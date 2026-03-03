@@ -2625,7 +2625,7 @@ async function main(): Promise<void> {
       if (!creds) return;
 
       const timeToExpiry = creds.expiresAt - Date.now();
-      if (timeToExpiry > 30 * 60 * 1000) return; // >30min to expiry, skip
+      if (timeToExpiry > 2 * 60 * 60 * 1000) return; // >2h to expiry, skip
 
       logger.info(
         { expiresIn: Math.round(timeToExpiry / 1000) },

@@ -39,6 +39,12 @@ export function ClaudeProviderSection({ setNotice, setError }: ClaudeProviderSec
   const [saving, setSaving] = useState(false);
   const [applying, setApplying] = useState(false);
 
+  // Claude API status from status.claude.com
+  const [claudeStatus, setClaudeStatus] = useState<{
+    indicator: string;
+    components: { name: string; status: string }[];
+  } | null>(null);
+
   const loadConfig = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -71,6 +77,33 @@ export function ClaudeProviderSection({ setNotice, setError }: ClaudeProviderSec
   }, [setError]);
 
   useEffect(() => { loadConfig(); }, [loadConfig]);
+
+  // Fetch Claude service status
+  useEffect(() => {
+    const fetchStatus = async () => {
+      try {
+        const [statusRes, compRes] = await Promise.all([
+          fetch('https://status.claude.com/api/v2/status.json'),
+          fetch('https://status.claude.com/api/v2/components.json'),
+        ]);
+        if (!statusRes.ok || !compRes.ok) return;
+        const statusData = await statusRes.json();
+        const compData = await compRes.json();
+        const keyComponents = (compData.components || [])
+          .filter((c: any) => ['Claude API (api.anthropic.com)', 'claude.ai', 'Claude Code'].includes(c.name))
+          .map((c: any) => ({ name: c.name, status: c.status as string }));
+        setClaudeStatus({
+          indicator: statusData.status?.indicator || 'none',
+          components: keyComponents,
+        });
+      } catch {
+        // silently ignore - status is non-critical
+      }
+    };
+    fetchStatus();
+    const timer = setInterval(fetchStatus, 5 * 60 * 1000); // refresh every 5 min
+    return () => clearInterval(timer);
+  }, []);
 
   const updatedAt = useMemo(() => {
     if (!config?.updatedAt) return '未记录';
@@ -278,20 +311,101 @@ export function ClaudeProviderSection({ setNotice, setError }: ClaudeProviderSec
         <div className="space-y-4">
           {/* OAuth credentials status */}
           {config?.hasClaudeOAuthCredentials && (
-            <div className="rounded-lg border border-emerald-200 bg-emerald-50/50 p-4 space-y-1">
-              <div className="text-sm font-medium text-emerald-800">OAuth 凭据（自动续期）</div>
+            <div className={`rounded-lg border p-4 space-y-2 ${
+              config.claudeOAuthCredentialsExpiresAt && config.claudeOAuthCredentialsExpiresAt <= Date.now()
+                ? 'border-red-300 bg-red-50/50'
+                : 'border-emerald-200 bg-emerald-50/50'
+            }`}>
+              <div className="flex items-center justify-between">
+                <div className={`text-sm font-medium ${
+                  config.claudeOAuthCredentialsExpiresAt && config.claudeOAuthCredentialsExpiresAt <= Date.now()
+                    ? 'text-red-800'
+                    : 'text-emerald-800'
+                }`}>
+                  OAuth 凭据（自动续期）
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={async () => {
+                    try {
+                      setNotice('正在刷新凭据...');
+                      const res = await api.post<ClaudeConfigPublic>('/api/config/claude/oauth/refresh');
+                      setConfig(res);
+                      setNotice('凭据刷新成功');
+                    } catch (err) {
+                      setError(getErrorMessage(err, '刷新失败，请尝试重新登录'));
+                    }
+                  }}
+                  disabled={loading}
+                  className="h-7 text-xs gap-1"
+                >
+                  <RefreshCw className="size-3" />
+                  刷新凭据
+                </Button>
+              </div>
               <div className="text-xs text-emerald-700">
                 Access Token: {config.claudeOAuthCredentialsAccessTokenMasked || '***'}
               </div>
               {config.claudeOAuthCredentialsExpiresAt && (
-                <div className="text-xs text-emerald-700">
+                <div className={`text-xs ${
+                  config.claudeOAuthCredentialsExpiresAt <= Date.now()
+                    ? 'text-red-700 font-medium'
+                    : 'text-emerald-700'
+                }`}>
                   过期时间: {new Date(config.claudeOAuthCredentialsExpiresAt).toLocaleString('zh-CN')}
                   {config.claudeOAuthCredentialsExpiresAt > Date.now()
                     ? ` (${Math.round((config.claudeOAuthCredentialsExpiresAt - Date.now()) / 60000)} 分钟后)`
-                    : ' (已过期，等待自动刷新)'}
+                    : ' (已过期)'}
                 </div>
               )}
-              <div className="text-xs text-emerald-600">系统每 5 分钟检查一次，过期前 30 分钟内自动刷新。</div>
+              <div className="text-xs text-emerald-600">系统每 5 分钟检查一次，过期前 2 小时内自动刷新。</div>
+            </div>
+          )}
+
+          {/* Claude service status */}
+          {claudeStatus && (
+            <div className={`rounded-lg border p-3 space-y-1.5 ${
+              claudeStatus.indicator === 'none'
+                ? 'border-emerald-200 bg-emerald-50/50'
+                : claudeStatus.indicator === 'minor'
+                  ? 'border-amber-200 bg-amber-50/50'
+                  : 'border-red-200 bg-red-50/50'
+            }`}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <span className={`inline-block size-2 rounded-full ${
+                    claudeStatus.indicator === 'none'
+                      ? 'bg-emerald-500'
+                      : claudeStatus.indicator === 'minor'
+                        ? 'bg-amber-500'
+                        : 'bg-red-500'
+                  }`} />
+                  <span className="text-xs font-medium text-slate-700">Claude 服务状态</span>
+                </div>
+                <a
+                  href="https://status.claude.com"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-slate-500 hover:text-slate-700 underline"
+                >
+                  详情
+                </a>
+              </div>
+              <div className="flex flex-wrap gap-x-4 gap-y-0.5">
+                {claudeStatus.components.map((comp) => (
+                  <div key={comp.name} className="flex items-center gap-1 text-xs text-slate-600">
+                    <span className={`inline-block size-1.5 rounded-full ${
+                      comp.status === 'operational'
+                        ? 'bg-emerald-500'
+                        : comp.status === 'degraded_performance'
+                          ? 'bg-amber-500'
+                          : 'bg-red-500'
+                    }`} />
+                    {comp.name.replace(' (api.anthropic.com)', '').replace(' (formerly console.anthropic.com)', '')}
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 

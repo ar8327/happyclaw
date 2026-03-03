@@ -43,6 +43,7 @@ import {
   getUserTelegramConfig,
   saveUserTelegramConfig,
   updateAllSessionCredentials,
+  refreshOAuthCredentials,
 } from '../runtime-config.js';
 import type { ClaudeOAuthCredentials } from '../runtime-config.js';
 import type { AuthUser } from '../types.js';
@@ -439,6 +440,47 @@ configRoutes.post(
       const message = err instanceof Error ? err.message : 'OAuth token exchange failed';
       return c.json({ error: message }, 500);
     }
+  },
+);
+
+// ─── Manual OAuth Refresh ────────────────────────────────────────
+
+configRoutes.post(
+  '/claude/oauth/refresh',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const config = getClaudeProviderConfig();
+    const creds = config.claudeOAuthCredentials;
+    if (!creds) {
+      return c.json({ error: 'No OAuth credentials configured' }, 400);
+    }
+
+    const actor = (c.get('user') as AuthUser).username;
+    logger.info({ actor }, 'Manual OAuth token refresh requested');
+
+    const refreshed = await refreshOAuthCredentials(creds);
+    if (!refreshed) {
+      return c.json({ error: 'OAuth token refresh failed. Please re-login via OAuth.' }, 500);
+    }
+
+    const saved = saveClaudeProviderConfig({
+      anthropicBaseUrl: config.anthropicBaseUrl,
+      anthropicAuthToken: config.anthropicAuthToken,
+      anthropicApiKey: config.anthropicApiKey,
+      claudeCodeOauthToken: config.claudeCodeOauthToken,
+      claudeOAuthCredentials: refreshed,
+    });
+
+    updateAllSessionCredentials(saved);
+    deps?.queue?.closeAllActiveForCredentialRefresh();
+
+    appendClaudeConfigAudit(actor, 'oauth_refresh_manual', [
+      'claudeOAuthCredentials:refreshed',
+    ]);
+
+    logger.info({ actor }, 'Manual OAuth token refresh successful');
+    return c.json(toPublicClaudeProviderConfig(saved));
   },
 );
 
