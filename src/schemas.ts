@@ -236,7 +236,7 @@ export const SystemSettingsSchema = z.object({
   billingMinStartBalanceUsd: z.number().min(0).max(1000000).optional(),
   billingCurrency: z.string().min(1).max(10).optional(),
   billingCurrencyRate: z.number().min(0.0001).max(1000000).optional(),
-  memoryQueryTimeout: z.number().int().min(10000).max(600000).optional(),
+  memoryQueryTimeout: z.number().int().min(10000).max(300000).optional(),
   memoryGlobalSleepTimeout: z.number().int().min(60000).max(3600000).optional(),
   memorySendTimeout: z.number().int().min(30000).max(3600000).optional(),
   turnBatchWindowMs: z.number().int().min(1000).max(60000).optional(),

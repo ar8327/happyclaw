@@ -19,7 +19,7 @@ import { DATA_DIR, GROUPS_DIR, TIMEZONE } from './config.js';
 import { getGroupsByOwner, listUsers } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
-import { getUserMemoryMode } from './runtime-config.js';
+import { getSystemSettings, getUserMemoryMode } from './runtime-config.js';
 
 // Memory Agent binary location (compiled TypeScript)
 const MEMORY_AGENT_DIST = path.join(
@@ -33,7 +33,7 @@ const MEMORY_AGENT_DIST = path.join(
 // Limits
 const MAX_CONCURRENT_MEMORY_AGENTS = 3;
 const IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
-const QUERY_TIMEOUT_MS = 30_000; // 30 seconds per query
+const DEFAULT_QUERY_TIMEOUT_MS = 60_000; // 60 seconds per query (configurable via Web UI)
 const IDLE_CHECK_INTERVAL_MS = 60_000; // Check idle agents every minute
 
 interface PendingQuery {
@@ -418,10 +418,11 @@ export class MemoryAgentManager {
     const requestId = crypto.randomUUID();
 
     return new Promise((resolve, reject) => {
+      const queryTimeoutMs = getSystemSettings().memoryQueryTimeout || DEFAULT_QUERY_TIMEOUT_MS;
       const timeout = setTimeout(() => {
         entry.pendingQueries.delete(requestId);
         reject(new Error('Memory query timeout'));
-      }, QUERY_TIMEOUT_MS);
+      }, queryTimeoutMs);
 
       entry.pendingQueries.set(requestId, { resolve, reject, timeout });
 

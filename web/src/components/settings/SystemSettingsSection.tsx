@@ -126,6 +126,17 @@ const fields: FieldConfig[] = [
     max: 600,
     step: 5,
   },
+  {
+    key: 'memoryQueryTimeout',
+    label: '记忆查询超时',
+    description: 'AI 记忆系统单次查询的最长等待时间',
+    unit: '秒',
+    toDisplay: (v) => Math.round(v / 1000),
+    toStored: (v) => v * 1000,
+    min: 10,
+    max: 300,
+    step: 5,
+  },
 ];
 
 export function SystemSettingsSection() {
