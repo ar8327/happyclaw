@@ -3834,35 +3834,31 @@ async function ensureDockerRunning(): Promise<void> {
     await execFileAsync('docker', ['info'], { timeout: 10000 });
     logger.debug('Docker daemon is running');
   } catch {
-    logger.error('Docker daemon is not running');
+    logger.warn('Docker daemon is not running — container-mode groups will not work until Docker is available');
     console.error(
       '\n╔════════════════════════════════════════════════════════════════╗',
     );
     console.error(
-      '║  FATAL: Docker is not running                                  ║',
+      '║  WARNING: Docker is not running                                ║',
     );
     console.error(
       '║                                                                ║',
     );
     console.error(
-      '║  Agents cannot run without Docker. To fix:                     ║',
+      '║  Container-mode groups will fail until Docker is started.      ║',
     );
     console.error(
-      '║  macOS: Start Docker Desktop                                   ║',
-    );
-    console.error(
-      '║  Linux: sudo systemctl start docker                            ║',
+      '║  Host-mode groups will continue to work normally.              ║',
     );
     console.error(
       '║                                                                ║',
     );
     console.error(
-      '║  Install from: https://docker.com/products/docker-desktop      ║',
+      '║  To fix: sudo systemctl start docker                          ║',
     );
     console.error(
       '╚════════════════════════════════════════════════════════════════╝\n',
     );
-    throw new Error('Docker is required but not running');
   }
 
   // Kill and clean up orphaned happyclaw containers from previous runs
