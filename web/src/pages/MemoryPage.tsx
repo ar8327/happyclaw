@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { ArrowLeft, BookOpen, ChevronDown, ChevronRight, Loader2, RefreshCw, Save } from 'lucide-react';
+import { ArrowLeft, BookOpen, ChevronDown, ChevronRight, Download, Loader2, RefreshCw, Save } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '../api/client';
 import { useGroupsStore } from '../stores/groups';
@@ -144,6 +144,18 @@ export function MemoryPage() {
   const [saving, setSaving] = useState(false);
   const [searchingContent, setSearchingContent] = useState(false);
 
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const [memoryMode, setMemoryMode] = useState<'legacy' | 'agent'>('legacy');
+  const [modeLoading, setModeLoading] = useState(true);
+  const [modeSaving, setModeSaving] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<{
+    imported: string[];
+    skipped: string[];
+    errors: string[];
+  } | null>(null);
   const isMobile = useMediaQuery('(max-width: 1023px)');
   const [showContent, setShowContent] = useState(false);
 
@@ -259,9 +271,73 @@ export function MemoryPage() {
     }
   }, [loadFile, selectedPath, folderParam]);
 
+  const loadMemoryMode = useCallback(async () => {
+    setModeLoading(true);
+    try {
+      const data = await api.get<{ memoryMode: 'legacy' | 'agent' }>(
+        '/api/config/user-im/memory',
+      );
+      setMemoryMode(data.memoryMode);
+    } catch {
+      setMemoryMode('legacy');
+    } finally {
+      setModeLoading(false);
+    }
+  }, []);
+
+  const handleToggleMode = async () => {
+    const newMode = memoryMode === 'legacy' ? 'agent' : 'legacy';
+    setModeSaving(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const data = await api.put<{ memoryMode: 'legacy' | 'agent' }>(
+        '/api/config/user-im/memory',
+        { memoryMode: newMode },
+      );
+      setMemoryMode(data.memoryMode);
+      setNotice(newMode === 'agent' ? '已切换到 AI 记忆系统，下次启动会话时生效' : '已切换到传统记忆系统');
+      await loadSources();
+    } catch (err) {
+      setError(getErrorMessage(err, '切换记忆模式失败'));
+    } finally {
+      setModeSaving(false);
+    }
+  };
+
+  const handleImportLegacy = async () => {
+    if (!confirm('确定要将旧记忆数据导入到新记忆系统？已存在的文件不会被覆盖。')) return;
+    setImporting(true);
+    setError(null);
+    setNotice(null);
+    setImportResult(null);
+    try {
+      const result = await api.post<{
+        imported: string[];
+        skipped: string[];
+        errors: string[];
+      }>('/api/config/user-im/memory/import-legacy');
+      setImportResult(result);
+      if (result.imported.length > 0) {
+        setNotice(`成功导入 ${result.imported.length} 个文件`);
+        await loadSources();
+      } else if (result.skipped.length > 0) {
+        setNotice('所有文件已存在，无需重复导入');
+      }
+      if (result.errors.length > 0) {
+        setError(`${result.errors.length} 个文件导入失败`);
+      }
+    } catch (err) {
+      setError(getErrorMessage(err, '导入旧记忆数据失败'));
+    } finally {
+      setImporting(false);
+    }
+  };
+
   useEffect(() => {
     loadSources();
-  }, [loadSources]);
+    loadMemoryMode();
+  }, [loadSources, loadMemoryMode]);
 
   useEffect(() => {
     const q = keyword.trim();
@@ -401,6 +477,68 @@ export function MemoryPage() {
                 </p>
               </div>
             </div>
+
+            {!modeLoading && (
+              <div className="mt-4 pt-4 border-t border-border space-y-3">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <div className="text-sm font-medium text-foreground">AI 记忆系统</div>
+                    <div className="text-xs text-muted-foreground mt-0.5">
+                      {memoryMode === 'agent'
+                        ? '使用 Memory Agent 自动整理和检索记忆'
+                        : '使用传统 CLAUDE.md 记忆系统'}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={memoryMode === 'agent'}
+                    disabled={modeSaving}
+                    onClick={handleToggleMode}
+                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 ${
+                      memoryMode === 'agent' ? 'bg-primary' : 'bg-muted'
+                    }`}
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-background shadow ring-0 transition duration-200 ease-in-out ${
+                        memoryMode === 'agent' ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                {memoryMode === 'agent' && (
+                  <div className="flex flex-wrap items-center gap-3">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleImportLegacy}
+                      disabled={importing}
+                    >
+                      {importing ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : (
+                        <Download className="w-4 h-4" />
+                      )}
+                      导入旧记忆数据
+                    </Button>
+                    {importResult && (
+                      <span className="text-xs text-muted-foreground">
+                        导入 {importResult.imported.length} · 跳过 {importResult.skipped.length}
+                        {importResult.errors.length > 0 ? ` · 失败 ${importResult.errors.length}` : ''}
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {(notice || error) && (
+                  <div className="space-y-1">
+                    {notice ? <div className="text-xs text-emerald-600">{notice}</div> : null}
+                    {error ? <div className="text-xs text-destructive">{error}</div> : null}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="text-xs text-muted-foreground">
               已加载记忆源: {sources.length}
