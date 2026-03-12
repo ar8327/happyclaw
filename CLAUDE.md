@@ -31,6 +31,7 @@ HappyClaw 是一个自托管的多用户 AI Agent 系统：
 | `src/routes/browse.ts` | 目录浏览 API（`GET/POST /api/browse/directories`，受挂载白名单约束） |
 | `src/routes/agents.ts` | Sub-Agent CRUD（`GET/POST/DELETE /api/groups/:jid/agents`） |
 | `src/routes/mcp-servers.ts` | MCP Servers 管理（CRUD + `POST /api/mcp-servers/sync-host`，per-user） |
+| `src/routes/logs.ts` | Agent 执行日志：列表（分页）、详情（分段解析）、原始文件下载，基于 folder 的权限检查 |
 | `src/feishu.ts` | 飞书连接工厂（`createFeishuConnection`）：WebSocket 长连接、消息去重（LRU 1000 条 / 30min TTL）、富文本卡片、Reaction；`file` 消息下载到工作区；`post` 图文消息仅提取文字 |
 | `src/telegram.ts` | Telegram 连接工厂（`createTelegramConnection`）：Bot API Long Polling、Markdown → HTML 转换、长消息分片（3800 字符）；`message:photo` 下载为 base64 供 Vision；`message:document` 下载文件到工作区 |
 | `src/qq.ts` | QQ 连接工厂（`createQQConnection`）：Bot API v2 WebSocket 长连接、OAuth Token 管理、C2C 私聊 + 群聊 @Bot、消息去重（LRU 1000 条 / 30min TTL）、Markdown → 纯文本、长消息分片（5000 字符）、图片下载为 base64 供 Vision |
@@ -94,6 +95,7 @@ HappyClaw 是一个自托管的多用户 AI Agent 系统：
 | `/skills` | `SkillsPage` — Skills 管理 | 登录后 |
 | `/settings` | `SettingsPage` — 系统设置（懒加载） | 登录后 |
 | `/mcp-servers` | `McpServersPage` — MCP Servers 管理 | 登录后 |
+| `/logs` | `LogsPage` — Agent 执行日志（懒加载） | 登录后 |
 | `/users` | `UsersPage` — 用户管理 | `manage_users` / `manage_invites` / `view_audit_log` |
 
 ### 2.3 容器 / 宿主机执行
@@ -454,6 +456,11 @@ scripts/                      # 构建辅助脚本
 - `GET /api/usage/stats?days=7&userId=&model=`（从 `usage_daily_summary` 查询，支持用户/模型筛选）
 - `GET /api/usage/models`（去重模型列表）
 - `GET /api/usage/users`（有用量数据的用户列表，admin 可见全部）
+
+### 执行日志
+- `GET /api/logs/:groupFolder`（列出日志文件，支持 `offset`/`limit` 分页）
+- `GET /api/logs/:groupFolder/:filename`（解析后的日志内容，按 section 分段）
+- `GET /api/logs/:groupFolder/:filename/raw`（下载原始日志文件）
 
 ### 监控
 - `GET /api/status` · `GET /api/health`（无需认证）

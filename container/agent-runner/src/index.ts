@@ -689,7 +689,23 @@ function buildMemoryRecallPrompt(isHome: boolean, isAdminHome: boolean): string 
       '系统也会在上下文压缩前提示你保存记忆。',
     ].join('\n');
   }
-  // Non-home group container: read-only access to home memory, use Claude auto memory
+  // Non-home group container with Memory Agent mode: read-only query via memory_query
+  if (MEMORY_MODE === 'agent') {
+    return [
+      '',
+      '## 记忆',
+      '',
+      '### 查询记忆',
+      '可使用 `memory_query` 工具查询用户的记忆（过去的对话、偏好、项目知识等）。',
+      '查询可能需要几秒钟。',
+      '',
+      '### 本地记忆',
+      '重要信息直接记录在当前工作区的 CLAUDE.md 或其他文件中。',
+      'Claude 会自动维护你的会话记忆，无需额外操作。',
+    ].join('\n');
+  }
+
+  // Non-home group container (legacy mode): read-only access to home memory
   return [
     '',
     '## 记忆',

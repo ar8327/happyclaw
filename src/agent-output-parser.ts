@@ -201,7 +201,7 @@ export interface CloseHandlerContext {
   /** containerName or processId */
   identifier: string;
   logsDir: string;
-  input: { prompt: string; sessionId?: string; isMain: boolean };
+  input: { prompt: string; sessionId?: string; isMain: boolean; agentId?: string; agentName?: string };
   stdoutState: StdoutParserState;
   stderrState: StderrState;
   onOutput?: (output: ContainerOutput) => Promise<void>;
@@ -275,7 +275,10 @@ export function writeRunLog(
 ): string {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   fs.mkdirSync(ctx.logsDir, { recursive: true });
-  const logFile = path.join(ctx.logsDir, `${ctx.filePrefix}-${timestamp}.log`);
+  const agentSlug = ctx.input.agentId
+    ? `-agent-${ctx.input.agentId.replace(/[^a-zA-Z0-9-]/g, '-')}`
+    : '';
+  const logFile = path.join(ctx.logsDir, `${ctx.filePrefix}${agentSlug}-${timestamp}.log`);
   const isVerbose =
     process.env.LOG_LEVEL === 'debug' || process.env.LOG_LEVEL === 'trace';
 
@@ -288,8 +291,14 @@ export function writeRunLog(
     `Exit Code: ${code}`,
     `Stdout Truncated: ${ctx.stdoutState.stdoutTruncated}`,
     `Stderr Truncated: ${ctx.stderrState.stderrTruncated}`,
-    ``,
   ];
+  if (ctx.input.agentId) {
+    logLines.push(`Agent ID: ${ctx.input.agentId}`);
+  }
+  if (ctx.input.agentName) {
+    logLines.push(`Agent Name: ${ctx.input.agentName}`);
+  }
+  logLines.push(``);
 
   const isError = code !== 0;
   const { stderr, stderrTruncated } = ctx.stderrState;
@@ -323,11 +332,16 @@ export function writeRunLog(
     stdoutLog,
   );
 
-  if (isVerbose || isError) {
-    logLines.push(``, `=== Input ===`, JSON.stringify(ctx.input, null, 2));
-    if (ctx.extraVerboseLines) {
-      logLines.push(``, ...ctx.extraVerboseLines);
-    }
+  // Always log input (with prompt truncation in non-verbose mode)
+  const PROMPT_LOG_LIMIT = 10000;
+  const inputForLog = { ...ctx.input };
+  if (!isVerbose && !isError && inputForLog.prompt.length > PROMPT_LOG_LIMIT) {
+    inputForLog.prompt = inputForLog.prompt.slice(0, PROMPT_LOG_LIMIT) +
+      `\n... (truncated ${ctx.input.prompt.length - PROMPT_LOG_LIMIT} chars)`;
+  }
+  logLines.push(``, `=== Input ===`, JSON.stringify(inputForLog, null, 2));
+  if ((isVerbose || isError) && ctx.extraVerboseLines) {
+    logLines.push(``, ...ctx.extraVerboseLines);
   }
 
   fs.writeFileSync(logFile, logLines.join('\n'));

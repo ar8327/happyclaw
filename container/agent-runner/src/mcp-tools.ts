@@ -121,6 +121,8 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
   const TASKS_DIR = path.join(ctx.workspaceIpc, 'tasks');
   const hasCrossGroupAccess = ctx.isAdminHome;
   const toRelativePath = createToRelativePath(ctx);
+  const MEMORY_MODE = process.env.HAPPYCLAW_MEMORY_MODE || 'legacy';
+  const isAgentMemory = MEMORY_MODE === 'agent';
 
   const tools: SdkMcpToolDefinition<any>[] = [
     // --- send_message ---
@@ -923,8 +925,8 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
     );
   }
 
-  // --- memory_append --- (only available for home containers)
-  if (ctx.isHome) {
+  // --- memory_append --- (only available for home containers in legacy mode)
+  if (ctx.isHome && !isAgentMemory) {
     tools.push(
       tool(
         'memory_append',
@@ -1044,7 +1046,8 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
     );
   }
 
-  // --- memory_search --- (available for all containers)
+  // --- memory_search + memory_get --- (legacy mode only)
+  if (!isAgentMemory) {
   tools.push(
     tool(
       'memory_search',
@@ -1252,13 +1255,13 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
       },
     ),
   );
+  } // end legacy memory tools
 
   // --- Memory Agent tools (only when memoryMode === 'agent') ---
-  const MEMORY_MODE = process.env.HAPPYCLAW_MEMORY_MODE || 'legacy';
   const API_URL = process.env.HAPPYCLAW_API_URL || 'http://localhost:3000';
   const API_TOKEN = process.env.HAPPYCLAW_INTERNAL_TOKEN || '';
 
-  if (MEMORY_MODE === 'agent' && ctx.userId) {
+  if (isAgentMemory && ctx.userId) {
     /** Shared HTTP helper for Memory Agent endpoints */
     async function callMemoryAgent(
       endpoint: string,
