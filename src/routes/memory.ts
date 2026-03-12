@@ -23,6 +23,11 @@ import type { GroupQueue } from '../group-queue.js';
 
 const memoryRoutes = new Hono<{ Variables: Variables }>();
 
+// --- Per-user operation locks (prevent duplicate trigger-wrapup / trigger-global-sleep) ---
+
+const activeWrapups = new Set<string>();
+const activeGlobalSleeps = new Set<string>();
+
 // --- Constants ---
 
 const USER_GLOBAL_DIR = path.join(GROUPS_DIR, 'user-global');
@@ -700,9 +705,11 @@ memoryRoutes.get('/status', authMiddleware, (c) => {
     lastGlobalSleep: (state.lastGlobalSleep as string | null) || null,
     lastSessionWrapupAt: (state.lastSessionWrapupAt as string | null) || null,
     pendingWrapupsCount: pendingWrapups.length,
-    canTriggerWrapup: !!homeGroup,
-    canTriggerGlobalSleep: pendingWrapups.length > 0,
+    canTriggerWrapup: !!homeGroup && !activeWrapups.has(user.id),
+    canTriggerGlobalSleep: pendingWrapups.length > 0 && !activeGlobalSleeps.has(user.id),
     hasActiveSession,
+    wrapupInProgress: activeWrapups.has(user.id),
+    globalSleepInProgress: activeGlobalSleeps.has(user.id),
   });
 });
 
@@ -715,16 +722,23 @@ memoryRoutes.post('/trigger-wrapup', authMiddleware, async (c) => {
   if (!injectedManager) {
     return c.json({ error: '记忆系统未初始化' }, 503);
   }
+  if (activeWrapups.has(user.id)) {
+    return c.json({ error: '会话整理正在进行中，请勿重复触发' }, 409);
+  }
 
   const homeGroup = getUserHomeGroup(user.id);
   if (!homeGroup) {
     return c.json({ error: '未找到主容器' }, 400);
   }
 
-  const allJids = getJidsByFolder(homeGroup.folder);
-  exportTranscriptsForUser(user.id, homeGroup.folder, allJids, injectedManager);
-
-  return c.json({ success: true, message: '已触发会话整理' });
+  activeWrapups.add(user.id);
+  try {
+    const allJids = getJidsByFolder(homeGroup.folder);
+    exportTranscriptsForUser(user.id, homeGroup.folder, allJids, injectedManager);
+    return c.json({ success: true, message: '已触发会话整理' });
+  } finally {
+    activeWrapups.delete(user.id);
+  }
 });
 
 memoryRoutes.post('/trigger-global-sleep', authMiddleware, async (c) => {
@@ -736,6 +750,9 @@ memoryRoutes.post('/trigger-global-sleep', authMiddleware, async (c) => {
   if (!injectedManager) {
     return c.json({ error: '记忆系统未初始化' }, 503);
   }
+  if (activeGlobalSleeps.has(user.id)) {
+    return c.json({ error: '深度整理正在进行中，请勿重复触发' }, 409);
+  }
 
   const state = readMemoryState(user.id);
   const pendingWrapups = (state.pendingWrapups || []) as string[];
@@ -743,6 +760,7 @@ memoryRoutes.post('/trigger-global-sleep', authMiddleware, async (c) => {
     return c.json({ error: '没有待整理的会话记录，无需执行深度整理' }, 400);
   }
 
+  activeGlobalSleeps.add(user.id);
   try {
     await injectedManager.send(user.id, { type: 'global_sleep' });
     return c.json({ success: true, message: '深度整理已完成' });
@@ -750,7 +768,43 @@ memoryRoutes.post('/trigger-global-sleep', authMiddleware, async (c) => {
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err, userId: user.id }, 'Manual global_sleep failed');
     return c.json({ error: `深度整理失败: ${message}` }, 500);
+  } finally {
+    activeGlobalSleeps.delete(user.id);
   }
+});
+
+memoryRoutes.post('/stop-active-sessions', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+
+  if (!injectedQueue) {
+    return c.json({ error: '队列未初始化' }, 503);
+  }
+
+  const userGroups = getGroupsByOwner(user.id);
+  const queueStatus = injectedQueue.getStatus();
+  const activeJids = new Set(
+    queueStatus.groups.filter((g) => g.active).map((g) => g.jid),
+  );
+
+  const activeGroupJids = userGroups
+    .map((g) => g.jid)
+    .filter((jid) => activeJids.has(jid));
+
+  if (activeGroupJids.length === 0) {
+    return c.json({ stopped: 0, message: '没有活跃会话' });
+  }
+
+  let stopped = 0;
+  for (const jid of activeGroupJids) {
+    try {
+      await injectedQueue.stopGroup(jid);
+      stopped++;
+    } catch (err) {
+      logger.warn({ jid, err }, 'Failed to stop group for memory deep sleep');
+    }
+  }
+
+  return c.json({ stopped, message: `已停止 ${stopped} 个活跃会话` });
 });
 
 export default memoryRoutes;
