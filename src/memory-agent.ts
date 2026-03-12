@@ -16,10 +16,11 @@ import path from 'path';
 import readline from 'readline';
 
 import { DATA_DIR, GROUPS_DIR, TIMEZONE } from './config.js';
-import { getGroupsByOwner, listUsers } from './db.js';
+import { getGroupsByOwner, getTranscriptMessagesSince, listUsers } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
 import { getSystemSettings, getUserMemoryMode } from './runtime-config.js';
+import type { MessageCursor } from './types.js';
 
 // Memory Agent binary location (compiled TypeScript)
 const MEMORY_AGENT_DIST = path.join(
@@ -85,6 +86,7 @@ const INDEX_MD_TEMPLATE = `# 随身索引
 
 const INITIAL_STATE: Record<string, unknown> = {
   lastGlobalSleep: null,
+  lastSessionWrapupAt: null,
   lastSessionWrapups: {},
   pendingWrapups: [],
   indexVersion: 0,
@@ -279,6 +281,164 @@ function atomicWrite(filePath: string, content: string): void {
   const tmp = `${filePath}.tmp`;
   fs.writeFileSync(tmp, content, 'utf-8');
   fs.renameSync(tmp, filePath);
+}
+
+// --- Transcript export ---
+
+interface TranscriptMessage {
+  id: string;
+  chat_jid: string;
+  sender_name: string;
+  content: string;
+  timestamp: string;
+  is_from_me: boolean;
+}
+
+function formatTranscriptMarkdown(
+  messages: TranscriptMessage[],
+  folder: string,
+): string {
+  if (messages.length === 0) return '';
+
+  const firstTs = messages[0].timestamp;
+  const lastTs = messages[messages.length - 1].timestamp;
+  const formatTime = (ts: string) => {
+    try {
+      return new Date(ts).toISOString().replace('T', ' ').slice(0, 19);
+    } catch {
+      return ts;
+    }
+  };
+
+  const lines: string[] = [
+    `# 对话记录 — ${folder}`,
+    `时间范围：${formatTime(firstTs)} ~ ${formatTime(lastTs)}`,
+    `消息数：${messages.length}`,
+    '',
+    '---',
+    '',
+  ];
+
+  for (const msg of messages) {
+    const role = msg.is_from_me ? 'Agent' : msg.sender_name || 'User';
+    const time = formatTime(msg.timestamp);
+    const content =
+      msg.content.length > 2000
+        ? msg.content.slice(0, 2000) + '\n\n[...内容截断...]'
+        : msg.content;
+    lines.push(`**${role}** (${time}): ${content}`, '');
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Export transcripts for a user's home group and trigger session_wrapup.
+ * Extracted from index.ts so it can be called from both container exit listener and manual trigger.
+ */
+export function exportTranscriptsForUser(
+  userId: string,
+  folder: string,
+  chatJids: string[],
+  memoryAgentManager: MemoryAgentManager,
+): void {
+  try {
+    const memDir = ensureMemoryDir(userId);
+    const state = readMemoryState(userId);
+    const wrapups = (state.lastSessionWrapups || {}) as Record<
+      string,
+      MessageCursor
+    >;
+    const defaultCursor: MessageCursor = {
+      timestamp: '1970-01-01T00:00:00Z',
+      id: '',
+    };
+
+    // Collect all messages from all associated chatJids
+    const allMessages: TranscriptMessage[] = [];
+    for (const jid of chatJids) {
+      const cursor = wrapups[jid] || defaultCursor;
+      const msgs = getTranscriptMessagesSince(jid, cursor);
+      allMessages.push(
+        ...msgs.map((m) => ({
+          id: m.id,
+          chat_jid: m.chat_jid,
+          sender_name: m.sender_name,
+          content: m.content,
+          timestamp: m.timestamp,
+          is_from_me: !!m.is_from_me,
+        })),
+      );
+    }
+
+    if (allMessages.length === 0) {
+      logger.debug({ userId, folder }, 'No new messages for transcript export');
+      return;
+    }
+
+    // Sort by time, then by id for stable ordering
+    allMessages.sort(
+      (a, b) =>
+        a.timestamp.localeCompare(b.timestamp) || a.id.localeCompare(b.id),
+    );
+
+    const md = formatTranscriptMarkdown(allMessages, folder);
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const filename = `${folder}-${Date.now()}.md`;
+    const transcriptRelPath = path.join('transcripts', dateStr, filename);
+    const fullPath = path.join(memDir, transcriptRelPath);
+
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+    // Atomic write
+    const tmp = `${fullPath}.tmp`;
+    fs.writeFileSync(tmp, md, 'utf-8');
+    fs.renameSync(tmp, fullPath);
+
+    logger.info(
+      {
+        userId,
+        folder,
+        messageCount: allMessages.length,
+        path: transcriptRelPath,
+      },
+      'Exported transcript for Memory Agent',
+    );
+
+    // Update cursors for all chatJids to the last message
+    const lastMsg = allMessages[allMessages.length - 1];
+    for (const jid of chatJids) {
+      wrapups[jid] = { timestamp: lastMsg.timestamp, id: lastMsg.id };
+    }
+    state.lastSessionWrapups = wrapups;
+    state.lastSessionWrapupAt = new Date().toISOString();
+    // Track pending wrapups for global_sleep scheduling
+    const pending = (state.pendingWrapups || []) as string[];
+    if (!pending.includes(folder)) {
+      pending.push(folder);
+      state.pendingWrapups = pending;
+    }
+    writeMemoryState(userId, state);
+
+    // Trigger session_wrapup (fire-and-forget, don't block container exit)
+    memoryAgentManager
+      .send(userId, {
+        type: 'session_wrapup',
+        transcriptFile: transcriptRelPath,
+        groupFolder: folder,
+        chatJids,
+      })
+      .catch((err) => {
+        logger.warn(
+          { userId, folder, err },
+          'Memory Agent session_wrapup failed (non-blocking)',
+        );
+      });
+  } catch (err) {
+    logger.error(
+      { userId, folder, err },
+      'Failed to export transcript for Memory Agent',
+    );
+  }
 }
 
 export class MemoryAgentManager {

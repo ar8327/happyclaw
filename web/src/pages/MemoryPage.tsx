@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { ArrowLeft, BookOpen, ChevronDown, ChevronRight, Download, Loader2, RefreshCw, Save } from 'lucide-react';
+import { ArrowLeft, BookOpen, ChevronDown, ChevronRight, Download, Loader2, Moon, Play, RefreshCw, Save } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '../api/client';
 import { useGroupsStore } from '../stores/groups';
@@ -156,6 +156,18 @@ export function MemoryPage() {
     skipped: string[];
     errors: string[];
   } | null>(null);
+
+  const [memoryStatus, setMemoryStatus] = useState<{
+    enabled: boolean;
+    lastGlobalSleep: string | null;
+    lastSessionWrapupAt: string | null;
+    pendingWrapupsCount: number;
+    canTriggerWrapup: boolean;
+    canTriggerGlobalSleep: boolean;
+    hasActiveSession: boolean;
+  } | null>(null);
+  const [triggeringWrapup, setTriggeringWrapup] = useState(false);
+  const [triggeringGlobalSleep, setTriggeringGlobalSleep] = useState(false);
   const isMobile = useMediaQuery('(max-width: 1023px)');
   const [showContent, setShowContent] = useState(false);
 
@@ -297,7 +309,7 @@ export function MemoryPage() {
       );
       setMemoryMode(data.memoryMode);
       setNotice(newMode === 'agent' ? '已切换到 AI 记忆系统，下次启动会话时生效' : '已切换到传统记忆系统');
-      await loadSources();
+      await Promise.all([loadSources(), loadMemoryStatus()]);
     } catch (err) {
       setError(getErrorMessage(err, '切换记忆模式失败'));
     } finally {
@@ -334,10 +346,59 @@ export function MemoryPage() {
     }
   };
 
+  const loadMemoryStatus = useCallback(async () => {
+    try {
+      const data = await api.get<{
+        enabled: boolean;
+        lastGlobalSleep: string | null;
+        lastSessionWrapupAt: string | null;
+        pendingWrapupsCount: number;
+        canTriggerWrapup: boolean;
+        canTriggerGlobalSleep: boolean;
+        hasActiveSession: boolean;
+      }>('/api/memory/status');
+      setMemoryStatus(data);
+    } catch {
+      setMemoryStatus(null);
+    }
+  }, []);
+
+  const handleTriggerWrapup = async () => {
+    setTriggeringWrapup(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await api.post<{ success: boolean; message: string }>('/api/memory/trigger-wrapup');
+      setNotice('会话整理已触发');
+      await loadMemoryStatus();
+    } catch (err) {
+      setError(getErrorMessage(err, '触发会话整理失败'));
+    } finally {
+      setTriggeringWrapup(false);
+    }
+  };
+
+  const handleTriggerGlobalSleep = async () => {
+    if (!confirm('深度整理可能需要几分钟，确定要执行吗？')) return;
+    setTriggeringGlobalSleep(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await api.post<{ success: boolean; message: string }>('/api/memory/trigger-global-sleep', undefined, 360000);
+      setNotice('深度整理已完成');
+      await loadMemoryStatus();
+    } catch (err) {
+      setError(getErrorMessage(err, '深度整理失败'));
+    } finally {
+      setTriggeringGlobalSleep(false);
+    }
+  };
+
   useEffect(() => {
     loadSources();
     loadMemoryMode();
-  }, [loadSources, loadMemoryMode]);
+    loadMemoryStatus();
+  }, [loadSources, loadMemoryMode, loadMemoryStatus]);
 
   useEffect(() => {
     const q = keyword.trim();
@@ -508,25 +569,85 @@ export function MemoryPage() {
                 </div>
 
                 {memoryMode === 'agent' && (
-                  <div className="flex flex-wrap items-center gap-3">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleImportLegacy}
-                      disabled={importing}
-                    >
-                      {importing ? (
-                        <Loader2 className="size-4 animate-spin" />
-                      ) : (
-                        <Download className="w-4 h-4" />
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleImportLegacy}
+                        disabled={importing}
+                      >
+                        {importing ? (
+                          <Loader2 className="size-4 animate-spin" />
+                        ) : (
+                          <Download className="w-4 h-4" />
+                        )}
+                        导入旧记忆数据
+                      </Button>
+                      {importResult && (
+                        <span className="text-xs text-muted-foreground">
+                          导入 {importResult.imported.length} · 跳过 {importResult.skipped.length}
+                          {importResult.errors.length > 0 ? ` · 失败 ${importResult.errors.length}` : ''}
+                        </span>
                       )}
-                      导入旧记忆数据
-                    </Button>
-                    {importResult && (
-                      <span className="text-xs text-muted-foreground">
-                        导入 {importResult.imported.length} · 跳过 {importResult.skipped.length}
-                        {importResult.errors.length > 0 ? ` · 失败 ${importResult.errors.length}` : ''}
-                      </span>
+                    </div>
+
+                    {memoryStatus?.enabled && (
+                      <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-2.5">
+                        <div className="text-xs font-medium text-foreground">记忆系统状态</div>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs text-muted-foreground">
+                          <div>
+                            <span className="text-muted-foreground/80">上次会话整理：</span>
+                            {memoryStatus.lastSessionWrapupAt
+                              ? new Date(memoryStatus.lastSessionWrapupAt).toLocaleString('zh-CN')
+                              : '从未执行'}
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground/80">上次深度整理：</span>
+                            {memoryStatus.lastGlobalSleep
+                              ? new Date(memoryStatus.lastGlobalSleep).toLocaleString('zh-CN')
+                              : '从未执行'}
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground/80">待整理记录：</span>
+                            {memoryStatus.pendingWrapupsCount} 个
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={handleTriggerWrapup}
+                            disabled={triggeringWrapup || !memoryStatus.canTriggerWrapup}
+                          >
+                            {triggeringWrapup ? (
+                              <Loader2 className="size-3.5 animate-spin" />
+                            ) : (
+                              <Play className="w-3.5 h-3.5" />
+                            )}
+                            会话整理
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={handleTriggerGlobalSleep}
+                            disabled={triggeringGlobalSleep || !memoryStatus.canTriggerGlobalSleep}
+                          >
+                            {triggeringGlobalSleep ? (
+                              <Loader2 className="size-3.5 animate-spin" />
+                            ) : (
+                              <Moon className="w-3.5 h-3.5" />
+                            )}
+                            深度整理
+                          </Button>
+                          {memoryStatus.hasActiveSession && (
+                            <span className="text-[11px] text-amber-600">有活跃会话</span>
+                          )}
+                          {triggeringGlobalSleep && (
+                            <span className="text-[11px] text-muted-foreground">深度整理中，可能需要几分钟……</span>
+                          )}
+                        </div>
+                      </div>
                     )}
                   </div>
                 )}

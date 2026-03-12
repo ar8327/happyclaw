@@ -19,6 +19,7 @@ const ChatPage = lazy(() => import('./pages/ChatPage').then(m => ({ default: m.C
 const TasksPage = lazy(() => import('./pages/TasksPage').then(m => ({ default: m.TasksPage })));
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then(m => ({ default: m.SettingsPage })));
 const BillingPage = lazy(() => import('./pages/BillingPage'));
+const LogsPage = lazy(() => import('./pages/LogsPage').then(m => ({ default: m.LogsPage })));
 
 export function App() {
   const Router = shouldUseHashRouter() ? HashRouter : BrowserRouter;
@@ -66,6 +67,9 @@ export function App() {
           <Route path="/skills" element={<SkillsPage />} />
           <Route path="/mcp-servers" element={<McpServersPage />} />
           <Route path="/agent-definitions" element={<AgentDefinitionsPage />} />
+          <Route path="/logs" element={<Suspense fallback={null}><LogsPage /></Suspense>} />
+          <Route path="/agent-definitions" element={<AgentDefinitionsPage />} />
+          <Route path="/logs" element={<Suspense fallback={null}><LogsPage /></Suspense>} />
           <Route path="/settings" element={<Suspense fallback={null}><SettingsPage /></Suspense>} />
           <Route
             path="/users"

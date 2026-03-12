@@ -12,10 +12,14 @@ import {
   type MemoryFilePayload,
   type MemorySearchHit,
 } from '../schemas.js';
-import { getAllRegisteredGroups, getUserById } from '../db.js';
+import { getAllRegisteredGroups, getGroupsByOwner, getJidsByFolder, getUserById, getUserHomeGroup } from '../db.js';
 import { logger } from '../logger.js';
 import { GROUPS_DIR, DATA_DIR } from '../config.js';
 import type { AuthUser } from '../types.js';
+import type { MemoryAgentManager } from '../memory-agent.js';
+import { readMemoryState, exportTranscriptsForUser } from '../memory-agent.js';
+import { getUserMemoryMode } from '../runtime-config.js';
+import type { GroupQueue } from '../group-queue.js';
 
 const memoryRoutes = new Hono<{ Variables: Variables }>();
 
@@ -644,6 +648,108 @@ memoryRoutes.put('/global', authMiddleware, async (c) => {
       err instanceof Error ? err.message : 'Failed to write global memory';
     logger.error({ err }, 'Failed to write user global memory');
     return c.json({ error: message }, 400);
+  }
+});
+
+// --- Memory Agent status & manual triggers ---
+
+let injectedManager: MemoryAgentManager | null = null;
+let injectedQueue: GroupQueue | null = null;
+
+export function injectMemoryDeps(deps: {
+  manager: MemoryAgentManager;
+  queue: GroupQueue;
+}): void {
+  injectedManager = deps.manager;
+  injectedQueue = deps.queue;
+}
+
+memoryRoutes.get('/status', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const mode = getUserMemoryMode(user.id);
+  if (mode !== 'agent') {
+    return c.json({
+      enabled: false,
+      lastGlobalSleep: null,
+      lastSessionWrapupAt: null,
+      pendingWrapupsCount: 0,
+      canTriggerWrapup: false,
+      canTriggerGlobalSleep: false,
+      hasActiveSession: false,
+    });
+  }
+
+  const state = readMemoryState(user.id);
+  const homeGroup = getUserHomeGroup(user.id);
+
+  // Check active sessions
+  let hasActiveSession = false;
+  if (injectedQueue) {
+    const queueStatus = injectedQueue.getStatus();
+    const activeJids = new Set(
+      queueStatus.groups.filter((g) => g.active).map((g) => g.jid),
+    );
+    const userGroups = getGroupsByOwner(user.id);
+    hasActiveSession = userGroups.some((g) => activeJids.has(g.jid));
+  }
+
+  const pendingWrapups = (state.pendingWrapups || []) as string[];
+
+  return c.json({
+    enabled: true,
+    lastGlobalSleep: (state.lastGlobalSleep as string | null) || null,
+    lastSessionWrapupAt: (state.lastSessionWrapupAt as string | null) || null,
+    pendingWrapupsCount: pendingWrapups.length,
+    canTriggerWrapup: !!homeGroup,
+    canTriggerGlobalSleep: pendingWrapups.length > 0,
+    hasActiveSession,
+  });
+});
+
+memoryRoutes.post('/trigger-wrapup', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+
+  if (getUserMemoryMode(user.id) !== 'agent') {
+    return c.json({ error: 'AI 记忆系统未启用' }, 400);
+  }
+  if (!injectedManager) {
+    return c.json({ error: '记忆系统未初始化' }, 503);
+  }
+
+  const homeGroup = getUserHomeGroup(user.id);
+  if (!homeGroup) {
+    return c.json({ error: '未找到主容器' }, 400);
+  }
+
+  const allJids = getJidsByFolder(homeGroup.folder);
+  exportTranscriptsForUser(user.id, homeGroup.folder, allJids, injectedManager);
+
+  return c.json({ success: true, message: '已触发会话整理' });
+});
+
+memoryRoutes.post('/trigger-global-sleep', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+
+  if (getUserMemoryMode(user.id) !== 'agent') {
+    return c.json({ error: 'AI 记忆系统未启用' }, 400);
+  }
+  if (!injectedManager) {
+    return c.json({ error: '记忆系统未初始化' }, 503);
+  }
+
+  const state = readMemoryState(user.id);
+  const pendingWrapups = (state.pendingWrapups || []) as string[];
+  if (pendingWrapups.length === 0) {
+    return c.json({ error: '没有待整理的会话记录，无需执行深度整理' }, 400);
+  }
+
+  try {
+    await injectedManager.send(user.id, { type: 'global_sleep' });
+    return c.json({ success: true, message: '深度整理已完成' });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err, userId: user.id }, 'Manual global_sleep failed');
+    return c.json({ error: `深度整理失败: ${message}` }, 500);
   }
 });
 
