@@ -1128,6 +1128,25 @@ export function setLastGroupSync(): void {
 }
 
 /**
+ * Batch-fetch chat names for a list of JIDs.
+ * Returns a Map from jid → name (only includes JIDs found in the DB).
+ */
+export function getChatNamesByJids(jids: string[]): Map<string, string> {
+  const result = new Map<string, string>();
+  if (jids.length === 0) return result;
+  const placeholders = jids.map(() => '?').join(',');
+  const rows = db
+    .prepare(`SELECT jid, name FROM chats WHERE jid IN (${placeholders})`)
+    .all(...jids) as Array<{ jid: string; name: string }>;
+  for (const row of rows) {
+    if (row.name && row.name !== row.jid) {
+      result.set(row.jid, row.name);
+    }
+  }
+  return result;
+}
+
+/**
  * Ensure a chat row exists in the chats table (avoids FK violation on messages insert).
  */
 export function ensureChatExists(chatJid: string): void {

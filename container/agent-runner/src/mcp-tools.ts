@@ -1322,6 +1322,8 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
             userId: ctx.userId,
             query: args.query,
             context: args.context,
+            chatJid: ctx.chatJid,
+            groupFolder: ctx.groupFolder,
           });
 
           if (!result.ok) {
@@ -1358,6 +1360,8 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
             userId: ctx.userId,
             content: args.content,
             importance: args.importance || 'normal',
+            chatJid: ctx.chatJid,
+            groupFolder: ctx.groupFolder,
           });
 
           if (!result.ok) {

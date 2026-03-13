@@ -16,7 +16,7 @@ import path from 'path';
 import readline from 'readline';
 
 import { DATA_DIR, GROUPS_DIR, TIMEZONE } from './config.js';
-import { getGroupsByOwner, getTranscriptMessagesSince, getUserHomeGroup, listUsers } from './db.js';
+import { getChatNamesByJids, getGroupsByOwner, getTranscriptMessagesSince, getUserHomeGroup, listUsers } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
 import {
@@ -290,11 +290,38 @@ function atomicWrite(filePath: string, content: string): void {
   fs.renameSync(tmp, filePath);
 }
 
+// --- Channel label resolution ---
+
+/**
+ * Derive a human-readable channel label from a JID and optional chat name.
+ *
+ * Examples:
+ *   feishu:oc_xxx + "设计群" → "飞书·设计群"
+ *   telegram:123  + "My Chat" → "Telegram·My Chat"
+ *   qq:456        + "项目群" → "QQ·项目群"
+ *   web:main                 → "Web"
+ */
+export function resolveChannelLabel(jid: string, name?: string): string {
+  const colonIdx = jid.indexOf(':');
+  const prefix = colonIdx > 0 ? jid.slice(0, colonIdx).toLowerCase() : '';
+  const channelMap: Record<string, string> = {
+    feishu: '飞书',
+    telegram: 'Telegram',
+    qq: 'QQ',
+    web: 'Web',
+  };
+  const channelType = channelMap[prefix] || prefix || 'Unknown';
+  if (channelType === 'Web') return 'Web';
+  if (name && name !== jid) return `${channelType}·${name}`;
+  return channelType;
+}
+
 // --- Transcript export ---
 
 interface TranscriptMessage {
   id: string;
   chat_jid: string;
+  source_jid?: string;
   sender_name: string;
   content: string;
   timestamp: string;
@@ -304,6 +331,7 @@ interface TranscriptMessage {
 function formatTranscriptMarkdown(
   messages: TranscriptMessage[],
   folder: string,
+  nameMap: Map<string, string>,
 ): string {
   if (messages.length === 0) return '';
 
@@ -317,10 +345,20 @@ function formatTranscriptMarkdown(
     }
   };
 
+  // Collect unique channel labels
+  const channelSet = new Set<string>();
+  for (const msg of messages) {
+    const effectiveJid = msg.source_jid || msg.chat_jid;
+    channelSet.add(resolveChannelLabel(effectiveJid, nameMap.get(effectiveJid)));
+  }
+  const channels = Array.from(channelSet);
+  const isMultiChannel = channels.length > 1;
+
   const lines: string[] = [
     `# 对话记录 — ${folder}`,
     `时间范围：${formatTime(firstTs)} ~ ${formatTime(lastTs)}`,
     `消息数：${messages.length}`,
+    `涉及渠道：${channels.join('、')}`,
     '',
     '---',
     '',
@@ -333,7 +371,14 @@ function formatTranscriptMarkdown(
       msg.content.length > 2000
         ? msg.content.slice(0, 2000) + '\n\n[...内容截断...]'
         : msg.content;
-    lines.push(`**${role}** (${time}): ${content}`, '');
+    // Only tag per-message channel when transcript spans multiple channels
+    if (isMultiChannel && !msg.is_from_me) {
+      const effectiveJid = msg.source_jid || msg.chat_jid;
+      const label = resolveChannelLabel(effectiveJid, nameMap.get(effectiveJid));
+      lines.push(`**${role}** (${time}) [${label}]: ${content}`, '');
+    } else {
+      lines.push(`**${role}** (${time}): ${content}`, '');
+    }
   }
 
   return lines.join('\n');
@@ -370,6 +415,7 @@ export function exportTranscriptsForUser(
         ...msgs.map((m) => ({
           id: m.id,
           chat_jid: m.chat_jid,
+          source_jid: m.source_jid,
           sender_name: m.sender_name,
           content: m.content,
           timestamp: m.timestamp,
@@ -389,7 +435,13 @@ export function exportTranscriptsForUser(
         a.timestamp.localeCompare(b.timestamp) || a.id.localeCompare(b.id),
     );
 
-    const md = formatTranscriptMarkdown(allMessages, folder);
+    // Resolve channel names for all effective JIDs
+    const effectiveJids = new Set<string>();
+    for (const msg of allMessages) {
+      effectiveJids.add(msg.source_jid || msg.chat_jid);
+    }
+    const nameMap = getChatNamesByJids(Array.from(effectiveJids));
+    const md = formatTranscriptMarkdown(allMessages, folder, nameMap);
     const dateStr = new Date().toISOString().slice(0, 10);
     const filename = `${folder}-${Date.now()}.md`;
     const transcriptRelPath = path.join('transcripts', dateStr, filename);
@@ -666,8 +718,13 @@ export class MemoryAgentManager {
    */
   async query(
     userId: string,
-    queryText: string,
-    context?: string,
+    options: {
+      query: string;
+      context?: string;
+      chatJid?: string;
+      groupFolder?: string;
+      channelLabel?: string;
+    },
   ): Promise<MemoryAgentResponse> {
     const entry = this.ensureAgent(userId);
     const requestId = crypto.randomUUID();
@@ -684,8 +741,11 @@ export class MemoryAgentManager {
       const message = JSON.stringify({
         requestId,
         type: 'query',
-        query: queryText,
-        context,
+        query: options.query,
+        context: options.context,
+        chatJid: options.chatJid,
+        groupFolder: options.groupFolder,
+        channelLabel: options.channelLabel,
       });
 
       entry.proc.stdin!.write(message + '\n', (err) => {
