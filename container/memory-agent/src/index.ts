@@ -50,6 +50,9 @@ interface MemoryRequest {
   transcriptFile?: string;
   groupFolder?: string;
   chatJids?: string[];
+  // channel context (query/remember)
+  chatJid?: string;
+  channelLabel?: string;
 }
 
 interface MemoryResponse {
@@ -134,7 +137,7 @@ const SYSTEM_PROMPT = `你是一个记忆管理系统。你的职责是管理和
 1. Grep index.md 快速查找
 2. 没命中 → Grep impressions/ 语义索引文件
 3. 命中 → Read knowledge/ 或 transcripts/ 获取细节
-4. 组织自然语言回复，包含来源和时间
+4. 组织自然语言回复，包含来源、时间和渠道信息（如果已知）
 5. **索引自我修复**（在组织回复之后、同一次处理中执行）：
    - 如果第 1 层（index.md）没命中但第 2/3 层命中了 → 回去检查对应的 impressions/ 索引文件，补充缺失的关键词/关联词，让下次同类查询更容易命中
    - 如果第 2 层命中但展开后发现实际不相关（误命中）→ 修正该索引文件中导致误命中的关键词，减少噪音
@@ -151,7 +154,7 @@ const SYSTEM_PROMPT = `你是一个记忆管理系统。你的职责是管理和
 ### session_wrapup — 会话收尾
 
 1. 读取 transcripts/ 中的新对话记录
-2. 生成语义索引文件 → impressions/（包含：话题摘要、关键词列表、涉及的人/事/概念、时间范围）
+2. 生成语义索引文件 → impressions/（包含：话题摘要、关键词列表、涉及的人/事/概念、来源渠道、时间范围）
 3. 提炼知识 → knowledge/（检查冲突，合并而非覆盖）
 4. 更新 index.md 近期上下文区
 5. **交叉修复**：如果本次对话中引用了旧记忆（比如用户说"上次聊的那个"），检查对应的旧 impressions 索引文件，补充本次对话暴露出的缺失关联
@@ -222,6 +225,7 @@ const SYSTEM_PROMPT = `你是一个记忆管理系统。你的职责是管理和
 - index.md 分区：关于用户(~30) / 活跃话题(~50) / 重要提醒(~20) / 近期上下文(~50) / 备用(~50)
 - compact 前必须备份 index.md（保留最近 3 版）
 - global_sleep 完成后必须更新 state.json（lastGlobalSleep + 清空 pendingWrapups）
+- 渠道维度：impression 文件应记录对话发生的渠道/群组名，查询时可作为上下文参考
 `;
 
 // ─── Prompt Builder ────────────────────────────────────────────────
@@ -234,6 +238,7 @@ function buildPrompt(request: MemoryRequest): string {
         ``,
         `查询内容：${request.query}`,
         request.context ? `当前对话上下文：${request.context}` : '',
+        request.channelLabel ? `当前对话渠道：${request.channelLabel}` : '',
         ``,
         `请按照 query 处理流程搜索记忆并回复。如果没有找到相关记忆，直接说明即可。`,
         `回复时使用自然语言，包含来源和时间信息。`,
@@ -249,10 +254,13 @@ function buildPrompt(request: MemoryRequest): string {
         ``,
         `需要记住的内容：${request.content}`,
         `重要性：${request.importance || 'normal'}`,
+        request.channelLabel ? `来源渠道：${request.channelLabel}` : '',
         `当前时间：${new Date().toISOString()}`,
         ``,
         `请按照 remember 处理流程存储这条信息。`,
-      ].join('\n');
+      ]
+        .filter(Boolean)
+        .join('\n');
 
     case 'session_wrapup':
       return [

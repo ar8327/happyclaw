@@ -10,8 +10,10 @@
 
 import { Hono } from 'hono';
 import type { Variables } from '../web-context.js';
+import { getChatNamesByJids } from '../db.js';
 import { logger } from '../logger.js';
 import type { MemoryAgentManager } from '../memory-agent.js';
+import { resolveChannelLabel } from '../memory-agent.js';
 
 let manager: MemoryAgentManager | null = null;
 let internalToken: string | null = null;
@@ -59,10 +61,24 @@ memoryAgentRoutes.post('/query', async (c) => {
   }
 
   try {
+    // Resolve channel label from chatJid if provided
+    let channelLabel: string | undefined;
+    const chatJid = body.chatJid as string | undefined;
+    const groupFolder = body.groupFolder as string | undefined;
+    if (chatJid) {
+      const names = getChatNamesByJids([chatJid]);
+      channelLabel = resolveChannelLabel(chatJid, names.get(chatJid));
+    }
+
     const result = await manager.query(
       body.userId,
-      body.query,
-      body.context as string | undefined,
+      {
+        query: body.query,
+        context: body.context as string | undefined,
+        chatJid,
+        groupFolder,
+        channelLabel,
+      },
     );
 
     if (result.success) {
@@ -109,10 +125,22 @@ memoryAgentRoutes.post('/remember', async (c) => {
   }
 
   try {
+    // Resolve channel label from chatJid if provided
+    let channelLabel: string | undefined;
+    const chatJid = body.chatJid as string | undefined;
+    const groupFolder = body.groupFolder as string | undefined;
+    if (chatJid) {
+      const names = getChatNamesByJids([chatJid]);
+      channelLabel = resolveChannelLabel(chatJid, names.get(chatJid));
+    }
+
     await manager.send(body.userId, {
       type: 'remember',
       content: body.content,
       importance: body.importance || 'normal',
+      chatJid,
+      groupFolder,
+      channelLabel,
     });
     return c.json({ accepted: true });
   } catch (err) {
