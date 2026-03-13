@@ -3906,8 +3906,8 @@ function buildOnNewChat(
       // Already owned by this user — nothing to do
       if (existing.created_by === userId) return;
 
-      // Don't override groups with explicit IM routing configured.
-      if (existing.target_agent_id || existing.target_main_jid) return;
+      // Don't override groups with explicit agent routing configured.
+      if (existing.target_agent_id) return;
 
       // Different user's connection now owns this IM app.
       // Re-route the chat to the current user's home folder.
@@ -3918,6 +3918,7 @@ function buildOnNewChat(
         const previousOwner = existing.created_by;
         existing.folder = homeFolder;
         existing.created_by = userId;
+        existing.target_main_jid = `web:${homeFolder}`;
         setRegisteredGroup(chatJid, existing);
         registeredGroups[chatJid] = existing;
         logger.info(
@@ -3939,6 +3940,7 @@ function buildOnNewChat(
       folder: homeFolder,
       added_at: new Date().toISOString(),
       created_by: userId,
+      target_main_jid: `web:${homeFolder}`,
     });
     logger.info(
       { chatJid, chatName, userId, homeFolder },

@@ -1034,7 +1034,34 @@ export function initDatabase(): void {
     })();
   }
 
-  const SCHEMA_VERSION = '28';
+  // v29: Auto-registered IM groups should route to their home web JID.
+  // Previously buildOnNewChat did not set target_main_jid, causing messages
+  // to be stored under the IM JID directly — leading to duplicate replies
+  // when multiple IM groups share the same folder.
+  if (curVer && parseInt(curVer, 10) < 29) {
+    db.exec(`
+      UPDATE registered_groups
+      SET target_main_jid = (
+        SELECT home.jid FROM registered_groups AS home
+        WHERE home.folder = registered_groups.folder
+          AND home.is_home = 1
+          AND home.jid LIKE 'web:%'
+        LIMIT 1
+      )
+      WHERE jid NOT LIKE 'web:%'
+        AND target_main_jid IS NULL
+        AND target_agent_id IS NULL
+        AND is_home = 0
+        AND EXISTS (
+          SELECT 1 FROM registered_groups AS home
+          WHERE home.folder = registered_groups.folder
+            AND home.is_home = 1
+        )
+    `);
+    logger.info('Migration v28→v29: set target_main_jid for auto-registered IM groups');
+  }
+
+  const SCHEMA_VERSION = '29';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
