@@ -5878,7 +5878,6 @@ async function startMessageLoop(): Promise<void> {
 
           const images = collectMessageImages(chatJid, messagesToSend);
           const imagesForAgent = images.length > 0 ? images : undefined;
-
           // Determine the IM source JID for route update on successful injection
           const lastSourceJidForRoute =
             messagesToSend[messagesToSend.length - 1]?.source_jid || chatJid;
