@@ -41,6 +41,7 @@ function checkCooldown(userId: string): string | null {
 
 let capCache: {
   ghAvailable: boolean;
+  ghUsername: string | null;
   claudeAvailable: boolean;
   checkedAt: number;
 } | null = null;
@@ -48,11 +49,13 @@ const CAP_CACHE_TTL = 5 * 60 * 1000;
 
 async function checkCapabilities(): Promise<{
   ghAvailable: boolean;
+  ghUsername: string | null;
   claudeAvailable: boolean;
 }> {
   if (capCache && Date.now() - capCache.checkedAt < CAP_CACHE_TTL) {
     return {
       ghAvailable: capCache.ghAvailable,
+      ghUsername: capCache.ghUsername,
       claudeAvailable: capCache.claudeAvailable,
     };
   }
@@ -66,8 +69,19 @@ async function checkCapabilities(): Promise<{
       .catch(() => false),
   ]);
 
-  capCache = { ghAvailable: gh, claudeAvailable: claude, checkedAt: Date.now() };
-  return { ghAvailable: gh, claudeAvailable: claude };
+  // Get gh username if available
+  let ghUsername: string | null = null;
+  if (gh) {
+    try {
+      const { stdout } = await execFileAsync('gh', ['api', 'user', '--jq', '.login'], { timeout: 5000 });
+      ghUsername = stdout.trim() || null;
+    } catch {
+      // gh available but can't get username
+    }
+  }
+
+  capCache = { ghAvailable: gh, ghUsername, claudeAvailable: claude, checkedAt: Date.now() };
+  return { ghAvailable: gh, ghUsername, claudeAvailable: claude };
 }
 
 // --- Helpers ---
@@ -128,7 +142,6 @@ function buildGeneratePrompt(
   description: string,
   systemInfo: Record<string, string>,
   logs: string,
-  browserErrors?: string,
 ): string {
   const sysInfoText = Object.entries(systemInfo)
     .map(([k, v]) => `- ${k}: ${v}`)
@@ -146,7 +159,6 @@ ${sysInfoText}
 \`\`\`
 ${logs}
 \`\`\`
-${browserErrors ? `\n## 浏览器控制台错误\n\`\`\`\n${browserErrors}\n\`\`\`` : ''}
 
 请生成一个结构化的 GitHub Issue。输出**纯 JSON**（不要 markdown 代码块），包含两个字段：
 - "title": 简洁的 issue 标题（不超过 80 字符），以类别开头如 "Bug:", "Crash:", "UI:" 等
@@ -175,7 +187,6 @@ function buildFallbackReport(
   description: string,
   systemInfo: Record<string, string>,
   logs: string,
-  browserErrors?: string,
 ): { title: string; body: string } {
   const sysInfoTable = Object.entries(systemInfo)
     .map(([k, v]) => `| ${k} | ${v} |`)
@@ -196,13 +207,40 @@ ${sysInfoTable}
 \`\`\`
 ${logs.slice(0, 3000)}
 \`\`\`
-${browserErrors ? `\n## 浏览器控制台错误\n\`\`\`\n${browserErrors.slice(0, 2000)}\n\`\`\`` : ''}
 `;
 
   return {
     title: `Bug: ${description.slice(0, 70)}`,
     body,
   };
+}
+
+/** Try multiple strategies to extract JSON { title, body } from Claude output */
+function tryParseJsonOutput(raw: string): { title?: string; body?: string } | null {
+  const candidates: string[] = [];
+
+  // Strategy 1: strip markdown fencing (greedy to handle nested backticks)
+  const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```\s*$/);
+  if (fenceMatch) candidates.push(fenceMatch[1].trim());
+
+  // Strategy 2: extract first { ... } block
+  const braceMatch = raw.match(/\{[\s\S]*\}/);
+  if (braceMatch) candidates.push(braceMatch[0]);
+
+  // Strategy 3: raw string as-is
+  candidates.push(raw.trim());
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as { title?: string; body?: string };
+      if (typeof parsed === 'object' && parsed !== null && parsed.body) {
+        return parsed;
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  return null;
 }
 
 // ========== Routes ==========
@@ -236,7 +274,7 @@ bugReportRoutes.post('/generate', authMiddleware, async (c) => {
       400,
     );
   }
-  const { description, screenshots, browserErrors } = parseResult.data;
+  const { description, screenshots } = parseResult.data;
 
   // Collect system info
   const homeGroup = getUserHomeGroup(user.id);
@@ -266,16 +304,11 @@ bugReportRoutes.post('/generate', authMiddleware, async (c) => {
   const caps = await checkCapabilities();
   if (!caps.claudeAvailable) {
     logger.info('bug-report: claude CLI not available, using fallback template');
-    const fallback = buildFallbackReport(
-      description,
-      systemInfo,
-      logs,
-      browserErrors,
-    );
+    const fallback = buildFallbackReport(description, systemInfo, logs);
     return c.json({ ...fallback, systemInfo });
   }
 
-  const prompt = buildGeneratePrompt(description, systemInfo, logs, browserErrors);
+  const prompt = buildGeneratePrompt(description, systemInfo, logs);
 
   try {
     const result = await new Promise<string | null>((resolve) => {
@@ -317,48 +350,33 @@ bugReportRoutes.post('/generate', authMiddleware, async (c) => {
     });
 
     if (!result) {
-      const fallback = buildFallbackReport(
-        description,
-        systemInfo,
-        logs,
-        browserErrors,
-      );
+      const fallback = buildFallbackReport(description, systemInfo, logs);
       return c.json({ ...fallback, systemInfo });
     }
 
     // Try to parse Claude's JSON output
-    try {
-      // Strip markdown fencing if present
-      let jsonStr = result;
-      const fenceMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-      if (fenceMatch) jsonStr = fenceMatch[1].trim();
-
-      const parsed = JSON.parse(jsonStr) as { title?: string; body?: string };
+    const parsed = tryParseJsonOutput(result);
+    if (parsed?.body) {
       return c.json({
         title: parsed.title || `Bug: ${description.slice(0, 70)}`,
-        body: parsed.body || result,
-        systemInfo,
-      });
-    } catch {
-      // Claude didn't return valid JSON, use raw output as body
-      logger.info('bug-report: claude output was not valid JSON, using as raw body');
-      return c.json({
-        title: `Bug: ${description.slice(0, 70)}`,
-        body: result,
+        body: parsed.body,
         systemInfo,
       });
     }
+
+    // Claude didn't return valid JSON, use raw output as body
+    logger.info('bug-report: claude output was not valid JSON, using as raw body');
+    return c.json({
+      title: `Bug: ${description.slice(0, 70)}`,
+      body: result,
+      systemInfo,
+    });
   } catch (err) {
     logger.error(
       { error: (err as Error).message },
       'bug-report: unexpected error during generation',
     );
-    const fallback = buildFallbackReport(
-      description,
-      systemInfo,
-      logs,
-      browserErrors,
-    );
+    const fallback = buildFallbackReport(description, systemInfo, logs);
     return c.json({ ...fallback, systemInfo });
   }
 });

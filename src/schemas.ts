@@ -577,7 +577,6 @@ export const BugReportGenerateSchema = z.object({
     .array(z.string().max(MAX_SCREENSHOT_BASE64_LENGTH))
     .max(3)
     .optional(),
-  browserErrors: z.string().max(10000).optional(),
 });
 
 export const BugReportSubmitSchema = z.object({
