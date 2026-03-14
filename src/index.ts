@@ -84,6 +84,7 @@ import {
   unregisterStreamingSession,
   hasActiveStreamingSession,
   abortAllStreamingSessions,
+  registerMessageIdMapping,
 } from './feishu-streaming-card.js';
 import {
   formatContextMessages,
@@ -1588,8 +1589,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Create a streaming session for Feishu channels (typing-machine effect).
   // Non-Feishu channels get undefined → all streaming logic is no-op.
   let streamingSessionJid = replySourceImJid ?? chatJid;
+  const makeOnCardCreated = (jid: string) => (messageId: string) =>
+    registerMessageIdMapping(messageId, jid);
   let streamingSession =
-    imManager.createStreamingSession(streamingSessionJid);
+    imManager.createStreamingSession(streamingSessionJid, makeOnCardCreated(streamingSessionJid));
   let streamingAccumulatedText = '';
   if (streamingSession) {
     registerStreamingSession(streamingSessionJid, streamingSession);
@@ -1618,7 +1621,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         unregisterStreamingSession(streamingSessionJid);
       }
       streamingSessionJid = newStreamingJid;
-      streamingSession = imManager.createStreamingSession(streamingSessionJid);
+      streamingSession = imManager.createStreamingSession(streamingSessionJid, makeOnCardCreated(streamingSessionJid));
       streamingAccumulatedText = '';
       if (streamingSession) {
         registerStreamingSession(streamingSessionJid, streamingSession);
@@ -1682,7 +1685,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   }
 
-  const output = await runAgent(
+  let output: { status: 'success' | 'error' | 'closed'; error?: string } | undefined;
+  try {
+  output = await runAgent(
     effectiveGroup,
     prompt,
     chatJid,
@@ -2013,24 +2018,26 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     },
     imagesForAgent,
   );
+  } finally {
+    await setTyping(chatJid, false);
+    if (idleTimer) clearTimeout(idleTimer);
+    activeRouteUpdaters.delete(effectiveGroup.folder);
 
-  await setTyping(chatJid, false);
-  if (idleTimer) clearTimeout(idleTimer);
-  activeRouteUpdaters.delete(effectiveGroup.folder);
-
-  // ── Streaming card cleanup ──
-  if (streamingSession) {
-    if (streamingSession.isActive()) {
-      // Agent finished without a visible result.result (e.g., error or interrupt)
-      if (hadError || output.status === 'error') {
-        await streamingSession.abort('处理出错').catch(() => {});
-      } else {
-        // Edge case: agent completed with no text output — dispose silently
-        streamingSession.dispose();
+    // ── Streaming card cleanup ──
+    if (streamingSession) {
+      if (streamingSession.isActive()) {
+        if (hadError || !output || output.status === 'error') {
+          await streamingSession.abort('处理出错').catch(() => {});
+        } else {
+          streamingSession.dispose();
+        }
       }
+      unregisterStreamingSession(streamingSessionJid);
     }
-    unregisterStreamingSession(streamingSessionJid);
   }
+
+  // runAgent threw — output is undefined, cannot proceed with post-processing
+  if (!output) return true;
 
   // 不可恢复的转录错误（如超大图片/MIME 错配被固化在会话历史中）：无论是否已有回复，都必须重置会话
   const errorForReset = [lastError, output.error].filter(Boolean).join(' ');
@@ -3316,7 +3323,10 @@ async function processAgentConversation(
   // Web-only interactions don't need a Feishu streaming card.
   const streamingSessionJid = replySourceImJid;
   const agentStreamingSession = streamingSessionJid
-    ? imManager.createStreamingSession(streamingSessionJid)
+    ? imManager.createStreamingSession(
+        streamingSessionJid,
+        (messageId) => registerMessageIdMapping(messageId, streamingSessionJid),
+      )
     : undefined;
   let agentStreamingAccText = '';
   if (agentStreamingSession && streamingSessionJid) {
