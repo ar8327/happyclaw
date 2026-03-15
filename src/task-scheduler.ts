@@ -712,16 +712,16 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         }
       }
 
-      // Daily summary generation (runs at most once per hour, 2-3 AM)
-      if (deps.dailySummaryDeps) {
-        try {
-          runDailySummaryIfNeeded(deps.dailySummaryDeps);
-        } catch (err) {
-          logger.error({ err }, 'Daily summary check failed');
-        }
-      }
+      // Daily summary generation — disabled, replaced by Memory Agent system
+      // if (deps.dailySummaryDeps) {
+      //   try {
+      //     runDailySummaryIfNeeded(deps.dailySummaryDeps);
+      //   } catch (err) {
+      //     logger.error({ err }, 'Daily summary check failed');
+      //   }
+      // }
 
-      // Memory Agent global_sleep (runs after daily summary, 2-3 AM)
+      // Memory Agent global_sleep
       if (deps.globalSleepDeps) {
         try {
           runMemoryGlobalSleepIfNeeded(deps.globalSleepDeps);
