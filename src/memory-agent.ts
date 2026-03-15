@@ -728,15 +728,54 @@ export class MemoryAgentManager {
   ): Promise<MemoryAgentResponse> {
     const entry = this.ensureAgent(userId);
     const requestId = crypto.randomUUID();
+    const startTime = Date.now();
+    const stderrStart = entry.stderrBuffer.length;
 
     return new Promise((resolve, reject) => {
       const queryTimeoutMs = getSystemSettings().memoryQueryTimeout || DEFAULT_QUERY_TIMEOUT_MS;
       const timeout = setTimeout(() => {
         entry.pendingQueries.delete(requestId);
-        reject(new Error('Memory query timeout'));
+        const err = new Error('Memory query timeout');
+        writeMemoryLog(userId, {
+          type: 'query',
+          startTime,
+          status: 'timeout',
+          exitCode: -1,
+          stderr: entry.stderrBuffer.slice(stderrStart),
+          error: err.message,
+        });
+        if (entry.pendingQueries.size === 0) entry.stderrBuffer.length = 0;
+        reject(err);
       }, queryTimeoutMs);
 
-      entry.pendingQueries.set(requestId, { resolve, reject, timeout });
+      const wrappedResolve = (resp: MemoryAgentResponse) => {
+        writeMemoryLog(userId, {
+          type: 'query',
+          startTime,
+          status: resp.success ? 'success' : 'error',
+          exitCode: resp.success ? 0 : 1,
+          response: resp.response,
+          stderr: entry.stderrBuffer.slice(stderrStart),
+          error: resp.error,
+        });
+        if (entry.pendingQueries.size === 0) entry.stderrBuffer.length = 0;
+        resolve(resp);
+      };
+
+      const wrappedReject = (reason: Error) => {
+        writeMemoryLog(userId, {
+          type: 'query',
+          startTime,
+          status: 'error',
+          exitCode: 1,
+          stderr: entry.stderrBuffer.slice(stderrStart),
+          error: reason.message,
+        });
+        if (entry.pendingQueries.size === 0) entry.stderrBuffer.length = 0;
+        reject(reason);
+      };
+
+      entry.pendingQueries.set(requestId, { resolve: wrappedResolve, reject: wrappedReject, timeout });
 
       const message = JSON.stringify({
         requestId,
@@ -752,7 +791,7 @@ export class MemoryAgentManager {
         if (err) {
           clearTimeout(timeout);
           entry.pendingQueries.delete(requestId);
-          reject(new Error(`Failed to write to Memory Agent stdin: ${err.message}`));
+          wrappedReject(new Error(`Failed to write to Memory Agent stdin: ${err.message}`));
         }
       });
     });
@@ -778,7 +817,6 @@ export class MemoryAgentManager {
       : settings.memorySendTimeout;
 
     const msgType = String(message.type || 'unknown');
-    const shouldLog = msgType === 'global_sleep' || msgType === 'session_wrapup';
     const startTime = Date.now();
     const stderrStart = entry.stderrBuffer.length;
 
@@ -786,48 +824,42 @@ export class MemoryAgentManager {
       const timeout = setTimeout(() => {
         entry.pendingQueries.delete(requestId);
         const err = new Error('Memory Agent send timeout');
-        if (shouldLog) {
-          writeMemoryLog(userId, {
-            type: msgType,
-            startTime,
-            status: 'timeout',
-            exitCode: -1,
-            stderr: entry.stderrBuffer.slice(stderrStart),
-            error: err.message,
-          });
-          if (entry.pendingQueries.size === 0) entry.stderrBuffer.length = 0;
-        }
+        writeMemoryLog(userId, {
+          type: msgType,
+          startTime,
+          status: 'timeout',
+          exitCode: -1,
+          stderr: entry.stderrBuffer.slice(stderrStart),
+          error: err.message,
+        });
+        if (entry.pendingQueries.size === 0) entry.stderrBuffer.length = 0;
         reject(err);
       }, timeoutMs);
 
       const wrappedResolve = (resp: MemoryAgentResponse) => {
-        if (shouldLog) {
-          writeMemoryLog(userId, {
-            type: msgType,
-            startTime,
-            status: resp.success ? 'success' : 'error',
-            exitCode: resp.success ? 0 : 1,
-            response: resp.response,
-            stderr: entry.stderrBuffer.slice(stderrStart),
-            error: resp.error,
-          });
-          if (entry.pendingQueries.size === 0) entry.stderrBuffer.length = 0;
-        }
+        writeMemoryLog(userId, {
+          type: msgType,
+          startTime,
+          status: resp.success ? 'success' : 'error',
+          exitCode: resp.success ? 0 : 1,
+          response: resp.response,
+          stderr: entry.stderrBuffer.slice(stderrStart),
+          error: resp.error,
+        });
+        if (entry.pendingQueries.size === 0) entry.stderrBuffer.length = 0;
         resolve(resp);
       };
 
       const wrappedReject = (reason: Error) => {
-        if (shouldLog) {
-          writeMemoryLog(userId, {
-            type: msgType,
-            startTime,
-            status: 'error',
-            exitCode: 1,
-            stderr: entry.stderrBuffer.slice(stderrStart),
-            error: reason.message,
-          });
-          if (entry.pendingQueries.size === 0) entry.stderrBuffer.length = 0;
-        }
+        writeMemoryLog(userId, {
+          type: msgType,
+          startTime,
+          status: 'error',
+          exitCode: 1,
+          stderr: entry.stderrBuffer.slice(stderrStart),
+          error: reason.message,
+        });
+        if (entry.pendingQueries.size === 0) entry.stderrBuffer.length = 0;
         reject(reason);
       };
 

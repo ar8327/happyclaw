@@ -279,8 +279,6 @@ export function writeRunLog(
     ? `-agent-${ctx.input.agentId.replace(/[^a-zA-Z0-9-]/g, '-')}`
     : '';
   const logFile = path.join(ctx.logsDir, `${ctx.filePrefix}${agentSlug}-${timestamp}.log`);
-  const isVerbose =
-    process.env.LOG_LEVEL === 'debug' || process.env.LOG_LEVEL === 'trace';
 
   const logLines = [
     `=== ${ctx.label} Run Log ===`,
@@ -300,21 +298,9 @@ export function writeRunLog(
   }
   logLines.push(``);
 
-  const isError = code !== 0;
   const { stderr, stderrTruncated } = ctx.stderrState;
   const { stdout, stdoutTruncated } = ctx.stdoutState;
 
-  const LOG_TAIL_LIMIT = 4000;
-  const stderrLog =
-    !isVerbose && !isError && stderr.length > LOG_TAIL_LIMIT
-      ? `... (truncated ${stderr.length - LOG_TAIL_LIMIT} chars) ...\n` +
-        stderr.slice(-LOG_TAIL_LIMIT)
-      : stderr;
-  const stdoutLog =
-    !isVerbose && !isError && stdout.length > LOG_TAIL_LIMIT
-      ? `... (truncated ${stdout.length - LOG_TAIL_LIMIT} chars) ...\n` +
-        stdout.slice(-LOG_TAIL_LIMIT)
-      : stdout;
   logLines.push(
     `=== Input Summary ===`,
     `Prompt length: ${ctx.input.prompt.length} chars`,
@@ -326,26 +312,19 @@ export function writeRunLog(
   logLines.push(
     ``,
     `=== Stderr${stderrTruncated ? ' (TRUNCATED)' : ''} ===`,
-    stderrLog,
+    stderr,
     ``,
     `=== Stdout${stdoutTruncated ? ' (TRUNCATED)' : ''} ===`,
-    stdoutLog,
+    stdout,
   );
 
-  // Always log input (with prompt truncation in non-verbose mode)
-  const PROMPT_LOG_LIMIT = 10000;
-  const inputForLog = { ...ctx.input };
-  if (!isVerbose && !isError && inputForLog.prompt.length > PROMPT_LOG_LIMIT) {
-    inputForLog.prompt = inputForLog.prompt.slice(0, PROMPT_LOG_LIMIT) +
-      `\n... (truncated ${ctx.input.prompt.length - PROMPT_LOG_LIMIT} chars)`;
-  }
-  logLines.push(``, `=== Input ===`, JSON.stringify(inputForLog, null, 2));
-  if ((isVerbose || isError) && ctx.extraVerboseLines) {
+  logLines.push(``, `=== Input ===`, JSON.stringify(ctx.input, null, 2));
+  if (ctx.extraVerboseLines) {
     logLines.push(``, ...ctx.extraVerboseLines);
   }
 
   fs.writeFileSync(logFile, logLines.join('\n'));
-  logger.debug({ logFile, verbose: isVerbose }, `${ctx.label} log written`);
+  logger.debug({ logFile }, `${ctx.label} log written`);
   return logFile;
 }
 
