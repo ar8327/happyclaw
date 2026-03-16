@@ -102,7 +102,6 @@ export class StreamEventProcessor {
     this.sdkTaskIdToToolUseId.set(sdkTaskId, toolUseId);
     this.log(`Registered SDK task mapping: ${sdkTaskId} → ${toolUseId.slice(0, 12)}`);
   }
-
   constructor(emit: EmitFn, log: LogFn, onModeChangeRequest?: ModeChangeRequestFn) {
     this.emit = emit;
     this.log = log;

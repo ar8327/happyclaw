@@ -312,14 +312,32 @@ interface Session {
 /** Pending result slot — only one request in flight at a time */
 let pendingResolve: ((result: RequestResult) => void) | null = null;
 
-/** Consume SDK messages from the query generator, routing results to the pending promise. */
+/** Consume SDK messages from the query generator, routing results to the pending promise.
+ *  Accumulates all text from assistant messages so that intermediate text (e.g. query
+ *  answers emitted before index repair tool calls) is not lost when result.result only
+ *  contains the last text block. */
 async function consumeQuery(q: Query): Promise<void> {
+  let accumulatedText = '';
   try {
     for await (const message of q) {
+      // Accumulate text from assistant messages (may span multiple turns)
+      if (message.type === 'assistant') {
+        const content = (message as Record<string, unknown>).message as { content?: unknown } | undefined;
+        if (content && Array.isArray(content.content)) {
+          for (const block of content.content as Array<{ type: string; text?: string }>) {
+            if (block.type === 'text' && block.text) {
+              accumulatedText += block.text;
+            }
+          }
+        }
+      }
       if (message.type === 'result') {
         const r = message as Record<string, unknown>;
-        const text = typeof r.result === 'string' ? r.result : '';
+        const resultText = typeof r.result === 'string' ? r.result : '';
         const isError = !!r.is_error;
+        // Use accumulated text if it's more complete than result.result
+        const text = accumulatedText.length > resultText.length ? accumulatedText : resultText;
+        accumulatedText = '';
         if (pendingResolve) {
           pendingResolve({ text, isError });
           pendingResolve = null;
