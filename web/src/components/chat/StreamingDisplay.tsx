@@ -4,7 +4,6 @@ import { useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { EmojiAvatar } from '../common/EmojiAvatar';
 import { MarkdownRenderer } from './MarkdownRenderer';
-import { TaskInlineCard } from './TaskInlineCard';
 import { TodoProgressPanel } from './TodoProgressPanel';
 import { ToolActivityCard } from './ToolActivityCard';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
@@ -57,7 +56,6 @@ function AskUserQuestionCard({ toolInput }: { toolInput: Record<string, unknown>
 /** Shared streaming content — used by both compact and chat modes to eliminate duplication. */
 function StreamingContent({
   streaming,
-  sdkTasks,
   localElapsed,
   groupJid,
   thinkingExpanded,
@@ -66,7 +64,6 @@ function StreamingContent({
   handleThinkingScroll,
 }: {
   streaming: import('../../stores/chat').StreamingState;
-  sdkTasks: Record<string, any>;
   localElapsed: Record<string, number>;
   groupJid: string;
   thinkingExpanded: boolean;
@@ -75,12 +72,8 @@ function StreamingContent({
   handleThinkingScroll: () => void;
 }) {
   // Classify active tools
-  const inlineTaskTools = streaming.activeTools.filter(
-    t => t.toolName === 'Task' && t.toolUseId && !sdkTasks[t.toolUseId]?.isTeammate
-  );
   const cardTools = streaming.activeTools.filter(
-    t => !(t.toolName === 'Task' && t.toolUseId && !sdkTasks[t.toolUseId]?.isTeammate)
-      && t.toolName !== 'AskUserQuestion'
+    t => t.toolName !== 'AskUserQuestion'
   );
   const askUserTools = streaming.activeTools.filter(
     t => t.toolName === 'AskUserQuestion' && t.toolInput
@@ -141,15 +134,6 @@ function StreamingContent({
       {/* Active tools */}
       {streaming.activeTools.length > 0 && (
         <div className="mb-2 space-y-1.5">
-          {inlineTaskTools.map((tool) => (
-            <TaskInlineCard
-              key={tool.toolUseId}
-              toolUseId={tool.toolUseId}
-              description={tool.toolInputSummary || sdkTasks[tool.toolUseId]?.description || 'Task'}
-              startTime={tool.startTime}
-              groupJid={groupJid}
-            />
-          ))}
           {cardTools.length > 0 && (
             <div className="space-y-1.5">
               {cardTools.map((tool) => (
@@ -234,7 +218,6 @@ export function StreamingDisplay({ groupJid, isWaiting, senderName: senderNamePr
   const mainStreaming = useChatStore(s => s.streaming[groupJid]);
   const agentStreamingState = useChatStore(s => agentId ? s.agentStreaming[agentId] : undefined);
   const streaming = agentId ? agentStreamingState : mainStreaming;
-  const sdkTasks = useChatStore(s => s.sdkTasks);
   const currentUser = useAuthStore(s => s.user);
   const appearance = useAuthStore(s => s.appearance);
   const senderName = currentUser?.ai_name || appearance?.aiName || senderNameProp;
@@ -425,7 +408,6 @@ export function StreamingDisplay({ groupJid, isWaiting, senderName: senderNamePr
           {/* Shared streaming content */}
           <StreamingContent
             streaming={streaming}
-            sdkTasks={sdkTasks}
             localElapsed={localElapsed}
             groupJid={groupJid}
             thinkingExpanded={thinkingExpanded}
@@ -478,7 +460,6 @@ export function StreamingDisplay({ groupJid, isWaiting, senderName: senderNamePr
           <div className="bg-card rounded-xl border border-border border-l-[3px] border-l-[var(--brand-400)] px-5 py-4 overflow-hidden">
             <StreamingContent
               streaming={streaming}
-              sdkTasks={sdkTasks}
               localElapsed={localElapsed}
               groupJid={groupJid}
               thinkingExpanded={thinkingExpanded}

@@ -74,7 +74,23 @@ export interface NewMessage {
   content: string;
   timestamp: string;
   attachments?: string;
+  turn_id?: string | null;
+  session_id?: string | null;
+  sdk_message_uuid?: string | null;
+  source_kind?: MessageSourceKind | null;
+  finalization_reason?: MessageFinalizationReason | null;
 }
+
+export type MessageSourceKind =
+  | 'sdk_final'
+  | 'sdk_send_message'
+  | 'interrupt_partial'
+  | 'legacy';
+
+export type MessageFinalizationReason =
+  | 'completed'
+  | 'interrupted'
+  | 'error';
 
 export interface MessageAttachment {
   type: 'image';

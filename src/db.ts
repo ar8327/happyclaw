@@ -23,9 +23,11 @@ import {
   GroupMember,
   InviteCode,
   InviteCodeWithCreator,
+  MessageFinalizationReason,
   MonthlyUsage,
   NewMessage,
   MessageCursor,
+  MessageSourceKind,
   RedeemCode,
   RegisteredGroup,
   ScheduledTask,
@@ -45,6 +47,14 @@ import {
 import { getDefaultPermissions, normalizePermissions } from './permissions.js';
 
 let db: Database.Database;
+
+interface StoredMessageMeta {
+  turnId?: string | null;
+  sessionId?: string | null;
+  sdkMessageUuid?: string | null;
+  sourceKind?: MessageSourceKind | null;
+  finalizationReason?: MessageFinalizationReason | null;
+}
 
 function hasColumn(tableName: string, columnName: string): boolean {
   const columns = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{
@@ -123,6 +133,11 @@ export function initDatabase(): void {
       is_from_me INTEGER,
       attachments TEXT,
       token_usage TEXT,
+      turn_id TEXT,
+      session_id TEXT,
+      sdk_message_uuid TEXT,
+      source_kind TEXT,
+      finalization_reason TEXT,
       PRIMARY KEY (id, chat_jid),
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
@@ -527,6 +542,11 @@ export function initDatabase(): void {
   ensureColumn('registered_groups', 'selected_mcps', 'TEXT');
   ensureColumn('registered_groups', 'activation_mode', "TEXT DEFAULT 'auto'");
   ensureColumn('messages', 'token_usage', 'TEXT');
+  ensureColumn('messages', 'turn_id', 'TEXT');
+  ensureColumn('messages', 'session_id', 'TEXT');
+  ensureColumn('messages', 'sdk_message_uuid', 'TEXT');
+  ensureColumn('messages', 'source_kind', 'TEXT');
+  ensureColumn('messages', 'finalization_reason', 'TEXT');
 
   // Add index on target_agent_id for fast lookup of IM bindings
   db.exec(
@@ -1034,7 +1054,7 @@ export function initDatabase(): void {
     })();
   }
 
-  const SCHEMA_VERSION = '28';
+  const SCHEMA_VERSION = '29';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -1148,14 +1168,31 @@ export function storeMessageDirect(
   content: string,
   timestamp: string,
   isFromMe: boolean,
-  attachments?: string,
-  tokenUsage?: string,
-  sourceJid?: string,
-): void {
+  opts?: {
+    attachments?: string;
+    tokenUsage?: string;
+    sourceJid?: string;
+    meta?: StoredMessageMeta;
+  },
+): string {
+  const { attachments, tokenUsage, sourceJid, meta } = opts ?? {};
+  const existingFinalRow =
+    meta?.sourceKind === 'sdk_final' && meta.turnId
+      ? (db.prepare(
+          `SELECT id FROM messages
+           WHERE chat_jid = ? AND turn_id = ? AND source_kind = 'sdk_final'
+           ORDER BY timestamp DESC
+           LIMIT 1`,
+        ).get(chatJid, meta.turnId) as { id: string } | undefined)
+      : undefined;
+  const effectiveMsgId = existingFinalRow?.id || msgId;
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (
+      id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me,
+      attachments, token_usage, turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
-    msgId,
+    effectiveMsgId,
     chatJid,
     sourceJid ?? chatJid,
     sender,
@@ -1165,7 +1202,13 @@ export function storeMessageDirect(
     isFromMe ? 1 : 0,
     attachments ?? null,
     tokenUsage ?? null,
+    meta?.turnId ?? null,
+    meta?.sessionId ?? null,
+    meta?.sdkMessageUuid ?? null,
+    meta?.sourceKind ?? null,
+    meta?.finalizationReason ?? null,
   );
+  return effectiveMsgId;
 }
 
 /**
@@ -1190,6 +1233,7 @@ export function updateLatestMessageTokenUsage(
        WHERE rowid = (
          SELECT rowid FROM messages
          WHERE chat_jid = ? AND is_from_me = 1 AND token_usage IS NULL
+           AND COALESCE(source_kind, 'legacy') != 'sdk_send_message'
          ORDER BY timestamp DESC LIMIT 1
        )`,
     ).run(tokenUsage, costUsd ?? null, chatJid);
@@ -2348,14 +2392,16 @@ export function getMessagesPage(
 ): Array<NewMessage & { is_from_me: boolean }> {
   const sql = before
     ? `
-      SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage
+      SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+             turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
       FROM messages
       WHERE chat_jid = ? AND timestamp < ?
       ORDER BY timestamp DESC
       LIMIT ?
     `
     : `
-      SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage
+      SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+             turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
       FROM messages
       WHERE chat_jid = ?
       ORDER BY timestamp DESC
@@ -2384,7 +2430,8 @@ export function getMessagesAfter(
 ): Array<NewMessage & { is_from_me: boolean }> {
   const rows = db
     .prepare(
-      `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage
+      `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
        FROM messages
        WHERE chat_jid = ? AND timestamp > ?
        ORDER BY timestamp ASC
@@ -2411,12 +2458,14 @@ export function getMessagesPageMulti(
 
   const placeholders = chatJids.map(() => '?').join(',');
   const sql = before
-    ? `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage
+    ? `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
        FROM messages
        WHERE chat_jid IN (${placeholders}) AND timestamp < ?
        ORDER BY timestamp DESC
        LIMIT ?`
-    : `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage
+    : `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
        FROM messages
        WHERE chat_jid IN (${placeholders})
        ORDER BY timestamp DESC
@@ -2495,7 +2544,8 @@ export function getMessagesByTimeRange(
   const endIso = new Date(endTs).toISOString();
   const rows = db
     .prepare(
-      `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments
+      `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments,
+              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
        FROM messages
        WHERE chat_jid = ? AND timestamp >= ? AND timestamp < ?
        ORDER BY timestamp ASC

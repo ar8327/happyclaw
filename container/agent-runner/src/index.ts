@@ -25,6 +25,7 @@ import type {
   SessionsIndex,
   SDKUserMessage,
   ParsedMessage,
+  StreamEvent,
 } from './types.js';
 export type { StreamEventType, StreamEvent } from './types.js';
 
@@ -711,8 +712,31 @@ async function runQuery(
   images?: Array<{ data: string; mimeType?: string }>,
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean; contextOverflow?: boolean; unrecoverableTranscriptError?: boolean; interruptedDuringQuery: boolean; sessionResumeFailed?: boolean }> {
   const stream = new MessageStream();
+  let newSessionId: string | undefined;
+  let lastAssistantUuid: string | undefined;
+  let canonicalAssistantText: string | undefined;
+  let canonicalAssistantUuid: string | undefined;
   const initialRejected = stream.push(prompt, images);
+  const decorateStreamEvent = (event: StreamEvent): StreamEvent => ({
+    ...event,
+    turnId: containerInput.turnId,
+    sessionId: newSessionId || sessionId,
+  });
   const emit = (output: ContainerOutput): void => {
+    if (output.streamEvent) {
+      output = {
+        ...output,
+        streamEvent: decorateStreamEvent(output.streamEvent),
+        turnId: containerInput.turnId,
+        sessionId: newSessionId || sessionId,
+      };
+    } else if (output.status === 'success' || output.status === 'error') {
+      output = {
+        ...output,
+        turnId: containerInput.turnId,
+        sessionId: newSessionId || sessionId,
+      };
+    }
     if (emitOutput) writeOutput(output);
   };
 
@@ -803,8 +827,6 @@ async function runQuery(
     );
   });
 
-  let newSessionId: string | undefined;
-  let lastAssistantUuid: string | undefined;
   let messageCount = 0;
   let resultCount = 0;
 
@@ -1050,6 +1072,20 @@ async function runQuery(
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;
+      const assistantMsg = message as Record<string, unknown>;
+      if ((assistantMsg.parent_tool_use_id ?? null) === null) {
+        const msgContent = (assistantMsg.message as Record<string, unknown> | undefined)?.content;
+        const topLevelText = Array.isArray(msgContent)
+          ? (msgContent as Array<{ type: string; text?: string }>)
+              .filter((block) => block.type === 'text' && typeof block.text === 'string')
+              .map((block) => block.text!)
+              .join('')
+          : '';
+        if (topLevelText) {
+          canonicalAssistantText = topLevelText;
+          canonicalAssistantUuid = assistantMsg.uuid as string;
+        }
+      }
       processor.processAssistantMessage(message as any);
     }
 
@@ -1099,10 +1135,14 @@ async function runQuery(
       }
 
       const { effectiveResult } = processor.processResult(textResult);
+      const finalText = canonicalAssistantText || effectiveResult;
       emit({
         status: 'success',
-        result: effectiveResult,
-        newSessionId
+        result: finalText,
+        newSessionId,
+        sdkMessageUuid: canonicalAssistantUuid || lastAssistantUuid,
+        sourceKind: 'sdk_final',
+        finalizationReason: 'completed',
       });
 
       // Emit usage stream event with token counts and cost

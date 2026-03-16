@@ -1005,9 +1005,7 @@ export function createFeishuConnection(
       text,
       timestamp,
       false,
-      attachmentsJson,
-      undefined,
-      chatJid,
+      { attachments: attachmentsJson, sourceJid: chatJid },
     );
     broadcastNewMessage(
       targetJid,

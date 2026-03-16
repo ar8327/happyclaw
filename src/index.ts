@@ -1111,6 +1111,14 @@ interface SendMessageOptions {
   localImagePaths?: string[];
   /** Message source identifier (e.g. 'scheduled_task') for frontend routing. */
   source?: string;
+  /** Metadata used to preserve Claude SDK turn semantics for persisted messages. */
+  messageMeta?: {
+    turnId?: string;
+    sessionId?: string;
+    sdkMessageUuid?: string;
+    sourceKind?: 'sdk_final' | 'sdk_send_message' | 'interrupt_partial' | 'legacy';
+    finalizationReason?: 'completed' | 'interrupted' | 'error';
+  };
 }
 
 /**
@@ -1694,13 +1702,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   let output: { status: 'success' | 'error' | 'closed'; error?: string } | undefined;
+  let activeSessionId = getSession(effectiveGroup.folder) || undefined;
   try {
   output = await runAgent(
     effectiveGroup,
     prompt,
     chatJid,
+    lastProcessed.id,
     async (result) => {
       try {
+        if (result.newSessionId && result.status !== 'error') {
+          activeSessionId = result.newSessionId;
+        }
         // 流式事件处理 - 广播 WebSocket + 持久化 SDK Task 生命周期到 DB
         if (result.status === 'stream' && result.streamEvent) {
           broadcastStreamEvent(chatJid, result.streamEvent);
@@ -1751,7 +1764,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 if (streamingSession?.isActive()) {
                   await streamingSession.abort('已中断').catch(() => {});
                 }
-                lastReplyMsgId = await sendMessage(chatJid, interruptedText, { sendToIM: false });
+                lastReplyMsgId = await sendMessage(chatJid, interruptedText, {
+                  sendToIM: false,
+                  messageMeta: {
+                    turnId: result.streamEvent.turnId || lastProcessed.id,
+                    sessionId: result.streamEvent.sessionId || activeSessionId,
+                    sourceKind: 'interrupt_partial',
+                    finalizationReason: 'interrupted',
+                  },
+                });
                 sentReply = true;
                 commitCursor();
               } catch (err) {
@@ -2026,6 +2047,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             lastReplyMsgId = await sendMessage(chatJid, text, {
               sendToIM: directImReply && !skipImSend,
               localImagePaths,
+              messageMeta: {
+                turnId: result.turnId || lastProcessed.id,
+                sessionId: result.sessionId || activeSessionId,
+                sdkMessageUuid: result.sdkMessageUuid,
+                sourceKind: result.sourceKind || 'sdk_final',
+                finalizationReason: result.finalizationReason || 'completed',
+              },
             });
 
             // For routed IM (web JID with IM source), skip the source channel
@@ -2100,7 +2128,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const interruptedText = buildInterruptedReply(streamingAccumulatedText);
       try {
         // sendToIM: false — 飞书卡片已通过 abort() 展示内容，不重复发送
-        lastReplyMsgId = await sendMessage(chatJid, interruptedText, { sendToIM: false });
+        lastReplyMsgId = await sendMessage(chatJid, interruptedText, {
+          sendToIM: false,
+          messageMeta: {
+            turnId: lastProcessed.id,
+            sessionId: activeSessionId,
+            sourceKind: 'interrupt_partial',
+            finalizationReason: 'interrupted',
+          },
+        });
         sentReply = true;
         commitCursor();
       } catch (err) {
@@ -2296,6 +2332,7 @@ async function runTerminalWarmup(chatJid: string): Promise<void> {
       group,
       warmupPrompt,
       chatJid,
+      undefined,
       async (result) => {
         if (result.status === 'stream' && result.streamEvent) {
           broadcastStreamEvent(chatJid, result.streamEvent);
@@ -2369,6 +2406,7 @@ async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
+  turnId?: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
   images?: Array<{ data: string; mimeType?: string }>,
 ): Promise<{ status: 'success' | 'error' | 'closed'; error?: string }> {
@@ -2449,6 +2487,7 @@ async function runAgent(
         {
           prompt,
           sessionId,
+          turnId,
           groupFolder: group.folder,
           chatJid,
           isMain: isAdminHome,
@@ -2466,6 +2505,7 @@ async function runAgent(
         {
           prompt,
           sessionId,
+          turnId,
           groupFolder: group.folder,
           chatJid,
           isMain: isAdminHome,
@@ -2538,7 +2578,7 @@ async function sendMessage(
     const msgId = crypto.randomUUID();
     const timestamp = new Date().toISOString();
     ensureChatExists(jid);
-    storeMessageDirect(
+    const persistedMsgId = storeMessageDirect(
       msgId,
       jid,
       'happyclaw-agent',
@@ -2546,16 +2586,22 @@ async function sendMessage(
       text,
       timestamp,
       true,
+      { meta: options.messageMeta },
     );
 
     broadcastNewMessage(jid, {
-      id: msgId,
+      id: persistedMsgId,
       chat_jid: jid,
       sender: 'happyclaw-agent',
       sender_name: ASSISTANT_NAME,
       content: text,
       timestamp,
       is_from_me: true,
+      turn_id: options.messageMeta?.turnId ?? null,
+      session_id: options.messageMeta?.sessionId ?? null,
+      sdk_message_uuid: options.messageMeta?.sdkMessageUuid ?? null,
+      source_kind: options.messageMeta?.sourceKind ?? null,
+      finalization_reason: options.messageMeta?.finalizationReason ?? null,
     }, undefined, options.source);
     logger.info({ jid, length: text.length, sendToIM }, 'Message sent');
     // Skip agent_reply broadcast for scheduled tasks to avoid clearing
@@ -2565,7 +2611,7 @@ async function sendMessage(
     if (!options.source) {
       broadcastToWebClients(jid, text);
     }
-    return msgId;
+    return persistedMsgId;
   } catch (err) {
     logger.error({ jid, err }, 'Failed to send message');
     return undefined;
@@ -2680,7 +2726,11 @@ function startIpcWatcher(): void {
                       targetGroup,
                     )
                   ) {
-                    await sendMessage(data.chatJid, data.text);
+                    await sendMessage(data.chatJid, data.text, {
+                      messageMeta: {
+                        sourceKind: 'sdk_send_message',
+                      },
+                    });
                     ipcMessageSentFolders.add(sourceGroup);
                     logger.info(
                       { chatJid: data.chatJid, sourceGroup },
@@ -2733,7 +2783,7 @@ function startIpcWatcher(): void {
                       const imgMsgId = crypto.randomUUID();
                       const imgTimestamp = new Date().toISOString();
                       ensureChatExists(data.chatJid);
-                      storeMessageDirect(
+                      const persistedImgMsgId = storeMessageDirect(
                         imgMsgId,
                         data.chatJid,
                         'happyclaw-agent',
@@ -2741,15 +2791,21 @@ function startIpcWatcher(): void {
                         displayText,
                         imgTimestamp,
                         true,
+                        { meta: { sourceKind: 'sdk_send_message' } },
                       );
                       broadcastNewMessage(data.chatJid, {
-                        id: imgMsgId,
+                        id: persistedImgMsgId,
                         chat_jid: data.chatJid,
                         sender: 'happyclaw-agent',
                         sender_name: ASSISTANT_NAME,
                         content: displayText,
                         timestamp: imgTimestamp,
                         is_from_me: true,
+                        turn_id: null,
+                        session_id: null,
+                        sdk_message_uuid: null,
+                        source_kind: 'sdk_send_message',
+                        finalization_reason: null,
                       });
                       broadcastToWebClients(data.chatJid, displayText);
 
@@ -3459,11 +3515,13 @@ async function processAgentConversation(
 
   // Get or use agent-specific session
   const sessionId = getSession(effectiveGroup.folder, agentId) || undefined;
+  let currentAgentSessionId = sessionId;
 
   const wrappedOnOutput = async (output: ContainerOutput) => {
     // Track session
     if (output.newSessionId && output.status !== 'error') {
       setSession(effectiveGroup.folder, output.newSessionId, agentId);
+      currentAgentSessionId = output.newSessionId;
     }
 
     // Stream events
@@ -3517,11 +3575,32 @@ async function processAgentConversation(
             const msgId = crypto.randomUUID();
             const timestamp = new Date().toISOString();
             ensureChatExists(virtualChatJid);
-            storeMessageDirect(msgId, virtualChatJid, 'happyclaw-agent', ASSISTANT_NAME, interruptedText, timestamp, true);
+            const persistedMsgId = storeMessageDirect(
+              msgId,
+              virtualChatJid,
+              'happyclaw-agent',
+              ASSISTANT_NAME,
+              interruptedText,
+              timestamp,
+              true,
+              {
+                meta: {
+                  turnId: output.streamEvent.turnId || lastProcessed.id,
+                  sessionId: output.streamEvent.sessionId || currentAgentSessionId,
+                  sourceKind: 'interrupt_partial',
+                  finalizationReason: 'interrupted',
+                },
+              },
+            );
             broadcastNewMessage(virtualChatJid, {
-              id: msgId, chat_jid: virtualChatJid,
+              id: persistedMsgId, chat_jid: virtualChatJid,
               sender: 'happyclaw-agent', sender_name: ASSISTANT_NAME,
               content: interruptedText, timestamp, is_from_me: true,
+              turn_id: output.streamEvent.turnId || lastProcessed.id,
+              session_id: output.streamEvent.sessionId || currentAgentSessionId,
+              sdk_message_uuid: null,
+              source_kind: 'interrupt_partial',
+              finalization_reason: 'interrupted',
             }, agentId);
             commitCursor();
           } catch (err) {
@@ -3575,7 +3654,7 @@ async function processAgentConversation(
         lastAgentReplyMsgId = msgId;
         const timestamp = new Date().toISOString();
         ensureChatExists(virtualChatJid);
-        storeMessageDirect(
+        const persistedMsgId = storeMessageDirect(
           msgId,
           virtualChatJid,
           'happyclaw-agent',
@@ -3583,17 +3662,31 @@ async function processAgentConversation(
           text,
           timestamp,
           true,
+          {
+            meta: {
+              turnId: output.turnId || lastProcessed.id,
+              sessionId: output.sessionId || currentAgentSessionId,
+              sdkMessageUuid: output.sdkMessageUuid,
+              sourceKind: output.sourceKind || 'sdk_final',
+              finalizationReason: output.finalizationReason || 'completed',
+            },
+          },
         );
         broadcastNewMessage(
           virtualChatJid,
           {
-            id: msgId,
+            id: persistedMsgId,
             chat_jid: virtualChatJid,
             sender: 'happyclaw-agent',
             sender_name: ASSISTANT_NAME,
             content: text,
             timestamp,
             is_from_me: true,
+            turn_id: output.turnId || lastProcessed.id,
+            session_id: output.sessionId || currentAgentSessionId,
+            sdk_message_uuid: output.sdkMessageUuid ?? null,
+            source_kind: output.sourceKind || 'sdk_final',
+            finalization_reason: output.finalizationReason || 'completed',
           },
           agentId,
         );
@@ -3658,6 +3751,7 @@ async function processAgentConversation(
     const containerInput: ContainerInput = {
       prompt,
       sessionId,
+      turnId: lastProcessed.id,
       groupFolder: effectiveGroup.folder,
       chatJid,
       isMain: isAdminHome,
@@ -3781,11 +3875,32 @@ async function processAgentConversation(
         const msgId = crypto.randomUUID();
         const timestamp = new Date().toISOString();
         ensureChatExists(virtualChatJid);
-        storeMessageDirect(msgId, virtualChatJid, 'happyclaw-agent', ASSISTANT_NAME, interruptedText, timestamp, true);
+        const persistedMsgId = storeMessageDirect(
+          msgId,
+          virtualChatJid,
+          'happyclaw-agent',
+          ASSISTANT_NAME,
+          interruptedText,
+          timestamp,
+          true,
+          {
+            meta: {
+              turnId: lastProcessed.id,
+              sessionId: currentAgentSessionId,
+              sourceKind: 'interrupt_partial',
+              finalizationReason: 'interrupted',
+            },
+          },
+        );
         broadcastNewMessage(virtualChatJid, {
-          id: msgId, chat_jid: virtualChatJid,
+          id: persistedMsgId, chat_jid: virtualChatJid,
           sender: 'happyclaw-agent', sender_name: ASSISTANT_NAME,
           content: interruptedText, timestamp, is_from_me: true,
+          turn_id: lastProcessed.id,
+          session_id: currentAgentSessionId,
+          sdk_message_uuid: null,
+          source_kind: 'interrupt_partial',
+          finalization_reason: 'interrupted',
         }, agentId);
         commitCursor();
       } catch (err) {

@@ -98,6 +98,7 @@ export interface ContainerInput {
   chatJid: string;
   /** @deprecated Use isHome + isAdminHome instead */
   isMain: boolean;
+  turnId?: string;
   isHome?: boolean;
   isAdminHome?: boolean;
   isScheduledTask?: boolean;
@@ -112,6 +113,11 @@ export interface ContainerOutput {
   newSessionId?: string;
   error?: string;
   streamEvent?: StreamEvent;
+  turnId?: string;
+  sessionId?: string;
+  sdkMessageUuid?: string;
+  sourceKind?: 'sdk_final' | 'sdk_send_message' | 'interrupt_partial' | 'legacy';
+  finalizationReason?: 'completed' | 'interrupted' | 'error';
 }
 
 interface VolumeMount {

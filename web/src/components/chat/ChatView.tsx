@@ -4,8 +4,6 @@ import { useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
-import { StreamingDisplay } from './StreamingDisplay';
-
 import { FilePanel } from './FilePanel';
 import { ContainerEnvPanel } from './ContainerEnvPanel';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
@@ -35,21 +33,6 @@ const SIDEBAR_TABS = [
   { id: 'mcp' as const, icon: Server, label: 'MCP 服务器' },
   { id: 'members' as const, icon: Users, label: '成员' },
 ];
-
-/** Inline elapsed-time counter for running tasks */
-function ElapsedTimer({ startTime }: { startTime: number }) {
-  const [elapsed, setElapsed] = useState(0);
-  useEffect(() => {
-    const tick = () => setElapsed(Math.floor((Date.now() - startTime) / 1000));
-    tick();
-    const id = setInterval(tick, 1000);
-    return () => clearInterval(id);
-  }, [startTime]);
-
-  const mins = Math.floor(elapsed / 60);
-  const secs = elapsed % 60;
-  return <span>{mins > 0 ? `${mins}m ${secs}s` : `${secs}s`}</span>;
-}
 
 const POLL_INTERVAL_MS = 2000;
 const TERMINAL_MIN_HEIGHT = 150;
@@ -112,14 +95,12 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const handleStreamEvent = useChatStore(s => s.handleStreamEvent);
   const handleWsNewMessage = useChatStore(s => s.handleWsNewMessage);
 
-  const clearStreaming = useChatStore(s => s.clearStreaming);
   const agents = useChatStore(s => s.agents[groupJid] ?? EMPTY_AGENTS);
   const activeAgentTab = useChatStore(s => s.activeAgentTab[groupJid] ?? null);
   const setActiveAgentTab = useChatStore(s => s.setActiveAgentTab);
   const loadAgents = useChatStore(s => s.loadAgents);
   const deleteAgentAction = useChatStore(s => s.deleteAgentAction);
   const agentStreaming = useChatStore(s => s.agentStreaming);
-  const sdkTasks = useChatStore(s => s.sdkTasks);
   const createConversation = useChatStore(s => s.createConversation);
   const loadAgentMessages = useChatStore(s => s.loadAgentMessages);
   const sendAgentMessage = useChatStore(s => s.sendAgentMessage);
@@ -221,7 +202,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   // Derived: active agent info and kind
   const activeAgent = activeAgentTab ? agents.find(a => a.id === activeAgentTab) : null;
   const isConversationTab = activeAgent?.kind === 'conversation';
-  const isSdkTask = !!activeAgentTab && !!sdkTasks[activeAgentTab];
+  // SDK Tasks 不再创建独立标签页，事件直接显示在主对话流式卡片中
 
   // Load sub-agents for this group
   useEffect(() => {
@@ -250,25 +231,21 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         }
       }
     });
-    // agent_reply 作为 fallback：如果 new_message 已处理则为 no-op
-    const unsub2 = wsManager.on('agent_reply', (data: any) => {
-      if (data.chatJid === groupJid) clearStreaming(groupJid);
-    });
     // 通过 new_message 立即添加消息到本地状态（消除轮询延迟导致的消息"丢失"）
-    const unsub3 = wsManager.on('new_message', (data: any) => {
+    const unsub2 = wsManager.on('new_message', (data: any) => {
       if (data.chatJid === groupJid && data.message) {
         handleWsNewMessage(groupJid, data.message, data.agentId, data.source);
       }
     });
     // WebSocket 消息校验失败时通知用户
-    const unsub4 = wsManager.on('ws_error', (data: any) => {
+    const unsub3 = wsManager.on('ws_error', (data: any) => {
       if (!data.chatJid || data.chatJid === groupJid) {
         showToast('发送失败', data.error || '消息格式无效', 4000);
       }
     });
     // agent_status 已提升到 AppLayout 全局监听
-    return () => { unsub1(); unsub2(); unsub3(); unsub4(); };
-  }, [groupJid, handleStreamEvent, handleWsNewMessage, clearStreaming]);
+    return () => { unsub1(); unsub2(); unsub3(); };
+  }, [groupJid, handleStreamEvent, handleWsNewMessage]);
 
   const [scrollTrigger, setScrollTrigger] = useState(0);
 
@@ -582,141 +559,6 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                 groupJid={groupJid}
                 onResetSession={() => { setResetAgentId(activeAgentTab); setShowResetConfirm(true); }}
               />
-            </>
-          ) : activeAgentTab ? (
-            /* Task agent tab */
-            <>
-              {isSdkTask ? (
-                /* SDK Task: 流式展示或状态反馈 */
-                <div className="flex-1 overflow-y-auto p-4">
-                  {(() => {
-                    const streamState = agentStreaming[activeAgentTab];
-                    const hasStreamContent = streamState && (
-                      streamState.partialText
-                      || streamState.thinkingText
-                      || streamState.activeTools.length > 0
-                      || !!streamState.activeHook
-                      || !!streamState.systemStatus
-                      || streamState.recentEvents.length > 0
-                    );
-                    const task = sdkTasks[activeAgentTab];
-                    const taskStatus = task?.status;
-
-                    if (taskStatus === 'completed') {
-                      return (
-                        <div className="text-center py-8 space-y-2">
-                          <div className="text-sm font-medium text-emerald-600">子 Agent 已完成</div>
-                          {task?.summary && (
-                            <div className="text-xs text-slate-500 max-w-md mx-auto">{task.summary}</div>
-                          )}
-                        </div>
-                      );
-                    }
-
-                    if (taskStatus === 'error') {
-                      return (
-                        <div className="text-center py-8 space-y-2">
-                          <div className="text-sm font-medium text-red-600">子 Agent 执行出错</div>
-                          {task?.summary && (
-                            <div className="text-xs text-slate-500 max-w-md mx-auto">{task.summary}</div>
-                          )}
-                        </div>
-                      );
-                    }
-
-                    if (hasStreamContent) {
-                      // 有流式数据 → 显示 StreamingDisplay（前台任务场景）
-                      return (
-                        <StreamingDisplay
-                          groupJid={groupJid}
-                          isWaiting={taskStatus === 'running'}
-                          agentId={activeAgentTab}
-                        />
-                      );
-                    }
-
-                    // running 状态：显示描述 + 实时计时 + 后台任务说明
-                    return (
-                      <div className="flex flex-col items-center justify-center py-12 px-4 space-y-4">
-                        {/* 动画 spinner */}
-                        <div className="relative">
-                          <div className="w-12 h-12 rounded-full border-2 border-teal-100" />
-                          <div className="absolute inset-0 w-12 h-12 rounded-full border-2 border-transparent border-t-teal-500 animate-spin" />
-                        </div>
-
-                        <div className="text-center space-y-2 max-w-md">
-                          <div className="text-sm font-medium text-slate-700">
-                            Teammate 正在后台执行中
-                          </div>
-                          {task?.description && (
-                            <div className="text-xs text-slate-500 leading-relaxed">
-                              {task.description}
-                            </div>
-                          )}
-                        </div>
-
-                        {/* 实时计时器 */}
-                        {task?.startedAt && (
-                          <div className="text-xs text-slate-400 tabular-nums">
-                            已运行 <ElapsedTimer startTime={task.startedAt} />
-                          </div>
-                        )}
-
-                        <div className="text-[11px] text-slate-400 text-center max-w-sm leading-relaxed">
-                          后台任务不传播中间过程，完成后将显示结果摘要
-                        </div>
-                      </div>
-                    );
-                  })()}
-                </div>
-              ) : (
-                /* DB Task: read-only — show agent's messages from main chat */
-                <MessageList
-                  key={`task-${activeAgentTab}`}
-                  messages={(groupMessages || []).filter(
-                    (m) => m.sender === `agent:${activeAgentTab}`,
-                  )}
-                  loading={false}
-                  hasMore={false}
-                  onLoadMore={() => {}}
-                  scrollTrigger={scrollTrigger}
-                  groupJid={groupJid}
-                  isWaiting={!!agentStreaming[activeAgentTab]}
-                  onInterrupt={() => interruptQuery(groupJid)}
-                  agentId={activeAgentTab}
-                />
-              )}
-              {(() => {
-                const activeSdkTask = activeAgentTab ? sdkTasks[activeAgentTab] : null;
-                if (isSdkTask && activeSdkTask?.isTeammate && activeSdkTask?.status === 'running') {
-                  return (
-                    /* Teammate 标签页：通过主对话中转发送消息给 Team Lead */
-                    <div className="border-t">
-                      <div className="px-4 pt-1.5 pb-0.5 text-[10px] text-amber-600 bg-amber-50/50 text-center">
-                        消息将发送到主对话，由 Team Lead 转发
-                      </div>
-                      <MessageInput
-                        onSend={async (content) => {
-                          const taskDesc = (activeSdkTask?.description || 'Teammate').replace(/"/g, '\\"');
-                          const wrappedContent = `[发送给 Teammate "${taskDesc}"]: ${content}`;
-                          await sendMessage(groupJid, wrappedContent);
-                          setScrollTrigger(n => n + 1);
-                        }}
-                        groupJid={groupJid}
-                      />
-                    </div>
-                  );
-                }
-                return (
-                  <div className="px-4 py-2 text-center text-xs text-slate-400 border-t">
-                    {isSdkTask
-                      ? (activeSdkTask?.status === 'running'
-                        ? '子 Agent 独立运行中 — 仅主对话可发送消息'
-                        : '子 Agent 已结束 — 仅主对话可发送消息')
-                      : '子 Agent 独立运行中 — 仅主对话可发送消息'}
-                  </div>
-                );
-              })()}
             </>
           ) : (
             /* Main conversation tab */

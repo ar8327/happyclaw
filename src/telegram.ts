@@ -550,9 +550,7 @@ export function createTelegramConnection(
             text,
             timestamp,
             false,
-            undefined,
-            undefined,
-            jid,
+            { sourceJid: jid },
           );
 
           // 广播到 Web 客户端
@@ -704,9 +702,7 @@ export function createTelegramConnection(
             text,
             timestamp,
             false,
-            attachmentsJson,
-            undefined,
-            jid,
+            { attachments: attachmentsJson, sourceJid: jid },
           );
 
           broadcastNewMessage(
@@ -790,9 +786,7 @@ export function createTelegramConnection(
               text,
               timestamp,
               false,
-              undefined,
-              undefined,
-              jid,
+              { sourceJid: jid },
             );
             broadcastNewMessage(
               earlyTargetJid,
@@ -853,9 +847,7 @@ export function createTelegramConnection(
             text,
             timestamp,
             false,
-            undefined,
-            undefined,
-            jid,
+            { sourceJid: jid },
           );
 
           broadcastNewMessage(

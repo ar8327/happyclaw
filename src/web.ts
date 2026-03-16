@@ -270,7 +270,7 @@ async function handleWebUserMessage(
     content,
     timestamp,
     false,
-    attachmentsStr,
+    { attachments: attachmentsStr },
   );
 
   broadcastNewMessage(chatJid, {
@@ -423,7 +423,7 @@ async function handleAgentConversationMessage(
     content,
     timestamp,
     false,
-    attachmentsStr,
+    { attachments: attachmentsStr },
   );
 
   // Broadcast new_message with agentId so frontend routes to agent tab
