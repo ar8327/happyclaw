@@ -52,7 +52,6 @@ import mcpServersRoutes from './routes/mcp-servers.js';
 import workspaceConfigRoutes from './routes/workspace-config.js';
 import agentDefinitionsRoutes from './routes/agent-definitions.js';
 import logsRoutes from './routes/logs.js';
-import agentDefinitionsRoutes from './routes/agent-definitions.js';
 import memoryAgentInternalRoutes from './routes/memory-agent.js';
 import { usage as usageRoutes } from './routes/usage.js';
 import billingRoutes from './routes/billing.js';
@@ -180,7 +179,6 @@ app.route('/api/agent-definitions', agentDefinitionsRoutes);
 app.route('/api/groups', agentRoutes); // Agent routes under /api/groups/:jid/agents
 app.route('/api/groups', workspaceConfigRoutes); // Workspace config under /api/groups/:jid/workspace-config
 app.route('/api/logs', logsRoutes);
-app.route('/api/agent-definitions', agentDefinitionsRoutes);
 app.route('/api', monitorRoutes);
 app.route('/api/usage', usageRoutes);
 app.route('/api/billing', billingRoutes);
@@ -1537,6 +1535,20 @@ export function broadcastGroupCreated(
 ): void {
   const allowedUserIds = userId ? new Set([userId]) : undefined;
   safeBroadcast({ type: 'group_created', jid, folder, name }, false, allowedUserIds);
+}
+
+export function broadcastBlocksFinalized(
+  chatJid: string,
+  messageId: string,
+  blocks: import('./streaming-blocks.js').StreamingBlock[],
+): void {
+  const jid = normalizeHomeJid(chatJid);
+  const allowedUserIds = getGroupAllowedUserIds(chatJid);
+  safeBroadcast(
+    { type: 'blocks_finalized', chatJid: jid, messageId, blocks } as WsMessageOut,
+    isHostGroupJid(chatJid),
+    allowedUserIds,
+  );
 }
 
 export function broadcastBillingUpdate(

@@ -974,6 +974,22 @@ groupRoutes.post('/:jid/interrupt', authMiddleware, async (c) => {
   return c.json({ success: true, interrupted });
 });
 
+// GET /api/groups/:jid/streaming-blocks - 获取当前运行中的 streaming blocks 快照
+groupRoutes.get('/:jid/streaming-blocks', authMiddleware, async (c) => {
+  const jid = c.req.param('jid');
+  const group = getRegisteredGroup(jid);
+  if (!group) return c.json({ completedBlocks: [], currentState: null });
+  const authUser = c.get('user') as AuthUser;
+  if (
+    !canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid })
+  ) {
+    return c.json({ completedBlocks: [], currentState: null });
+  }
+  const { streamingBlocksManager } = await import('../streaming-blocks.js');
+  const snapshot = streamingBlocksManager.getSnapshot(group.folder);
+  return c.json(snapshot || { completedBlocks: [], currentState: null });
+});
+
 // POST /api/groups/:jid/reset-session - 重置会话上下文
 // Optional body: { agentId?: string } — when provided, only reset that agent's session
 groupRoutes.post('/:jid/reset-session', authMiddleware, async (c) => {

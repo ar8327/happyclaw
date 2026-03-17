@@ -166,14 +166,14 @@ import {
   broadcastAgentStatus,
   broadcastGroupCreated,
   broadcastBillingUpdate,
+  broadcastBlocksFinalized,
   shutdownTerminals,
   shutdownWebServer,
   getActiveStreamingTexts,
   clearStreamingSnapshot,
 } from './web.js';
-import {
-  syncHostSkillsForUser,
-} from './routes/skills.js';
+import { syncHostSkillsForUser } from './routes/skills.js';
+import { streamingBlocksManager } from './streaming-blocks.js';
 import { verifyPairingCode } from './telegram-pairing.js';
 import { sdkQuery } from './sdk-query.js';
 import { executeSessionReset } from './commands.js';
@@ -2460,6 +2460,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     | { status: 'success' | 'error' | 'closed'; error?: string }
     | undefined;
   let activeSessionId = getSession(effectiveGroup.folder) || undefined;
+  streamingBlocksManager.reset(effectiveGroup.folder);
   try {
     output = await runAgent(
       effectiveGroup,
@@ -2474,6 +2475,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           // 流式事件处理 - 广播 WebSocket + 持久化 SDK Task 生命周期到 DB
           if (result.status === 'stream' && result.streamEvent) {
             broadcastStreamEvent(chatJid, result.streamEvent);
+            streamingBlocksManager
+              .getOrCreate(effectiveGroup.folder)
+              .feed(result.streamEvent);
 
             if (
               result.streamEvent.eventType === 'status' &&
@@ -3096,6 +3100,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
     return false;
   }
+
+  const finalBlocks = streamingBlocksManager.finalize(effectiveGroup.folder);
+  if (finalBlocks.length > 0 && lastReplyMsgId) {
+    broadcastBlocksFinalized(chatJid, lastReplyMsgId, finalBlocks);
+  }
+  streamingBlocksManager.remove(effectiveGroup.folder);
 
   // 不可恢复的转录错误（如超大图片/MIME 错配被固化在会话历史中）：无论是否已有回复，都必须重置会话
   const errorForReset = [lastError, output.error].filter(Boolean).join(' ');

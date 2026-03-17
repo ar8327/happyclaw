@@ -340,6 +340,12 @@ export type WsMessageOut =
       agentId?: string;
     }
   | {
+      type: 'blocks_finalized';
+      chatJid: string;
+      messageId: string;
+      blocks: import('./streaming-blocks.js').StreamingBlock[];
+    }
+  | {
       type: 'agent_status';
       chatJid: string;
       agentId: string;

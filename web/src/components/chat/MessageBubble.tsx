@@ -2,7 +2,7 @@ import { useState, memo, lazy, Suspense } from 'react';
 import { Copy, Check, ChevronDown, ChevronUp, Ellipsis, ImageDown } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { Message } from '../../stores/chat';
+import { Message, type StreamingBlock } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { EmojiAvatar } from '../common/EmojiAvatar';
 import { MarkdownRenderer } from './MarkdownRenderer';
@@ -17,7 +17,67 @@ interface MessageBubbleProps {
   message: Message;
   showTime: boolean;
   thinkingContent?: string;
+  blocksContent?: StreamingBlock[];
   isShared?: boolean;
+}
+
+/** Collapsed execution trace for AI messages. */
+function ExecutionTrace({ blocks }: { blocks: StreamingBlock[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const toolBlocks = blocks.filter(b => b.type === 'tool');
+  const statusBlocks = blocks.filter(b => b.type === 'status');
+  const summary = [
+    toolBlocks.length > 0 ? `${toolBlocks.length} tool calls` : '',
+    statusBlocks.length > 0 ? `${statusBlocks.length} status` : '',
+  ].filter(Boolean).join(', ');
+
+  return (
+    <div className="mt-2 pt-2 border-t border-border/50">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors w-full text-left"
+      >
+        <span>&#9776;</span>
+        <span>执行轨迹 ({summary})</span>
+        {expanded ? <ChevronUp className="w-3 h-3 ml-auto" /> : <ChevronDown className="w-3 h-3 ml-auto" />}
+      </button>
+      {expanded && (
+        <div className="mt-1.5 space-y-0 max-h-48 overflow-y-auto">
+          {blocks.map((block) => {
+            if (block.type === 'tool') {
+              const name = block.skillName ? `Skill: ${block.skillName}` : block.toolName;
+              const dur = block.duration != null ? `${block.duration % 1 === 0 ? block.duration.toFixed(0) : block.duration.toFixed(1)}s` : '';
+              return (
+                <div key={block.id} className="flex items-center gap-1.5 py-0.5 text-[11px] text-foreground/60">
+                  <span className="text-green-500">&#10003;</span>
+                  <span className="font-medium">{name}</span>
+                  {block.toolInputSummary && <span className="truncate text-muted-foreground">{block.toolInputSummary.slice(0, 50)}</span>}
+                  {dur && <span className="ml-auto flex-shrink-0 tabular-nums">{dur}</span>}
+                </div>
+              );
+            }
+            if (block.type === 'status') {
+              return (
+                <div key={block.id} className="flex items-center gap-1.5 py-0.5 text-[11px] text-amber-600">
+                  <span>&#9888;</span>
+                  <span>{block.statusText === 'compacting' ? '上下文已压缩' : block.statusText}</span>
+                </div>
+              );
+            }
+            if (block.type === 'hook') {
+              return (
+                <div key={block.id} className="flex items-center gap-1.5 py-0.5 text-[11px] text-foreground/60">
+                  <span className="text-blue-500">&#9741;</span>
+                  <span>Hook: {block.hookName} ({block.hookOutcome || 'success'})</span>
+                </div>
+              );
+            }
+            return null;
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 interface MessageAttachment {
@@ -133,7 +193,7 @@ function TokenUsageDisplay({ tokenUsageJson }: { tokenUsageJson: string }) {
   );
 }
 
-export const MessageBubble = memo(function MessageBubble({ message, showTime, thinkingContent, isShared }: MessageBubbleProps) {
+export const MessageBubble = memo(function MessageBubble({ message, showTime, thinkingContent, blocksContent, isShared }: MessageBubbleProps) {
   const [copied, setCopied] = useState(false);
   const [lightboxState, setLightboxState] = useState<{ images: string[]; index: number } | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
@@ -365,6 +425,11 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
           <TokenUsageDisplay tokenUsageJson={message.token_usage} />
         )}
 
+        {/* Execution trace (compact mode) */}
+        {isAI && blocksContent && blocksContent.length > 0 && (
+          <ExecutionTrace blocks={blocksContent} />
+        )}
+
         {lightboxState && (
           <ImageLightbox images={lightboxState.images} initialIndex={lightboxState.index} onClose={() => setLightboxState(null)} />
         )}
@@ -579,6 +644,11 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
             {message.is_from_me && message.token_usage && (
               <TokenUsageDisplay tokenUsageJson={message.token_usage} />
             )}
+
+            {/* Execution trace */}
+            {message.is_from_me && blocksContent && blocksContent.length > 0 && (
+              <ExecutionTrace blocks={blocksContent} />
+            )}
           </div>
 
           {/* Action toolbar — below content, Claude-style */}
@@ -644,5 +714,6 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
   prev.message.token_usage === next.message.token_usage &&
   prev.showTime === next.showTime &&
   prev.thinkingContent === next.thinkingContent &&
+  prev.blocksContent === next.blocksContent &&
   prev.isShared === next.isShared
 );

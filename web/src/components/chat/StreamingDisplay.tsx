@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, ChevronUp, OctagonX } from 'lucide-react';
-import { useChatStore } from '../../stores/chat';
+import { useChatStore, type StreamingBlock } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import type { AgentInfo } from '../../types';
 import { EmojiAvatar } from '../common/EmojiAvatar';
@@ -8,6 +8,145 @@ import { MarkdownRenderer } from './MarkdownRenderer';
 import { TodoProgressPanel } from './TodoProgressPanel';
 import { ToolActivityCard } from './ToolActivityCard';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
+
+// ── Tool input summary parsing (shared with ToolActivityCard) ──
+
+function parseToolParam(toolName: string, summary?: string): { label: string; value: string } | null {
+  if (!summary) return null;
+  const v = summary.length > 80 ? summary.slice(0, 77) + '...' : summary;
+  switch (toolName) {
+    case 'Read': case 'Write': case 'Edit': case 'Glob':
+      return { label: 'path', value: v };
+    case 'Bash':
+      return { label: 'cmd', value: v };
+    case 'Grep':
+      return { label: 'pattern', value: v };
+    case 'Agent':
+      return { label: 'task', value: v };
+    default:
+      return { label: 'input', value: v };
+  }
+}
+
+/** Single completed block in the execution trace. */
+function CompletedBlockItem({ block }: { block: StreamingBlock }) {
+  const [expanded, setExpanded] = useState(false);
+
+  if (block.type === 'tool') {
+    const displayName = block.skillName
+      ? `Skill: ${block.skillName}`
+      : block.toolName || 'unknown';
+    const param = parseToolParam(block.toolName || '', block.toolInputSummary);
+    const durationStr = block.duration != null
+      ? `${block.duration % 1 === 0 ? block.duration.toFixed(0) : block.duration.toFixed(1)}s`
+      : '';
+    return (
+      <div className="flex items-center gap-1.5 py-0.5 text-xs text-foreground/70">
+        <span className="text-green-500 flex-shrink-0">&#10003;</span>
+        <span className="font-medium text-foreground/85 flex-shrink-0">{displayName}</span>
+        {param && (
+          <span className="truncate text-muted-foreground">{param.value}</span>
+        )}
+        {durationStr && (
+          <span className="ml-auto flex-shrink-0 text-muted-foreground tabular-nums">{durationStr}</span>
+        )}
+      </div>
+    );
+  }
+
+  if (block.type === 'status') {
+    const isCompact = block.statusText === 'compacting';
+    return (
+      <div className={`flex items-center gap-1.5 py-1 text-xs ${isCompact ? 'text-amber-600' : 'text-muted-foreground'}`}>
+        <span className="flex-shrink-0">{isCompact ? '⚠' : '●'}</span>
+        <span className="font-medium">
+          {isCompact ? '上下文已压缩' : block.statusText}
+        </span>
+      </div>
+    );
+  }
+
+  if (block.type === 'hook') {
+    return (
+      <div className="flex items-center gap-1.5 py-0.5 text-xs text-foreground/70">
+        <span className="text-blue-500 flex-shrink-0">&#9741;</span>
+        <span>Hook: {block.hookName}</span>
+        <span className="text-muted-foreground">({block.hookOutcome || 'success'})</span>
+      </div>
+    );
+  }
+
+  if (block.type === 'thinking') {
+    const preview = (block.thinkingText || '').split('\n')[0].slice(0, 60);
+    return (
+      <div className="py-0.5">
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="flex items-center gap-1.5 text-xs text-amber-600 hover:text-amber-700 w-full text-left"
+        >
+          <span className="flex-shrink-0">&#9672;</span>
+          <span className="truncate">{expanded ? 'Reasoning' : preview || 'Reasoning...'}</span>
+          {expanded ? <ChevronUp className="w-3 h-3 ml-auto flex-shrink-0" /> : <ChevronDown className="w-3 h-3 ml-auto flex-shrink-0" />}
+        </button>
+        {expanded && (
+          <div className="mt-1 pl-4 text-xs text-amber-900/60 whitespace-pre-wrap break-words max-h-40 overflow-y-auto">
+            {block.thinkingText}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (block.type === 'text') {
+    const preview = (block.content || '').split('\n')[0].slice(0, 60);
+    return (
+      <div className="py-0.5">
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="flex items-center gap-1.5 text-xs text-foreground/70 hover:text-foreground w-full text-left"
+        >
+          <span className="flex-shrink-0">&#9998;</span>
+          <span className="truncate">{expanded ? '输出文本' : preview || '...'}</span>
+          {expanded ? <ChevronUp className="w-3 h-3 ml-auto flex-shrink-0" /> : <ChevronDown className="w-3 h-3 ml-auto flex-shrink-0" />}
+        </button>
+        {expanded && (
+          <div className="mt-1 pl-4 text-xs text-foreground/60 whitespace-pre-wrap break-words max-h-40 overflow-y-auto">
+            {block.content}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return null;
+}
+
+/** Completed blocks list — the persistent execution trace. */
+function CompletedBlocksList({ blocks }: { blocks: StreamingBlock[] }) {
+  const listRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (listRef.current) {
+      listRef.current.scrollTop = listRef.current.scrollHeight;
+    }
+  }, [blocks.length]);
+
+  if (!blocks.length) return null;
+
+  return (
+    <div className="mb-2">
+      <div className="text-[11px] font-medium text-muted-foreground mb-1">执行轨迹</div>
+      <div
+        ref={listRef}
+        className="space-y-0 max-h-60 overflow-y-auto rounded-lg border border-border bg-muted/20 px-2.5 py-1.5"
+      >
+        {blocks.map((block) => (
+          <CompletedBlockItem key={block.id} block={block} />
+        ))}
+      </div>
+    </div>
+  );
+}
 
 /** Render AskUserQuestion options as a visual card (read-only). */
 function AskUserQuestionCard({ toolInput }: { toolInput: Record<string, unknown> }) {
@@ -199,6 +338,11 @@ function StreamingContent({
 
   return (
     <>
+      {/* Completed blocks — persistent execution trace */}
+      {streaming.completedBlocks && streaming.completedBlocks.length > 0 && (
+        <CompletedBlocksList blocks={streaming.completedBlocks} />
+      )}
+
       {/* System status */}
       {streaming.systemStatus && (
         <div className="flex items-center gap-2 text-[13px] text-muted-foreground mb-2">
@@ -456,7 +600,8 @@ export function StreamingDisplay({ groupJid, isWaiting, senderName: senderNamePr
     streaming.activeHook ||
     streaming.systemStatus ||
     streaming.recentEvents.length > 0 ||
-    (streaming.todos && streaming.todos.length > 0)
+    (streaming.todos && streaming.todos.length > 0) ||
+    (streaming.completedBlocks && streaming.completedBlocks.length > 0)
   )) || hasTaskAgents;
 
   // 仅在既不等待也无冻结数据时才隐藏

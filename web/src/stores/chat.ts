@@ -58,6 +58,24 @@ export interface StreamSnapshotData {
   turnId?: string;
 }
 
+export interface StreamingBlock {
+  id: string;
+  type: 'thinking' | 'tool' | 'text' | 'status' | 'hook';
+  timestamp: number;
+  endTimestamp?: number;
+  toolName?: string;
+  toolUseId?: string;
+  toolInputSummary?: string;
+  skillName?: string;
+  duration?: number;
+  content?: string;
+  thinkingText?: string;
+  statusText?: string;
+  hookName?: string;
+  hookEvent?: string;
+  hookOutcome?: string;
+}
+
 export interface StreamingState {
   turnId?: string;
   sessionId?: string;
@@ -80,6 +98,7 @@ export interface StreamingState {
   recentEvents: StreamingTimelineEvent[];
   todos?: Array<{ id: string; content: string; status: string }>;
   interrupted?: boolean;
+  completedBlocks: StreamingBlock[];
 }
 
 function mergeMessagesChronologically(
@@ -180,6 +199,7 @@ interface ChatState {
   agentMessages: Record<string, Message[]>;          // agentId → messages
   agentWaiting: Record<string, boolean>;             // agentId → waiting for reply
   agentHasMore: Record<string, boolean>;             // agentId → has more messages
+  blocksCache: Record<string, StreamingBlock[]>;     // messageId → finalized blocks
   loadGroups: () => Promise<void>;
   selectGroup: (jid: string) => void;
   loadMessages: (jid: string, loadMore?: boolean) => Promise<void>;
@@ -203,6 +223,8 @@ interface ChatState {
   ) => void;
   restoreActiveState: () => Promise<void>;
   handleStreamSnapshot: (chatJid: string, snapshot: StreamSnapshotData, agentId?: string) => void;
+  fetchStreamingBlocks: (chatJid: string) => Promise<void>;
+  handleBlocksFinalized: (chatJid: string, messageId: string, blocks: StreamingBlock[]) => void;
   // Sub-agent actions
   loadAgents: (jid: string) => Promise<void>;
   deleteAgentAction: (jid: string, agentId: string) => Promise<boolean>;
@@ -232,6 +254,7 @@ const DEFAULT_STREAMING_STATE: StreamingState = {
   sessionId: undefined,
   partialText: '', thinkingText: '', isThinking: false,
   activeTools: [], activeHook: null, systemStatus: null, recentEvents: [],
+  completedBlocks: [],
 };
 
 /**
@@ -245,6 +268,18 @@ function resolveStreamingPrev(current: StreamingState | undefined, event: Stream
 }
 
 const MAX_STREAMING_TEXT = 8000;
+
+const MAX_BLOCKS_CACHE_SIZE = 100;
+const MAX_BLOCKS_PER_ROUND = 200;
+
+function capBlocksCache(cache: Record<string, StreamingBlock[]>): Record<string, StreamingBlock[]> {
+  const keys = Object.keys(cache);
+  if (keys.length <= MAX_BLOCKS_CACHE_SIZE) return cache;
+  const keep = keys.slice(keys.length - MAX_BLOCKS_CACHE_SIZE);
+  const next: Record<string, StreamingBlock[]> = {};
+  for (const k of keep) next[k] = cache[k];
+  return next;
+}
 const MAX_EVENT_LOG = 30;
 const SDK_TASK_AUTO_CLOSE_MS = 3000;
 const SDK_TASK_TOOL_END_FALLBACK_CLOSE_MS = 1200;
@@ -638,6 +673,18 @@ function applyStreamEvent(
             ? `技能 ${ended.skillName || 'unknown'}`
             : `工具 ${ended.toolName}`;
           next.recentEvents = pushEvent(prev.recentEvents, isSkill ? 'skill' : 'tool', `✓ ${label} (${elapsedSec}s)`);
+          // Accumulate completed tool block
+          next.completedBlocks = [...(prev.completedBlocks || []), {
+            id: ended.toolUseId,
+            type: 'tool' as const,
+            timestamp: ended.startTime,
+            endTimestamp: Date.now(),
+            toolName: ended.toolName,
+            toolUseId: ended.toolUseId,
+            toolInputSummary: ended.toolInputSummary,
+            skillName: ended.skillName,
+            duration: Math.round(rawSec * 10) / 10,
+          }].slice(-MAX_BLOCKS_PER_ROUND);
         }
       } else {
         next.activeTools = [];
@@ -696,6 +743,15 @@ function applyStreamEvent(
         'hook',
         `Hook 结束: ${event.hookName || 'unknown'} (${event.hookOutcome || 'success'})`,
       );
+      // Accumulate hook block
+      next.completedBlocks = [...(prev.completedBlocks || []), {
+        id: crypto.randomUUID(),
+        type: 'hook' as const,
+        timestamp: Date.now(),
+        hookName: event.hookName,
+        hookEvent: event.hookEvent,
+        hookOutcome: event.hookOutcome,
+      }].slice(-MAX_BLOCKS_PER_ROUND);
       break;
     case 'todo_update':
       if (event.todos) {
@@ -706,6 +762,13 @@ function applyStreamEvent(
       next.systemStatus = event.statusText || null;
       if (event.statusText) {
         next.recentEvents = pushEvent(prev.recentEvents, 'status', `状态: ${event.statusText}`);
+        // Accumulate status block
+        next.completedBlocks = [...(prev.completedBlocks || []), {
+          id: crypto.randomUUID(),
+          type: 'status' as const,
+          timestamp: Date.now(),
+          statusText: event.statusText,
+        }].slice(-MAX_BLOCKS_PER_ROUND);
       }
       break;
     }
@@ -741,6 +804,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   agentMessages: {},
   agentWaiting: {},
   agentHasMore: {},
+  blocksCache: {},
   drafts: {},
 
   loadGroups: async () => {
@@ -1627,6 +1691,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const thinkingText = isAgentReply
           ? (streamState?.thinkingText || s.pendingThinking[chatJid])
           : undefined;
+        // Save completed blocks to cache before clearing streaming state
+        const completedBlocks = streamState?.completedBlocks;
+        const nextBlocksCache = completedBlocks?.length
+          ? capBlocksCache({ ...s.blocksCache, [msg.id]: completedBlocks })
+          : s.blocksCache;
         const nextStreaming = { ...s.streaming };
         delete nextStreaming[chatJid];
         const nextPending = { ...s.pendingThinking };
@@ -1637,6 +1706,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           waiting: { ...s.waiting, [chatJid]: false },
           streaming: nextStreaming,
           pendingThinking: nextPending,
+          blocksCache: nextBlocksCache,
           ...(thinkingText ? { thinkingCache: capThinkingCache({ ...s.thinkingCache, [msg.id]: thinkingText }) } : {}),
         };
       }
@@ -2219,6 +2289,61 @@ export const useChatStore = create<ChatState>((set, get) => ({
         };
       });
     }
+  },
+
+  // 获取后端累积的 streaming blocks（页面打开/重连时补课用）
+  fetchStreamingBlocks: async (chatJid: string) => {
+    try {
+      const jid = encodeURIComponent(chatJid);
+      const data = await api.get<{
+        completedBlocks: StreamingBlock[];
+        currentState: {
+          activeTools: Array<{ toolName: string; toolUseId: string; startTime: number; skillName?: string; toolInputSummary?: string }>;
+          partialText: string;
+          thinkingText: string;
+          isThinking: boolean;
+          systemStatus: string | null;
+          activeHook: { hookName: string; hookEvent: string } | null;
+        } | null;
+      }>(`/api/groups/${jid}/streaming-blocks`);
+      if (!data.completedBlocks?.length && !data.currentState) return;
+      set((s) => {
+        const existing = s.streaming[chatJid];
+        // 如果前端已经有更新的实时数据（activeTools 不为空），不覆盖 currentState
+        const hasLiveData = existing && existing.activeTools.length > 0;
+        return {
+          streaming: {
+            ...s.streaming,
+            [chatJid]: {
+              ...(existing || { ...DEFAULT_STREAMING_STATE }),
+              completedBlocks: data.completedBlocks || [],
+              ...(!hasLiveData && data.currentState ? {
+                activeTools: data.currentState.activeTools.map(t => ({
+                  ...t,
+                  startTime: t.startTime || Date.now(),
+                })),
+                partialText: data.currentState.partialText || '',
+                thinkingText: data.currentState.thinkingText || '',
+                isThinking: data.currentState.isThinking || false,
+                systemStatus: data.currentState.systemStatus,
+                activeHook: data.currentState.activeHook,
+              } : {}),
+            },
+          },
+          waiting: { ...s.waiting, [chatJid]: true },
+        };
+      });
+    } catch {
+      // 静默失败
+    }
+  },
+
+  // 处理 blocks_finalized WS 消息（Agent 回复后后端推送完整 blocks）
+  handleBlocksFinalized: (_chatJid: string, messageId: string, blocks: StreamingBlock[]) => {
+    if (!messageId || !blocks?.length) return;
+    set((s) => ({
+      blocksCache: capBlocksCache({ ...s.blocksCache, [messageId]: blocks }),
+    }));
   },
 
   // 清除流式状态（保留仍在运行的后台 SDK Task 的 agentStreaming）

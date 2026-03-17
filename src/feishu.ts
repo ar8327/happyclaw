@@ -1551,6 +1551,7 @@ export function createFeishuConnection(
         );
         return;
       }
+      const feishuClient = client;
 
       const clearAckReaction = () => {
         const ackStored = ackReactionByChat.get(chatId);
@@ -1570,12 +1571,12 @@ export function createFeishuConnection(
               if (parsed.type === 'interactive' && parsed.card) {
                 const lastMsgId = lastMessageIdByChat.get(chatId);
                 if (lastMsgId) {
-                  await client.im.message.reply({
+                  await feishuClient.im.message.reply({
                     path: { message_id: lastMsgId },
                     data: { content: msgText, msg_type: 'interactive' },
                   });
                 } else {
-                  await client.im.v1.message.create({
+                  await feishuClient.im.v1.message.create({
                     params: { receive_id_type: 'chat_id' },
                     data: {
                       receive_id: chatId,
@@ -1601,12 +1602,12 @@ export function createFeishuConnection(
             const postContent = buildPostMdFallback(msgText);
             const lastMsgId = lastMessageIdByChat.get(chatId);
             if (lastMsgId) {
-              await client.im.message.reply({
+              await feishuClient.im.message.reply({
                 path: { message_id: lastMsgId },
                 data: { content: postContent, msg_type: 'post' },
               });
             } else {
-              await client.im.v1.message.create({
+              await feishuClient.im.v1.message.create({
                 params: { receive_id_type: 'chat_id' },
                 data: {
                   receive_id: chatId,
@@ -1623,7 +1624,7 @@ export function createFeishuConnection(
           const lastMsgId = lastMessageIdByChat.get(chatId);
           if (lastMsgId) {
             try {
-              await client.im.message.reply({
+              await feishuClient.im.message.reply({
                 path: { message_id: lastMsgId },
                 data: { content, msg_type: 'interactive' },
               });
@@ -1632,7 +1633,7 @@ export function createFeishuConnection(
                 { err, chatId },
                 'Feishu interactive reply failed, fallback to post+md',
               );
-              await client.im.message.reply({
+              await feishuClient.im.message.reply({
                 path: { message_id: lastMsgId },
                 data: {
                   content: buildPostMdFallback(msgText),
@@ -1642,7 +1643,7 @@ export function createFeishuConnection(
             }
           } else {
             try {
-              await client.im.v1.message.create({
+              await feishuClient.im.v1.message.create({
                 params: { receive_id_type: 'chat_id' },
                 data: {
                   receive_id: chatId,
@@ -1655,7 +1656,7 @@ export function createFeishuConnection(
                 { err, chatId },
                 'Feishu interactive create failed, fallback to post+md',
               );
-              await client.im.v1.message.create({
+              await feishuClient.im.v1.message.create({
                 params: { receive_id_type: 'chat_id' },
                 data: {
                   receive_id: chatId,
@@ -1700,7 +1701,7 @@ export function createFeishuConnection(
 
         for (const localImagePath of localImagePaths || []) {
           try {
-            const uploadRes = (await client.im.v1.image.create({
+            const uploadRes = (await feishuClient.im.v1.image.create({
               data: {
                 image_type: 'message',
                 image: fs.createReadStream(localImagePath),
@@ -1718,7 +1719,7 @@ export function createFeishuConnection(
               );
               continue;
             }
-            await client.im.v1.message.create({
+            await feishuClient.im.v1.message.create({
               params: { receive_id_type: 'chat_id' },
               data: {
                 receive_id: chatId,

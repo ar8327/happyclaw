@@ -96,7 +96,9 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const handleStreamEvent = useChatStore(s => s.handleStreamEvent);
   const handleWsNewMessage = useChatStore(s => s.handleWsNewMessage);
   const handleStreamSnapshot = useChatStore(s => s.handleStreamSnapshot);
-
+  const fetchStreamingBlocks = useChatStore(s => s.fetchStreamingBlocks);
+  const handleBlocksFinalized = useChatStore(s => s.handleBlocksFinalized);
+  const streamingState = useChatStore(s => s.streaming[groupJid]);
   const agents = useChatStore(s => s.agents[groupJid] ?? EMPTY_AGENTS);
   const activeAgentTab = useChatStore(s => s.activeAgentTab[groupJid] ?? null);
   const setActiveAgentTab = useChatStore(s => s.setActiveAgentTab);
@@ -266,9 +268,22 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         handleStreamSnapshot(groupJid, data.snapshot, snapshotAgentId);
       }
     });
+    // Agent 回复后后端推送完整 blocks
+    const unsub5 = wsManager.on('blocks_finalized', (data: any) => {
+      if (data.chatJid === groupJid && data.messageId && data.blocks) {
+        handleBlocksFinalized(groupJid, data.messageId, data.blocks);
+      }
+    });
     // agent_status 已提升到 AppLayout 全局监听
-    return () => { unsub1(); unsub2(); unsub3(); unsub4(); };
-  }, [groupJid, handleStreamEvent, handleWsNewMessage, handleStreamSnapshot]);
+    return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); };
+  }, [groupJid, handleStreamEvent, handleWsNewMessage, handleStreamSnapshot, handleBlocksFinalized]);
+
+  // Agent 运行中但没有 blocks 数据时从后端补课（页面打开/重连）
+  useEffect(() => {
+    if (isWaiting && groupJid && (!streamingState || !streamingState.completedBlocks?.length)) {
+      fetchStreamingBlocks(groupJid);
+    }
+  }, [isWaiting, groupJid, streamingState, fetchStreamingBlocks]);
 
   const [scrollTrigger, setScrollTrigger] = useState(0);
 
