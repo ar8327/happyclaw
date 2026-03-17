@@ -20,8 +20,6 @@ const BASE_RETRY_MS = 5000;
 
 interface GroupState {
   active: boolean;
-  /** True when the active runner is executing a scheduled task (not user messages). */
-  activeRunnerIsTask: boolean;
   /** Last time this runner produced any observable output. */
   lastActivityAt: number | null;
   /** True while the runner is inside an active query turn. */
@@ -80,7 +78,6 @@ export class GroupQueue {
     if (!state) {
       state = {
         active: false,
-        activeRunnerIsTask: false,
         lastActivityAt: null,
         queryInFlight: false,
         pendingMessages: false,
@@ -247,7 +244,6 @@ export class GroupQueue {
     return state?.active === true;
   }
 
-  /** Count active task runners whose JID starts with the given base JID + '#task:' */
   countActiveTaskRunners(baseJid: string): number {
     const prefix = baseJid + '#task:';
     let count = 0;
@@ -257,16 +253,6 @@ export class GroupQueue {
       }
     }
     return count;
-  }
-
-  /**
-   * Returns true if the active runner for this group (or its serialization
-   * sibling) is currently executing a scheduled task rather than user messages.
-   * Used by the message loop to avoid prematurely interrupting task containers.
-   */
-  isActiveRunnerTask(groupJid: string): boolean {
-    const state = this.resolveActiveState(groupJid);
-    return state?.activeRunnerIsTask === true;
   }
 
   markRunnerActivity(groupJid: string): void {
@@ -300,7 +286,6 @@ export class GroupQueue {
     const stuck: Array<{ jid: string; idleMs: number }> = [];
     for (const [jid, state] of this.groups.entries()) {
       if (!state.active) continue;
-      if (state.activeRunnerIsTask) continue;
       if (!state.pendingMessages) continue;
       if (state.agentId !== null) continue;
       if (state.restarting) continue;
@@ -355,6 +340,10 @@ export class GroupQueue {
     this.runForGroup(groupJid, 'messages');
   }
 
+  /**
+   * Enqueue an arbitrary async function to run with queue serialization.
+   * Used for sub-agent conversations and terminal warmup.
+   */
   enqueueTask(groupJid: string, taskId: string, fn: () => Promise<void>): void {
     if (this.shuttingDown) return;
 
@@ -378,19 +367,8 @@ export class GroupQueue {
     }
 
     if (!this.hasCapacityFor(groupJid)) {
-      const isHost = this.isHostMode(groupJid);
       state.pendingTasks.push({ id: taskId, groupJid, fn });
       this.waitingGroups.add(groupJid);
-      logger.debug(
-        {
-          groupJid,
-          taskId,
-          activeContainerCount: this.activeContainerCount,
-          activeHostProcessCount: this.activeHostProcessCount,
-          mode: isHost ? 'host' : 'container',
-        },
-        'At concurrency limit, task queued',
-      );
       return;
     }
 
@@ -460,26 +438,6 @@ export class GroupQueue {
   ): SendMessageResult {
     const state = this.resolveActiveState(groupJid);
     if (!state) return 'no_active';
-
-    // If the active runner is a scheduled task (not a user-message handler),
-    // do NOT pipe user messages into it.  The task container has no knowledge
-    // of the user conversation context, so any IPC message injected here would
-    // be silently consumed (or confusingly processed) by the task agent and the
-    // reply would never reach the user.  Returning 'no_active' causes the
-    // caller to enqueue a fresh message-processing run that will execute once
-    // the task finishes.  See GitHub issue riba2534/happyclaw#151.
-    //
-    // Exception: conversation agent tasks (virtual JIDs with #agent:) are
-    // user-message handlers started via enqueueTask.  They DO accept IPC
-    // messages — blocking them causes a deadlock where the agent waits for
-    // IPC input that never arrives.
-    if (state.activeRunnerIsTask && !groupJid.includes('#agent:')) {
-      logger.debug(
-        { groupJid },
-        'Active runner is a scheduled task; deferring user message until task completes',
-      );
-      return 'no_active';
-    }
 
     // queryInFlight=true：当前 query 正在执行，将消息写入 IPC 文件排队。
     // 当前 query 完成后 waitForIpcMessage() → drainIpcInput() 会合并所有
@@ -893,7 +851,6 @@ export class GroupQueue {
     const state = this.getGroup(groupJid);
     const isHostMode = this.isHostMode(groupJid);
     state.active = true;
-    state.activeRunnerIsTask = false;
     state.lastActivityAt = Date.now();
     state.queryInFlight = true;
     state.pendingMessages = false;
@@ -999,7 +956,6 @@ export class GroupQueue {
     const state = this.getGroup(groupJid);
     const isHostMode = this.isHostMode(groupJid);
     state.active = true;
-    state.activeRunnerIsTask = true;
     state.lastActivityAt = Date.now();
     state.queryInFlight = false;
     this.waitingGroups.delete(groupJid);
@@ -1041,7 +997,6 @@ export class GroupQueue {
         this.recoverUnconsumedIpc(groupJid, state, 'task exit');
       }
       state.active = false;
-      state.activeRunnerIsTask = false;
       state.drainSentinelWritten = false;
       state.lastActivityAt = null;
       state.queryInFlight = false;
@@ -1137,7 +1092,7 @@ export class GroupQueue {
       return;
     }
 
-    // Tasks first (they won't be re-discovered from SQLite like messages)
+    // Queued tasks first (they won't be re-discovered like messages)
     while (state.pendingTasks.length > 0) {
       const task = state.pendingTasks.shift()!;
       // Check if scheduled task is still active before occupying a slot.
@@ -1185,7 +1140,6 @@ export class GroupQueue {
       this.waitingGroups.delete(jid);
       const state = this.getGroup(jid);
 
-      // Prioritize tasks over messages
       if (state.pendingTasks.length > 0) {
         // Skip cancelled/deleted scheduled tasks (but allow dynamic tasks
         // like agent conversations that have no DB entry).

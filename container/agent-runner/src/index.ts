@@ -115,7 +115,7 @@ async function main(): Promise<void> {
     writeOutput({
       status: 'error',
       result: null,
-      error: `Failed to parse input: ${err instanceof Error ? err.message : String(err)}`
+      error: `Failed to parse input: ${err instanceof Error ? err.message : String(err)}`,
     });
     process.exit(1);
   }
@@ -123,16 +123,13 @@ async function main(): Promise<void> {
   const provider = selectProvider();
   log(`Provider: ${provider}`);
 
-  // Initialize session state
   state.loadImChannels(IM_CHANNELS_FILE);
 
-  // Clean up stale sentinels
   fs.mkdirSync(ipcPaths.inputDir, { recursive: true });
   try { fs.unlinkSync(ipcPaths.closeSentinel); } catch { /* ignore */ }
   try { fs.unlinkSync(ipcPaths.drainSentinel); } catch { /* ignore */ }
   try { fs.unlinkSync(ipcPaths.interruptSentinel); } catch { /* ignore */ }
 
-  // Build initial prompt (drain any pending IPC messages)
   let prompt = containerInput.prompt;
   let promptImages = containerInput.images;
   const pendingDrain = drainIpcInput(ipcPaths, log);
@@ -149,7 +146,6 @@ async function main(): Promise<void> {
     }
   }
 
-  // Create and initialize the runner
   if (provider === 'claude') {
     const runner = new ClaudeRunner({
       containerInput,
@@ -168,13 +164,11 @@ async function main(): Promise<void> {
     });
     await runner.initialize();
 
-    // Run the query loop
     await runQueryLoop({
       runner,
       initialPrompt: prompt,
       initialImages: promptImages,
       sessionId: containerInput.sessionId,
-      exitAfterSuccess: containerInput.isScheduledTask === true,
       state,
       ipcPaths,
       imChannelsFile: IM_CHANNELS_FILE,
@@ -205,7 +199,6 @@ async function main(): Promise<void> {
       initialPrompt: prompt,
       initialImages: promptImages,
       sessionId: containerInput.sessionId,
-      exitAfterSuccess: containerInput.isScheduledTask === true,
       state,
       ipcPaths,
       imChannelsFile: IM_CHANNELS_FILE,
@@ -258,7 +251,6 @@ process.on('unhandledRejection', (reason) => {
   console.error('Unhandled rejection:', reason);
 });
 
-// Start
 main().catch((err) => {
   const errorMessage = err instanceof Error ? err.message : String(err);
   log(`Agent error: ${errorMessage}`);

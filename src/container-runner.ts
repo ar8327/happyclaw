@@ -111,7 +111,6 @@ export interface ContainerInput {
   turnId?: string;
   isHome?: boolean;
   isAdminHome?: boolean;
-  isScheduledTask?: boolean;
   /** Isolated task run ID — determines IPC namespace (tasks-run/{taskRunId}/) */
   taskRunId?: string;
   images?: Array<{ data: string; mimeType?: string }>;

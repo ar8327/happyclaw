@@ -7577,56 +7577,9 @@ async function main(): Promise<void> {
   });
   const schedulerDeps: import('./task-scheduler.js').SchedulerDependencies = {
     registeredGroups: () => registeredGroups,
-    getSessions: () => sessions,
-    queue,
-    onProcess: (
-      groupJid,
-      proc,
-      containerName,
-      groupFolder,
-      displayName,
-      taskRunId,
-    ) =>
-      queue.registerProcess(
-        groupJid,
-        proc,
-        containerName,
-        groupFolder,
-        displayName,
-        undefined, // agentId
-        taskRunId,
-      ),
+    broadcastNewMessage,
     sendMessage,
-    broadcastStreamEvent,
-    onWorkspaceCreated: broadcastGroupCreated,
-    storePromptMessage: (chatJid, senderId, senderName, text) => {
-      const msgId = crypto.randomUUID();
-      const now = new Date().toISOString();
-      ensureChatExists(chatJid);
-      storeMessageDirect(
-        msgId,
-        chatJid,
-        senderId,
-        senderName,
-        text,
-        now,
-        false,
-        {
-          meta: { sourceKind: 'scheduled_task_prompt' },
-        },
-      );
-      broadcastNewMessage(chatJid, {
-        id: msgId,
-        chat_jid: chatJid,
-        sender: senderId,
-        sender_name: senderName,
-        content: text,
-        timestamp: now,
-        is_from_me: false,
-      });
-    },
     assistantName: ASSISTANT_NAME,
-    // dailySummaryDeps disabled — replaced by Memory Agent system
     globalSleepDeps: {
       manager: memoryAgentManager,
       queue,

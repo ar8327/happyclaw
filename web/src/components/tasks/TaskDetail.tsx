@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { Check, Pencil, RefreshCw, X } from 'lucide-react';
 import { ScheduledTask, TaskRunLog, useTasksStore } from '../../stores/tasks';
 import { showToast } from '../../utils/toast';
@@ -420,28 +419,6 @@ export function TaskDetail({ task }: TaskDetailProps) {
             </div>
           </div>
         )}
-
-        {task.execution_mode && (
-          <div>
-            <div className="text-xs text-muted-foreground mb-1">执行模式</div>
-            <div className="text-sm text-foreground">
-              {task.execution_mode === 'host' ? '宿主机' : 'Docker 容器'}
-            </div>
-          </div>
-        )}
-
-        {task.workspace_folder && (
-          <div>
-            <div className="text-xs text-muted-foreground mb-1">任务工作区</div>
-            <Link
-              to={`/chat/${task.workspace_folder}`}
-              className="text-sm text-primary hover:underline"
-            >
-              {task.workspace_folder}
-            </Link>
-          </div>
-        )}
-
         <div>
           <div className="text-xs text-muted-foreground mb-1">创建时间</div>
           <div className="text-sm text-foreground">

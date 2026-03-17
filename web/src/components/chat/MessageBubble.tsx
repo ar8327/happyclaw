@@ -285,6 +285,30 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
     );
   }
 
+  // Scheduled task trigger message
+  if (message.sender === '__task__') {
+    const taskMatch = message.content.match(/^\[task:[^\]]+\]\s*([\s\S]*)/);
+    const prompt = taskMatch ? taskMatch[1] : message.content;
+    return (
+      <div className="mb-6">
+        {showTime && (
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-xs text-slate-500">{time}</span>
+          </div>
+        )}
+        <div className="flex items-start gap-3">
+          <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center text-amber-600 dark:text-amber-400 text-sm">
+            ⏰
+          </div>
+          <div className="bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-xl px-4 py-3 max-w-[80%]">
+            <div className="text-xs text-amber-600 dark:text-amber-400 font-medium mb-1">定时任务</div>
+            <div className="text-sm text-foreground whitespace-pre-wrap">{prompt}</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // ── Compact mode: all messages left-aligned, no bubbles, full-width ──
   if (displayMode === 'compact') {
     const isAI = message.is_from_me;

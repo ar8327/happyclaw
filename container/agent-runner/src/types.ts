@@ -13,8 +13,6 @@ export interface ContainerInput {
   sessionId?: string;
   groupFolder: string;
   chatJid: string;
-  /** Scheduled task runners should exit after a successful turn instead of waiting for IPC. */
-  isScheduledTask?: boolean;
   /** Whether this is the user's home container (admin or member). */
   isHome?: boolean;
   /** Whether this is the admin's home container (full privileges). */

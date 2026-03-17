@@ -358,7 +358,6 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
                 </p>
               </div>
             )}
-
             {/* Prompt */}
             <div>
               <label className="block text-sm font-medium text-foreground mb-2">
