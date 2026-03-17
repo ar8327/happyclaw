@@ -155,8 +155,12 @@ function extractMessageContent(
       // Extract text and inline images from rich post content.
       const lines: string[] = [];
       const imageKeys: string[] = [];
-      const post = parsed.post;
-      if (!post) {
+      // 飞书 post 消息有三种已知格式：
+      // 1. 带 post + 语言包裹：{"post": {"zh_cn": {"title": "...", "content": [[...]]}}}
+      // 2. 仅语言包裹：{"zh_cn": {"title": "...", "content": [[...]]}}
+      // 3. 无包裹（直接 title+content）：{"title": "...", "content": [[...]]}
+      const post = parsed.post || parsed;
+      if (!post || typeof post !== 'object') {
         logger.warn(
           { keys: Object.keys(parsed) },
           'Empty post object in post message',
@@ -164,8 +168,16 @@ function extractMessageContent(
         return { text: '' };
       }
 
-      // Try zh_cn first, then en_us, then other languages
-      const contentData = post.zh_cn || post.en_us || Object.values(post)[0];
+      // 判断 contentData：如果 post 本身就有 content 数组，直接用；否则查找语言层
+      let contentData: any;
+      if (Array.isArray(post.content)) {
+        // 格式 3：无包裹，post 本身就是 {title, content}
+        contentData = post;
+        logger.debug('Post message using flat format (no locale wrapper)');
+      } else {
+        // 格式 1/2：有语言层包裹
+        contentData = post.zh_cn || post.en_us || Object.values(post)[0];
+      }
       if (!contentData || !Array.isArray(contentData.content)) {
         logger.warn(
           { keys: Object.keys(post) },
