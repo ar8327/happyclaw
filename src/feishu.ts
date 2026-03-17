@@ -1562,63 +1562,64 @@ export function createFeishuConnection(
       };
 
       try {
-        // Detect pre-built Feishu interactive card JSON — send directly without wrapping
-        if (text.startsWith('{"type":"interactive"')) {
-          try {
-            const parsed = JSON.parse(text);
-            if (parsed.type === 'interactive' && parsed.card) {
-              const lastMsgId = lastMessageIdByChat.get(chatId);
-              if (lastMsgId) {
-                await client.im.message.reply({
-                  path: { message_id: lastMsgId },
-                  data: { content: text, msg_type: 'interactive' },
-                });
-              } else {
-                await client.im.v1.message.create({
-                  params: { receive_id_type: 'chat_id' },
-                  data: {
-                    receive_id: chatId,
-                    msg_type: 'interactive',
-                    content: text,
-                  },
-                });
+        const sendMsg = async (msgText: string) => {
+          // Detect pre-built Feishu interactive card JSON — send directly without wrapping
+          if (msgText.startsWith('{"type":"interactive"')) {
+            try {
+              const parsed = JSON.parse(msgText);
+              if (parsed.type === 'interactive' && parsed.card) {
+                const lastMsgId = lastMessageIdByChat.get(chatId);
+                if (lastMsgId) {
+                  await client.im.message.reply({
+                    path: { message_id: lastMsgId },
+                    data: { content: msgText, msg_type: 'interactive' },
+                  });
+                } else {
+                  await client.im.v1.message.create({
+                    params: { receive_id_type: 'chat_id' },
+                    data: {
+                      receive_id: chatId,
+                      msg_type: 'interactive',
+                      content: msgText,
+                    },
+                  });
+                }
+                return;
               }
-              clearAckReaction();
-              return;
+            } catch {
+              // Not valid card JSON, fall through to normal handling
             }
-          } catch {
-            // Not valid card JSON, fall through to normal handling
           }
-        }
 
-        // Count markdown tables to decide format upfront — Feishu cards have a table limit
-        // Each table has exactly one separator row (e.g. |---|---|), so counting those = table count
-        const tableCount = (text.match(/^\|[\s:-]+\|/gm) || []).length;
-        const usePostMd = tableCount > CARD_TABLE_LIMIT;
+          // Count markdown tables to decide format upfront — Feishu cards have a table limit
+          // Each table has exactly one separator row (e.g. |---|---|), so counting those = table count
+          const tableCount = (msgText.match(/^\|[\s:-]+\|/gm) || []).length;
+          const usePostMd = tableCount > CARD_TABLE_LIMIT;
 
-        if (usePostMd) {
-          // Too many tables for card format, go directly to post+md
-          const postContent = buildPostMdFallback(text);
-          const lastMsgId = lastMessageIdByChat.get(chatId);
-          if (lastMsgId) {
-            await client.im.message.reply({
-              path: { message_id: lastMsgId },
-              data: { content: postContent, msg_type: 'post' },
-            });
-          } else {
-            await client.im.v1.message.create({
-              params: { receive_id_type: 'chat_id' },
-              data: {
-                receive_id: chatId,
-                msg_type: 'post',
-                content: postContent,
-              },
-            });
+          if (usePostMd) {
+            // Too many tables for card format, go directly to post+md
+            const postContent = buildPostMdFallback(msgText);
+            const lastMsgId = lastMessageIdByChat.get(chatId);
+            if (lastMsgId) {
+              await client.im.message.reply({
+                path: { message_id: lastMsgId },
+                data: { content: postContent, msg_type: 'post' },
+              });
+            } else {
+              await client.im.v1.message.create({
+                params: { receive_id_type: 'chat_id' },
+                data: {
+                  receive_id: chatId,
+                  msg_type: 'post',
+                  content: postContent,
+                },
+              });
+            }
+            return;
           }
-        } else {
-          const card = buildInteractiveCard(text);
+
+          const card = buildInteractiveCard(msgText);
           const content = JSON.stringify(card);
-
           const lastMsgId = lastMessageIdByChat.get(chatId);
           if (lastMsgId) {
             try {
@@ -1634,7 +1635,7 @@ export function createFeishuConnection(
               await client.im.message.reply({
                 path: { message_id: lastMsgId },
                 data: {
-                  content: buildPostMdFallback(text),
+                  content: buildPostMdFallback(msgText),
                   msg_type: 'post',
                 },
               });
@@ -1659,10 +1660,39 @@ export function createFeishuConnection(
                 data: {
                   receive_id: chatId,
                   msg_type: 'post',
-                  content: buildPostMdFallback(text),
+                  content: buildPostMdFallback(msgText),
                 },
               });
             }
+          }
+        };
+
+        try {
+          await sendMsg(text);
+        } catch (outerErr: any) {
+          const feishuCode = outerErr?.response?.data?.code;
+          if (feishuCode === 230028) {
+            logger.warn(
+              { chatId },
+              'Feishu audit 230028, replacing @ with fullwidth ＠ and retrying',
+            );
+            try {
+              const sanitized = text.replace(
+                /([a-zA-Z0-9._%+\-]+)@([a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/g,
+                '$1\uFF20$2',
+              );
+              await sendMsg(
+                `${sanitized}\n\n> ⚠️ 消息中的 @ 已被替换为全角＠以通过飞书安全审计，请注意复制时替换回半角 @`,
+              );
+            } catch (retryErr) {
+              logger.error(
+                { chatId, err: retryErr },
+                'Feishu audit 230028 fullwidth @ retry also failed',
+              );
+              throw outerErr;
+            }
+          } else {
+            throw outerErr;
           }
         }
         logger.debug({ chatId }, 'Sent Feishu card message');
