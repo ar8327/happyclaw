@@ -322,6 +322,9 @@ export type WsMessageOut =
       type: 'runner_state';
       chatJid: string;
       state:
+        | 'queued'
+        | 'capacity_wait'
+        | 'starting'
         | 'idle'
         | 'running'
         | 'interrupting'

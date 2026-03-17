@@ -57,6 +57,9 @@ export class GroupQueue {
   private userConcurrentLimitFn:
     | ((groupJid: string) => { allowed: boolean })
     | null = null;
+  private lifecycleEmitter:
+    | ((groupJid: string, state: string, detail?: string) => void)
+    | null = null;
 
   private getGroup(groupJid: string): GroupState {
     let state = this.groups.get(groupJid);
@@ -85,6 +88,12 @@ export class GroupQueue {
 
   setHostModeChecker(fn: (groupJid: string) => boolean): void {
     this.hostModeChecker = fn;
+  }
+
+  setLifecycleEmitter(
+    fn: (groupJid: string, state: string, detail?: string) => void,
+  ): void {
+    this.lifecycleEmitter = fn;
   }
 
   setSerializationKeyResolver(fn: (groupJid: string) => string): void {
@@ -184,6 +193,7 @@ export class GroupQueue {
     if (state.active || (activeRunner && activeRunner !== groupJid)) {
       state.pendingMessages = true;
       this.waitingGroups.add(groupJid);
+      this.lifecycleEmitter?.(groupJid, 'queued');
       logger.debug(
         { groupJid, activeRunner: activeRunner || groupJid },
         'Group runner active, message queued',
@@ -195,6 +205,17 @@ export class GroupQueue {
       const isHost = this.isHostMode(groupJid);
       state.pendingMessages = true;
       this.waitingGroups.add(groupJid);
+      const max = isHost
+        ? getSystemSettings().maxConcurrentHostProcesses
+        : getSystemSettings().maxConcurrentContainers;
+      const current = isHost
+        ? this.activeHostProcessCount
+        : this.activeContainerCount;
+      this.lifecycleEmitter?.(
+        groupJid,
+        'capacity_wait',
+        `${current}/${max} ${isHost ? '进程' : '容器'}运行中`,
+      );
       logger.debug(
         {
           groupJid,
@@ -647,6 +668,7 @@ export class GroupQueue {
     // causing sendMessage() to return 'no_active' and silently queue messages.
     state.groupFolder = this.getSerializationKey(groupJid);
     this.waitingGroups.delete(groupJid);
+    this.lifecycleEmitter?.(groupJid, 'starting');
     this.activeCount++;
     if (isHostMode) {
       this.activeHostProcessCount++;

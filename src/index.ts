@@ -138,6 +138,7 @@ import {
   broadcastAgentStatus,
   broadcastBillingUpdate,
   broadcastBlocksFinalized,
+  broadcastRunnerState,
   shutdownTerminals,
   shutdownWebServer,
 } from './web.js';
@@ -1628,6 +1629,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // 新一轮从干净状态开始
   streamingBlocksManager.reset(group.folder);
+  broadcastRunnerState(chatJid, 'starting');
 
   const output = await runAgent(
     effectiveGroup,
@@ -3465,6 +3467,7 @@ async function startMessageLoop(): Promise<void> {
             saveState();
           } else {
             // no_active — enqueue for a new one
+            broadcastRunnerState(chatJid, 'queued');
             queue.enqueueMessageCheck(chatJid);
           }
         }
@@ -3489,6 +3492,7 @@ function recoverPendingMessages(): void {
         { group: group.name, pendingCount: pending.length },
         'Recovery: found unprocessed messages',
       );
+      broadcastRunnerState(chatJid, 'queued');
       queue.enqueueMessageCheck(chatJid);
     }
   }
@@ -4493,6 +4497,9 @@ async function main(): Promise<void> {
   await ensureDockerRunning();
 
   queue.setProcessMessagesFn(processGroupMessages);
+  queue.setLifecycleEmitter((groupJid, state, detail) => {
+    broadcastRunnerState(groupJid, state, detail);
+  });
   queue.setHostModeChecker((groupJid: string) => {
     let group = registeredGroups[groupJid];
     if (!group) {

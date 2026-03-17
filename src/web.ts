@@ -1255,6 +1255,20 @@ export function broadcastStreamEvent(
   safeBroadcast(msg, isHostGroupJid(chatJid), allowedUserIds);
 }
 
+export function broadcastRunnerState(
+  chatJid: string,
+  state: string,
+  detail?: string,
+): void {
+  const jid = normalizeHomeJid(chatJid);
+  const allowedUserIds = getGroupAllowedUserIds(chatJid);
+  safeBroadcast(
+    { type: 'runner_state', chatJid: jid, state, detail } as WsMessageOut,
+    isHostGroupJid(chatJid),
+    allowedUserIds,
+  );
+}
+
 export function broadcastBlocksFinalized(
   chatJid: string,
   messageId: string,

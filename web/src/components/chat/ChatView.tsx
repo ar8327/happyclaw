@@ -115,6 +115,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const clearStreaming = useChatStore(s => s.clearStreaming);
   const fetchStreamingBlocks = useChatStore(s => s.fetchStreamingBlocks);
   const handleBlocksFinalized = useChatStore(s => s.handleBlocksFinalized);
+  const handleRunnerState = useChatStore(s => s.handleRunnerState);
   const streamingState = useChatStore(s => s.streaming[groupJid]);
   const agents = useChatStore(s => s.agents[groupJid] ?? EMPTY_AGENTS);
   const activeAgentTab = useChatStore(s => s.activeAgentTab[groupJid] ?? null);
@@ -275,8 +276,14 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         handleBlocksFinalized(groupJid, data.messageId, data.blocks);
       }
     });
-    return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); };
-  }, [groupJid, handleStreamEvent, handleWsNewMessage, handleAgentStatus, clearStreaming, handleBlocksFinalized]);
+    // Agent 生命周期状态（queued / capacity_wait / starting）
+    const unsub6 = wsManager.on('runner_state', (data: any) => {
+      if (data.chatJid === groupJid) {
+        handleRunnerState(groupJid, data.state, data.detail);
+      }
+    });
+    return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); unsub6(); };
+  }, [groupJid, handleStreamEvent, handleWsNewMessage, handleAgentStatus, clearStreaming, handleBlocksFinalized, handleRunnerState]);
 
   // Agent 运行中但没有 blocks 数据时从后端补课（页面打开/重连）
   useEffect(() => {

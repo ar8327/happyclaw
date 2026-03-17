@@ -152,6 +152,8 @@ interface ChatState {
   agentWaiting: Record<string, boolean>;             // agentId → waiting for reply
   agentHasMore: Record<string, boolean>;             // agentId → has more messages
   blocksCache: Record<string, StreamingBlock[]>;     // messageId → finalized blocks
+  runnerState: Record<string, { state: string; detail?: string }>;
+  handleRunnerState: (chatJid: string, state: string, detail?: string) => void;
   loadGroups: () => Promise<void>;
   selectGroup: (jid: string) => void;
   loadMessages: (jid: string, loadMore?: boolean) => Promise<void>;
@@ -589,6 +591,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   agentWaiting: {},
   agentHasMore: {},
   blocksCache: {},
+  runnerState: {},
+
+  handleRunnerState: (chatJid, state, detail) => {
+    set((s) => ({
+      runnerState: { ...s.runnerState, [chatJid]: { state, detail } },
+    }));
+  },
 
   loadGroups: async () => {
     set({ loading: true });
@@ -1399,9 +1408,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const prev = s.streaming[chatJid] || { ...DEFAULT_STREAMING_STATE };
       const next = { ...prev };
       applyStreamEvent(event, prev, next, MAX_STREAMING_TEXT);
+      const nextRunnerState = { ...s.runnerState };
+      delete nextRunnerState[chatJid];
       return {
         waiting: { ...s.waiting, [chatJid]: true },
         streaming: { ...s.streaming, [chatJid]: next },
+        runnerState: nextRunnerState,
       };
     });
   },
@@ -1471,6 +1483,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         delete nextStreaming[chatJid];
         const nextPending = { ...s.pendingThinking };
         delete nextPending[chatJid];
+        const nextRunnerState = { ...s.runnerState };
+        delete nextRunnerState[chatJid];
 
         return {
           messages: { ...s.messages, [chatJid]: updated },
@@ -1478,6 +1492,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           streaming: nextStreaming,
           pendingThinking: nextPending,
           blocksCache: nextBlocksCache,
+          runnerState: nextRunnerState,
           ...(thinkingText ? { thinkingCache: capThinkingCache({ ...s.thinkingCache, [msg.id]: thinkingText }) } : {}),
         };
       }
@@ -1980,6 +1995,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         delete nextPendingThinking[chatJid];
       }
 
+      const nextRunnerState = { ...s.runnerState };
+      delete nextRunnerState[chatJid];
+
       // 收集该 chatJid 下仍在运行的 SDK Task
       const runningTaskIds: string[] = [];
       for (const [taskId, task] of Object.entries(s.sdkTasks)) {
@@ -2002,6 +2020,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           streaming: next,
           pendingThinking: nextPendingThinking,
           agentStreaming: nextAgentStreaming,
+          runnerState: nextRunnerState,
         };
       }
 
@@ -2009,6 +2028,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         waiting: { ...s.waiting, [chatJid]: false },
         streaming: next,
         pendingThinking: nextPendingThinking,
+        runnerState: nextRunnerState,
       };
     });
   },
