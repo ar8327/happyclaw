@@ -94,8 +94,6 @@ export function AgentDefinitionsPage() {
     setDetailError(null);
     try {
       await updateAgent(detail.id, content);
-      // updateAgent already calls loadAgents() internally to sync the list.
-      // Just update local state with the saved content — no extra fetch needed.
       setInitialContent(content);
       setNotice('已保存');
     } catch (err) {
@@ -185,7 +183,7 @@ tools:
                 新建
               </Button>
             </div>
-          </div>
+            </div>
             <div className="text-xs text-muted-foreground">
               已加载 Agent: {agents.length}
             </div>
