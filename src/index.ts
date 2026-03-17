@@ -4536,19 +4536,9 @@ async function main(): Promise<void> {
   });
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
-    getSessions: () => sessions,
-    queue,
-    onProcess: (groupJid, proc, containerName, groupFolder, displayName) =>
-      queue.registerProcess(
-        groupJid,
-        proc,
-        containerName,
-        groupFolder,
-        displayName,
-      ),
+    broadcastNewMessage,
     sendMessage,
     assistantName: ASSISTANT_NAME,
-    // dailySummaryDeps disabled — replaced by Memory Agent system
     globalSleepDeps: {
       manager: memoryAgentManager,
       queue,

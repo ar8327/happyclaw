@@ -1204,9 +1204,6 @@ async function main(): Promise<void> {
   // Build initial prompt (drain any pending IPC messages too)
   let prompt = containerInput.prompt;
   let promptImages = containerInput.images;
-  if (containerInput.isScheduledTask) {
-    prompt = `[定时任务 - 以下内容由系统自动发送，并非来自用户或群组的直接消息。需要通知用户时请使用 send_message 工具。]\n\n${prompt}`;
-  }
   const pendingDrain = drainIpcInput();
   if (pendingDrain.modeChange) {
     currentPermissionMode = pendingDrain.modeChange as PermissionMode;
@@ -1338,14 +1335,6 @@ async function main(): Promise<void> {
 
       // Emit session update so host can track it
       writeOutput({ status: 'success', result: null, newSessionId: sessionId });
-
-      // 定时任务完成后直接退出，不进入 IPC 等待循环。
-      // GroupQueue 设计上不允许用户消息注入到任务 Agent（activeRunnerIsTask 检查），
-      // 所以等在这里没有意义——等了也收不到消息，还会堵住 state.active 阻止用户消息处理。
-      if (containerInput.isScheduledTask) {
-        log('Scheduled task completed, exiting (no IPC wait)');
-        break;
-      }
 
       log('Query ended, waiting for next IPC message...');
 

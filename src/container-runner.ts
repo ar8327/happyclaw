@@ -102,7 +102,6 @@ export interface ContainerInput {
   isMain: boolean;
   isHome?: boolean;
   isAdminHome?: boolean;
-  isScheduledTask?: boolean;
   images?: Array<{ data: string; mimeType?: string }>;
   agentId?: string;
   agentName?: string;

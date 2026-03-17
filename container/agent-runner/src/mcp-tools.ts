@@ -311,15 +311,11 @@ Supports: PDF, DOC, XLS, PPT, MP4, etc. Max file size: 30MB.`,
       `Schedule a recurring or one-time task.
 
 EXECUTION TYPE:
-\u2022 "agent" (default): Task runs as a full Claude Agent with access to all tools. Consumes API tokens.
+\u2022 "agent" (default): When triggered, a [定时任务] message is sent in the current conversation. You will process it in your normal conversation context with full chat history and all tools available.
 \u2022 "script" (admin only): Task runs a shell command directly on the host. Zero API token cost. Use for deterministic tasks like health checks, data collection, cURL calls, or cron-like scripts.
 
-CONTEXT MODE (agent mode only) - Choose based on task type:
-\u2022 "group": Task runs in the group's conversation context, with access to chat history.
-\u2022 "isolated": Task runs in a fresh session with no conversation history.
-
-MESSAGING BEHAVIOR - Task output is NOT automatically sent to users.
-\u2022 Agent mode: use send_message tool with channel parameter to notify users. stdout only appears in Web UI.
+MESSAGING BEHAVIOR:
+\u2022 Agent mode: You receive the task as a message in the conversation. Use send_message with channel parameter to notify IM users. Your stdout output only appears in Web UI.
 \u2022 Script mode: stdout is sent as the result. stderr is included on failure.
 
 SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
@@ -361,7 +357,7 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
           .enum(['group', 'isolated'])
           .default('group')
           .describe(
-            '(agent mode only) group=runs with chat history, isolated=fresh session',
+            'Deprecated. Always uses group mode (task runs in conversation context).',
           ),
         target_group_jid: z
           .string()

@@ -48,7 +48,7 @@ export function CreateTaskForm({ groups, onSubmit, onClose, isAdmin }: CreateTas
     prompt: '',
     scheduleType: 'cron' as 'cron' | 'interval' | 'once',
     scheduleValue: '',
-    contextMode: 'isolated' as 'group' | 'isolated',
+    contextMode: 'group' as 'group' | 'isolated',
     executionType: 'agent' as 'agent' | 'script',
     scriptCommand: '',
   });
@@ -353,35 +353,6 @@ export function CreateTaskForm({ groups, onSubmit, onClose, isAdmin }: CreateTas
               <p className="mt-1 text-sm text-red-600">{errors.scheduleValue}</p>
             )}
           </div>
-
-          {/* Context Mode (agent mode only) */}
-          {!isScript && (
-            <div>
-              <label className="block text-sm font-medium text-foreground mb-2">
-                上下文模式
-              </label>
-              <Select
-                value={formData.contextMode}
-                onValueChange={(value) =>
-                  setFormData({
-                    ...formData,
-                    contextMode: value as 'group' | 'isolated',
-                  })
-                }
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="isolated">独立执行（推荐）</SelectItem>
-                  <SelectItem value="group">共享群组上下文</SelectItem>
-                </SelectContent>
-              </Select>
-              <p className="mt-1 text-xs text-slate-500">
-                共享群组上下文会复用该群组会话，独立执行每次使用隔离会话
-              </p>
-            </div>
-          )}
 
           {/* Actions */}
           <div className="flex items-center justify-end gap-3 pt-4 border-t border-border">

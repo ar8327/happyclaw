@@ -25,8 +25,6 @@ const BASE_RETRY_MS = 5000;
 
 interface GroupState {
   active: boolean;
-  /** True when the active runner is executing a scheduled task (not user messages). */
-  activeRunnerIsTask: boolean;
   pendingMessages: boolean;
   pendingTasks: QueuedTask[];
   process: ChildProcess | null;
@@ -65,7 +63,6 @@ export class GroupQueue {
     if (!state) {
       state = {
         active: false,
-        activeRunnerIsTask: false,
         pendingMessages: false,
         pendingTasks: [],
         process: null,
@@ -178,16 +175,6 @@ export class GroupQueue {
     return state?.active === true;
   }
 
-  /**
-   * Returns true if the active runner for this group (or its serialization
-   * sibling) is currently executing a scheduled task rather than user messages.
-   * Used by the message loop to avoid prematurely interrupting task containers.
-   */
-  isActiveRunnerTask(groupJid: string): boolean {
-    const state = this.resolveActiveState(groupJid);
-    return state?.activeRunnerIsTask === true;
-  }
-
   enqueueMessageCheck(groupJid: string): void {
     if (this.shuttingDown) return;
 
@@ -224,6 +211,10 @@ export class GroupQueue {
     this.runForGroup(groupJid, 'messages');
   }
 
+  /**
+   * Enqueue an arbitrary async function to run with queue serialization.
+   * Used for sub-agent conversations and terminal warmup.
+   */
   enqueueTask(groupJid: string, taskId: string, fn: () => Promise<void>): void {
     if (this.shuttingDown) return;
 
@@ -247,19 +238,8 @@ export class GroupQueue {
     }
 
     if (!this.hasCapacityFor(groupJid)) {
-      const isHost = this.isHostMode(groupJid);
       state.pendingTasks.push({ id: taskId, groupJid, fn });
       this.waitingGroups.add(groupJid);
-      logger.debug(
-        {
-          groupJid,
-          taskId,
-          activeContainerCount: this.activeContainerCount,
-          activeHostProcessCount: this.activeHostProcessCount,
-          mode: isHost ? 'host' : 'container',
-        },
-        'At concurrency limit, task queued',
-      );
       return;
     }
 
@@ -321,21 +301,6 @@ export class GroupQueue {
   ): SendMessageResult {
     const state = this.resolveActiveState(groupJid);
     if (!state) return 'no_active';
-
-    // If the active runner is a scheduled task (not a user-message handler),
-    // do NOT pipe user messages into it.  The task container has no knowledge
-    // of the user conversation context, so any IPC message injected here would
-    // be silently consumed (or confusingly processed) by the task agent and the
-    // reply would never reach the user.  Returning 'no_active' causes the
-    // caller to enqueue a fresh message-processing run that will execute once
-    // the task finishes.  See GitHub issue riba2534/happyclaw#151.
-    if (state.activeRunnerIsTask) {
-      logger.debug(
-        { groupJid },
-        'Active runner is a scheduled task; deferring user message until task completes',
-      );
-      return 'no_active';
-    }
 
     if (intent === 'stop') {
       this.interruptQuery(groupJid);
@@ -675,7 +640,6 @@ export class GroupQueue {
     const state = this.getGroup(groupJid);
     const isHostMode = this.isHostMode(groupJid);
     state.active = true;
-    state.activeRunnerIsTask = false;
     state.pendingMessages = false;
     // Pre-set groupFolder so resolveActiveState() works immediately,
     // before registerProcess() is called after the agent process spawns.
@@ -744,7 +708,6 @@ export class GroupQueue {
     const state = this.getGroup(groupJid);
     const isHostMode = this.isHostMode(groupJid);
     state.active = true;
-    state.activeRunnerIsTask = true;
     state.groupFolder = this.getSerializationKey(groupJid);
     this.waitingGroups.delete(groupJid);
     this.activeCount++;
@@ -770,7 +733,6 @@ export class GroupQueue {
       logger.error({ groupJid, taskId: task.id, err }, 'Error running task');
     } finally {
       state.active = false;
-      state.activeRunnerIsTask = false;
       state.process = null;
       state.containerName = null;
       state.displayName = null;
@@ -857,7 +819,7 @@ export class GroupQueue {
       return;
     }
 
-    // Tasks first (they won't be re-discovered from SQLite like messages)
+    // Queued tasks first (they won't be re-discovered like messages)
     if (state.pendingTasks.length > 0) {
       const task = state.pendingTasks.shift()!;
       this.runTask(groupJid, task);
@@ -890,7 +852,6 @@ export class GroupQueue {
       this.waitingGroups.delete(jid);
       const state = this.getGroup(jid);
 
-      // Prioritize tasks over messages
       if (state.pendingTasks.length > 0) {
         const task = state.pendingTasks.shift()!;
         this.runTask(jid, task);

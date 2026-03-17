@@ -19,7 +19,6 @@ export interface ContainerInput {
   isHome?: boolean;
   /** Whether this is the admin's home container (full privileges). */
   isAdminHome?: boolean;
-  isScheduledTask?: boolean;
   images?: Array<{ data: string; mimeType?: string }>;
   agentId?: string;
   agentName?: string;

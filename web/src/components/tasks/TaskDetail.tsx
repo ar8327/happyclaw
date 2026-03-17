@@ -101,19 +101,6 @@ export function TaskDetail({ task }: TaskDetailProps) {
           </div>
         )}
 
-        {task.execution_type !== 'script' && (
-          <div>
-            <div className="text-xs text-slate-500 mb-1">上下文模式</div>
-            <div className="text-sm text-foreground">
-              {task.context_mode === 'group'
-                ? '共享群组上下文'
-                : task.context_mode === 'isolated'
-                  ? '独立执行'
-                  : task.context_mode}
-            </div>
-          </div>
-        )}
-
         <div>
           <div className="text-xs text-slate-500 mb-1">创建时间</div>
           <div className="text-sm text-foreground">
