@@ -1037,11 +1037,6 @@ async function runQuery(
     }
 
     if (message.type === 'result') {
-      // Always stop IPC polling to avoid push-after-close crashes on ProcessTransport.
-      // Remaining IPC messages stay in the filesystem and will be picked up by
-      // the main loop's waitForIpcMessage().
-      ipcPolling = false;
-
       resultCount++;
       const textResult = 'result' in message ? (message as { result?: string }).result : null;
       const resultSubtype = message.subtype;
@@ -1055,6 +1050,7 @@ async function runQuery(
       if (typeof resultSubtype === 'string' && (resultSubtype === 'error_during_execution' || resultSubtype.startsWith('error'))) {
         if (queryActivityTimer) clearTimeout(queryActivityTimer);
         waitingForBackgroundTasks = false;
+        ipcPolling = false;
         stream.end();
         if (!newSessionId) {
           log(`Session resume failed (no init): ${resultSubtype}`);
@@ -1070,6 +1066,7 @@ async function runQuery(
       if (textResult && isContextOverflowError(textResult)) {
         if (queryActivityTimer) clearTimeout(queryActivityTimer);
         waitingForBackgroundTasks = false;
+        ipcPolling = false;
         stream.end();
         log(`Context overflow detected in result: ${textResult.slice(0, 100)}`);
         processor.resetFullTextAccumulator();
@@ -1078,6 +1075,7 @@ async function runQuery(
       if (textResult && isUnrecoverableTranscriptError(textResult)) {
         if (queryActivityTimer) clearTimeout(queryActivityTimer);
         waitingForBackgroundTasks = false;
+        ipcPolling = false;
         stream.end();
         log(`Unrecoverable transcript error in result: ${textResult.slice(0, 200)}`);
         processor.resetFullTextAccumulator();
@@ -1090,13 +1088,18 @@ async function runQuery(
         // Background tasks still running — keep the for-await loop alive so we
         // receive task_notification messages.  The SDK will re-invoke the model
         // when a background task completes, producing another result.
+        // IPC polling stays active so new user messages and _close sentinels
+        // can still be received while waiting for background tasks.
         log(`Result received but ${processor.pendingBackgroundTaskCount} background task(s) pending, keeping query alive`);
         waitingForBackgroundTasks = true;
         resetQueryActivityTimer();
       } else {
-        // No background tasks — safe to end the stream.
+        // No background tasks — safe to end the stream and stop IPC polling.
+        // IPC polling must stop before stream.end() to avoid push-after-close
+        // crashes on ProcessTransport (see commit c6b5086).
         if (queryActivityTimer) clearTimeout(queryActivityTimer);
         waitingForBackgroundTasks = false;
+        ipcPolling = false;
         stream.end();
       }
 
