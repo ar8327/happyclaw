@@ -1066,7 +1066,17 @@ async function runQuery(
     processor.processSubAgentMessage(message as any);
 
     if (message.type === 'assistant' && 'uuid' in message) {
-      lastAssistantUuid = (message as { uuid: string }).uuid;
+      // Only update lastAssistantUuid for assistant messages that contain text
+      // (not tool_use-only messages). Resuming at a tool_use assistant node
+      // causes the subsequent user(tool_result) to be missing, triggering
+      // ensureToolResultPairing repairs and potential session instability.
+      const assistantContent = (message as any).message?.content;
+      const hasTextContent = Array.isArray(assistantContent)
+        ? assistantContent.some((b: { type: string }) => b.type === 'text')
+        : typeof assistantContent === 'string';
+      if (hasTextContent) {
+        lastAssistantUuid = (message as { uuid: string }).uuid;
+      }
       processor.processAssistantMessage(message as any);
     }
 
@@ -1352,13 +1362,17 @@ async function main(): Promise<void> {
         resumeAt = queryResult.lastAssistantUuid;
       }
 
+      // Rebuild MCP server config between queries to prevent stale transport.
+      // The SDK's createSdkMcpServer transport can become disconnected when the
+      // internal CLI process exits between query turns. Without rebuilding, the
+      // next query may get "Stream closed" errors on MCP tool calls.
+      mcpServerConfig = buildMcpServerConfig();
+
       // Session resume 失败（SDK 无法恢复旧会话）：清除 session，以新会话重试
       if (queryResult.sessionResumeFailed) {
         log(`Session resume failed, retrying with fresh session (old: ${sessionId})`);
         sessionId = undefined;
         resumeAt = undefined;
-        // Rebuild MCP server to avoid "Already connected to a transport" error
-        mcpServerConfig = buildMcpServerConfig();
         continue;
       }
 
