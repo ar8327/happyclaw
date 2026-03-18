@@ -316,6 +316,10 @@ function buildVolumeMounts(
   const containerOverride = getContainerEnvConfig(group.folder);
   const envLines = buildContainerEnvLines(globalConfig, containerOverride);
 
+  // Agent-browser isolation: each workspace gets its own browser session + profile
+  envLines.push(`AGENT_BROWSER_SESSION=${group.folder}`);
+  envLines.push(`AGENT_BROWSER_PROFILE=/workspace/group/.agent-browser-profile`);
+
   // Memory Agent env vars (for Docker containers)
   if (ownerId) {
     const token = getInternalToken();
@@ -951,6 +955,10 @@ export async function runHostAgent(
     const settings = getSystemSettings();
     hostEnv['HAPPYCLAW_MEMORY_QUERY_TIMEOUT'] = String(settings.memoryQueryTimeout);
   }
+
+  // Agent-browser isolation: each workspace gets its own browser session + profile
+  hostEnv['AGENT_BROWSER_SESSION'] = group.folder;
+  hostEnv['AGENT_BROWSER_PROFILE'] = path.join(groupDir, '.agent-browser-profile');
 
   // 让 SDK 捕获 CLI 的 stderr 输出，便于排查启动失败
   hostEnv['DEBUG_CLAUDE_AGENT_SDK'] = '1';

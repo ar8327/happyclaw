@@ -916,12 +916,10 @@ async function runQuery(
     backgroundTaskGuidelines,
   ].filter(Boolean).join('\n');
 
-  // Home containers (admin & member) can access global and memory directories.
-  // Non-home containers only access memory directory; global CLAUDE.md is NOT
-  // injected into systemPrompt but remains accessible via filesystem (readonly mount).
-  const extraDirs = isHome
-    ? [WORKSPACE_GLOBAL, WORKSPACE_MEMORY]
-    : [WORKSPACE_MEMORY];
+  // All containers can access global and memory directories via additionalDirectories.
+  // Home containers additionally inject global CLAUDE.md into systemPrompt for immediate context.
+  // Non-home containers discover it via filesystem (readonly mount) without systemPrompt injection.
+  const extraDirs = [WORKSPACE_GLOBAL, WORKSPACE_MEMORY];
 
   try {
     const q = query({

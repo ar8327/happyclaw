@@ -102,18 +102,24 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
           .describe('Optional caption text to send with the image'),
       },
       async (args) => {
-        // Resolve path relative to workspace
+        // Resolve path relative to workspace (try group first, then global)
         const absPath = path.isAbsolute(args.file_path)
           ? args.file_path
           : path.join(ctx.workspaceGroup, args.file_path);
 
-        // Security: ensure path is within workspace
-        // Use path.sep suffix to prevent prefix-bypass (e.g. /ws/group1 matching /ws/group10/evil.png)
+        // Security: ensure path is within workspace group or global directory
         const resolved = path.resolve(absPath);
-        const safeRoot = ctx.workspaceGroup.endsWith(path.sep)
+        const groupRoot = ctx.workspaceGroup.endsWith(path.sep)
           ? ctx.workspaceGroup
           : ctx.workspaceGroup + path.sep;
-        if (resolved !== ctx.workspaceGroup && !resolved.startsWith(safeRoot)) {
+        const globalRoot = ctx.workspaceGlobal
+          ? (ctx.workspaceGlobal.endsWith(path.sep)
+              ? ctx.workspaceGlobal
+              : ctx.workspaceGlobal + path.sep)
+          : null;
+        const inGroup = resolved === ctx.workspaceGroup || resolved.startsWith(groupRoot);
+        const inGlobal = globalRoot && (resolved === ctx.workspaceGlobal || resolved.startsWith(globalRoot));
+        if (!inGroup && !inGlobal) {
           return {
             content: [
               {
@@ -228,20 +234,24 @@ Supports: PDF, DOC, XLS, PPT, MP4, etc. Max file size: 30MB.`,
         let relativePath: string;
 
         if (path.isAbsolute(args.filePath)) {
-          // Absolute path provided - validate and convert to relative
+          // Absolute path provided - validate within workspace group or global
           resolvedPath = path.resolve(args.filePath);
-          const safeRoot = ctx.workspaceGroup.endsWith(path.sep)
+          const groupRoot = ctx.workspaceGroup.endsWith(path.sep)
             ? ctx.workspaceGroup
             : ctx.workspaceGroup + path.sep;
-          if (
-            resolvedPath !== ctx.workspaceGroup &&
-            !resolvedPath.startsWith(safeRoot)
-          ) {
+          const globalRoot = ctx.workspaceGlobal
+            ? (ctx.workspaceGlobal.endsWith(path.sep)
+                ? ctx.workspaceGlobal
+                : ctx.workspaceGlobal + path.sep)
+            : null;
+          const inGroup = resolvedPath === ctx.workspaceGroup || resolvedPath.startsWith(groupRoot);
+          const inGlobal = globalRoot && (resolvedPath === ctx.workspaceGlobal || resolvedPath.startsWith(globalRoot));
+          if (!inGroup && !inGlobal) {
             return {
               content: [
                 {
                   type: 'text' as const,
-                  text: 'Error: file must be within the workspace/group directory.',
+                  text: 'Error: file must be within the workspace directory.',
                 },
               ],
               isError: true,
@@ -663,6 +673,221 @@ Use available_groups.json to find the JID for a group. The folder name should be
   // --- Memory Agent tools ---
   const API_URL = process.env.HAPPYCLAW_API_URL || 'http://localhost:3000';
   const API_TOKEN = process.env.HAPPYCLAW_INTERNAL_TOKEN || '';
+
+  // --- Feishu document reading tool ---
+  if (ctx.userId) {
+    tools.push(
+      tool(
+        'read_feishu_document',
+        '读取飞书文档或 Wiki 页面的内容。支持 feishu.cn 和 larkoffice.com 的 wiki/docx 链接。' +
+          '需要用户已在设置中完成飞书 OAuth 授权。',
+        {
+          url: z
+            .string()
+            .describe(
+              '飞书文档 URL（如 https://xxx.feishu.cn/wiki/xxx 或 https://xxx.larkoffice.com/wiki/xxx）',
+            ),
+        },
+        async (args) => {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 30000);
+          try {
+            const res = await fetch(
+              `${API_URL}/api/internal/feishu/read-document`,
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${API_TOKEN}`,
+                },
+                body: JSON.stringify({
+                  userId: ctx.userId,
+                  url: args.url,
+                }),
+                signal: controller.signal,
+              },
+            );
+            clearTimeout(timeout);
+
+            if (!res.ok) {
+              const errBody = await res.json().catch(() => ({}));
+              const errMsg =
+                (errBody as { error?: string }).error || '读取文档失败';
+              const code = (errBody as { code?: string }).code;
+              if (code === 'OAUTH_REQUIRED') {
+                return {
+                  content: [
+                    {
+                      type: 'text' as const,
+                      text: '需要先完成飞书 OAuth 授权才能读取文档。请让用户在 Web 设置页面中完成「飞书文档授权」。',
+                    },
+                  ],
+                  isError: true,
+                };
+              }
+              return {
+                content: [{ type: 'text' as const, text: errMsg }],
+                isError: true,
+              };
+            }
+
+            const data = (await res.json()) as {
+              title?: string;
+              content?: string;
+            };
+            const title = data.title ? `# ${data.title}\n\n` : '';
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: `${title}${data.content || '（文档内容为空）'}`,
+                },
+              ],
+            };
+          } catch (err) {
+            clearTimeout(timeout);
+            const errMsg =
+              err instanceof Error && err.name === 'AbortError'
+                ? '读取飞书文档超时'
+                : '无法连接到飞书文档服务';
+            return {
+              content: [{ type: 'text' as const, text: errMsg }],
+              isError: true,
+            };
+          }
+        },
+      ),
+    );
+  }
+
+  // --- Feishu document search tool ---
+  if (ctx.userId) {
+    tools.push(
+      tool(
+        'search_feishu_docs',
+        '搜索飞书文档。根据关键词搜索云文档和 Wiki 页面，返回匹配的文档列表（标题、链接、预览）。' +
+          '需要用户已在设置中完成飞书 OAuth 授权（含搜索权限）。' +
+          '搜索结果中的文档可以用 read_feishu_document 工具进一步读取内容。',
+        {
+          query: z
+            .string()
+            .min(1)
+            .describe('搜索关键词（不能为空）'),
+          count: z
+            .number()
+            .min(1)
+            .max(50)
+            .optional()
+            .describe('返回结果数量（默认 20，最大 50）'),
+          search_wiki: z
+            .boolean()
+            .optional()
+            .describe('是否同时搜索 Wiki（默认 true）'),
+          doc_types: z
+            .array(z.enum(['doc', 'docx', 'sheet', 'bitable', 'mindnote', 'wiki', 'slide']))
+            .optional()
+            .describe('筛选文档类型'),
+        },
+        async (args) => {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 30000);
+          try {
+            const res = await fetch(
+              `${API_URL}/api/internal/feishu/search`,
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${API_TOKEN}`,
+                },
+                body: JSON.stringify({
+                  userId: ctx.userId,
+                  query: args.query,
+                  count: args.count || 20,
+                  searchWiki: args.search_wiki !== false,
+                  docTypes: args.doc_types,
+                }),
+                signal: controller.signal,
+              },
+            );
+            clearTimeout(timeout);
+
+            if (!res.ok) {
+              const errBody = await res.json().catch(() => ({}));
+              const errMsg =
+                (errBody as { error?: string }).error || '搜索飞书文档失败';
+              const code = (errBody as { code?: string }).code;
+              if (code === 'OAUTH_REQUIRED') {
+                return {
+                  content: [
+                    {
+                      type: 'text' as const,
+                      text: '需要先完成飞书 OAuth 授权才能搜索文档。请让用户在 Web 设置页面中完成「飞书文档授权」（需包含搜索权限）。',
+                    },
+                  ],
+                  isError: true,
+                };
+              }
+              return {
+                content: [{ type: 'text' as const, text: errMsg }],
+                isError: true,
+              };
+            }
+
+            const data = (await res.json()) as {
+              results?: Array<{
+                title?: string;
+                url?: string;
+                docType?: string;
+                preview?: string;
+                updateTime?: string;
+              }>;
+              hasMore?: boolean;
+              total?: number;
+            };
+
+            const results = data.results || [];
+            if (results.length === 0) {
+              return {
+                content: [
+                  {
+                    type: 'text' as const,
+                    text: `没有找到与「${args.query}」相关的飞书文档。`,
+                  },
+                ],
+              };
+            }
+
+            const formatted = results
+              .map((r, i) => {
+                const parts = [`${i + 1}. **${r.title || '无标题'}**`];
+                if (r.docType) parts.push(`   类型: ${r.docType}`);
+                if (r.url) parts.push(`   链接: ${r.url}`);
+                if (r.preview) parts.push(`   预览: ${r.preview}`);
+                if (r.updateTime) parts.push(`   更新: ${r.updateTime}`);
+                return parts.join('\n');
+              })
+              .join('\n\n');
+
+            const summary = `找到 ${data.total || results.length} 个结果${data.hasMore ? '（还有更多）' : ''}：\n\n${formatted}`;
+            return {
+              content: [{ type: 'text' as const, text: summary }],
+            };
+          } catch (err) {
+            clearTimeout(timeout);
+            const errMsg =
+              err instanceof Error && err.name === 'AbortError'
+                ? '搜索飞书文档超时'
+                : '无法连接到飞书搜索服务';
+            return {
+              content: [{ type: 'text' as const, text: errMsg }],
+              isError: true,
+            };
+          }
+        },
+      ),
+    );
+  }
 
   if (ctx.userId) {
     /** Shared HTTP helper for Memory Agent endpoints */
