@@ -59,9 +59,11 @@ function parseLogHeader(
     timestamp: '',
     duration: 0,
     exitCode: null,
-    filePrefix: filename.startsWith('host') ? 'host'
-      : filename.startsWith('memory') ? 'memory'
-      : 'container',
+    filePrefix: filename.startsWith('host')
+      ? 'host'
+      : filename.startsWith('memory')
+        ? 'memory'
+        : 'container',
     fileSize,
   };
 
@@ -128,7 +130,10 @@ function parseLogSections(content: string): LogSection[] {
 
   for (let i = 0; i < markers.length; i++) {
     const start = markers[i].start;
-    const end = i + 1 < markers.length ? markers[i + 1].start - markers[i + 1].name.length - 7 : content.length;
+    const end =
+      i + 1 < markers.length
+        ? markers[i + 1].start - markers[i + 1].name.length - 7
+        : content.length;
     let sectionContent = content.slice(start, end).trim();
     if (sectionContent.length > SECTION_CONTENT_LIMIT) {
       sectionContent =

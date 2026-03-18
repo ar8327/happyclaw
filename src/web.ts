@@ -48,6 +48,7 @@ import browseRoutes from './routes/browse.js';
 import agentRoutes from './routes/agents.js';
 import mcpServersRoutes from './routes/mcp-servers.js';
 import logsRoutes from './routes/logs.js';
+import turnsRoutes from './routes/turns.js';
 import agentDefinitionsRoutes from './routes/agent-definitions.js';
 import memoryAgentInternalRoutes from './routes/memory-agent.js';
 import feishuApiRoutes, { injectFeishuApiDeps } from './routes/feishu-api.js';
@@ -171,6 +172,7 @@ app.route('/api/browse', browseRoutes);
 app.route('/api/mcp-servers', mcpServersRoutes);
 app.route('/api/groups', agentRoutes); // Agent routes under /api/groups/:jid/agents
 app.route('/api/logs', logsRoutes);
+app.route('/api/groups', turnsRoutes); // Turn routes under /api/groups/:jid/turns
 app.route('/api/agent-definitions', agentDefinitionsRoutes);
 app.route('/api', monitorRoutes);
 app.route('/api/usage', usageRoutes);
@@ -266,7 +268,7 @@ async function handleWebUserMessage(
     normalizedAttachments.length > 0
       ? JSON.stringify(normalizedAttachments)
       : undefined;
-  storeMessageDirect(
+  const msgRowid = storeMessageDirect(
     messageId,
     chatJid,
     userId,
@@ -314,8 +316,8 @@ async function handleWebUserMessage(
           timestamp: sysTimestamp,
           is_from_me: true,
         });
-        deps.setLastAgentTimestamp(chatJid, { timestamp, id: messageId });
-        deps.advanceGlobalCursor({ timestamp, id: messageId });
+        deps.setLastAgentTimestamp(chatJid, { rowid: msgRowid });
+        deps.advanceGlobalCursor({ rowid: msgRowid });
         return { ok: true, messageId, timestamp };
       }
     }
@@ -367,9 +369,9 @@ async function handleWebUserMessage(
   // Only advance per-group cursor when we piped directly into a running container.
   // For queued processing, processGroupMessages must still see this message from DB.
   if (pipedToActive) {
-    deps.setLastAgentTimestamp(chatJid, { timestamp, id: messageId });
+    deps.setLastAgentTimestamp(chatJid, { rowid: msgRowid });
   }
-  deps.advanceGlobalCursor({ timestamp, id: messageId });
+  deps.advanceGlobalCursor({ rowid: msgRowid });
   return { ok: true, messageId, timestamp };
 }
 
@@ -689,9 +691,14 @@ function setupWebSocket(server: any): WebSocketServer {
             if (targetGroup) {
               try {
                 // Export transcripts before reset (for memory system)
-                await deps.triggerSessionWrapup?.(targetGroup.folder).catch((err) => {
-                  logger.warn({ chatJid, err }, 'Pre-clear transcript export failed (non-blocking)');
-                });
+                await deps
+                  .triggerSessionWrapup?.(targetGroup.folder)
+                  .catch((err) => {
+                    logger.warn(
+                      { chatJid, err },
+                      'Pre-clear transcript export failed (non-blocking)',
+                    );
+                  });
                 await executeSessionReset(chatJid, targetGroup.folder, {
                   queue: deps.queue,
                   sessions: deps.getSessions(),
@@ -1254,6 +1261,27 @@ export function broadcastStreamEvent(
   const msg: WsMessageOut = agentId
     ? { type: 'stream_event', chatJid: jid, event, agentId }
     : { type: 'stream_event', chatJid: jid, event };
+  safeBroadcast(msg, isHostGroupJid(chatJid), allowedUserIds);
+}
+
+export function broadcastRunnerState(
+  chatJid: string,
+  state: string,
+  detail?: string,
+): void {
+  const jid = normalizeHomeJid(chatJid);
+  const allowedUserIds = getGroupAllowedUserIds(chatJid);
+  safeBroadcast(
+    { type: 'runner_state', chatJid: jid, state, detail } as WsMessageOut,
+    isHostGroupJid(chatJid),
+    allowedUserIds,
+  );
+}
+
+export function broadcastTurnEvent(chatJid: string, event: StreamEvent): void {
+  const jid = normalizeHomeJid(chatJid);
+  const allowedUserIds = getGroupAllowedUserIds(chatJid);
+  const msg: WsMessageOut = { type: 'stream_event', chatJid: jid, event };
   safeBroadcast(msg, isHostGroupJid(chatJid), allowedUserIds);
 }
 

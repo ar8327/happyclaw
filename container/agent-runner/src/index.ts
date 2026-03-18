@@ -46,6 +46,7 @@ const CLAUDE_MODEL = process.env.HAPPYCLAW_MODEL || process.env.ANTHROPIC_MODEL 
 
 const IPC_INPUT_DIR = path.join(WORKSPACE_IPC, 'input');
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
+const IPC_INPUT_DRAIN_SENTINEL = path.join(IPC_INPUT_DIR, '_drain');
 const IPC_POLL_MS = 500;
 
 // Track recently seen IM channels from IPC messages (non-web sources)
@@ -465,6 +466,18 @@ function shouldClose(): boolean {
   return false;
 }
 
+/**
+ * Check for _drain sentinel.
+ * Unlike _close (immediate exit), _drain means "finish current query then exit".
+ */
+function shouldDrain(): boolean {
+  if (fs.existsSync(IPC_INPUT_DRAIN_SENTINEL)) {
+    try { fs.unlinkSync(IPC_INPUT_DRAIN_SENTINEL); } catch { /* ignore */ }
+    return true;
+  }
+  return false;
+}
+
 const IPC_INPUT_INTERRUPT_SENTINEL = path.join(IPC_INPUT_DIR, '_interrupt');
 const INTERRUPT_GRACE_WINDOW_MS = 10_000;
 let lastInterruptRequestedAt = 0;
@@ -546,14 +559,33 @@ function drainIpcInput(): IpcDrainResult {
  */
 function waitForIpcMessage(): Promise<{ text: string; images?: Array<{ data: string; mimeType?: string }> } | null> {
   return new Promise((resolve) => {
+    let pollCount = 0;
+    const HEARTBEAT_INTERVAL = 120; // Log every ~60 seconds (120 polls * 500ms)
     const poll = () => {
+      pollCount++;
       if (shouldClose()) {
         resolve(null);
         return;
       }
+      if (shouldDrain()) {
+        log('Drain sentinel received while idle, exiting for turn boundary');
+        writeOutput({ status: 'drained', result: null });
+        // Must self-exit: unlike _close (host sends SIGTERM), _drain expects
+        // the process to terminate. SDK/MCP resources keep the event loop alive.
+        process.exit(0);
+      }
       if (shouldInterrupt()) {
         log('Interrupt sentinel received while idle, ignoring');
         clearInterruptRequested();
+      }
+      // Periodic heartbeat to detect stuck polling
+      if (pollCount % HEARTBEAT_INTERVAL === 0) {
+        try {
+          const files = fs.readdirSync(IPC_INPUT_DIR);
+          log(`Idle heartbeat: ${Math.round(pollCount * IPC_POLL_MS / 1000)}s waiting, IPC dir has ${files.length} files: [${files.join(', ')}]`);
+        } catch {
+          log(`Idle heartbeat: ${Math.round(pollCount * IPC_POLL_MS / 1000)}s waiting, IPC dir read failed`);
+        }
       }
       const { messages, modeChange } = drainIpcInput();
       if (modeChange) {
@@ -718,7 +750,7 @@ async function runQuery(
   allowedTools: string[] = DEFAULT_ALLOWED_TOOLS,
   disallowedTools?: string[],
   images?: Array<{ data: string; mimeType?: string }>,
-): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean; contextOverflow?: boolean; unrecoverableTranscriptError?: boolean; interruptedDuringQuery: boolean; sessionResumeFailed?: boolean }> {
+): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean; contextOverflow?: boolean; unrecoverableTranscriptError?: boolean; interruptedDuringQuery: boolean; sessionResumeFailed?: boolean; drainDetectedDuringQuery?: boolean }> {
   const stream = new MessageStream();
   // Track IM channels from initial prompt
   extractSourceChannels(prompt);
@@ -736,6 +768,10 @@ async function runQuery(
   let ipcPolling = true;
   let closedDuringQuery = false;
   let interruptedDuringQuery = false;
+  // When true, the main result has been emitted but we're waiting for background
+  // tasks to finish.  IPC polling is stopped (to avoid push-after-close crashes)
+  // but the for-await loop stays alive to receive task_notifications.
+  let waitingForBackgroundTasks = false;
 
   // Query activity watchdog: if the SDK for-await loop yields no events for
   // QUERY_ACTIVITY_TIMEOUT_MS, the API call is likely hung.  Force an interrupt
@@ -747,7 +783,7 @@ async function runQuery(
     lastEventAt = Date.now();
     if (queryActivityTimer) clearTimeout(queryActivityTimer);
     queryActivityTimer = setTimeout(() => {
-      if (!ipcPolling) return; // query already ended
+      if (!ipcPolling && !waitingForBackgroundTasks) return; // query already ended
       // Don't interrupt while background sub-agents are still running —
       // they won't produce events on the main iterator but are doing real work.
       if (processor.pendingBackgroundTaskCount > 0) {
@@ -764,6 +800,7 @@ async function runQuery(
       }
       log(`Query activity timeout: no SDK events for ${QUERY_ACTIVITY_TIMEOUT_MS}ms, forcing interrupt`);
       interruptedDuringQuery = true;
+      waitingForBackgroundTasks = false;
       queryRef?.interrupt().catch((err: unknown) => log(`Activity timeout interrupt failed: ${err}`));
       stream.end();
       ipcPolling = false;
@@ -772,6 +809,11 @@ async function runQuery(
   resetQueryActivityTimer();
   // queryRef is set just before the for-await loop so pollIpcDuringQuery can call interrupt()
   let queryRef: { interrupt(): Promise<void>; setPermissionMode(mode: PermissionMode): Promise<void> } | null = null;
+  // Track drain detection during query: if _drain appears while the SDK query
+  // is still running, we set this flag and let the query finish naturally.
+  // The main loop will check this flag after the for-await loop exits.
+  let drainDetectedDuringQuery = false;
+
   const pollIpcDuringQuery = () => {
     if (!ipcPolling) return;
     if (shouldClose()) {
@@ -780,6 +822,14 @@ async function runQuery(
       stream.end();
       ipcPolling = false;
       return;
+    }
+    // Check for _drain during query: consume the sentinel immediately so it
+    // isn't lost to a filesystem race, but let the current query finish.
+    if (!drainDetectedDuringQuery && shouldDrain()) {
+      log('Drain sentinel detected during query, will exit after query completes');
+      drainDetectedDuringQuery = true;
+      // Don't end the stream or stop polling — let the query finish naturally.
+      // The flag is checked in the main loop after the for-await exits.
     }
     if (shouldInterrupt()) {
       log('Interrupt sentinel detected, interrupting current query');
@@ -875,6 +925,9 @@ async function runQuery(
     '这样用户无需等待，可以继续与你交流其他事项。',
     '任务结束时你会自动收到通知，届时使用 send_message 向用户汇报即可。',
     '告知用户：「已为您在后台启动该任务，完成后我会第一时间反馈。现在有其他问题也可以随时问我。」',
+    '',
+    '**重要**：启动后台任务后，不要使用 TaskOutput 去阻塞等待结果——系统会自动通知你。',
+    '你可以继续回答用户的其他问题，当后台任务完成时，你会收到通知并可以立即汇报结果。',
   ].join('\n');
 
   // Interaction guidelines to prevent the agent from confusing MCP tool
@@ -990,6 +1043,25 @@ async function runQuery(
       log(`[msg #${messageCount}] type=${msgType}${msgParentToolUseId ? ` parent=${msgParentToolUseId.slice(0, 12)}` : ''}`);
     }
 
+    // ── Extract SDK task_id from background Task tool_results ──
+    // The SDK assigns its own short-hash task_id (e.g. "a68ac00") to background tasks,
+    // which differs from the tool_use block's id. We parse the tool_result to build
+    // a mapping so processTaskNotification can resolve IDs correctly.
+    if (message.type === 'user' && !msgParentToolUseId) {
+      const userContent = (message as any).message?.content;
+      if (Array.isArray(userContent)) {
+        for (const block of userContent) {
+          if (block.type === 'tool_result' && block.tool_use_id && Array.isArray(block.content)) {
+            const text = block.content.map((b: { text?: string }) => b.text || '').join('');
+            const agentIdMatch = text.match(/agentId:\s*([a-f0-9]+)/);
+            if (agentIdMatch && processor.isBackgroundTask(block.tool_use_id)) {
+              processor.registerSdkTaskId(agentIdMatch[1], block.tool_use_id);
+            }
+          }
+        }
+      }
+    }
+
     // ── 子 Agent 消息转 StreamEvent ──
     processor.processSubAgentMessage(message as any);
 
@@ -1022,7 +1094,7 @@ async function runQuery(
     }
 
     if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
-      const tn = message as unknown as { task_id: string; status: string; summary: string };
+      const tn = message as unknown as { task_id: string; tool_use_id?: string; status: string; summary: string };
       processor.processTaskNotification(tn);
     }
 
@@ -1032,13 +1104,16 @@ async function runQuery(
       const resultSubtype = message.subtype;
       log(`Result #${resultCount}: subtype=${resultSubtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
 
+      // ── Error results: always end the stream immediately ──
+      // These paths return/throw, so stream must be closed before exiting.
+
       // SDK 在某些失败场景会返回 error_* subtype 且不抛异常。
-      // 不能把这类结果当 success(null)，否则前端会一直停留在"思考中"。
-      // 匹配策略：显式枚举已知的 error subtype，并用 startsWith('error') 兜底未知的未来 error subtype。
-      // 参考 SDK result subtype 约定：error_during_execution、error_max_turns 等均以 'error' 开头。
+      // 匹配策略：显式枚举已知的 error subtype，并用 startsWith('error') 兜底。
       if (typeof resultSubtype === 'string' && (resultSubtype === 'error_during_execution' || resultSubtype.startsWith('error'))) {
-        // If session never initialized (no system/init), resume itself failed — report it
-        // so the caller can retry with a fresh session instead of crashing.
+        if (queryActivityTimer) clearTimeout(queryActivityTimer);
+        waitingForBackgroundTasks = false;
+        ipcPolling = false;
+        stream.end();
         if (!newSessionId) {
           log(`Session resume failed (no init): ${resultSubtype}`);
           return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery, sessionResumeFailed: true };
@@ -1051,14 +1126,43 @@ async function runQuery(
 
       // SDK 将某些 API 错误包装为 subtype=success 的 result（不抛异常）
       if (textResult && isContextOverflowError(textResult)) {
+        if (queryActivityTimer) clearTimeout(queryActivityTimer);
+        waitingForBackgroundTasks = false;
+        ipcPolling = false;
+        stream.end();
         log(`Context overflow detected in result: ${textResult.slice(0, 100)}`);
         processor.resetFullTextAccumulator();
         return { newSessionId, lastAssistantUuid, closedDuringQuery, contextOverflow: true, interruptedDuringQuery };
       }
       if (textResult && isUnrecoverableTranscriptError(textResult)) {
+        if (queryActivityTimer) clearTimeout(queryActivityTimer);
+        waitingForBackgroundTasks = false;
+        ipcPolling = false;
+        stream.end();
         log(`Unrecoverable transcript error in result: ${textResult.slice(0, 200)}`);
         processor.resetFullTextAccumulator();
         return { newSessionId, lastAssistantUuid, closedDuringQuery, unrecoverableTranscriptError: true, interruptedDuringQuery };
+      }
+
+      // ── Successful result: check for pending background tasks ──
+
+      if (processor.pendingBackgroundTaskCount > 0) {
+        // Background tasks still running — keep the for-await loop alive so we
+        // receive task_notification messages.  The SDK will re-invoke the model
+        // when a background task completes, producing another result.
+        // IPC polling stays active so new user messages and _close sentinels
+        // can still be received while waiting for background tasks.
+        log(`Result received but ${processor.pendingBackgroundTaskCount} background task(s) pending, keeping query alive`);
+        waitingForBackgroundTasks = true;
+        resetQueryActivityTimer();
+      } else {
+        // No background tasks — safe to end the stream and stop IPC polling.
+        // IPC polling must stop before stream.end() to avoid push-after-close
+        // crashes on ProcessTransport (see commit c6b5086).
+        if (queryActivityTimer) clearTimeout(queryActivityTimer);
+        waitingForBackgroundTasks = false;
+        ipcPolling = false;
+        stream.end();
       }
 
       const { effectiveResult } = processor.processResult(textResult);
@@ -1120,8 +1224,8 @@ async function runQuery(
 
   ipcPolling = false;
   if (queryActivityTimer) clearTimeout(queryActivityTimer);
-  log(`Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}, interruptedDuringQuery: ${interruptedDuringQuery}`);
-  return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery };
+  log(`Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}, interruptedDuringQuery: ${interruptedDuringQuery}, drainDetectedDuringQuery: ${drainDetectedDuringQuery}`);
+  return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery, drainDetectedDuringQuery };
   } catch (err) {
     ipcPolling = false;
     if (queryActivityTimer) clearTimeout(queryActivityTimer);
@@ -1197,6 +1301,7 @@ async function main(): Promise<void> {
 
   // Clean up stale sentinels from previous container runs
   try { fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL); } catch { /* ignore */ }
+  try { fs.unlinkSync(IPC_INPUT_DRAIN_SENTINEL); } catch { /* ignore */ }
   try { fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL); } catch { /* ignore */ }
 
   // Build initial prompt (drain any pending IPC messages too)
@@ -1331,15 +1436,26 @@ async function main(): Promise<void> {
         continue;
       }
 
+      // Check for _drain sentinel: finish current query then exit for turn boundary.
+      // Unlike _close (where the host sends SIGTERM), _drain requires self-exit
+      // because the host is waiting for the process to terminate naturally.
+      // Check both: the flag set during pollIpcDuringQuery AND the sentinel file
+      // (in case it was written after the query's IPC polling stopped).
+      if (queryResult.drainDetectedDuringQuery || shouldDrain()) {
+        log('Drain sentinel detected, exiting for turn boundary');
+        writeOutput({ status: 'drained', result: null, newSessionId: sessionId });
+        process.exit(0);
+      }
+
       // Emit session update so host can track it
       writeOutput({ status: 'success', result: null, newSessionId: sessionId });
 
       log('Query ended, waiting for next IPC message...');
 
-      // Wait for the next message or _close sentinel
+      // Wait for the next message or _close/_drain sentinel
       const nextMessage = await waitForIpcMessage();
       if (nextMessage === null) {
-        log('Close sentinel received, exiting');
+        log('Close/drain sentinel received, exiting');
         break;
       }
 
@@ -1414,6 +1530,13 @@ process.on('unhandledRejection', (reason: unknown) => {
   const errno = reason as NodeJS.ErrnoException;
   if (errno?.code === 'EPIPE') {
     process.exit(0);
+  }
+  // ProcessTransport closed — can happen if IPC poll races with query completion.
+  // The message that triggered this was already consumed from IPC and is lost,
+  // but the process should not crash. The main loop will pick up subsequent messages.
+  if (reason instanceof Error && /ProcessTransport is not ready/i.test(reason.message)) {
+    console.error('[agent-runner] ProcessTransport not ready (non-fatal, query ended):', reason.message);
+    return;
   }
   if (isWithinInterruptGraceWindow()) {
     console.error('Unhandled rejection during interrupt (non-fatal):', reason);

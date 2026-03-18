@@ -25,6 +25,7 @@ import {
   InviteCodeWithCreator,
   MonthlyUsage,
   NewMessage,
+  DbMessage,
   MessageCursor,
   RedeemCode,
   RegisteredGroup,
@@ -815,19 +816,7 @@ export function initDatabase(): void {
         db.prepare(
           `INSERT OR IGNORE INTO billing_plans (id, name, description, tier, monthly_cost_usd, allow_overage, features, is_default, is_active, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
-          'free',
-          '免费版',
-          '基础免费套餐',
-          0,
-          0,
-          0,
-          '[]',
-          1,
-          1,
-          now,
-          now,
-        );
+        ).run('free', '免费版', '基础免费套餐', 0, 0, 0, '[]', 1, 1, now, now);
       }
 
       // Initialize balances for all existing users
@@ -895,7 +884,9 @@ export function initDatabase(): void {
   );
   ensureColumn('balance_transactions', 'notes', 'TEXT');
   // Create unique index only if it doesn't exist
-  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_bal_tx_idempotency ON balance_transactions(idempotency_key) WHERE idempotency_key IS NOT NULL`);
+  db.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_bal_tx_idempotency ON balance_transactions(idempotency_key) WHERE idempotency_key IS NOT NULL`,
+  );
 
   // v26→v27 migration: wallet-first commercialization baseline
   const v27Ver = getRouterStateInternal('schema_version');
@@ -1058,10 +1049,37 @@ export function initDatabase(): void {
             AND home.is_home = 1
         )
     `);
-    logger.info('Migration v28→v29: set target_main_jid for auto-registered IM groups');
+    logger.info(
+      'Migration v28→v29: set target_main_jid for auto-registered IM groups',
+    );
   }
 
-  const SCHEMA_VERSION = '29';
+  // v30: turns table for Turn-based message routing
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS turns (
+      id TEXT PRIMARY KEY,
+      chat_jid TEXT NOT NULL,
+      channel TEXT,
+      message_ids TEXT,
+      started_at TEXT NOT NULL,
+      completed_at TEXT,
+      status TEXT NOT NULL DEFAULT 'running',
+      result_message_id TEXT,
+      summary TEXT,
+      trace_file TEXT,
+      token_usage TEXT,
+      group_folder TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_turns_folder ON turns(group_folder, started_at);
+    CREATE INDEX IF NOT EXISTS idx_turns_jid ON turns(chat_jid, started_at);
+  `);
+
+  // v31: index on turns.result_message_id for trace lookup by message
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_turns_result_msg ON turns(result_message_id);
+  `);
+
+  const SCHEMA_VERSION = '31';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -1197,8 +1215,8 @@ export function storeMessageDirect(
   attachments?: string,
   tokenUsage?: string,
   sourceJid?: string,
-): void {
-  db.prepare(
+): number {
+  const result = db.prepare(
     `INSERT OR REPLACE INTO messages (id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msgId,
@@ -1212,6 +1230,7 @@ export function storeMessageDirect(
     attachments ?? null,
     tokenUsage ?? null,
   );
+  return Number(result.lastInsertRowid);
 }
 
 /**
@@ -1716,58 +1735,54 @@ export function getLastInboundMessage(
 export function getNewMessages(
   jids: string[],
   cursor: MessageCursor,
-): { messages: NewMessage[]; newCursor: MessageCursor } {
+): { messages: DbMessage[]; newCursor: MessageCursor } {
   if (jids.length === 0) return { messages: [], newCursor: cursor };
 
   const placeholders = jids.map(() => '?').join(',');
   // Filter out assistant outputs.
   const sql = `
-    SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments
+    SELECT rowid, id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments
     FROM messages
     WHERE
-      (timestamp > ? OR (timestamp = ? AND id > ?))
+      rowid > ?
       AND chat_jid IN (${placeholders})
       AND is_from_me = 0
-    ORDER BY timestamp ASC, id ASC
+    ORDER BY rowid ASC
   `;
 
   const rows = db
     .prepare(sql)
     .all(
-      cursor.timestamp,
-      cursor.timestamp,
-      cursor.id,
+      cursor.rowid,
       ...jids,
-    ) as NewMessage[];
+    ) as DbMessage[];
   const last = rows[rows.length - 1];
   return {
     messages: rows,
-    newCursor: last ? { timestamp: last.timestamp, id: last.id } : cursor,
+    newCursor: last ? { rowid: last.rowid } : cursor,
   };
 }
 
 export function getMessagesSince(
   chatJid: string,
   cursor: MessageCursor,
-): NewMessage[] {
+): DbMessage[] {
   // Filter out assistant outputs.
   const sql = `
-    SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments
+    SELECT rowid, id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments
     FROM messages
     WHERE
       chat_jid = ?
-      AND (timestamp > ? OR (timestamp = ? AND id > ?))
+      AND rowid > ?
       AND is_from_me = 0
-    ORDER BY timestamp ASC, id ASC
+    ORDER BY rowid ASC
   `;
   return db
     .prepare(sql)
     .all(
       chatJid,
-      cursor.timestamp,
-      cursor.timestamp,
-      cursor.id,
-    ) as NewMessage[];
+      cursor.rowid,
+    ) as DbMessage[];
 }
 
 /**
@@ -1777,23 +1792,37 @@ export function getMessagesSince(
 export function getTranscriptMessagesSince(
   chatJid: string,
   cursor: MessageCursor,
-): Array<NewMessage & { is_from_me: boolean }> {
+): Array<DbMessage & { is_from_me: boolean }> {
   const sql = `
-    SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments, is_from_me
+    SELECT rowid, id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments, is_from_me
     FROM messages
     WHERE
       chat_jid = ?
-      AND (timestamp > ? OR (timestamp = ? AND id > ?))
-    ORDER BY timestamp ASC, id ASC
+      AND rowid > ?
+    ORDER BY rowid ASC
   `;
   return db
     .prepare(sql)
-    .all(
-      chatJid,
-      cursor.timestamp,
-      cursor.timestamp,
-      cursor.id,
-    ) as Array<NewMessage & { is_from_me: boolean }>;
+    .all(chatJid, cursor.rowid) as Array<
+    DbMessage & { is_from_me: boolean }
+  >;
+}
+
+/**
+ * Migration helper: look up the rowid of a message by its old-format
+ * (timestamp, id) cursor. Falls back to MAX(rowid) at or before that
+ * timestamp, or 0 if the table is empty / timestamp predates all rows.
+ */
+export function getRowidByCursor(timestamp: string, id: string): number {
+  if (!timestamp) return 0;
+  const exact = db
+    .prepare('SELECT rowid FROM messages WHERE id = ? AND timestamp = ?')
+    .get(id, timestamp) as { rowid: number } | undefined;
+  if (exact) return exact.rowid;
+  const fallback = db
+    .prepare('SELECT MAX(rowid) as rowid FROM messages WHERE timestamp <= ?')
+    .get(timestamp) as { rowid: number | null } | undefined;
+  return fallback?.rowid ?? 0;
 }
 
 export function createTask(
@@ -1979,9 +2008,9 @@ export function cleanupOldTaskRunLogs(retentionDays = 30): number {
 }
 
 export function cleanupOldDailyUsage(retentionDays = 90): number {
-  const cutoff = new Date(
-    Date.now() - retentionDays * 24 * 60 * 60 * 1000,
-  ).toISOString().slice(0, 10);
+  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
   const result = db
     .prepare('DELETE FROM daily_usage WHERE date < ?')
     .run(cutoff);
@@ -4037,9 +4066,9 @@ export function updateBillingPlan(
   db.transaction(() => {
     // Clear old default BEFORE setting new one to avoid brief dual-default state
     if (updates.is_default) {
-      db.prepare(
-        'UPDATE billing_plans SET is_default = 0 WHERE id != ?',
-      ).run(id);
+      db.prepare('UPDATE billing_plans SET is_default = 0 WHERE id != ?').run(
+        id,
+      );
     }
     db.prepare(
       `UPDATE billing_plans SET ${fields.join(', ')} WHERE id = ?`,
@@ -4079,8 +4108,7 @@ function mapBillingPlanRow(row: Record<string, unknown>): BillingPlan {
     weekly_token_quota:
       row.weekly_token_quota != null ? Number(row.weekly_token_quota) : null,
     rate_multiplier: Number(row.rate_multiplier) || 1.0,
-    trial_days:
-      row.trial_days != null ? Number(row.trial_days) : null,
+    trial_days: row.trial_days != null ? Number(row.trial_days) : null,
     sort_order: Number(row.sort_order) || 0,
     display_price:
       typeof row.display_price === 'string' ? row.display_price : null,
@@ -4169,9 +4197,9 @@ export function cancelUserSubscription(userId: string): void {
   db.prepare(
     "UPDATE user_subscriptions SET status = 'cancelled', cancelled_at = ? WHERE user_id = ? AND status = 'active'",
   ).run(now, userId);
-  db.prepare(
-    'UPDATE users SET subscription_plan_id = NULL WHERE id = ?',
-  ).run(userId);
+  db.prepare('UPDATE users SET subscription_plan_id = NULL WHERE id = ?').run(
+    userId,
+  );
 }
 
 export function expireSubscriptions(): number {
@@ -4267,9 +4295,17 @@ export function expireSubscriptions(): number {
         `INSERT INTO user_subscriptions (id, user_id, plan_id, status, started_at, expires_at, cancelled_at, trial_ends_at, notes, auto_renew, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
-        newSub.id, newSub.user_id, newSub.plan_id, newSub.status,
-        newSub.started_at, newSub.expires_at, newSub.cancelled_at,
-        newSub.trial_ends_at, newSub.notes, newSub.auto_renew, newSub.created_at,
+        newSub.id,
+        newSub.user_id,
+        newSub.plan_id,
+        newSub.status,
+        newSub.started_at,
+        newSub.expires_at,
+        newSub.cancelled_at,
+        newSub.trial_ends_at,
+        newSub.notes,
+        newSub.auto_renew,
+        newSub.created_at,
       );
 
       logBillingAudit('subscription_assigned', userId, null, {
@@ -4385,9 +4421,7 @@ export function adjustUserBalance(
   // Idempotency check: if key already used, return the existing transaction
   if (idempotencyKey) {
     const existing = db
-      .prepare(
-        'SELECT * FROM balance_transactions WHERE idempotency_key = ?',
-      )
+      .prepare('SELECT * FROM balance_transactions WHERE idempotency_key = ?')
       .get(idempotencyKey) as Record<string, unknown> | undefined;
     if (existing) {
       return {
@@ -4396,10 +4430,20 @@ export function adjustUserBalance(
         type: String(existing.type) as BalanceTransactionType,
         amount_usd: Number(existing.amount_usd),
         balance_after: Number(existing.balance_after),
-        description: typeof existing.description === 'string' ? existing.description : null,
-        reference_type: typeof existing.reference_type === 'string' ? existing.reference_type as BalanceReferenceType : null,
-        reference_id: typeof existing.reference_id === 'string' ? existing.reference_id : null,
-        actor_id: typeof existing.actor_id === 'string' ? existing.actor_id : null,
+        description:
+          typeof existing.description === 'string'
+            ? existing.description
+            : null,
+        reference_type:
+          typeof existing.reference_type === 'string'
+            ? (existing.reference_type as BalanceReferenceType)
+            : null,
+        reference_id:
+          typeof existing.reference_id === 'string'
+            ? existing.reference_id
+            : null,
+        actor_id:
+          typeof existing.actor_id === 'string' ? existing.actor_id : null,
         source:
           typeof existing.source === 'string'
             ? (existing.source as BalanceTransactionSource)
@@ -4456,26 +4500,28 @@ export function adjustUserBalance(
     const balanceAfter = Number(newRow.balance_usd);
 
     // Record transaction
-    const result = db.prepare(
-      `INSERT INTO balance_transactions (
+    const result = db
+      .prepare(
+        `INSERT INTO balance_transactions (
         user_id, type, amount_usd, balance_after, description, reference_type,
         reference_id, actor_id, source, operator_type, notes, created_at, idempotency_key
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      userId,
-      type,
-      amount,
-      balanceAfter,
-      description,
-      referenceType,
-      referenceId,
-      actorId,
-      source,
-      operatorType,
-      notes,
-      now,
-      idempotencyKey ?? null,
-    );
+      )
+      .run(
+        userId,
+        type,
+        amount,
+        balanceAfter,
+        description,
+        referenceType,
+        referenceId,
+        actorId,
+        source,
+        operatorType,
+        notes,
+        now,
+        idempotencyKey ?? null,
+      );
 
     return {
       id: Number(result.lastInsertRowid),
@@ -4530,11 +4576,11 @@ export function getBalanceTransactions(
       amount_usd: Number(r.amount_usd),
       balance_after: Number(r.balance_after),
       description: typeof r.description === 'string' ? r.description : null,
-      reference_type: typeof r.reference_type === 'string'
-        ? (r.reference_type as BalanceReferenceType)
-        : null,
-      reference_id:
-        typeof r.reference_id === 'string' ? r.reference_id : null,
+      reference_type:
+        typeof r.reference_type === 'string'
+          ? (r.reference_type as BalanceReferenceType)
+          : null,
+      reference_id: typeof r.reference_id === 'string' ? r.reference_id : null,
       actor_id: typeof r.actor_id === 'string' ? r.actor_id : null,
       source:
         typeof r.source === 'string'
@@ -4572,9 +4618,7 @@ export function getMonthlyUsage(
   month: string,
 ): MonthlyUsage | undefined {
   const row = db
-    .prepare(
-      'SELECT * FROM monthly_usage WHERE user_id = ? AND month = ?',
-    )
+    .prepare('SELECT * FROM monthly_usage WHERE user_id = ? AND month = ?')
     .get(userId, month) as Record<string, unknown> | undefined;
   if (!row) return undefined;
   return mapMonthlyUsageRow(row);
@@ -4616,9 +4660,9 @@ export function getUserMonthlyUsageHistory(
 // --- Redeem Codes ---
 
 export function getRedeemCode(code: string): RedeemCode | undefined {
-  const row = db.prepare('SELECT * FROM redeem_codes WHERE code = ?').get(code) as
-    | Record<string, unknown>
-    | undefined;
+  const row = db
+    .prepare('SELECT * FROM redeem_codes WHERE code = ?')
+    .get(code) as Record<string, unknown> | undefined;
   if (!row) return undefined;
   return mapRedeemCodeRow(row);
 }
@@ -4662,14 +4706,13 @@ export function incrementRedeemCodeUsage(code: string, userId: string): void {
 }
 
 export function deleteRedeemCode(code: string): boolean {
-  const result = db.prepare('DELETE FROM redeem_codes WHERE code = ?').run(code);
+  const result = db
+    .prepare('DELETE FROM redeem_codes WHERE code = ?')
+    .run(code);
   return result.changes > 0;
 }
 
-export function hasUserRedeemedCode(
-  userId: string,
-  code: string,
-): boolean {
+export function hasUserRedeemedCode(userId: string, code: string): boolean {
   const row = db
     .prepare(
       'SELECT COUNT(*) as cnt FROM redeem_code_usage WHERE user_id = ? AND code = ?',
@@ -4684,8 +4727,7 @@ function mapRedeemCodeRow(row: Record<string, unknown>): RedeemCode {
     type: String(row.type) as RedeemCode['type'],
     value_usd: row.value_usd != null ? Number(row.value_usd) : null,
     plan_id: typeof row.plan_id === 'string' ? row.plan_id : null,
-    duration_days:
-      row.duration_days != null ? Number(row.duration_days) : null,
+    duration_days: row.duration_days != null ? Number(row.duration_days) : null,
     max_uses: Number(row.max_uses) || 1,
     used_count: Number(row.used_count) || 0,
     expires_at: typeof row.expires_at === 'string' ? row.expires_at : null,
@@ -4731,7 +4773,8 @@ export function getBillingAuditLog(
     conditions.push('event_type = ?');
     params.push(eventType);
   }
-  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const where =
+    conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
   const total = (
     db
@@ -4751,9 +4794,10 @@ export function getBillingAuditLog(
       event_type: String(r.event_type) as BillingAuditEventType,
       user_id: String(r.user_id),
       actor_id: typeof r.actor_id === 'string' ? r.actor_id : null,
-      details: typeof r.details === 'string'
-        ? (JSON.parse(r.details) as Record<string, unknown>)
-        : null,
+      details:
+        typeof r.details === 'string'
+          ? (JSON.parse(r.details) as Record<string, unknown>)
+          : null,
       created_at: String(r.created_at),
     })),
     total,
@@ -4893,9 +4937,10 @@ export function getDailyUsage(
   return mapDailyUsageRow(row);
 }
 
-export function getWeeklyUsageSummary(
-  userId: string,
-): { totalCost: number; totalTokens: number } {
+export function getWeeklyUsageSummary(userId: string): {
+  totalCost: number;
+  totalTokens: number;
+} {
   // Align to calendar week (Monday–Sunday) to match checkQuota() reset logic
   const now = new Date();
   const dayOfWeek = now.getDay(); // 0=Sun, 1=Mon, ...
@@ -4930,11 +4975,17 @@ export function getUserDailyUsageHistory(
 export function getDailyUsageSumForMonth(
   userId: string,
   month: string,
-): { totalInputTokens: number; totalOutputTokens: number; totalCost: number; messageCount: number } {
+): {
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCost: number;
+  messageCount: number;
+} {
   const startDate = `${month}-01`;
   // End date: first day of next month
   const [y, m] = month.split('-').map(Number);
-  const nextMonth = m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
+  const nextMonth =
+    m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
   const endDate = `${nextMonth}-01`;
 
   const row = db
@@ -5023,14 +5074,17 @@ export function getDashboardStats(): {
   const month = new Date().toISOString().slice(0, 7);
 
   const totalUsers = (
-    db.prepare("SELECT COUNT(*) as cnt FROM users WHERE status != 'deleted'")
+    db
+      .prepare("SELECT COUNT(*) as cnt FROM users WHERE status != 'deleted'")
       .get() as { cnt: number }
   ).cnt;
 
   const activeUsers = (
-    db.prepare(
-      "SELECT COUNT(DISTINCT user_id) as cnt FROM daily_usage WHERE date = ?",
-    ).get(today) as { cnt: number }
+    db
+      .prepare(
+        'SELECT COUNT(DISTINCT user_id) as cnt FROM daily_usage WHERE date = ?',
+      )
+      .get(today) as { cnt: number }
   ).cnt;
 
   const planDistribution = db
@@ -5046,21 +5100,27 @@ export function getDashboardStats(): {
     .all() as Array<{ plan_name: string; count: number }>;
 
   const todayCost = (
-    db.prepare(
-      'SELECT COALESCE(SUM(total_cost_usd), 0) as total FROM daily_usage WHERE date = ?',
-    ).get(today) as { total: number }
+    db
+      .prepare(
+        'SELECT COALESCE(SUM(total_cost_usd), 0) as total FROM daily_usage WHERE date = ?',
+      )
+      .get(today) as { total: number }
   ).total;
 
   const monthCost = (
-    db.prepare(
-      'SELECT COALESCE(SUM(total_cost_usd), 0) as total FROM monthly_usage WHERE month = ?',
-    ).get(month) as { total: number }
+    db
+      .prepare(
+        'SELECT COALESCE(SUM(total_cost_usd), 0) as total FROM monthly_usage WHERE month = ?',
+      )
+      .get(month) as { total: number }
   ).total;
 
   const activeSubscriptions = (
-    db.prepare(
-      "SELECT COUNT(*) as cnt FROM user_subscriptions WHERE status = 'active'",
-    ).get() as { cnt: number }
+    db
+      .prepare(
+        "SELECT COUNT(*) as cnt FROM user_subscriptions WHERE status = 'active'",
+      )
+      .get() as { cnt: number }
   ).cnt;
 
   return {
@@ -5113,7 +5173,14 @@ export function batchAssignPlan(
       db.prepare(
         `INSERT INTO user_subscriptions (id, user_id, plan_id, status, started_at, expires_at, auto_renew, created_at)
          VALUES (?, ?, ?, 'active', ?, ?, 0, ?)`,
-      ).run(subId, userId, planId, now.toISOString(), expiresAt, now.toISOString());
+      ).run(
+        subId,
+        userId,
+        planId,
+        now.toISOString(),
+        expiresAt,
+        now.toISOString(),
+      );
 
       db.prepare('UPDATE users SET subscription_plan_id = ? WHERE id = ?').run(
         planId,
@@ -5155,7 +5222,6 @@ export function getAllPlanSubscriberCounts(): Record<string, number> {
   return result;
 }
 
-
 /**
  * Atomically increment redeem code usage with optimistic locking.
  * Returns true if the increment succeeded (used_count < max_uses).
@@ -5177,6 +5243,150 @@ export function tryIncrementRedeemCodeUsage(
     ).run(code, userId, now);
     return true;
   })();
+}
+
+// ───────────────── Turns ─────────────────
+
+export interface TurnRow {
+  id: string;
+  chat_jid: string;
+  channel: string | null;
+  message_ids: string | null;
+  started_at: string;
+  completed_at: string | null;
+  status: string;
+  result_message_id: string | null;
+  summary: string | null;
+  trace_file: string | null;
+  token_usage: string | null;
+  group_folder: string;
+}
+
+export function insertTurn(turn: {
+  id: string;
+  chat_jid: string;
+  channel?: string;
+  message_ids?: string;
+  started_at: string;
+  status: string;
+  group_folder: string;
+}): void {
+  db.prepare(
+    `INSERT INTO turns (id, chat_jid, channel, message_ids, started_at, status, group_folder)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    turn.id,
+    turn.chat_jid,
+    turn.channel || null,
+    turn.message_ids || null,
+    turn.started_at,
+    turn.status,
+    turn.group_folder,
+  );
+}
+
+export function updateTurn(
+  id: string,
+  fields: Partial<
+    Pick<
+      TurnRow,
+      | 'completed_at'
+      | 'status'
+      | 'result_message_id'
+      | 'summary'
+      | 'trace_file'
+      | 'token_usage'
+      | 'message_ids'
+    >
+  >,
+): void {
+  const sets: string[] = [];
+  const values: unknown[] = [];
+  for (const [key, value] of Object.entries(fields)) {
+    if (value !== undefined) {
+      sets.push(`${key} = ?`);
+      values.push(value);
+    }
+  }
+  if (sets.length === 0) return;
+  values.push(id);
+  db.prepare(`UPDATE turns SET ${sets.join(', ')} WHERE id = ?`).run(...values);
+}
+
+export function getTurnById(id: string): TurnRow | undefined {
+  return db.prepare('SELECT * FROM turns WHERE id = ?').get(id) as
+    | TurnRow
+    | undefined;
+}
+
+export function getActiveTurnByFolder(folder: string): TurnRow | undefined {
+  return db
+    .prepare(
+      "SELECT * FROM turns WHERE group_folder = ? AND status = 'running' ORDER BY started_at DESC LIMIT 1",
+    )
+    .get(folder) as TurnRow | undefined;
+}
+
+export function getTurnsByJid(
+  chatJid: string,
+  limit: number = 50,
+  offset: number = 0,
+): TurnRow[] {
+  return db
+    .prepare(
+      'SELECT * FROM turns WHERE chat_jid = ? ORDER BY started_at DESC LIMIT ? OFFSET ?',
+    )
+    .all(chatJid, limit, offset) as TurnRow[];
+}
+
+export function getTurnsByFolder(
+  folder: string,
+  limit: number = 50,
+  offset: number = 0,
+): TurnRow[] {
+  return db
+    .prepare(
+      'SELECT * FROM turns WHERE group_folder = ? ORDER BY started_at DESC LIMIT ? OFFSET ?',
+    )
+    .all(folder, limit, offset) as TurnRow[];
+}
+
+export function cleanupOldTurns(olderThanDays: number): number {
+  const cutoff = new Date(
+    Date.now() - olderThanDays * 24 * 60 * 60 * 1000,
+  ).toISOString();
+  const result = db
+    .prepare('DELETE FROM turns WHERE started_at < ?')
+    .run(cutoff);
+  return result.changes;
+}
+
+export function getTurnByResultMessageId(
+  messageId: string,
+): TurnRow | undefined {
+  return db
+    .prepare('SELECT * FROM turns WHERE result_message_id = ? LIMIT 1')
+    .get(messageId) as TurnRow | undefined;
+}
+
+export function getMessageIdsWithTrace(
+  messageIds: string[],
+): Set<string> {
+  if (messageIds.length === 0) return new Set();
+  const placeholders = messageIds.map(() => '?').join(',');
+  const rows = db
+    .prepare(
+      `SELECT result_message_id FROM turns WHERE result_message_id IN (${placeholders}) AND trace_file IS NOT NULL`,
+    )
+    .all(...messageIds) as Array<{ result_message_id: string }>;
+  return new Set(rows.map((r) => r.result_message_id));
+}
+
+export function markStaleTurnsAsError(): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    "UPDATE turns SET status = 'error', completed_at = ? WHERE status = 'running'",
+  ).run(now);
 }
 
 /**

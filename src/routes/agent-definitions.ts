@@ -35,11 +35,16 @@ function validateAgentId(id: string): boolean {
   return /^[\w\-]+$/.test(id);
 }
 
-function extractTools(frontmatter: Record<string, string | string[]>): string[] {
+function extractTools(
+  frontmatter: Record<string, string | string[]>,
+): string[] {
   return Array.isArray(frontmatter.tools)
     ? frontmatter.tools
     : typeof frontmatter.tools === 'string'
-      ? frontmatter.tools.split(',').map((t) => t.trim()).filter(Boolean)
+      ? frontmatter.tools
+          .split(',')
+          .map((t) => t.trim())
+          .filter(Boolean)
       : [];
 }
 
@@ -139,7 +144,10 @@ function discoverAgents(): AgentDefinition[] {
           updatedAt: stats.mtime.toISOString(),
         });
       } catch (err) {
-        logger.warn({ filePath, error: err instanceof Error ? err.message : String(err) }, 'Failed to parse agent file');
+        logger.warn(
+          { filePath, error: err instanceof Error ? err.message : String(err) },
+          'Failed to parse agent file',
+        );
       }
     }
   } catch {
@@ -192,81 +200,100 @@ agentDefinitionsRoutes.get('/:id', authMiddleware, (c) => {
 });
 
 // Update agent content
-agentDefinitionsRoutes.put('/:id', authMiddleware, systemConfigMiddleware, async (c) => {
-  const id = c.req.param('id');
-  if (!validateAgentId(id)) {
-    return c.json({ error: 'Invalid agent ID' }, 400);
-  }
-
-  const body = await c.req.json().catch(() => ({}));
-  const { content } = body as { content: string };
-  if (typeof content !== 'string') {
-    return c.json({ error: 'content must be a string' }, 400);
-  }
-
-  const filePath = path.join(getAgentsDir(), `${id}.md`);
-  try {
-    fs.accessSync(filePath);
-    fs.writeFileSync(filePath, content, 'utf-8');
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return c.json({ error: 'Agent definition not found' }, 404);
+agentDefinitionsRoutes.put(
+  '/:id',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const id = c.req.param('id');
+    if (!validateAgentId(id)) {
+      return c.json({ error: 'Invalid agent ID' }, 400);
     }
-    throw err;
-  }
-  return c.json({ success: true });
-});
+
+    const body = await c.req.json().catch(() => ({}));
+    const { content } = body as { content: string };
+    if (typeof content !== 'string') {
+      return c.json({ error: 'content must be a string' }, 400);
+    }
+
+    const filePath = path.join(getAgentsDir(), `${id}.md`);
+    try {
+      fs.accessSync(filePath);
+      fs.writeFileSync(filePath, content, 'utf-8');
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return c.json({ error: 'Agent definition not found' }, 404);
+      }
+      throw err;
+    }
+    return c.json({ success: true });
+  },
+);
 
 // Create new agent
-agentDefinitionsRoutes.post('/', authMiddleware, systemConfigMiddleware, async (c) => {
-  const body = await c.req.json().catch(() => ({}));
-  const { name, content } = body as { name: string; content: string };
+agentDefinitionsRoutes.post(
+  '/',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const { name, content } = body as { name: string; content: string };
 
-  if (!name || typeof name !== 'string') {
-    return c.json({ error: 'name is required' }, 400);
-  }
-  if (typeof content !== 'string') {
-    return c.json({ error: 'content must be a string' }, 400);
-  }
-
-  // Derive id from name
-  const id = name.toLowerCase().replace(/[^a-z0-9\-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-  if (!id || !validateAgentId(id)) {
-    return c.json({ error: 'Invalid agent name' }, 400);
-  }
-
-  const agentsDir = getAgentsDir();
-  fs.mkdirSync(agentsDir, { recursive: true });
-
-  const filePath = path.join(agentsDir, `${id}.md`);
-  try {
-    fs.writeFileSync(filePath, content, { encoding: 'utf-8', flag: 'wx' });
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-      return c.json({ error: 'Agent with this name already exists' }, 409);
+    if (!name || typeof name !== 'string') {
+      return c.json({ error: 'name is required' }, 400);
     }
-    throw err;
-  }
-  return c.json({ success: true, id });
-});
+    if (typeof content !== 'string') {
+      return c.json({ error: 'content must be a string' }, 400);
+    }
+
+    // Derive id from name
+    const id = name
+      .toLowerCase()
+      .replace(/[^a-z0-9\-]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+    if (!id || !validateAgentId(id)) {
+      return c.json({ error: 'Invalid agent name' }, 400);
+    }
+
+    const agentsDir = getAgentsDir();
+    fs.mkdirSync(agentsDir, { recursive: true });
+
+    const filePath = path.join(agentsDir, `${id}.md`);
+    try {
+      fs.writeFileSync(filePath, content, { encoding: 'utf-8', flag: 'wx' });
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        return c.json({ error: 'Agent with this name already exists' }, 409);
+      }
+      throw err;
+    }
+    return c.json({ success: true, id });
+  },
+);
 
 // Delete agent
-agentDefinitionsRoutes.delete('/:id', authMiddleware, systemConfigMiddleware, (c) => {
-  const id = c.req.param('id');
-  if (!validateAgentId(id)) {
-    return c.json({ error: 'Invalid agent ID' }, 400);
-  }
-
-  const filePath = path.join(getAgentsDir(), `${id}.md`);
-  try {
-    fs.unlinkSync(filePath);
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return c.json({ error: 'Agent definition not found' }, 404);
+agentDefinitionsRoutes.delete(
+  '/:id',
+  authMiddleware,
+  systemConfigMiddleware,
+  (c) => {
+    const id = c.req.param('id');
+    if (!validateAgentId(id)) {
+      return c.json({ error: 'Invalid agent ID' }, 400);
     }
-    throw err;
-  }
-  return c.json({ success: true });
-});
+
+    const filePath = path.join(getAgentsDir(), `${id}.md`);
+    try {
+      fs.unlinkSync(filePath);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return c.json({ error: 'Agent definition not found' }, 404);
+      }
+      throw err;
+    }
+    return c.json({ success: true });
+  },
+);
 
 export default agentDefinitionsRoutes;

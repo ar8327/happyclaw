@@ -23,7 +23,6 @@ import {
   getClaudeProviderConfig,
   getContainerEnvConfig,
   getSystemSettings,
-
   mergeClaudeEnvConfig,
   shellQuoteEnvLines,
   writeCredentialsFile,
@@ -92,7 +91,6 @@ function ensureSettingsJson(
   fs.writeFileSync(settingsFile, newContent, { mode: 0o644 });
 }
 
-
 export interface ContainerInput {
   prompt: string;
   sessionId?: string;
@@ -106,10 +104,11 @@ export interface ContainerInput {
   agentId?: string;
   agentName?: string;
   userId?: string;
+  turnId?: string;
 }
 
 export interface ContainerOutput {
-  status: 'success' | 'error' | 'stream' | 'closed';
+  status: 'success' | 'error' | 'stream' | 'closed' | 'drained';
   result: string | null;
   newSessionId?: string;
   error?: string;
@@ -325,11 +324,15 @@ function buildVolumeMounts(
     const token = getInternalToken();
     if (token) envLines.push(`HAPPYCLAW_INTERNAL_TOKEN=${token}`);
     // Docker containers use host.docker.internal to reach the host
-    envLines.push(`HAPPYCLAW_API_URL=http://host.docker.internal:${process.env.WEB_PORT || '3000'}`);
+    envLines.push(
+      `HAPPYCLAW_API_URL=http://host.docker.internal:${process.env.WEB_PORT || '3000'}`,
+    );
 
     // Pass memory query timeout so agent-runner HTTP timeout stays in sync
     const settings = getSystemSettings();
-    envLines.push(`HAPPYCLAW_MEMORY_QUERY_TIMEOUT=${settings.memoryQueryTimeout}`);
+    envLines.push(
+      `HAPPYCLAW_MEMORY_QUERY_TIMEOUT=${settings.memoryQueryTimeout}`,
+    );
 
     // Mount memory directory as read-only for index.md injection
     const memoryIndexDir = path.join(DATA_DIR, 'memory', ownerId);
@@ -674,7 +677,10 @@ export function writeGroupsSnapshot(
  * 杀死进程及其所有子进程。
  * 如果进程以 detached 模式启动（独立进程组），使用负 PID 杀整个进程组。
  */
-export function killProcessTree(proc: ChildProcess, signal: NodeJS.Signals = 'SIGTERM'): boolean {
+export function killProcessTree(
+  proc: ChildProcess,
+  signal: NodeJS.Signals = 'SIGTERM',
+): boolean {
   try {
     if (proc.pid) {
       process.kill(-proc.pid, signal);
@@ -950,10 +956,17 @@ export async function runHostAgent(
   if (ownerId) {
     const token = getInternalToken();
     if (token) hostEnv['HAPPYCLAW_INTERNAL_TOKEN'] = token;
-    hostEnv['HAPPYCLAW_API_URL'] = `http://localhost:${process.env.WEB_PORT || '3000'}`;
-    hostEnv['HAPPYCLAW_WORKSPACE_MEMORY_INDEX'] = path.join(DATA_DIR, 'memory', ownerId);
+    hostEnv['HAPPYCLAW_API_URL'] =
+      `http://localhost:${process.env.WEB_PORT || '3000'}`;
+    hostEnv['HAPPYCLAW_WORKSPACE_MEMORY_INDEX'] = path.join(
+      DATA_DIR,
+      'memory',
+      ownerId,
+    );
     const settings = getSystemSettings();
-    hostEnv['HAPPYCLAW_MEMORY_QUERY_TIMEOUT'] = String(settings.memoryQueryTimeout);
+    hostEnv['HAPPYCLAW_MEMORY_QUERY_TIMEOUT'] = String(
+      settings.memoryQueryTimeout,
+    );
   }
 
   // Agent-browser isolation: each workspace gets its own browser session + profile

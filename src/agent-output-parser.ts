@@ -25,6 +25,8 @@ export interface StdoutParserState {
   hasSuccessOutput: boolean;
   /** True when agent emitted a { status: 'closed' } marker (exit due to _close sentinel). */
   hasClosedOutput: boolean;
+  /** True when agent emitted a { status: 'drained' } marker (exit due to _drain sentinel for turn boundary). */
+  hasDrainedOutput: boolean;
   /** True when agent emitted a stream event with statusText='interrupted'. */
   hasInterruptedOutput: boolean;
 }
@@ -46,6 +48,7 @@ export function createStdoutParserState(): StdoutParserState {
     outputChain: Promise.resolve(),
     hasSuccessOutput: false,
     hasClosedOutput: false,
+    hasDrainedOutput: false,
     hasInterruptedOutput: false,
   };
 }
@@ -114,6 +117,9 @@ export function attachStdoutHandler(
           }
           if (parsed.status === 'closed') {
             state.hasClosedOutput = true;
+          }
+          if (parsed.status === 'drained') {
+            state.hasDrainedOutput = true;
           }
           if (
             parsed.status === 'stream' &&
@@ -201,7 +207,13 @@ export interface CloseHandlerContext {
   /** containerName or processId */
   identifier: string;
   logsDir: string;
-  input: { prompt: string; sessionId?: string; isMain: boolean; agentId?: string; agentName?: string };
+  input: {
+    prompt: string;
+    sessionId?: string;
+    isMain: boolean;
+    agentId?: string;
+    agentName?: string;
+  };
   stdoutState: StdoutParserState;
   stderrState: StderrState;
   onOutput?: (output: ContainerOutput) => Promise<void>;
@@ -278,7 +290,10 @@ export function writeRunLog(
   const agentSlug = ctx.input.agentId
     ? `-agent-${ctx.input.agentId.replace(/[^a-zA-Z0-9-]/g, '-')}`
     : '';
-  const logFile = path.join(ctx.logsDir, `${ctx.filePrefix}${agentSlug}-${timestamp}.log`);
+  const logFile = path.join(
+    ctx.logsDir,
+    `${ctx.filePrefix}${agentSlug}-${timestamp}.log`,
+  );
 
   const logLines = [
     `=== ${ctx.label} Run Log ===`,
@@ -476,17 +491,18 @@ export function handleSuccessClose(
 
   // Streaming mode: wait for output chain to settle
   if (ctx.onOutput) {
-    const { hasClosedOutput } = ctx.stdoutState;
+    const { hasClosedOutput, hasDrainedOutput } = ctx.stdoutState;
     waitForOutputChain(
       outputChain,
       ctx.groupName,
       `${ctx.filePrefix} success path`,
       () => {
-        // Propagate 'closed' status so the host can distinguish a _close-interrupted
-        // exit from a normal completion and avoid committing the message cursor.
+        // Propagate 'closed'/'drained' status so the host can distinguish exit reasons.
         const finalStatus = hasClosedOutput
           ? ('closed' as const)
-          : ('success' as const);
+          : hasDrainedOutput
+            ? ('drained' as const)
+            : ('success' as const);
         logger.info(
           { group: ctx.groupName, duration, newSessionId, finalStatus },
           `${ctx.label} completed (streaming mode)`,

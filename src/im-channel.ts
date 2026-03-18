@@ -55,10 +55,7 @@ export interface IMChannelConnectOpts {
   /** 群聊消息过滤：bot 未被 @mention 时调用，返回 true 则处理，false 则丢弃 */
   shouldProcessGroupMessage?: (chatJid: string) => boolean;
   /** 中断 fast-path：消息到达时立即检测中断意图，绕过轮询延迟直接触发中断 */
-  onInterruptRequest?: (
-    chatJid: string,
-    intent: 'stop' | 'correction',
-  ) => void;
+  onInterruptRequest?: (chatJid: string, intent: 'stop' | 'correction') => void;
 }
 
 export interface IMSendOptions {
@@ -237,7 +234,9 @@ export function createFeishuChannel(config: FeishuConnectionConfig): IMChannel {
       return inner.getChatInfo(chatId);
     },
 
-    createStreamingSession(chatId: string): StreamingCardController | undefined {
+    createStreamingSession(
+      chatId: string,
+    ): StreamingCardController | undefined {
       if (!inner) return undefined;
       const larkClient = inner.getLarkClient();
       if (!larkClient) return undefined;

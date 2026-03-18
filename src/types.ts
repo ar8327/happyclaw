@@ -66,6 +66,7 @@ export interface GroupMember {
 }
 
 export interface NewMessage {
+  rowid?: number;
   id: string;
   chat_jid: string;
   source_jid?: string;
@@ -76,6 +77,9 @@ export interface NewMessage {
   attachments?: string;
 }
 
+/** NewMessage with guaranteed rowid — returned by DB query functions */
+export type DbMessage = NewMessage & { rowid: number };
+
 export interface MessageAttachment {
   type: 'image';
   data: string; // base64 编码的图片数据
@@ -83,8 +87,7 @@ export interface MessageAttachment {
 }
 
 export interface MessageCursor {
-  timestamp: string;
-  id: string;
+  rowid: number;
 }
 
 export interface ScheduledTask {
@@ -316,6 +319,9 @@ export type WsMessageOut =
       type: 'runner_state';
       chatJid: string;
       state:
+        | 'queued'
+        | 'capacity_wait'
+        | 'starting'
         | 'idle'
         | 'running'
         | 'interrupting'

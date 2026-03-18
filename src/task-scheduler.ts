@@ -3,11 +3,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
-import {
-  GROUPS_DIR,
-  SCHEDULER_POLL_INTERVAL,
-  TIMEZONE,
-} from './config.js';
+import { GROUPS_DIR, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { DailySummaryDeps, runDailySummaryIfNeeded } from './daily-summary.js';
 import {
   GlobalSleepDeps,
@@ -138,7 +134,10 @@ async function runScriptTask(
     if (group?.created_by) {
       const owner = getUserById(group.created_by);
       if (owner && owner.role !== 'admin') {
-        const accessResult = checkBillingAccessFresh(group.created_by, owner.role);
+        const accessResult = checkBillingAccessFresh(
+          group.created_by,
+          owner.role,
+        );
         if (!accessResult.allowed) {
           const reason = accessResult.reason || '当前账户不可用';
           logger.info(

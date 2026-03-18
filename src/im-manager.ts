@@ -56,10 +56,7 @@ export interface ConnectFeishuOptions {
   onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
   onBotRemovedFromGroup?: (chatJid: string) => void;
   shouldProcessGroupMessage?: (chatJid: string) => boolean;
-  onInterruptRequest?: (
-    chatJid: string,
-    intent: 'stop' | 'correction',
-  ) => void;
+  onInterruptRequest?: (chatJid: string, intent: 'stop' | 'correction') => void;
 }
 
 class IMConnectionManager {

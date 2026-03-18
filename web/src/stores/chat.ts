@@ -19,17 +19,70 @@ export interface Message {
   is_from_me: boolean;
   attachments?: string;
   token_usage?: string;
+  has_trace?: boolean;
 }
 
 // Streaming event types (canonical source: shared/stream-event.ts)
 import type { StreamEventType, StreamEvent } from '../stream-event.types';
 export type { StreamEventType, StreamEvent };
 
+export interface TurnInfo {
+  id: string;
+  channel: string;
+  messageIds: string[];
+  startedAt: string;
+  completedAt?: string;
+  status: string;
+}
+
+export interface TurnActiveRuntime {
+  turnId: string;
+  channel: string;
+  messageCount: number;
+  startedAt: number;
+  status:
+    | 'started'
+    | 'queued'
+    | 'capacity_wait'
+    | 'starting'
+    | 'interrupting'
+    | 'running'
+    | 'interrupted'
+    | 'error'
+    | 'drained'
+    | 'completed';
+  runnerState?: {
+    state: string;
+    detail?: string;
+    updatedAt: string;
+  } | null;
+  lastEventAt?: string;
+  lastInterruptAt?: string;
+}
+
 export interface StreamingTimelineEvent {
   id: string;
   timestamp: number;
   text: string;
-  kind: 'tool' | 'skill' | 'hook' | 'status';
+  kind: 'tool' | 'skill' | 'hook' | 'status' | 'runner';
+}
+
+export interface StreamingBlock {
+  id: string;
+  type: 'thinking' | 'tool' | 'text' | 'status' | 'hook';
+  timestamp: number;
+  endTimestamp?: number;
+  toolName?: string;
+  toolUseId?: string;
+  toolInputSummary?: string;
+  skillName?: string;
+  duration?: number;
+  content?: string;
+  thinkingText?: string;
+  statusText?: string;
+  hookName?: string;
+  hookEvent?: string;
+  hookOutcome?: string;
 }
 
 export interface StreamingState {
@@ -132,6 +185,16 @@ interface ChatState {
   agentMessages: Record<string, Message[]>;          // agentId → messages
   agentWaiting: Record<string, boolean>;             // agentId → waiting for reply
   agentHasMore: Record<string, boolean>;             // agentId → has more messages
+  traceCache: Record<string, StreamingBlock[]>;       // messageId → loaded trace blocks (lazy)
+  runnerState: Record<string, { state: string; detail?: string; updatedAt: string }>;
+  // Turn state (populated from turn_started/turn_completed stream events)
+  activeTurn: Record<string, TurnActiveRuntime | null>;
+  pendingBuffer: Record<string, Record<string, number>>;  // chatJid → channel → pending count
+  // Historical turn data (loaded from API)
+  turns: Record<string, TurnInfo[]>;  // jid → turns (chronological)
+  loadTurns: (jid: string) => Promise<void>;
+  handleRunnerState: (chatJid: string, state: string, detail?: string) => void;
+  loadActiveTurnState: (jid: string) => Promise<void>;
   loadGroups: () => Promise<void>;
   selectGroup: (jid: string) => void;
   loadMessages: (jid: string, loadMore?: boolean) => Promise<void>;
@@ -154,6 +217,7 @@ interface ChatState {
     options?: { preserveThinking?: boolean },
   ) => void;
   restoreActiveState: () => Promise<void>;
+  loadTrace: (chatJid: string, messageId: string) => Promise<void>;
   // Sub-agent actions
   loadAgents: (jid: string) => Promise<void>;
   deleteAgentAction: (jid: string, agentId: string) => Promise<boolean>;
@@ -175,6 +239,8 @@ const DEFAULT_STREAMING_STATE: StreamingState = {
   partialText: '', thinkingText: '', isThinking: false,
   activeTools: [], activeHook: null, systemStatus: null, recentEvents: [],
 };
+
+const MAX_TRACE_CACHE_SIZE = 100;
 
 const MAX_EVENT_LOG = 30;
 const SDK_TASK_AUTO_CLOSE_MS = 3000;
@@ -505,6 +571,51 @@ function applyStreamEvent(
   }
 }
 
+interface ActiveTurnObservabilityResponse {
+  activeTurn: null | {
+    id: string;
+    chatJid: string;
+    channel: string;
+    messageIds: string[];
+    startedAt: string;
+    status: string;
+    observability?: {
+      runnerState: { state: string; detail?: string; updatedAt: string } | null;
+      pendingBuffer: Array<{ channel: string; count: number }>;
+      lastEventAt?: string;
+      lastInterruptAt?: string;
+      streaming: StreamingState;
+    } | null;
+  };
+  pendingBuffer: Array<{ channel: string; count: number }>;
+}
+
+function restoreStreamingFromSnapshot(snapshot?: StreamingState | null): StreamingState | undefined {
+  if (!snapshot) return undefined;
+  return {
+    partialText: snapshot.partialText || '',
+    thinkingText: snapshot.thinkingText || '',
+    isThinking: !!snapshot.isThinking,
+    activeTools: Array.isArray(snapshot.activeTools)
+      ? snapshot.activeTools.map((tool) => ({
+          ...tool,
+          startTime: tool.startTime || Date.now(),
+          ...(tool.toolInput ? { toolInput: { ...tool.toolInput } } : {}),
+        }))
+      : [],
+    activeHook: snapshot.activeHook ? { ...snapshot.activeHook } : null,
+    systemStatus: snapshot.systemStatus || null,
+    recentEvents: Array.isArray(snapshot.recentEvents)
+      ? snapshot.recentEvents.map((item) => ({ ...item }))
+      : [],
+    ...(snapshot.todos
+      ? {
+          todos: snapshot.todos.map((todo) => ({ ...todo })),
+        }
+      : {}),
+  };
+}
+
 export const useChatStore = create<ChatState>((set, get) => ({
   groups: {},
   currentGroup: null,
@@ -525,6 +636,142 @@ export const useChatStore = create<ChatState>((set, get) => ({
   agentMessages: {},
   agentWaiting: {},
   agentHasMore: {},
+  traceCache: {},
+  runnerState: {},
+  activeTurn: {},
+  pendingBuffer: {},
+  turns: {},
+
+  loadTurns: async (jid: string) => {
+    try {
+      const data = await api.get<{ turns: Array<{ id: string; chatJid: string; channel: string; messageIds: string[]; startedAt: string; completedAt: string; status: string }> }>(
+        `/api/groups/${encodeURIComponent(jid)}/turns?limit=200`
+      );
+      // API returns DESC order, reverse to chronological
+      const turns: TurnInfo[] = data.turns.map(t => ({
+        id: t.id,
+        channel: t.channel,
+        messageIds: t.messageIds,
+        startedAt: t.startedAt,
+        completedAt: t.completedAt,
+        status: t.status,
+      })).reverse();
+      set((s) => ({ turns: { ...s.turns, [jid]: turns } }));
+    } catch { /* non-critical, silently ignore */ }
+  },
+
+  handleRunnerState: (chatJid, state, detail) => {
+    if (state === 'idle') {
+      // Agent 进程退出或 query 无可见输出：清除流式状态，
+      // 停止显示"正在思考..."。如果后续有新消息触发新 query，
+      // stream events 会自然重新设置 waiting。
+      get().clearStreaming(chatJid, { preserveThinking: true });
+      return;
+    }
+    set((s) => ({
+      runnerState: {
+        ...s.runnerState,
+        [chatJid]: { state, ...(detail ? { detail } : {}), updatedAt: new Date().toISOString() },
+      },
+      activeTurn: s.activeTurn[chatJid]
+        ? {
+            ...s.activeTurn,
+            [chatJid]: {
+              ...s.activeTurn[chatJid]!,
+              status: state as TurnActiveRuntime['status'],
+              runnerState: {
+                state,
+                ...(detail ? { detail } : {}),
+                updatedAt: new Date().toISOString(),
+              },
+            },
+          }
+        : s.activeTurn,
+    }));
+  },
+
+  loadActiveTurnState: async (jid: string) => {
+    try {
+      const data = await api.get<ActiveTurnObservabilityResponse>(
+        `/api/groups/${encodeURIComponent(jid)}/turns/active`,
+      );
+      set((s) => {
+        const nextActiveTurn = { ...s.activeTurn };
+        const nextPendingBuffer = { ...s.pendingBuffer };
+        const nextRunnerState = { ...s.runnerState };
+        const nextStreaming = { ...s.streaming };
+        const nextWaiting = { ...s.waiting };
+        const pendingRecord: Record<string, number> = {};
+        for (const entry of data.pendingBuffer || []) {
+          if (entry.count > 0) pendingRecord[entry.channel] = entry.count;
+        }
+
+        if (data.activeTurn) {
+          const startedAtMs = Date.parse(data.activeTurn.startedAt);
+          const obs = data.activeTurn.observability || null;
+          nextActiveTurn[jid] = {
+            turnId: data.activeTurn.id,
+            channel: data.activeTurn.channel,
+            messageCount: data.activeTurn.messageIds.length,
+            startedAt: Number.isFinite(startedAtMs) ? startedAtMs : Date.now(),
+            status: (data.activeTurn.status as TurnActiveRuntime['status']) || 'running',
+            runnerState: obs?.runnerState || null,
+            ...(obs?.lastEventAt ? { lastEventAt: obs.lastEventAt } : {}),
+            ...(obs?.lastInterruptAt ? { lastInterruptAt: obs.lastInterruptAt } : {}),
+          };
+          nextPendingBuffer[jid] = pendingRecord;
+          if (obs?.runnerState) {
+            nextRunnerState[jid] = { ...obs.runnerState };
+          } else {
+            delete nextRunnerState[jid];
+          }
+          const restoredStreaming = restoreStreamingFromSnapshot(obs?.streaming);
+          if (restoredStreaming) {
+            nextStreaming[jid] = restoredStreaming;
+          } else {
+            delete nextStreaming[jid];
+          }
+          nextWaiting[jid] = true;
+          return {
+            activeTurn: nextActiveTurn,
+            pendingBuffer: nextPendingBuffer,
+            runnerState: nextRunnerState,
+            streaming: nextStreaming,
+            waiting: nextWaiting,
+          };
+        }
+
+        nextActiveTurn[jid] = null;
+        delete nextPendingBuffer[jid];
+        delete nextRunnerState[jid];
+        const localStreaming = s.streaming[jid];
+        const hasVisibleStreaming = !!(
+          localStreaming &&
+          (
+            localStreaming.partialText ||
+            localStreaming.thinkingText ||
+            localStreaming.activeTools.length > 0 ||
+            localStreaming.activeHook ||
+            localStreaming.systemStatus ||
+            localStreaming.recentEvents.length > 0 ||
+            (localStreaming.todos && localStreaming.todos.length > 0)
+          )
+        );
+        if (!hasVisibleStreaming) {
+          delete nextStreaming[jid];
+        }
+        return {
+          activeTurn: nextActiveTurn,
+          pendingBuffer: nextPendingBuffer,
+          runnerState: nextRunnerState,
+          streaming: nextStreaming,
+          waiting: nextWaiting,
+        };
+      });
+    } catch {
+      // 静默失败
+    }
+  },
 
   loadGroups: async () => {
     set({ loading: true });
@@ -563,6 +810,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const state = get();
     if (!state.messages[jid]) {
       get().loadMessages(jid);
+    }
+    if (!state.turns[jid]) {
+      get().loadTurns(jid);
     }
   },
 
@@ -635,11 +885,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
             s.messages[jid] || [],
             data.messages,
           );
-          // Check if agent has replied (any new message with is_from_me=true)
+          // Check if agent has replied with a *new* message (not already in local state)
+          const existingIds = new Set((s.messages[jid] || []).map(m => m.id));
           const agentReplied = data.messages.some(
-            (m) => m.is_from_me && m.sender !== '__system__',
+            (m) => m.is_from_me && m.sender !== '__system__' && !existingIds.has(m.id),
           );
-          const hasSystemError = data.messages.some((m) => isTerminalSystemMessage(m));
+          const hasSystemError = data.messages.some(
+            (m) => isTerminalSystemMessage(m) && !existingIds.has(m.id),
+          );
 
           // Transfer pending thinking to thinkingCache
           let nextThinkingCache = s.thinkingCache;
@@ -1008,6 +1261,41 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Skip while clearHistory is in-flight
     if (get().clearing[chatJid]) return;
 
+    // Turn lifecycle events (from host process, not agent-runner)
+    if (event.eventType === 'turn_started' && event.turnId) {
+      set((s) => ({
+        activeTurn: {
+          ...s.activeTurn,
+          [chatJid]: {
+            turnId: event.turnId!,
+            channel: event.turnChannel || '',
+            messageCount: event.turnMessageCount || 0,
+            startedAt: Date.now(),
+            status: 'started',
+          },
+        },
+      }));
+      return;
+    }
+    if (event.eventType === 'turn_completed' && event.turnId) {
+      set((s) => {
+        const nextRunnerState = { ...s.runnerState };
+        delete nextRunnerState[chatJid];
+        return {
+          activeTurn: { ...s.activeTurn, [chatJid]: null },
+          pendingBuffer: (() => {
+            const next = { ...s.pendingBuffer };
+            delete next[chatJid];
+            return next;
+          })(),
+          runnerState: nextRunnerState,
+        };
+      });
+      // Refresh turns to include the newly completed turn with full message_ids
+      get().loadTurns(chatJid);
+      return;
+    }
+
     // ① conversation agent（DB 持久化的）— 已有逻辑不变
     if (agentId) {
       if (event.eventType === 'status' && event.statusText === 'interrupted') {
@@ -1326,18 +1614,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // ⑥ 主对话 streaming — 使用 applyStreamEvent 共享函数
     set((s) => {
-      // If streaming state was already cleared (final message received),
-      // ignore late-arriving stream events to prevent "thinking" from reappearing.
-      if (!s.streaming[chatJid] && s.waiting[chatJid] === false) {
-        return s;
-      }
       const MAX_STREAMING_TEXT = 8000;
       const prev = s.streaming[chatJid] || { ...DEFAULT_STREAMING_STATE };
       const next = { ...prev };
       applyStreamEvent(event, prev, next, MAX_STREAMING_TEXT);
+      const nextRunnerState = { ...s.runnerState };
+      delete nextRunnerState[chatJid];
+      const nextActiveTurn = s.activeTurn[chatJid]
+        ? {
+            ...s.activeTurn,
+            [chatJid]: {
+              ...s.activeTurn[chatJid]!,
+              status: 'running' as const,
+              runnerState: {
+                state: 'running',
+                updatedAt: new Date().toISOString(),
+              },
+              lastEventAt: new Date().toISOString(),
+            },
+          }
+        : s.activeTurn;
       return {
         waiting: { ...s.waiting, [chatJid]: true },
         streaming: { ...s.streaming, [chatJid]: next },
+        runnerState: nextRunnerState,
+        activeTurn: nextActiveTurn,
       };
     });
   },
@@ -1402,19 +1703,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
         delete nextStreaming[chatJid];
         const nextPending = { ...s.pendingThinking };
         delete nextPending[chatJid];
+        const nextRunnerState = { ...s.runnerState };
+        delete nextRunnerState[chatJid];
 
         return {
           messages: { ...s.messages, [chatJid]: updated },
           waiting: { ...s.waiting, [chatJid]: false },
           streaming: nextStreaming,
           pendingThinking: nextPending,
+          runnerState: nextRunnerState,
           ...(thinkingText ? { thinkingCache: capThinkingCache({ ...s.thinkingCache, [msg.id]: thinkingText }) } : {}),
         };
       }
 
-      // 普通消息（如其他用户发送的消息）：只添加到列表
+      // 普通消息（如 IM 用户发送的消息）：添加到列表并标记等待
+      const shouldWait = msg.sender !== '__system__' && !isTerminalSystemMessage(msg);
       return {
         messages: { ...s.messages, [chatJid]: updated },
+        ...(shouldWait ? { waiting: { ...s.waiting, [chatJid]: true } } : {}),
       };
     });
   },
@@ -1830,11 +2136,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
             latest.is_from_me === false;
           if (inferredWaiting) {
             nextWaiting[g.jid] = true;
-          } else {
-            delete nextWaiting[g.jid];
           }
+          // active 且最新消息是 Agent 回复时：不删除 waiting，
+          // 让 stream_event / new_message 自然管理状态。
         }
         return { waiting: nextWaiting, streaming: nextStreaming };
+      });
+    } catch {
+      // 静默失败
+    }
+  },
+
+  // 按需加载消息的执行轨迹（从后端 turn trace 文件读取）
+  loadTrace: async (chatJid: string, messageId: string) => {
+    // 已缓存则跳过
+    if (get().traceCache[messageId]) return;
+    try {
+      const jid = encodeURIComponent(chatJid);
+      const msgId = encodeURIComponent(messageId);
+      const data = await api.get<{ blocks: StreamingBlock[] }>(
+        `/api/groups/${jid}/messages/${msgId}/trace`,
+      );
+      if (!data.blocks?.length) return;
+      set((s) => {
+        const next = { ...s.traceCache, [messageId]: data.blocks };
+        // Cap cache size
+        const keys = Object.keys(next);
+        if (keys.length > MAX_TRACE_CACHE_SIZE) {
+          const keep = keys.slice(keys.length - MAX_TRACE_CACHE_SIZE);
+          const capped: Record<string, StreamingBlock[]> = {};
+          for (const k of keep) capped[k] = next[k];
+          return { traceCache: capped };
+        }
+        return { traceCache: next };
       });
     } catch {
       // 静默失败
@@ -1854,6 +2188,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       } else {
         delete nextPendingThinking[chatJid];
       }
+
+      const nextRunnerState = { ...s.runnerState };
+      delete nextRunnerState[chatJid];
 
       // 收集该 chatJid 下仍在运行的 SDK Task
       const runningTaskIds: string[] = [];
@@ -1877,6 +2214,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           streaming: next,
           pendingThinking: nextPendingThinking,
           agentStreaming: nextAgentStreaming,
+          runnerState: nextRunnerState,
         };
       }
 
@@ -1884,6 +2222,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         waiting: { ...s.waiting, [chatJid]: false },
         streaming: next,
         pendingThinking: nextPendingThinking,
+        runnerState: nextRunnerState,
       };
     });
   },

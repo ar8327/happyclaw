@@ -81,7 +81,7 @@ export async function executeSessionReset(
   const dividerMessageId = crypto.randomUUID();
   const timestamp = new Date().toISOString();
   ensureChatExists(targetJid);
-  storeMessageDirect(
+  const dividerRowid = storeMessageDirect(
     dividerMessageId,
     targetJid,
     '__system__',
@@ -105,14 +105,11 @@ export async function executeSessionReset(
   //    re-sent to the next fresh agent session.
   if (agentId) {
     const virtualJid = `web:${folder}#agent:${agentId}`;
-    deps.setLastAgentTimestamp(virtualJid, { timestamp, id: dividerMessageId });
+    deps.setLastAgentTimestamp(virtualJid, { rowid: dividerRowid });
   } else {
     const siblingJids = getJidsByFolder(folder);
     for (const siblingJid of siblingJids) {
-      deps.setLastAgentTimestamp(siblingJid, {
-        timestamp,
-        id: dividerMessageId,
-      });
+      deps.setLastAgentTimestamp(siblingJid, { rowid: dividerRowid });
     }
   }
 

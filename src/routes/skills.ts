@@ -104,7 +104,6 @@ function writeSkillsManifest(userId: string, manifest: SkillsManifest): void {
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 }
 
-
 /**
  * Remove a skill from the manifest when it is deleted.
  */
@@ -389,7 +388,6 @@ function copySkillToUser(src: string, dest: string): void {
   fs.cpSync(realSrc, dest, { recursive: true });
 }
 
-
 // --- Routes ---
 
 skillsRoutes.get('/', authMiddleware, (c) => {
@@ -397,7 +395,6 @@ skillsRoutes.get('/', authMiddleware, (c) => {
   const skills = discoverSkills(authUser.id);
   return c.json({ skills });
 });
-
 
 skillsRoutes.get('/:id', authMiddleware, (c) => {
   const id = c.req.param('id');
@@ -603,7 +600,6 @@ skillsRoutes.post('/sync-host', authMiddleware, async (c) => {
   const total = hostSkillNames.length;
   return c.json({ stats, total });
 });
-
 
 export { getUserSkillsDir, deleteSkillForUser };
 export default skillsRoutes;

@@ -74,6 +74,11 @@ export class StreamEventProcessor {
   // Background Task tool_use_ids (run_in_background: true)
   private readonly backgroundTaskToolUseIds = new Set<string>();
 
+  // SDK internal task_id (short hash like "a68ac00") → tool_use_id mapping.
+  // The SDK assigns its own task_id to background tasks, which differs from the
+  // tool_use block's id. Built from parsing tool_result messages in index.ts.
+  private readonly sdkTaskIdToToolUseId = new Map<string, string>();
+
   // Sub-agent active tools per parent task ID
   private readonly activeSubAgentToolsByTask = new Map<string, Set<string>>();
 
@@ -85,6 +90,17 @@ export class StreamEventProcessor {
   /** Whether a top-level tool call is currently executing (waiting for result). */
   get hasActiveToolCall(): boolean {
     return this.activeTopLevelToolUseId !== null;
+  }
+
+  /** Check if a tool_use_id is a tracked background task. */
+  isBackgroundTask(toolUseId: string): boolean {
+    return this.backgroundTaskToolUseIds.has(toolUseId);
+  }
+
+  /** Register SDK internal task_id → tool_use_id mapping. */
+  registerSdkTaskId(sdkTaskId: string, toolUseId: string): void {
+    this.sdkTaskIdToToolUseId.set(sdkTaskId, toolUseId);
+    this.log(`Registered SDK task mapping: ${sdkTaskId} → ${toolUseId.slice(0, 12)}`);
   }
 
   constructor(emit: EmitFn, log: LogFn, onModeChangeRequest?: ModeChangeRequestFn) {
@@ -478,8 +494,17 @@ export class StreamEventProcessor {
       : [];
     this.log(`[tool_use_summary] ids=[${ids.map((id: string) => id.slice(0, 12)).join(',')}] taskToolUseIds=[${[...this.taskToolUseIds].map(id => id.slice(0, 12)).join(',')}] bgTasks=[${[...this.backgroundTaskToolUseIds].map(id => id.slice(0, 12)).join(',')}]`);
     for (const id of ids) {
+      // Background tasks: keep all tracking intact — they are only cleaned up
+      // when processTaskNotification() receives the SDK's task_notification.
+      // Clearing here would drop pendingBackgroundTaskCount to 0 prematurely,
+      // causing stream.end() on result and preventing the SDK from re-invoking
+      // the model when the background task completes.
+      if (this.backgroundTaskToolUseIds.has(id)) {
+        this.log(`[tool_use_summary] Skipping background Task ${id.slice(0, 12)}`);
+        continue;
+      }
       // Foreground Task completion: synthesize task_notification
-      if (this.taskToolUseIds.has(id) && !this.backgroundTaskToolUseIds.has(id)) {
+      if (this.taskToolUseIds.has(id)) {
         this.log(`Synthesizing task_notification for foreground Task ${id.slice(0, 12)}`);
         this.cleanupTaskTools(id);
         this.emit({
@@ -493,7 +518,6 @@ export class StreamEventProcessor {
         });
       }
       this.taskToolUseIds.delete(id);
-      this.backgroundTaskToolUseIds.delete(id);
       this.emit({
         status: 'stream', result: null,
         streamEvent: { eventType: 'tool_use_end', toolUseId: id },
@@ -723,27 +747,50 @@ export class StreamEventProcessor {
   /**
    * Process a task_notification system message.
    */
-  processTaskNotification(message: { task_id: string; status: string; summary: string }): void {
-    this.log(`Task notification: task=${message.task_id} status=${message.status} summary=${message.summary}`);
+  processTaskNotification(message: { task_id: string; tool_use_id?: string; status: string; summary: string }): void {
+    // Resolve to tool_use_id for cleanup.
+    // SDK ≥0.2.47 includes tool_use_id directly in the notification.
+    // For older SDKs, fall back to the sdkTaskIdToToolUseId mapping or heuristic.
+    let resolvedId = message.tool_use_id || message.task_id;
+    if (!this.backgroundTaskToolUseIds.has(resolvedId)) {
+      // tool_use_id missing or doesn't match — try mapping table
+      const mapped = this.sdkTaskIdToToolUseId.get(message.task_id);
+      if (mapped) {
+        resolvedId = mapped;
+        this.sdkTaskIdToToolUseId.delete(message.task_id);
+        this.log(`Task notification: SDK task_id ${message.task_id} → ${resolvedId.slice(0, 12)} (via mapping)`);
+      } else if (this.backgroundTaskToolUseIds.size === 1) {
+        // Last resort: single pending background task
+        const [only] = this.backgroundTaskToolUseIds;
+        resolvedId = only;
+        this.log(`Task notification fallback: ${message.task_id} → ${resolvedId.slice(0, 12)}`);
+      } else if (this.backgroundTaskToolUseIds.size > 1) {
+        const [first] = this.backgroundTaskToolUseIds;
+        resolvedId = first;
+        this.log(`Task notification fallback (ambiguous, ${this.backgroundTaskToolUseIds.size} pending): ${message.task_id} → ${resolvedId.slice(0, 12)}`);
+      }
+    }
+
+    this.log(`Task notification: task=${message.task_id} resolved=${resolvedId.slice(0, 12)} status=${message.status} summary=${message.summary?.slice(0, 100)}`);
     this.emit({
       status: 'stream', result: null,
       streamEvent: {
         eventType: 'task_notification',
-        taskId: message.task_id,
+        taskId: resolvedId,
         taskStatus: message.status,
         taskSummary: message.summary,
         isBackground: true,
       },
     });
-    this.cleanupTaskTools(message.task_id);
-    this.backgroundTaskToolUseIds.delete(message.task_id);
-    if (this.taskToolUseIds.has(message.task_id)) {
-      this.taskToolUseIds.delete(message.task_id);
+    this.cleanupTaskTools(resolvedId);
+    this.backgroundTaskToolUseIds.delete(resolvedId);
+    if (this.taskToolUseIds.has(resolvedId)) {
+      this.taskToolUseIds.delete(resolvedId);
       this.emit({
         status: 'stream', result: null,
-        streamEvent: { eventType: 'tool_use_end', toolUseId: message.task_id },
+        streamEvent: { eventType: 'tool_use_end', toolUseId: resolvedId },
       });
-      if (this.activeTopLevelToolUseId === message.task_id) {
+      if (this.activeTopLevelToolUseId === resolvedId) {
         this.activeTopLevelToolUseId = null;
       }
     }

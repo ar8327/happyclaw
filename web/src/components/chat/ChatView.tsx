@@ -101,10 +101,13 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   // Individual selectors: avoid re-renders from unrelated store changes (e.g. streaming)
   const group = useChatStore(s => s.groups[groupJid]);
   const groupMessages = useChatStore(s => s.messages[groupJid]);
+  const groupTurns = useChatStore(s => s.turns[groupJid]);
   const isWaiting = useChatStore(s => !!s.waiting[groupJid]);
   const hasMoreMessages = useChatStore(s => !!s.hasMore[groupJid]);
   const loading = useChatStore(s => s.loading);
   const loadMessages = useChatStore(s => s.loadMessages);
+  const loadTurns = useChatStore(s => s.loadTurns);
+  const loadActiveTurnState = useChatStore(s => s.loadActiveTurnState);
   const refreshMessages = useChatStore(s => s.refreshMessages);
   const sendMessage = useChatStore(s => s.sendMessage);
   const interruptQuery = useChatStore(s => s.interruptQuery);
@@ -113,6 +116,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const handleWsNewMessage = useChatStore(s => s.handleWsNewMessage);
   const handleAgentStatus = useChatStore(s => s.handleAgentStatus);
   const clearStreaming = useChatStore(s => s.clearStreaming);
+  const handleRunnerState = useChatStore(s => s.handleRunnerState);
   const agents = useChatStore(s => s.agents[groupJid] ?? EMPTY_AGENTS);
   const activeAgentTab = useChatStore(s => s.activeAgentTab[groupJid] ?? null);
   const setActiveAgentTab = useChatStore(s => s.setActiveAgentTab);
@@ -169,6 +173,19 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     }
   }, [groupJid, hasMessages, loadMessages]);
 
+  const hasTurns = !!groupTurns;
+  useEffect(() => {
+    if (groupJid && !hasTurns) {
+      loadTurns(groupJid);
+    }
+  }, [groupJid, hasTurns, loadTurns]);
+
+  useEffect(() => {
+    if (groupJid) {
+      loadActiveTurnState(groupJid);
+    }
+  }, [groupJid, loadActiveTurnState]);
+
   // Poll for new messages — use setTimeout recursion to avoid request piling up
   // Pauses when the page is not visible to save resources
   useEffect(() => {
@@ -183,6 +200,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       if (!active) return;
       try {
         await refreshMessages(groupJid);
+        await loadActiveTurnState(groupJid);
       } catch { /* handled in store */ }
       schedulePoll();
     };
@@ -204,19 +222,21 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       if (pollRef.current) clearTimeout(pollRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupJid]);
+  }, [groupJid, refreshMessages, loadActiveTurnState]);
 
   // WS 重连时恢复正在运行的 agent 状态（独立于 groupJid，避免切换会话时重复调用）
   // wsManager.connect() 已提升到 AppLayout 级别
   const restoreActiveState = useChatStore(s => s.restoreActiveState);
   useEffect(() => {
     restoreActiveState();
+    loadActiveTurnState(groupJid);
     const unsub = wsManager.on('connected', () => {
       restoreActiveState();
+      loadActiveTurnState(groupJid);
     });
     return () => { unsub(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [groupJid, loadActiveTurnState]);
 
   // Derived: active agent info and kind
   const activeAgent = activeAgentTab ? agents.find(a => a.id === activeAgentTab) : null;
@@ -266,8 +286,14 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         handleAgentStatus(groupJid, data.agentId, data.status, data.name, data.prompt, data.resultSummary, data.kind);
       }
     });
-    return () => { unsub1(); unsub2(); unsub3(); unsub4(); };
-  }, [groupJid, handleStreamEvent, handleWsNewMessage, handleAgentStatus, clearStreaming]);
+    // Agent 生命周期状态（queued / capacity_wait / starting）
+    const unsub5 = wsManager.on('runner_state', (data: any) => {
+      if (data.chatJid === groupJid) {
+        handleRunnerState(groupJid, data.state, data.detail);
+      }
+    });
+    return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); };
+  }, [groupJid, handleStreamEvent, handleWsNewMessage, handleAgentStatus, clearStreaming, handleRunnerState]);
 
   const [scrollTrigger, setScrollTrigger] = useState(0);
 

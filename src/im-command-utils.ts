@@ -140,9 +140,10 @@ export function resolveLocationInfo(
     folder = group.folder;
   }
 
-  const replyPolicy = group.target_main_jid || group.target_agent_id
-    ? (group.reply_policy || 'source_only')
-    : null;
+  const replyPolicy =
+    group.target_main_jid || group.target_agent_id
+      ? group.reply_policy || 'source_only'
+      : null;
 
   return { locationLine, folder, replyPolicy };
 }

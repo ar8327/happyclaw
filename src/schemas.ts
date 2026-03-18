@@ -237,6 +237,9 @@ export const SystemSettingsSchema = z.object({
   memoryQueryTimeout: z.number().int().min(10000).max(600000).optional(),
   memoryGlobalSleepTimeout: z.number().int().min(60000).max(3600000).optional(),
   memorySendTimeout: z.number().int().min(30000).max(3600000).optional(),
+  turnBatchWindowMs: z.number().int().min(1000).max(60000).optional(),
+  turnMaxBatchMs: z.number().int().min(5000).max(300000).optional(),
+  traceRetentionDays: z.number().int().min(1).max(90).optional(),
   feishuApiDomain: z.string().min(1).max(100).optional(),
   feishuDocDomain: z.string().min(1).max(100).optional(),
 });
@@ -418,7 +421,6 @@ export const QQConfigSchema = z
     { message: 'At least one config field must be provided' },
   );
 
-
 export const ClaudeCustomEnvSchema = z.object({
   customEnv: z.record(z.string().max(256), z.string().max(4096)),
 });
@@ -462,7 +464,11 @@ export const TerminalStopSchema = z.object({
 // --- Billing schemas ---
 
 export const BillingPlanCreateSchema = z.object({
-  id: z.string().min(1).max(64).regex(/^[\w-]+$/, 'ID must be alphanumeric with hyphens/underscores'),
+  id: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(/^[\w-]+$/, 'ID must be alphanumeric with hyphens/underscores'),
   name: z.string().min(1).max(64),
   description: z.string().max(500).nullable().optional(),
   tier: z.number().int().min(0).max(100).optional(),
@@ -489,7 +495,9 @@ export const BillingPlanCreateSchema = z.object({
   is_active: z.boolean().optional(),
 });
 
-export const BillingPlanPatchSchema = BillingPlanCreateSchema.omit({ id: true }).partial();
+export const BillingPlanPatchSchema = BillingPlanCreateSchema.omit({
+  id: true,
+}).partial();
 
 export const AssignPlanSchema = z.object({
   plan_id: z.string().min(1),
@@ -508,39 +516,48 @@ export const BatchAssignPlanSchema = z.object({
   duration_days: z.number().int().min(1).max(3650).optional(),
 });
 
-export const RedeemCodeCreateSchema = z.object({
-  type: z.enum(['balance', 'subscription', 'trial']),
-  value_usd: z.number().min(0.01).optional(),
-  plan_id: z.string().min(1).optional(),
-  duration_days: z.number().int().min(1).max(3650).optional(),
-  max_uses: z.number().int().min(1).max(10000).optional(),
-  count: z.number().int().min(1).max(100).optional(), // 批量生成数量
-  prefix: z.string().max(16).regex(/^[\w-]*$/).optional(), // 兑换码前缀
-  expires_in_hours: z.number().int().min(1).max(87600).optional(),
-  notes: z.string().max(500).optional(),
-}).superRefine((data, ctx) => {
-  if (data.type === 'balance' && (!data.value_usd || data.value_usd <= 0)) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['value_usd'],
-      message: 'Balance type requires a positive value_usd',
-    });
-  }
-  if (data.type === 'subscription' && !data.plan_id) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['plan_id'],
-      message: 'Subscription type requires a plan_id',
-    });
-  }
-  if (data.type === 'trial' && (!data.duration_days || data.duration_days <= 0)) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['duration_days'],
-      message: 'Trial type requires a positive duration_days',
-    });
-  }
-});
+export const RedeemCodeCreateSchema = z
+  .object({
+    type: z.enum(['balance', 'subscription', 'trial']),
+    value_usd: z.number().min(0.01).optional(),
+    plan_id: z.string().min(1).optional(),
+    duration_days: z.number().int().min(1).max(3650).optional(),
+    max_uses: z.number().int().min(1).max(10000).optional(),
+    count: z.number().int().min(1).max(100).optional(), // 批量生成数量
+    prefix: z
+      .string()
+      .max(16)
+      .regex(/^[\w-]*$/)
+      .optional(), // 兑换码前缀
+    expires_in_hours: z.number().int().min(1).max(87600).optional(),
+    notes: z.string().max(500).optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.type === 'balance' && (!data.value_usd || data.value_usd <= 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['value_usd'],
+        message: 'Balance type requires a positive value_usd',
+      });
+    }
+    if (data.type === 'subscription' && !data.plan_id) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['plan_id'],
+        message: 'Subscription type requires a plan_id',
+      });
+    }
+    if (
+      data.type === 'trial' &&
+      (!data.duration_days || data.duration_days <= 0)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['duration_days'],
+        message: 'Trial type requires a positive duration_days',
+      });
+    }
+  });
 
 export const RedeemCodeSchema = z.object({
   code: z.string().min(1).max(64),

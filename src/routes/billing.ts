@@ -362,7 +362,8 @@ billingRoutes.get(
       // Plan info
       plan_id: plan?.id ?? null,
       plan_name: plan?.name ?? null,
-      subscription_status: realSubscription?.status ?? (isFallback ? 'default' : null),
+      subscription_status:
+        realSubscription?.status ?? (isFallback ? 'default' : null),
       is_fallback: isFallback,
       has_real_subscription: !!realSubscription,
       access_allowed: access.allowed,
@@ -456,8 +457,7 @@ billingRoutes.post(
       );
       return c.json(tx);
     } catch (err) {
-      const message =
-        err instanceof Error ? err.message : '调整余额失败';
+      const message = err instanceof Error ? err.message : '调整余额失败';
       return c.json({ error: message }, 400);
     }
   },
@@ -557,7 +557,12 @@ billingRoutes.get(
     const offset = parseInt(c.req.query('offset') || '0');
     const userId = c.req.query('user_id');
     const eventType = c.req.query('event_type');
-    const result = getBillingAuditLog(limit, offset, userId || undefined, eventType || undefined);
+    const result = getBillingAuditLog(
+      limit,
+      offset,
+      userId || undefined,
+      eventType || undefined,
+    );
     return c.json(result);
   },
 );
@@ -652,7 +657,8 @@ billingRoutes.get(
   billingManageMiddleware,
   async (c) => {
     const codes = getAllRedeemCodes();
-    const header = 'code,type,value_usd,plan_id,duration_days,max_uses,used_count,expires_at,notes,batch_id,created_at\n';
+    const header =
+      'code,type,value_usd,plan_id,duration_days,max_uses,used_count,expires_at,notes,batch_id,created_at\n';
     const csvEscape = (val: unknown): string => {
       const s = String(val ?? '');
       if (s.includes(',') || s.includes('"') || s.includes('\n')) {

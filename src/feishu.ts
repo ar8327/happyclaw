@@ -54,10 +54,7 @@ export interface ConnectOptions {
   /** 群聊消息过滤：bot 未被 @mention 时调用，返回 true 则处理，false 则丢弃 */
   shouldProcessGroupMessage?: (chatJid: string) => boolean;
   /** 中断 fast-path：消息到达时立即检测中断意图，绕过轮询延迟直接触发中断 */
-  onInterruptRequest?: (
-    chatJid: string,
-    intent: 'stop' | 'correction',
-  ) => void;
+  onInterruptRequest?: (chatJid: string, intent: 'stop' | 'correction') => void;
 }
 
 export interface FeishuChatInfo {
@@ -273,8 +270,7 @@ function extractMessageContent(
     }
 
     if (messageType === 'sticker') {
-      const stickerDesc =
-        parsed.description || parsed.sticker_id || '表情包';
+      const stickerDesc = parsed.description || parsed.sticker_id || '表情包';
       return { text: `[表情包: ${stickerDesc}]` };
     }
 
@@ -328,8 +324,7 @@ function extractMessageContent(
 
     if (messageType === 'system') {
       const body = parsed.body || parsed.content || '';
-      const systemText =
-        typeof body === 'string' ? body : JSON.stringify(body);
+      const systemText = typeof body === 'string' ? body : JSON.stringify(body);
       return { text: `[系统消息: ${systemText.slice(0, 200)}]` };
     }
 
@@ -503,7 +498,11 @@ export function createFeishuConnection(
   let disconnectedSince: number | null = null;
   let healthTimer: NodeJS.Timeout | null = null;
 
-  function rememberChatProgress(chatId: string, createTimeMs: number, chatType?: string): void {
+  function rememberChatProgress(
+    chatId: string,
+    createTimeMs: number,
+    chatType?: string,
+  ): void {
     knownChatIds.add(chatId);
     if (chatType) chatTypeById.set(chatId, chatType);
     const prev = lastCreateTimeByChat.get(chatId) || 0;
@@ -1376,7 +1375,10 @@ export function createFeishuConnection(
           method: 'GET',
           url: '/open-apis/bot/v3/info/',
         });
-        const info = botInfoRes as { bot?: { open_id?: string }; data?: { bot?: { open_id?: string } } };
+        const info = botInfoRes as {
+          bot?: { open_id?: string };
+          data?: { bot?: { open_id?: string } };
+        };
         botOpenId = info?.bot?.open_id || info?.data?.bot?.open_id || '';
         if (botOpenId) {
           logger.info(
@@ -1598,16 +1600,25 @@ export function createFeishuConnection(
           // as sensitive data (EMAIL_ADDRESS). Replace @ with fullwidth ＠ and retry.
           const feishuCode = outerErr?.response?.data?.code;
           if (feishuCode === 230028) {
-            logger.warn({ chatId }, 'Feishu audit 230028, replacing @ with fullwidth ＠ and retrying');
+            logger.warn(
+              { chatId },
+              'Feishu audit 230028, replacing @ with fullwidth ＠ and retrying',
+            );
             try {
               // Replace @ in email-like patterns with fullwidth ＠ (U+FF20)
               const sanitized = text.replace(
                 /([a-zA-Z0-9._%+\-]+)@([a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/g,
                 '$1\uFF20$2',
               );
-              sentMsgId = await sendMsg(sanitized + '\n\n> ⚠️ 消息中的 @ 已被替换为全角＠以通过飞书安全审计，请注意复制时替换回半角 @');
+              sentMsgId = await sendMsg(
+                sanitized +
+                  '\n\n> ⚠️ 消息中的 @ 已被替换为全角＠以通过飞书安全审计，请注意复制时替换回半角 @',
+              );
             } catch (retryErr) {
-              logger.error({ chatId, err: retryErr }, 'Feishu audit 230028 fullwidth @ retry also failed');
+              logger.error(
+                { chatId, err: retryErr },
+                'Feishu audit 230028 fullwidth @ retry also failed',
+              );
               throw outerErr;
             }
           } else {
@@ -1698,7 +1709,8 @@ export function createFeishuConnection(
           },
         })) as { image_key?: string; data?: { image_key?: string } } | null;
 
-        const imageKey = uploadResult?.image_key ?? uploadResult?.data?.image_key;
+        const imageKey =
+          uploadResult?.image_key ?? uploadResult?.data?.image_key;
         if (!imageKey) {
           logger.error(
             { chatId },

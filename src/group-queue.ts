@@ -57,6 +57,9 @@ export class GroupQueue {
   private userConcurrentLimitFn:
     | ((groupJid: string) => { allowed: boolean })
     | null = null;
+  private lifecycleEmitter:
+    | ((groupJid: string, state: string, detail?: string) => void)
+    | null = null;
 
   private getGroup(groupJid: string): GroupState {
     let state = this.groups.get(groupJid);
@@ -85,6 +88,12 @@ export class GroupQueue {
 
   setHostModeChecker(fn: (groupJid: string) => boolean): void {
     this.hostModeChecker = fn;
+  }
+
+  setLifecycleEmitter(
+    fn: (groupJid: string, state: string, detail?: string) => void,
+  ): void {
+    this.lifecycleEmitter = fn;
   }
 
   setSerializationKeyResolver(fn: (groupJid: string) => string): void {
@@ -146,7 +155,7 @@ export class GroupQueue {
     const isHost = this.isHostMode(groupJid);
     const systemCapacity = isHost
       ? this.activeHostProcessCount <
-          getSystemSettings().maxConcurrentHostProcesses
+        getSystemSettings().maxConcurrentHostProcesses
       : this.activeContainerCount < getSystemSettings().maxConcurrentContainers;
     if (!systemCapacity) return false;
 
@@ -184,6 +193,11 @@ export class GroupQueue {
     if (state.active || (activeRunner && activeRunner !== groupJid)) {
       state.pendingMessages = true;
       this.waitingGroups.add(groupJid);
+      const detail =
+        activeRunner && activeRunner !== groupJid
+          ? '当前共享工作区正在处理其它渠道的 Turn'
+          : '当前工作区仍在处理上一轮消息';
+      this.lifecycleEmitter?.(groupJid, 'queued', detail);
       logger.debug(
         { groupJid, activeRunner: activeRunner || groupJid },
         'Group runner active, message queued',
@@ -195,6 +209,17 @@ export class GroupQueue {
       const isHost = this.isHostMode(groupJid);
       state.pendingMessages = true;
       this.waitingGroups.add(groupJid);
+      const max = isHost
+        ? getSystemSettings().maxConcurrentHostProcesses
+        : getSystemSettings().maxConcurrentContainers;
+      const current = isHost
+        ? this.activeHostProcessCount
+        : this.activeContainerCount;
+      this.lifecycleEmitter?.(
+        groupJid,
+        'capacity_wait',
+        `${current}/${max} ${isHost ? '进程' : '容器'}运行中`,
+      );
       logger.debug(
         {
           groupJid,
@@ -351,6 +376,29 @@ export class GroupQueue {
       fs.writeFileSync(path.join(inputDir, '_close'), '');
     } catch {
       // ignore
+    }
+  }
+
+  /**
+   * Signal the active container to drain: finish current query then exit.
+   * Unlike closeStdin which signals immediate exit, drain waits for the query to complete.
+   * Used for turn boundaries when a different channel's message needs processing.
+   */
+  sendDrain(groupJid: string): boolean {
+    const state = this.resolveActiveState(groupJid);
+    if (!state) return false;
+
+    const inputDir = this.resolveIpcInputDir(state);
+    try {
+      fs.mkdirSync(inputDir, { recursive: true });
+      fs.writeFileSync(path.join(inputDir, '_drain'), '');
+      logger.info(
+        { groupJid, groupFolder: state.groupFolder },
+        'Drain sentinel written',
+      );
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -647,6 +695,11 @@ export class GroupQueue {
     // causing sendMessage() to return 'no_active' and silently queue messages.
     state.groupFolder = this.getSerializationKey(groupJid);
     this.waitingGroups.delete(groupJid);
+    this.lifecycleEmitter?.(
+      groupJid,
+      'starting',
+      reason === 'drain' ? '上一轮已结束，正在接手这一轮' : '正在启动当前 Turn',
+    );
     this.activeCount++;
     if (isHostMode) {
       this.activeHostProcessCount++;

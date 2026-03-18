@@ -68,10 +68,7 @@ export interface QQConnectOpts {
   ) => { effectiveJid: string; agentId: string | null } | null;
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
   /** 中断 fast-path：消息到达时立即检测中断意图，绕过轮询延迟直接触发中断 */
-  onInterruptRequest?: (
-    chatJid: string,
-    intent: 'stop' | 'correction',
-  ) => void;
+  onInterruptRequest?: (chatJid: string, intent: 'stop' | 'correction') => void;
 }
 
 export interface QQConnection {
@@ -188,14 +185,19 @@ function parseQQChatId(
 function checkInterruptFastPath(
   text: string,
   jid: string,
-  onInterruptRequest: ((jid: string, intent: 'stop' | 'correction') => void) | undefined,
+  onInterruptRequest:
+    | ((jid: string, intent: 'stop' | 'correction') => void)
+    | undefined,
   source: string,
 ): void {
   if (!onInterruptRequest || text.length > 50) return;
   const intent = analyzeIntent(text);
   if (intent !== 'continue') {
     onInterruptRequest(jid, intent);
-    logger.info({ jid, intent }, `Interrupt fast-path triggered from ${source}`);
+    logger.info(
+      { jid, intent },
+      `Interrupt fast-path triggered from ${source}`,
+    );
   }
 }
 
@@ -819,7 +821,12 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
       const targetJid = agentRouting?.effectiveJid ?? jid;
 
       // ── 中断 fast-path（使用路由后的 targetJid） ──
-      checkInterruptFastPath(content, targetJid, opts.onInterruptRequest, 'QQ C2C');
+      checkInterruptFastPath(
+        content,
+        targetJid,
+        opts.onInterruptRequest,
+        'QQ C2C',
+      );
 
       const id = crypto.randomUUID();
       let timestamp: string;
@@ -1016,7 +1023,12 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
       const targetJid = agentRouting?.effectiveJid ?? jid;
 
       // ── 中断 fast-path（使用路由后的 targetJid） ──
-      checkInterruptFastPath(content, targetJid, opts.onInterruptRequest, 'QQ group');
+      checkInterruptFastPath(
+        content,
+        targetJid,
+        opts.onInterruptRequest,
+        'QQ group',
+      );
 
       const id = crypto.randomUUID();
       let timestamp: string;

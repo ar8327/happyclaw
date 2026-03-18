@@ -12,7 +12,13 @@ import {
   type MemoryFilePayload,
   type MemorySearchHit,
 } from '../schemas.js';
-import { getAllRegisteredGroups, getGroupsByOwner, getJidsByFolder, getUserById, getUserHomeGroup } from '../db.js';
+import {
+  getAllRegisteredGroups,
+  getGroupsByOwner,
+  getJidsByFolder,
+  getUserById,
+  getUserHomeGroup,
+} from '../db.js';
 import { logger } from '../logger.js';
 import { GROUPS_DIR, DATA_DIR } from '../config.js';
 import type { AuthUser } from '../types.js';
@@ -391,7 +397,10 @@ function listMemorySources(user: AuthUser): MemorySource[] {
   if (fs.existsSync(MEMORY_DATA_DIR)) {
     const memFolders = fs.readdirSync(MEMORY_DATA_DIR, { withFileTypes: true });
     for (const d of memFolders) {
-      if (d.isDirectory() && (isAdmin || accessibleFolders.has(d.name) || d.name === user.id)) {
+      if (
+        d.isDirectory() &&
+        (isAdmin || accessibleFolders.has(d.name) || d.name === user.id)
+      ) {
         const scanned: string[] = [];
         walkFiles(
           path.join(MEMORY_DATA_DIR, d.name),
@@ -691,7 +700,8 @@ memoryRoutes.get('/status', authMiddleware, (c) => {
     lastSessionWrapupAt: (state.lastSessionWrapupAt as string | null) || null,
     pendingWrapupsCount: pendingWrapups.length,
     canTriggerWrapup: !!homeGroup && !activeWrapups.has(user.id),
-    canTriggerGlobalSleep: pendingWrapups.length > 0 && !activeGlobalSleeps.has(user.id),
+    canTriggerGlobalSleep:
+      pendingWrapups.length > 0 && !activeGlobalSleeps.has(user.id),
     hasActiveSession,
     wrapupInProgress: activeWrapups.has(user.id),
     globalSleepInProgress: activeGlobalSleeps.has(user.id),
@@ -716,14 +726,22 @@ memoryRoutes.post('/trigger-wrapup', authMiddleware, async (c) => {
   activeWrapups.add(user.id);
   try {
     const allJids = getJidsByFolder(homeGroup.folder);
-    const result = await exportTranscriptsForUser(user.id, homeGroup.folder, allJids, injectedManager);
+    const result = await exportTranscriptsForUser(
+      user.id,
+      homeGroup.folder,
+      allJids,
+      injectedManager,
+    );
     if (result === null) {
       return c.json({ success: true, message: '没有新消息需要整理' });
     }
     if (result.success) {
       return c.json({ success: true, message: '会话整理完成' });
     }
-    return c.json({ error: `会话整理失败: ${result.error || '未知错误'}` }, 500);
+    return c.json(
+      { error: `会话整理失败: ${result.error || '未知错误'}` },
+      500,
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err, userId: user.id }, 'Manual session_wrapup failed');

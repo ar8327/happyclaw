@@ -116,9 +116,7 @@ function buildStreamingCard(
   if (noteMap[state]) {
     elements.push({
       tag: 'note',
-      elements: [
-        { tag: 'plain_text', content: noteMap[state] },
-      ],
+      elements: [{ tag: 'plain_text', content: noteMap[state] }],
     });
   }
 
@@ -263,7 +261,10 @@ export class StreamingCardController {
     if (this.state === 'idle') {
       this.state = 'creating';
       this.createInitialCard().catch((err) => {
-        logger.warn({ err, chatId: this.chatId }, 'Streaming card: initial create failed, will use fallback');
+        logger.warn(
+          { err, chatId: this.chatId },
+          'Streaming card: initial create failed, will use fallback',
+        );
         this.state = 'error';
         this.onFallback?.();
       });
@@ -290,7 +291,10 @@ export class StreamingCardController {
       try {
         await this.patchCard('completed');
       } catch (err) {
-        logger.debug({ err, chatId: this.chatId }, 'Streaming card: final patch failed');
+        logger.debug(
+          { err, chatId: this.chatId },
+          'Streaming card: final patch failed',
+        );
       }
     }
   }
@@ -312,7 +316,10 @@ export class StreamingCardController {
       try {
         await this.patchCard('aborted');
       } catch (err) {
-        logger.debug({ err, chatId: this.chatId }, 'Streaming card: abort patch failed');
+        logger.debug(
+          { err, chatId: this.chatId },
+          'Streaming card: abort patch failed',
+        );
       }
     }
   }
@@ -324,10 +331,7 @@ export class StreamingCardController {
   // ─── Internal Methods ──────────────────────────────────
 
   private async createInitialCard(): Promise<void> {
-    const card = buildStreamingCard(
-      this.accumulatedText || '...',
-      'streaming',
-    );
+    const card = buildStreamingCard(this.accumulatedText || '...', 'streaming');
     const content = JSON.stringify(card);
 
     try {
@@ -366,7 +370,10 @@ export class StreamingCardController {
         try {
           await this.patchCard(finalState);
         } catch (err) {
-          logger.debug({ err, chatId: this.chatId }, 'Failed to patch to final state after late creation');
+          logger.debug(
+            { err, chatId: this.chatId },
+            'Failed to patch to final state after late creation',
+          );
         }
         return;
       }
@@ -499,8 +506,5 @@ export async function abortAllStreamingSessions(
   }
   await Promise.allSettled(promises);
   activeSessions.clear();
-  logger.info(
-    { count: promises.length },
-    'All streaming sessions aborted',
-  );
+  logger.info({ count: promises.length }, 'All streaming sessions aborted');
 }

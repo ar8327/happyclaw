@@ -13,7 +13,11 @@ import {
   canAccessGroup,
   getWebDeps,
 } from '../web-context.js';
-import { getRegisteredGroup, getRouterState, hasContainerModeGroups } from '../db.js';
+import {
+  getRegisteredGroup,
+  getRouterState,
+  hasContainerModeGroups,
+} from '../db.js';
 import { CONTAINER_IMAGE } from '../config.js';
 import { getSystemSettings } from '../runtime-config.js';
 import { logger } from '../logger.js';

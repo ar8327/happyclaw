@@ -52,6 +52,8 @@ import {
   getUserPinnedGroups,
   pinGroup,
   unpinGroup,
+  getTurnByResultMessageId,
+  getMessageIdsWithTrace,
 } from '../db.js';
 import { logger } from '../logger.js';
 import {
@@ -73,7 +75,29 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import net from 'node:net';
 import { z } from 'zod';
-import { broadcastNewMessage, invalidateAllowedUserCache } from '../web.js';
+import {
+  broadcastNewMessage,
+  broadcastRunnerState,
+  invalidateAllowedUserCache,
+} from '../web.js';
+import { loadTurnTrace } from '../turn-trace.js';
+import { turnObservabilityManager } from '../turn-observability.js';
+
+/** Annotate AI reply messages with has_trace flag based on turns table */
+function annotateMessagesWithTrace(
+  messages: Array<{ id: string; is_from_me: boolean; has_trace?: boolean }>,
+): void {
+  const aiMsgIds = messages
+    .filter((m) => m.is_from_me)
+    .map((m) => m.id);
+  if (aiMsgIds.length === 0) return;
+  const traceSet = getMessageIdsWithTrace(aiMsgIds);
+  for (const msg of messages) {
+    if (traceSet.has(msg.id)) {
+      msg.has_trace = true;
+    }
+  }
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -754,11 +778,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
   }
 
   // Update registered group if name, skills, or activation_mode changed
-  if (
-    name ||
-    selected_skills !== undefined ||
-    activation_mode !== undefined
-  ) {
+  if (name || selected_skills !== undefined || activation_mode !== undefined) {
     const updated: RegisteredGroup = {
       name: name || existing.name,
       folder: existing.folder,
@@ -879,7 +899,7 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
 
   delete deps.getRegisteredGroups()[jid];
   delete deps.getSessions()[existing.folder];
-  deps.setLastAgentTimestamp(jid, { timestamp: '', id: '' });
+  deps.setLastAgentTimestamp(jid, { rowid: 0 });
 
   return c.json({ success: true });
 });
@@ -925,6 +945,15 @@ groupRoutes.post('/:jid/interrupt', authMiddleware, async (c) => {
 
   const interrupted = deps.queue.interruptQuery(jid);
   if (interrupted) {
+    broadcastRunnerState(jid, 'interrupting', '正在中断当前 Turn');
+    if (agentSep < 0) {
+      turnObservabilityManager.setRunnerState(
+        group.folder,
+        'interrupting',
+        '正在中断当前 Turn',
+        deps.getActiveTurnRuntime?.(group.folder) || null,
+      );
+    }
     // Persist interrupt as a system marker so refresh/state-restore can
     // deterministically clear waiting even when no assistant reply exists.
     const messageId = crypto.randomUUID();
@@ -1003,7 +1032,10 @@ groupRoutes.post('/:jid/reset-session', authMiddleware, async (c) => {
   // 0. Export transcripts before reset (for memory system), main session only
   if (!agentId && deps.triggerSessionWrapup) {
     await deps.triggerSessionWrapup(group.folder).catch((err) => {
-      logger.warn({ jid, err }, 'Pre-reset transcript export failed (non-blocking)');
+      logger.warn(
+        { jid, err },
+        'Pre-reset transcript export failed (non-blocking)',
+      );
     });
   }
 
@@ -1066,9 +1098,10 @@ groupRoutes.post('/:jid/reset-session', authMiddleware, async (c) => {
   const targetJid = agentId ? `${jid}#agent:${agentId}` : jid;
   const dividerMessageId = crypto.randomUUID();
   const timestamp = new Date().toISOString();
+  let dividerRowid = 0;
   try {
     ensureChatExists(targetJid);
-    storeMessageDirect(
+    dividerRowid = storeMessageDirect(
       dividerMessageId,
       targetJid,
       '__system__',
@@ -1098,15 +1131,12 @@ groupRoutes.post('/:jid/reset-session', authMiddleware, async (c) => {
   //    re-sent to the next fresh agent session.
   if (agentId) {
     const virtualJid = `${jid}#agent:${agentId}`;
-    deps.setLastAgentTimestamp(virtualJid, { timestamp, id: dividerMessageId });
+    deps.setLastAgentTimestamp(virtualJid, { rowid: dividerRowid });
   } else {
     // Main session: advance cursor for ALL sibling JIDs sharing this folder.
     const siblingJids = getJidsByFolder(group.folder);
     for (const siblingJid of siblingJids) {
-      deps.setLastAgentTimestamp(siblingJid, {
-        timestamp,
-        id: dividerMessageId,
-      });
+      deps.setLastAgentTimestamp(siblingJid, { rowid: dividerRowid });
     }
   }
 
@@ -1180,7 +1210,7 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
       deleteChatHistory(siblingJid);
       // Re-create the chats row so subsequent messages work properly
       ensureChatExists(siblingJid);
-      deps.setLastAgentTimestamp(siblingJid, { timestamp: '', id: '' });
+      deps.setLastAgentTimestamp(siblingJid, { rowid: 0 });
     }
   } catch (err) {
     logger.error(
@@ -1235,11 +1265,13 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
     const virtualJid = `${jid}#agent:${agentIdParam}`;
     if (after) {
       const messages = getMessagesAfter(virtualJid, after, limit);
+      annotateMessagesWithTrace(messages);
       return c.json({ messages });
     }
     const rows = getMessagesPage(virtualJid, before, limit + 1);
     const hasMore = rows.length > limit;
     const messages = hasMore ? rows.slice(0, limit) : rows;
+    annotateMessagesWithTrace(messages);
     return c.json({ messages, hasMore });
   }
 
@@ -1268,23 +1300,47 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
     // 单 JID 走原路径
     if (after) {
       const messages = getMessagesAfter(jid, after, limit);
+      annotateMessagesWithTrace(messages);
       return c.json({ messages });
     }
     const rows = getMessagesPage(jid, before, limit + 1);
     const hasMore = rows.length > limit;
     const messages = hasMore ? rows.slice(0, limit) : rows;
+    annotateMessagesWithTrace(messages);
     return c.json({ messages, hasMore });
   }
 
   // 多 JID 合并查询
   if (after) {
     const messages = getMessagesAfterMulti(queryJids, after, limit);
+    annotateMessagesWithTrace(messages);
     return c.json({ messages });
   }
   const rows = getMessagesPageMulti(queryJids, before, limit + 1);
   const hasMore = rows.length > limit;
   const messages = hasMore ? rows.slice(0, limit) : rows;
+  annotateMessagesWithTrace(messages);
   return c.json({ messages, hasMore });
+});
+
+// GET /api/groups/:jid/messages/:messageId/trace - 获取消息的执行轨迹
+groupRoutes.get('/:jid/messages/:messageId/trace', authMiddleware, (c) => {
+  const jid = c.req.param('jid');
+  const messageId = c.req.param('messageId');
+  const group = getRegisteredGroup(jid);
+  if (!group) return c.json({ blocks: [] });
+  const authUser = c.get('user') as AuthUser;
+  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
+    return c.json({ blocks: [] });
+  }
+
+  const turn = getTurnByResultMessageId(messageId);
+  if (!turn?.trace_file) return c.json({ blocks: [] });
+
+  const trace = loadTurnTrace(turn.trace_file);
+  if (!trace) return c.json({ blocks: [] });
+
+  return c.json({ blocks: trace.blocks });
 });
 
 // DELETE /api/groups/:jid/messages/:messageId - 删除单条消息
@@ -1658,7 +1714,11 @@ groupRoutes.put('/:jid/mcp', authMiddleware, async (c) => {
   const selected_mcps = body.selected_mcps;
 
   // Validate mcp_mode
-  if (mcp_mode !== undefined && mcp_mode !== 'inherit' && mcp_mode !== 'custom') {
+  if (
+    mcp_mode !== undefined &&
+    mcp_mode !== 'inherit' &&
+    mcp_mode !== 'custom'
+  ) {
     return c.json({ error: 'Invalid mcp_mode' }, 400);
   }
 
@@ -1678,7 +1738,8 @@ groupRoutes.put('/:jid/mcp', authMiddleware, async (c) => {
   const updatedGroup: RegisteredGroup = {
     ...group,
     mcp_mode: mcp_mode ?? group.mcp_mode ?? 'inherit',
-    selected_mcps: selected_mcps !== undefined ? selected_mcps : group.selected_mcps,
+    selected_mcps:
+      selected_mcps !== undefined ? selected_mcps : group.selected_mcps,
   };
 
   setRegisteredGroup(jid, updatedGroup);

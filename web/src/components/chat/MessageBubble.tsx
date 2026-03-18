@@ -1,8 +1,8 @@
-import { useState, useRef, memo } from 'react';
-import { Copy, Check, ChevronDown, ChevronUp, Ellipsis } from 'lucide-react';
+import { useState, useRef, useCallback, memo } from 'react';
+import { Copy, Check, ChevronDown, ChevronUp, Ellipsis, Loader2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { Message } from '../../stores/chat';
+import { Message, useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { EmojiAvatar } from '../common/EmojiAvatar';
 import { MarkdownRenderer } from './MarkdownRenderer';
@@ -15,7 +15,88 @@ interface MessageBubbleProps {
   message: Message;
   showTime: boolean;
   thinkingContent?: string;
+  chatJid: string;
   isShared?: boolean;
+}
+
+/** Collapsed execution trace for AI messages — loads blocks from API on expand. */
+function ExecutionTrace({ messageId, chatJid }: { messageId: string; chatJid: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const blocks = useChatStore(s => s.traceCache[messageId]);
+  const loadTrace = useChatStore(s => s.loadTrace);
+
+  const handleExpand = useCallback(async () => {
+    if (!expanded && !blocks) {
+      setLoading(true);
+      await loadTrace(chatJid, messageId);
+      setLoading(false);
+    }
+    setExpanded(!expanded);
+  }, [expanded, blocks, loadTrace, chatJid, messageId]);
+
+  const toolBlocks = blocks?.filter(b => b.type === 'tool') ?? [];
+  const statusBlocks = blocks?.filter(b => b.type === 'status') ?? [];
+  const summary = blocks
+    ? [
+        toolBlocks.length > 0 ? `${toolBlocks.length} tool calls` : '',
+        statusBlocks.length > 0 ? `${statusBlocks.length} status` : '',
+      ].filter(Boolean).join(', ')
+    : '...';
+
+  return (
+    <div className="mt-2 pt-2 border-t border-border/50">
+      <button
+        onClick={handleExpand}
+        className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors w-full text-left"
+      >
+        <span>&#9776;</span>
+        <span>执行轨迹{blocks ? ` (${summary})` : ''}</span>
+        {loading ? (
+          <Loader2 className="w-3 h-3 ml-auto animate-spin" />
+        ) : expanded ? (
+          <ChevronUp className="w-3 h-3 ml-auto" />
+        ) : (
+          <ChevronDown className="w-3 h-3 ml-auto" />
+        )}
+      </button>
+      {expanded && blocks && (
+        <div className="mt-1.5 space-y-0 max-h-48 overflow-y-auto">
+          {blocks.map((block) => {
+            if (block.type === 'tool') {
+              const name = block.skillName ? `Skill: ${block.skillName}` : block.toolName;
+              const dur = block.duration != null ? `${block.duration % 1 === 0 ? block.duration.toFixed(0) : block.duration.toFixed(1)}s` : '';
+              return (
+                <div key={block.id} className="flex items-center gap-1.5 py-0.5 text-[11px] text-foreground/60">
+                  <span className="text-green-500">&#10003;</span>
+                  <span className="font-medium">{name}</span>
+                  {block.toolInputSummary && <span className="truncate text-muted-foreground">{block.toolInputSummary.slice(0, 50)}</span>}
+                  {dur && <span className="ml-auto flex-shrink-0 tabular-nums">{dur}</span>}
+                </div>
+              );
+            }
+            if (block.type === 'status') {
+              return (
+                <div key={block.id} className="flex items-center gap-1.5 py-0.5 text-[11px] text-amber-600">
+                  <span>&#9888;</span>
+                  <span>{block.statusText === 'compacting' ? '上下文已压缩' : block.statusText}</span>
+                </div>
+              );
+            }
+            if (block.type === 'hook') {
+              return (
+                <div key={block.id} className="flex items-center gap-1.5 py-0.5 text-[11px] text-foreground/60">
+                  <span className="text-blue-500">&#9741;</span>
+                  <span>Hook: {block.hookName} ({block.hookOutcome || 'success'})</span>
+                </div>
+              );
+            }
+            return null;
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 interface MessageAttachment {
@@ -131,7 +212,7 @@ function TokenUsageDisplay({ tokenUsageJson }: { tokenUsageJson: string }) {
   );
 }
 
-export const MessageBubble = memo(function MessageBubble({ message, showTime, thinkingContent, isShared }: MessageBubbleProps) {
+export const MessageBubble = memo(function MessageBubble({ message, showTime, thinkingContent, chatJid, isShared }: MessageBubbleProps) {
   const [copied, setCopied] = useState(false);
   const [lightboxState, setLightboxState] = useState<{ images: string[]; index: number } | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
@@ -390,6 +471,11 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
           <TokenUsageDisplay tokenUsageJson={message.token_usage} />
         )}
 
+        {/* Execution trace (compact mode) */}
+        {isAI && message.has_trace && (
+          <ExecutionTrace messageId={message.id} chatJid={chatJid} />
+        )}
+
         {lightboxState && (
           <ImageLightbox images={lightboxState.images} initialIndex={lightboxState.index} onClose={() => setLightboxState(null)} />
         )}
@@ -624,6 +710,11 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
             {message.is_from_me && message.token_usage && (
               <TokenUsageDisplay tokenUsageJson={message.token_usage} />
             )}
+
+            {/* Execution trace */}
+            {message.is_from_me && message.has_trace && (
+              <ExecutionTrace messageId={message.id} chatJid={chatJid} />
+            )}
           </div>
         </div>
       </div>
@@ -650,7 +741,9 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
   prev.message.id === next.message.id &&
   prev.message.content === next.message.content &&
   prev.message.token_usage === next.message.token_usage &&
+  prev.message.has_trace === next.message.has_trace &&
   prev.showTime === next.showTime &&
   prev.thinkingContent === next.thinkingContent &&
+  prev.chatJid === next.chatJid &&
   prev.isShared === next.isShared
 );

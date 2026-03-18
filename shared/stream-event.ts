@@ -17,7 +17,8 @@ export type StreamEventType =
   | 'todo_update'
   | 'mode_change'
   | 'usage'
-  | 'status' | 'init';
+  | 'status' | 'init'
+  | 'turn_started' | 'turn_completed';
 
 export interface StreamEvent {
   eventType: StreamEventType;
@@ -54,4 +55,9 @@ export interface StreamEvent {
     numTurns: number;
     modelUsage?: Record<string, { inputTokens: number; outputTokens: number; costUSD: number }>;
   };
+  /** Turn lifecycle fields (emitted by host process, not agent-runner) */
+  turnId?: string;
+  turnStatus?: 'started' | 'completed' | 'interrupted' | 'error' | 'drained';
+  turnChannel?: string;
+  turnMessageCount?: number;
 }

@@ -38,7 +38,9 @@ export function getInternalToken(): string | null {
 const memoryAgentRoutes = new Hono<{ Variables: Variables }>();
 
 // Bearer token middleware for internal endpoints
-function checkInternalAuth(c: { req: { header: (name: string) => string | undefined } }): boolean {
+function checkInternalAuth(c: {
+  req: { header: (name: string) => string | undefined };
+}): boolean {
   if (!internalToken) return false;
   const auth = c.req.header('Authorization');
   if (!auth) return false;
@@ -56,7 +58,11 @@ memoryAgentRoutes.post('/query', async (c) => {
   }
 
   const body = await c.req.json().catch(() => null);
-  if (!body || typeof body.userId !== 'string' || typeof body.query !== 'string') {
+  if (
+    !body ||
+    typeof body.userId !== 'string' ||
+    typeof body.query !== 'string'
+  ) {
     return c.json({ error: 'Invalid request: userId and query required' }, 400);
   }
 
@@ -70,16 +76,13 @@ memoryAgentRoutes.post('/query', async (c) => {
       channelLabel = resolveChannelLabel(chatJid, names.get(chatJid));
     }
 
-    const result = await manager.query(
-      body.userId,
-      {
-        query: body.query,
-        context: body.context as string | undefined,
-        chatJid,
-        groupFolder,
-        channelLabel,
-      },
-    );
+    const result = await manager.query(body.userId, {
+      query: body.query,
+      context: body.context as string | undefined,
+      chatJid,
+      groupFolder,
+      channelLabel,
+    });
 
     if (result.success) {
       return c.json({
@@ -87,10 +90,7 @@ memoryAgentRoutes.post('/query', async (c) => {
         found: !!result.response,
       });
     } else {
-      return c.json(
-        { error: result.error || 'Query failed' },
-        502,
-      );
+      return c.json({ error: result.error || 'Query failed' }, 502);
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -120,8 +120,15 @@ memoryAgentRoutes.post('/remember', async (c) => {
   }
 
   const body = await c.req.json().catch(() => null);
-  if (!body || typeof body.userId !== 'string' || typeof body.content !== 'string') {
-    return c.json({ error: 'Invalid request: userId and content required' }, 400);
+  if (
+    !body ||
+    typeof body.userId !== 'string' ||
+    typeof body.content !== 'string'
+  ) {
+    return c.json(
+      { error: 'Invalid request: userId and content required' },
+      400,
+    );
   }
 
   try {

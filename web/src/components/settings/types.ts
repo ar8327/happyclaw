@@ -83,6 +83,9 @@ export interface SystemSettings {
   memoryQueryTimeout: number;
   memoryGlobalSleepTimeout: number;
   memorySendTimeout: number;
+  turnBatchWindowMs: number;
+  turnMaxBatchMs: number;
+  traceRetentionDays: number;
 }
 
 export type SettingsTab = 'claude' | 'registration' | 'appearance' | 'system' | 'profile' | 'my-channels' | 'security' | 'groups' | 'memory' | 'skills' | 'mcp-servers' | 'agent-definitions' | 'users' | 'about' | 'bindings';

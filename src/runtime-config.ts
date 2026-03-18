@@ -2063,7 +2063,10 @@ export function writeCredentialsFile(
     if (fs.existsSync(filePath)) {
       const existing = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       const existingExpiresAt = existing?.claudeAiOauth?.expiresAt;
-      if (typeof existingExpiresAt === 'number' && existingExpiresAt > creds.expiresAt) {
+      if (
+        typeof existingExpiresAt === 'number' &&
+        existingExpiresAt > creds.expiresAt
+      ) {
         return; // on-disk is newer, don't overwrite
       }
     }
@@ -2688,8 +2691,6 @@ export function saveUserQQConfig(
   return normalized;
 }
 
-
-
 // ─── System settings (plain JSON, no encryption) ─────────────────
 
 const SYSTEM_SETTINGS_FILE = path.join(
@@ -2716,6 +2717,9 @@ export interface SystemSettings {
   memoryQueryTimeout: number;
   memoryGlobalSleepTimeout: number;
   memorySendTimeout: number;
+  turnBatchWindowMs: number;
+  turnMaxBatchMs: number;
+  traceRetentionDays: number;
   // Feishu
   feishuApiDomain: string;
   feishuDocDomain: string;
@@ -2739,6 +2743,9 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   memoryQueryTimeout: 60000,
   memoryGlobalSleepTimeout: 300000,
   memorySendTimeout: 120000,
+  turnBatchWindowMs: 5000,
+  turnMaxBatchMs: 30000,
+  traceRetentionDays: 7,
   feishuApiDomain: 'open.feishu.cn',
   feishuDocDomain: 'bytedance.larkoffice.com',
 };
@@ -2828,13 +2835,26 @@ function readSystemSettingsFromFile(): SystemSettings | null {
         ? raw.memoryQueryTimeout
         : DEFAULT_SYSTEM_SETTINGS.memoryQueryTimeout,
     memoryGlobalSleepTimeout:
-      typeof raw.memoryGlobalSleepTimeout === 'number' && raw.memoryGlobalSleepTimeout > 0
+      typeof raw.memoryGlobalSleepTimeout === 'number' &&
+      raw.memoryGlobalSleepTimeout > 0
         ? raw.memoryGlobalSleepTimeout
         : DEFAULT_SYSTEM_SETTINGS.memoryGlobalSleepTimeout,
     memorySendTimeout:
       typeof raw.memorySendTimeout === 'number' && raw.memorySendTimeout > 0
         ? raw.memorySendTimeout
         : DEFAULT_SYSTEM_SETTINGS.memorySendTimeout,
+    turnBatchWindowMs:
+      typeof raw.turnBatchWindowMs === 'number' && raw.turnBatchWindowMs > 0
+        ? raw.turnBatchWindowMs
+        : DEFAULT_SYSTEM_SETTINGS.turnBatchWindowMs,
+    turnMaxBatchMs:
+      typeof raw.turnMaxBatchMs === 'number' && raw.turnMaxBatchMs > 0
+        ? raw.turnMaxBatchMs
+        : DEFAULT_SYSTEM_SETTINGS.turnMaxBatchMs,
+    traceRetentionDays:
+      typeof raw.traceRetentionDays === 'number' && raw.traceRetentionDays > 0
+        ? raw.traceRetentionDays
+        : DEFAULT_SYSTEM_SETTINGS.traceRetentionDays,
     feishuApiDomain:
       typeof raw.feishuApiDomain === 'string' && raw.feishuApiDomain
         ? raw.feishuApiDomain
@@ -2893,8 +2913,7 @@ function buildEnvFallbackSettings(): SystemSettings {
       DEFAULT_SYSTEM_SETTINGS.billingMinStartBalanceUsd,
     ),
     billingCurrency:
-      process.env.BILLING_CURRENCY ||
-      DEFAULT_SYSTEM_SETTINGS.billingCurrency,
+      process.env.BILLING_CURRENCY || DEFAULT_SYSTEM_SETTINGS.billingCurrency,
     billingCurrencyRate: parseFloatEnv(
       process.env.BILLING_CURRENCY_RATE,
       DEFAULT_SYSTEM_SETTINGS.billingCurrencyRate,
@@ -2910,6 +2929,18 @@ function buildEnvFallbackSettings(): SystemSettings {
     memorySendTimeout: parseIntEnv(
       process.env.MEMORY_SEND_TIMEOUT,
       DEFAULT_SYSTEM_SETTINGS.memorySendTimeout,
+    ),
+    turnBatchWindowMs: parseIntEnv(
+      process.env.TURN_BATCH_WINDOW_MS,
+      DEFAULT_SYSTEM_SETTINGS.turnBatchWindowMs,
+    ),
+    turnMaxBatchMs: parseIntEnv(
+      process.env.TURN_MAX_BATCH_MS,
+      DEFAULT_SYSTEM_SETTINGS.turnMaxBatchMs,
+    ),
+    traceRetentionDays: parseIntEnv(
+      process.env.TRACE_RETENTION_DAYS,
+      DEFAULT_SYSTEM_SETTINGS.traceRetentionDays,
     ),
     feishuApiDomain:
       process.env.FEISHU_API_DOMAIN || DEFAULT_SYSTEM_SETTINGS.feishuApiDomain,
@@ -2996,10 +3027,18 @@ export function saveSystemSettings(
     merged.billingMinStartBalanceUsd = 1000000;
   if (merged.memoryQueryTimeout < 10000) merged.memoryQueryTimeout = 10000; // min 10s
   if (merged.memoryQueryTimeout > 600000) merged.memoryQueryTimeout = 600000; // max 10 min
-  if (merged.memoryGlobalSleepTimeout < 60000) merged.memoryGlobalSleepTimeout = 60000; // min 1 min
-  if (merged.memoryGlobalSleepTimeout > 3600000) merged.memoryGlobalSleepTimeout = 3600000; // max 1 hour
+  if (merged.memoryGlobalSleepTimeout < 60000)
+    merged.memoryGlobalSleepTimeout = 60000; // min 1 min
+  if (merged.memoryGlobalSleepTimeout > 3600000)
+    merged.memoryGlobalSleepTimeout = 3600000; // max 1 hour
   if (merged.memorySendTimeout < 30000) merged.memorySendTimeout = 30000; // min 30s
   if (merged.memorySendTimeout > 3600000) merged.memorySendTimeout = 3600000; // max 1 hour
+  if (merged.turnBatchWindowMs < 1000) merged.turnBatchWindowMs = 1000; // min 1s
+  if (merged.turnBatchWindowMs > 60000) merged.turnBatchWindowMs = 60000; // max 60s
+  if (merged.turnMaxBatchMs < 5000) merged.turnMaxBatchMs = 5000; // min 5s
+  if (merged.turnMaxBatchMs > 300000) merged.turnMaxBatchMs = 300000; // max 5 min
+  if (merged.traceRetentionDays < 1) merged.traceRetentionDays = 1; // min 1 day
+  if (merged.traceRetentionDays > 90) merged.traceRetentionDays = 90; // max 90 days
   // Feishu domains: strip protocol prefix and trailing slash
   for (const key of ['feishuApiDomain', 'feishuDocDomain'] as const) {
     if (typeof merged[key] === 'string') {

@@ -45,6 +45,7 @@ import {
   getMessagesSince,
   getNewMessages,
   getRouterState,
+  getRowidByCursor,
   getTaskById,
   getHomeGroupByFolder,
   getUserHomeGroup,
@@ -78,13 +79,13 @@ import {
   cleanupOldBillingAuditLog,
   insertUsageRecord,
   getTranscriptMessagesSince,
+  markStaleTurnsAsError,
+  cleanupOldTurns,
 } from './db.js';
 // feishu.js deprecated exports are no longer needed; imManager handles all connections
 import { imManager } from './im-manager.js';
 import { getChannelType, extractChatId, type IMSendOptions } from './im-channel.js';
-import {
-  abortAllStreamingSessions,
-} from './feishu-streaming-card.js';
+import { abortAllStreamingSessions } from './feishu-streaming-card.js';
 import {
   formatContextMessages,
   formatWorkspaceList,
@@ -111,6 +112,8 @@ import type {
   QQConnectConfig,
 } from './im-manager.js';
 import { GroupQueue } from './group-queue.js';
+import { TurnManager } from './turn-manager.js';
+import { saveTurnTrace, cleanupOldTraces } from './turn-trace.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import {
   checkBillingAccessFresh,
@@ -124,6 +127,7 @@ import {
 } from './billing.js';
 import {
   AgentStatus,
+  DbMessage,
   MessageCursor,
   NewMessage,
   RegisteredGroup,
@@ -138,9 +142,13 @@ import {
   broadcastStreamEvent,
   broadcastAgentStatus,
   broadcastBillingUpdate,
+  broadcastRunnerState,
+  broadcastTurnEvent,
   shutdownTerminals,
   shutdownWebServer,
 } from './web.js';
+import { streamingBlocksManager } from './streaming-blocks.js';
+import { turnObservabilityManager } from './turn-observability.js';
 import { verifyPairingCode } from './telegram-pairing.js';
 import {
   MemoryAgentManager,
@@ -150,13 +158,12 @@ import { injectMemoryAgentDeps } from './routes/memory-agent.js';
 import { injectFeishuApiDeps } from './routes/feishu-api.js';
 import { injectMemoryDeps } from './routes/memory.js';
 
-
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const execFileAsync = promisify(execFile);
 const DEFAULT_MAIN_JID = 'web:main';
 const DEFAULT_MAIN_NAME = 'Main';
 
-let globalMessageCursor: MessageCursor = { timestamp: '', id: '' };
+let globalMessageCursor: MessageCursor = { rowid: 0 };
 let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, MessageCursor> = {};
@@ -165,7 +172,8 @@ let ipcWatcherRunning = false;
 let shuttingDown = false;
 
 const queue = new GroupQueue();
-const EMPTY_CURSOR: MessageCursor = { timestamp: '', id: '' };
+const turnManager = new TurnManager();
+const EMPTY_CURSOR: MessageCursor = { rowid: 0 };
 const terminalWarmupInFlight = new Set<string>();
 
 /**
@@ -192,7 +200,11 @@ const triggerMessagesByFolder = new Map<
 const IPC_DELIVERY_TIMEOUT_MS = 120_000;
 const pendingIpcDeliveries = new Map<
   string,
-  { count: number; timers: ReturnType<typeof setTimeout>[]; firstSentAt: number }
+  {
+    count: number;
+    timers: ReturnType<typeof setTimeout>[];
+    firstSentAt: number;
+  }
 >();
 function trackIpcDelivery(chatJid: string): void {
   const existing = pendingIpcDeliveries.get(chatJid);
@@ -214,7 +226,11 @@ function trackIpcDelivery(chatJid: string): void {
     existing.count++;
     existing.timers.push(timer);
   } else {
-    pendingIpcDeliveries.set(chatJid, { count: 1, timers: [timer], firstSentAt: now });
+    pendingIpcDeliveries.set(chatJid, {
+      count: 1,
+      timers: [timer],
+      firstSentAt: now,
+    });
   }
 }
 function ackIpcDelivery(chatJid: string): void {
@@ -224,7 +240,11 @@ function ackIpcDelivery(chatJid: string): void {
     const timer = entry.timers.shift();
     if (timer) clearTimeout(timer);
     logger.info(
-      { chatJid, pending: entry.count, latencyMs: Date.now() - entry.firstSentAt },
+      {
+        chatJid,
+        pending: entry.count,
+        latencyMs: Date.now() - entry.firstSentAt,
+      },
       'IPC delivery acknowledged by agent',
     );
     if (entry.count <= 0) pendingIpcDeliveries.delete(chatJid);
@@ -358,7 +378,10 @@ function writeUsageRecords(opts: {
     costUSD: number;
     durationMs: number;
     numTurns: number;
-    modelUsage?: Record<string, { inputTokens: number; outputTokens: number; costUSD: number }>;
+    modelUsage?: Record<
+      string,
+      { inputTokens: number; outputTokens: number; costUSD: number }
+    >;
   };
 }): void {
   const { userId, groupFolder, messageId, agentId, usage } = opts;
@@ -375,8 +398,12 @@ function writeUsageRecords(opts: {
         inputTokens: mu.inputTokens,
         outputTokens: mu.outputTokens,
         // Assign root-level cache tokens to the first model entry
-        cacheReadInputTokens: cacheReadAssigned ? 0 : usage.cacheReadInputTokens,
-        cacheCreationInputTokens: cacheReadAssigned ? 0 : usage.cacheCreationInputTokens,
+        cacheReadInputTokens: cacheReadAssigned
+          ? 0
+          : usage.cacheReadInputTokens,
+        cacheCreationInputTokens: cacheReadAssigned
+          ? 0
+          : usage.cacheCreationInputTokens,
         costUSD: mu.costUSD,
         durationMs: usage.durationMs,
         numTurns: usage.numTurns,
@@ -492,25 +519,33 @@ function sendImWithFailTracking(
 }
 
 function isCursorAfter(candidate: MessageCursor, base: MessageCursor): boolean {
-  if (candidate.timestamp > base.timestamp) return true;
-  if (candidate.timestamp < base.timestamp) return false;
-  return candidate.id > base.id;
+  return candidate.rowid > base.rowid;
 }
 
 function normalizeCursor(value: unknown): MessageCursor {
-  if (typeof value === 'string') {
-    return { timestamp: value, id: '' };
+  // New format: { rowid: number }
+  if (
+    value &&
+    typeof value === 'object' &&
+    typeof (value as { rowid?: unknown }).rowid === 'number'
+  ) {
+    return { rowid: (value as { rowid: number }).rowid };
   }
+  // Old format migration: { timestamp, id } → look up rowid
   if (
     value &&
     typeof value === 'object' &&
     typeof (value as { timestamp?: unknown }).timestamp === 'string'
   ) {
-    const maybeId = (value as { id?: unknown }).id;
-    return {
-      timestamp: (value as { timestamp: string }).timestamp,
-      id: typeof maybeId === 'string' ? maybeId : '',
-    };
+    const ts = (value as { timestamp: string }).timestamp;
+    const id =
+      typeof (value as { id?: unknown }).id === 'string'
+        ? (value as { id: string }).id
+        : '';
+    return { rowid: getRowidByCursor(ts, id) };
+  }
+  if (typeof value === 'string') {
+    return { rowid: getRowidByCursor(value, '') };
   }
   return { ...EMPTY_CURSOR };
 }
@@ -1210,13 +1245,18 @@ function migrateSystemIMToPerUser(): void {
 }
 
 function loadState(): void {
-  // Load from SQLite
-  const persistedTimestamp = getRouterState('last_timestamp') || '';
-  const lastTimestampId = getRouterState('last_timestamp_id') || '';
-  globalMessageCursor = {
-    timestamp: persistedTimestamp,
-    id: lastTimestampId,
-  };
+  // Load from SQLite — try new rowid format first, fall back to old format
+  const persistedRowid = getRouterState('last_cursor_rowid');
+  if (persistedRowid) {
+    globalMessageCursor = { rowid: Number(persistedRowid) || 0 };
+  } else {
+    // Migrate from old (timestamp, id) format
+    const persistedTimestamp = getRouterState('last_timestamp') || '';
+    const lastTimestampId = getRouterState('last_timestamp_id') || '';
+    globalMessageCursor = {
+      rowid: getRowidByCursor(persistedTimestamp, lastTimestampId),
+    };
+  }
   const agentTs = getRouterState('last_agent_timestamp');
   try {
     const parsed = agentTs
@@ -1324,7 +1364,6 @@ function loadState(): void {
     }
   }
 
-
   // Initialize per-user global CLAUDE.md from template for users missing it
   const templatePath = path.resolve(
     process.cwd(),
@@ -1377,8 +1416,7 @@ function loadState(): void {
 }
 
 function saveState(): void {
-  setRouterState('last_timestamp', globalMessageCursor.timestamp);
-  setRouterState('last_timestamp_id', globalMessageCursor.id);
+  setRouterState('last_cursor_rowid', String(globalMessageCursor.rowid));
   setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
 }
 
@@ -1497,6 +1535,55 @@ function collectMessageImages(
 }
 
 /**
+ * Resolve the channel identifier for a batch of messages.
+ * Takes the last message's source_jid, falling back to chat_jid.
+ */
+function resolveChannel(messages: NewMessage[]): string {
+  const last = messages[messages.length - 1];
+  return last.source_jid || last.chat_jid;
+}
+
+/**
+ * Resolve the effective folder for a group JID (via serialization key).
+ * This mirrors the logic in GroupQueue.getSerializationKey.
+ */
+function resolveGroupFolder(chatJid: string): string {
+  const group = registeredGroups[chatJid];
+  return group?.folder || chatJid;
+}
+
+function syncPendingTurnObservability(folder: string): void {
+  turnObservabilityManager.setPendingCounts(
+    folder,
+    turnManager.getPendingCounts(folder),
+  );
+}
+
+function broadcastInterruptedTurn(
+  folder: string,
+  chatJid: string,
+  detail?: string,
+): void {
+  const activeTurn = turnManager.getActiveTurn(folder);
+  if (!activeTurn) return;
+  turnObservabilityManager.markInterrupted(folder, activeTurn, detail);
+  broadcastTurnEvent(chatJid, {
+    eventType: 'status',
+    statusText: 'interrupted',
+  });
+  turnManager.interruptTurn(folder);
+  broadcastTurnEvent(chatJid, {
+    eventType: 'turn_completed',
+    turnId: activeTurn.id,
+    turnStatus: 'interrupted',
+    turnChannel: activeTurn.channel,
+    turnMessageCount: activeTurn.messageIds.length,
+  });
+  turnObservabilityManager.clear(folder);
+  syncPendingTurnObservability(folder);
+}
+
+/**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
  *
@@ -1606,12 +1693,66 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const commitCursor = (): void => {
     if (cursorCommitted) return;
-    lastAgentTimestamp[chatJid] = {
-      timestamp: lastProcessed.timestamp,
-      id: lastProcessed.id,
-    };
+    // Only advance, never regress — the message loop may have already
+    // advanced the cursor via IPC injection while the agent was running.
+    const current = lastAgentTimestamp[chatJid];
+    if (current && lastProcessed.rowid <= current.rowid) {
+      cursorCommitted = true;
+      return;
+    }
+    lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
     saveState();
     cursorCommitted = true;
+  };
+
+  const finalizeCurrentTurn = (
+    status: 'completed' | 'error' | 'interrupted' | 'drained',
+    options?: { errorDetail?: string },
+  ): void => {
+    const activeTurn = turnManager.getActiveTurn(group.folder);
+    if (!activeTurn) return;
+
+    let traceFile: string | undefined;
+    try {
+      const finalBlocks = streamingBlocksManager.finalize(group.folder);
+      if (finalBlocks.length > 0) {
+        traceFile = saveTurnTrace({
+          turnId: activeTurn.id,
+          chatJid,
+          channel: activeTurn.channel,
+          folder: group.folder,
+          messageIds: activeTurn.messageIds,
+          startedAt: new Date(activeTurn.startedAt).toISOString(),
+          completedAt: new Date().toISOString(),
+          status,
+          blocks: finalBlocks,
+        });
+      }
+    } catch (err) {
+      logger.warn({ err, turnId: activeTurn.id }, 'Failed to save turn trace');
+    }
+
+    if (status === 'interrupted') {
+      turnManager.interruptTurn(group.folder);
+    } else if (status === 'error') {
+      turnManager.failTurn(group.folder, options?.errorDetail);
+    } else {
+      turnManager.completeTurn(group.folder, {
+        resultMessageId: lastReplyMsgId,
+        summary: undefined,
+        traceFile,
+      });
+    }
+
+    broadcastTurnEvent(chatJid, {
+      eventType: 'turn_completed',
+      turnId: activeTurn.id,
+      turnStatus: status,
+      turnChannel: activeTurn.channel,
+      turnMessageCount: activeTurn.messageIds.length,
+    });
+    turnObservabilityManager.clear(group.folder);
+    syncPendingTurnObservability(group.folder);
   };
 
   if (effectiveGroup.created_by) {
@@ -1640,6 +1781,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   }
 
+  // 新一轮从干净状态开始
+  streamingBlocksManager.reset(group.folder);
+  turnObservabilityManager.syncTurn(
+    group.folder,
+    turnManager.getActiveTurn(group.folder),
+  );
+  broadcastRunnerState(chatJid, 'starting');
+
   // Build per-sourceJid trigger message map so IPC handler can thread
   // replies to the correct triggering message (not whatever DB says is latest).
   const triggerMap = new Map<string, { id: string; sender: string }>();
@@ -1650,6 +1799,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
   triggerMessagesByFolder.set(effectiveGroup.folder, triggerMap);
 
+  let wasInterrupted = false;
   const output = await runAgent(
     effectiveGroup,
     prompt,
@@ -1659,6 +1809,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         // 流式事件处理 - 广播 WebSocket + 持久化 SDK Task 生命周期到 DB
         if (result.status === 'stream' && result.streamEvent) {
           broadcastStreamEvent(chatJid, result.streamEvent);
+          // 累积 streaming blocks（后端持久化，前端可随时查询）
+          streamingBlocksManager
+            .getOrCreate(group.folder)
+            .feed(result.streamEvent);
+          turnObservabilityManager.feedEvent(
+            group.folder,
+            result.streamEvent,
+            turnManager.getActiveTurn(group.folder),
+          );
 
           // IPC delivery acknowledgement from agent-runner
           const se = result.streamEvent;
@@ -1667,6 +1826,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             se.statusText === 'ipc_message_received'
           ) {
             ackIpcDelivery(chatJid);
+          }
+          if (se.eventType === 'status' && se.statusText === 'interrupted') {
+            wasInterrupted = true;
           }
 
           // Persist SDK Task lifecycle to DB so tabs survive page refresh
@@ -1912,6 +2074,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           }
           // Only reset idle timer on actual results, not session-update markers (result: null)
           resetIdleTimer();
+
+          // Finalize streaming blocks for this round (kept for turn trace persistence)
+          streamingBlocksManager.finalize(group.folder);
+        }
+
+        // Query 返回无文本结果（仅工具调用、send_message 等）：通知前端清除
+        // 流式状态，避免 agent idle 期间持续显示"正在思考..."。
+        if (result.status === 'success' && !result.result) {
+          finalizeCurrentTurn('completed');
+          broadcastRunnerState(chatJid, 'idle');
         }
 
         if (result.status === 'error') {
@@ -1929,6 +2101,52 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   await setTyping(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
   clearIpcDeliveryTracker(chatJid);
+
+  // Agent 进程已退出：通知前端清除流式状态（"正在思考..."）。
+  // 正常有回复时前端已通过 new_message/agent_reply 清理，这里作为兜底确保
+  // 无可见回复（result 为 null）或异常退出时 streaming 状态也能被清除。
+  broadcastRunnerState(chatJid, 'idle');
+
+  // --- Turn lifecycle: complete/fail turn and save trace ---
+  const activeTurn = turnManager.getActiveTurn(group.folder);
+  if (activeTurn) {
+    const isErrorExit_ = output.status === 'error' || hadError;
+    const isDrained = output.status === 'drained';
+    const isInterrupted = wasInterrupted;
+    finalizeCurrentTurn(
+      isInterrupted
+        ? 'interrupted'
+        : isErrorExit_
+          ? 'error'
+          : isDrained
+            ? 'drained'
+            : 'completed',
+      { errorDetail: output.error || lastError },
+    );
+
+    // Check if there are queued turns to process next
+    const nextEntry = turnManager.drainNext(group.folder);
+    if (nextEntry) {
+      logger.info(
+        {
+          folder: group.folder,
+          nextChatJid: nextEntry.chatJid,
+          nextChannel: nextEntry.channel,
+        },
+        'Turn: draining next queued entry',
+      );
+      // The next message poll cycle will pick up the queued chatJid's messages
+      // via the normal cursor mechanism since we didn't advance cursor for queued messages
+      const queuedDetail =
+        nextEntry.chatJid === chatJid
+          ? '上一轮已结束，等待下一轮开始'
+          : `正在等待当前 Turn 结束 · ${nextEntry.channel}`;
+      broadcastRunnerState(nextEntry.chatJid, 'queued', queuedDetail);
+      queue.enqueueMessageCheck(nextEntry.chatJid);
+    }
+  }
+
+  streamingBlocksManager.remove(group.folder);
 
   // 不可恢复的转录错误（如超大图片/MIME 错配被固化在会话历史中）：无论是否已有回复，都必须重置会话
   const errorForReset = [lastError, output.error].filter(Boolean).join(' ');
@@ -1972,6 +2190,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       { group: group.name, chatJid },
       'Container closed during query without reply, keeping cursor for retry',
     );
+    return true;
+  }
+
+  // Drained: query completed, process exiting for turn boundary.
+  // This is a successful completion — commit cursor and return.
+  if (output.status === 'drained') {
+    commitCursor();
     return true;
   }
 
@@ -2236,7 +2461,10 @@ async function runAgent(
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
   images?: Array<{ data: string; mimeType?: string }>,
-): Promise<{ status: 'success' | 'error' | 'closed'; error?: string }> {
+): Promise<{
+  status: 'success' | 'error' | 'closed' | 'drained';
+  error?: string;
+}> {
   const isHome = !!group.is_home;
   // For the agent-runner: isMain means this is an admin home container (full privileges)
   const isAdminHome = isHome && group.folder === MAIN_GROUP_FOLDER;
@@ -2296,6 +2524,7 @@ async function runAgent(
     };
 
     const ownerHomeFolder = resolveOwnerHomeFolder(group);
+    const activeTurnId = turnManager.getActiveTurn(group.folder)?.id;
 
     let output: ContainerOutput;
 
@@ -2312,6 +2541,7 @@ async function runAgent(
           isAdminHome,
           images,
           userId: group.created_by,
+          turnId: activeTurnId,
         },
         onProcessCb,
         wrappedOnOutput,
@@ -2330,6 +2560,7 @@ async function runAgent(
           isAdminHome,
           images,
           userId: group.created_by,
+          turnId: activeTurnId,
         },
         onProcessCb,
         wrappedOnOutput,
@@ -2348,6 +2579,12 @@ async function runAgent(
     // Propagate so processGroupMessages can skip cursor commit.
     if (output.status === 'closed') {
       return { status: 'closed' };
+    }
+
+    // Agent exited cleanly due to _drain sentinel (turn boundary).
+    // Treat as successful completion — cursor should be committed.
+    if (output.status === 'drained') {
+      return { status: 'drained' };
     }
 
     if (output.status === 'error') {
@@ -2705,11 +2942,7 @@ function startIpcWatcher(): void {
             });
 
             const taskFiles = allEntries
-              .filter(
-                (entry) =>
-                  entry.isFile() &&
-                  entry.name.endsWith('.json'),
-              )
+              .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
               .map((entry) => entry.name);
             for (const file of taskFiles) {
               const filePath = path.join(tasksDir, file);
@@ -3170,10 +3403,7 @@ async function processAgentConversation(
   const lastProcessed = missedMessages[missedMessages.length - 1];
   const commitCursor = (): void => {
     if (cursorCommitted) return;
-    lastAgentTimestamp[virtualChatJid] = {
-      timestamp: lastProcessed.timestamp,
-      id: lastProcessed.id,
-    };
+    lastAgentTimestamp[virtualChatJid] = { rowid: lastProcessed.rowid };
     saveState();
     cursorCommitted = true;
   };
@@ -3206,9 +3436,10 @@ async function processAgentConversation(
           // Write to usage_records + usage_daily_summary
           // Sub-Agent 的 effectiveGroup 可能没有 created_by，从父群组继承
           writeUsageRecords({
-            userId: effectiveGroup.created_by
-              || registeredGroups[chatJid]?.created_by
-              || 'system',
+            userId:
+              effectiveGroup.created_by ||
+              registeredGroups[chatJid]?.created_by ||
+              'system',
             groupFolder: effectiveGroup.folder,
             agentId,
             messageId: lastAgentReplyMsgId,
@@ -3414,7 +3645,7 @@ async function startMessageLoop(): Promise<void> {
         saveState();
 
         // Deduplicate by group
-        const messagesByGroup = new Map<string, NewMessage[]>();
+        const messagesByGroup = new Map<string, DbMessage[]>();
         for (const msg of messages) {
           const existing = messagesByGroup.get(msg.chat_jid);
           if (existing) {
@@ -3478,24 +3709,52 @@ async function startMessageLoop(): Promise<void> {
 
                 // Advance cursor past these messages so they aren't re-processed
                 const lastMsg = groupMessages[groupMessages.length - 1];
-                lastAgentTimestamp[chatJid] = {
-                  timestamp: lastMsg.timestamp,
-                  id: lastMsg.id,
-                };
+                lastAgentTimestamp[chatJid] = { rowid: lastMsg.rowid };
                 saveState();
                 continue;
               }
             }
           }
 
-          // Pull all messages since lastAgentTimestamp to preserve full context.
-          const allPending = getMessagesSince(
-            chatJid,
-            lastAgentTimestamp[chatJid] || EMPTY_CURSOR,
-          );
-          const messagesToSend =
-            allPending.length > 0 ? allPending : groupMessages;
+          // Use only the new messages from this poll cycle.
+          // processGroupMessages() handles the initial full fetch from
+          // lastAgentTimestamp when the agent starts.  Subsequent inject/IPC
+          // paths must NOT re-fetch from lastAgentTimestamp because it may
+          // still point to before processGroupMessages' batch, which would
+          // cause duplicate delivery of already-sent messages.
+          const messagesToSend = groupMessages;
 
+          // --- Turn-based routing ---
+          const channel = resolveChannel(messagesToSend);
+          const folder = resolveGroupFolder(chatJid);
+          const messageIds = messagesToSend.map((m) => m.id);
+          const route = turnManager.routeMessage(
+            folder,
+            chatJid,
+            channel,
+            messageIds,
+          );
+
+          if (route.action === 'already_queued') {
+            // Message's chatJid is already in the pending queue — skip
+            continue;
+          }
+
+          if (route.action === 'queue') {
+            // Different channel or outside batch window — queue for later
+            // Do NOT advance cursor so these messages are re-read when drained
+            if (route.needsDrain) {
+              queue.sendDrain(chatJid);
+            }
+            syncPendingTurnObservability(folder);
+            logger.info(
+              { chatJid, channel, folder, needsDrain: route.needsDrain },
+              'Turn: message queued (different channel or window expired)',
+            );
+            continue;
+          }
+
+          // action === 'start_new' or 'inject'
           const shared = !group.is_home && isGroupShared(group.folder);
           const formatted = formatMessages(messagesToSend, shared);
 
@@ -3505,15 +3764,9 @@ async function startMessageLoop(): Promise<void> {
           const lastRawText = messagesToSend[messagesToSend.length - 1].content;
           const intent = analyzeIntent(lastRawText);
 
-          const sendResult = queue.sendMessage(
-            chatJid,
-            formatted,
-            imagesForAgent,
-            intent,
-          );
-          if (sendResult === 'sent') {
-            // Update trigger message map with the piped batch so IPC reply
-            // handler threads to the latest message the agent actually sees.
+          // Helper: update trigger message map so IPC reply handler threads
+          // to the latest message the agent actually sees.
+          const updateTriggerMap = () => {
             const existingTrigger = triggerMessagesByFolder.get(group.folder);
             if (existingTrigger) {
               for (const m of messagesToSend) {
@@ -3521,42 +3774,103 @@ async function startMessageLoop(): Promise<void> {
                 existingTrigger.set(srcJid, { id: m.id, sender: m.sender });
               }
             }
-            logger.info(
-              {
-                chatJid,
-                count: messagesToSend.length,
-                imageCount: images.length,
-              },
-              'Piped messages to active container via IPC',
+          };
+
+          if (route.action === 'inject') {
+            // Same channel, within window — inject into running agent
+            turnObservabilityManager.syncTurn(
+              folder,
+              turnManager.getActiveTurn(folder),
             );
-            trackIpcDelivery(chatJid);
-            const lastProcessed = messagesToSend[messagesToSend.length - 1];
-            lastAgentTimestamp[chatJid] = {
-              timestamp: lastProcessed.timestamp,
-              id: lastProcessed.id,
-            };
-            saveState();
-          } else if (sendResult === 'interrupted_stop') {
-            // Stop intent: update cursor, don't enqueue (agent stops)
-            const lastProcessed = messagesToSend[messagesToSend.length - 1];
-            lastAgentTimestamp[chatJid] = {
-              timestamp: lastProcessed.timestamp,
-              id: lastProcessed.id,
-            };
-            saveState();
-          } else if (sendResult === 'interrupted_correction') {
-            // Correction intent: update cursor; the IPC message was written so the
-            // interrupted agent will pick it up in its session loop after the abort.
-            // No enqueueMessageCheck needed — the existing agent handles it.
-            const lastProcessed = messagesToSend[messagesToSend.length - 1];
-            lastAgentTimestamp[chatJid] = {
-              timestamp: lastProcessed.timestamp,
-              id: lastProcessed.id,
-            };
-            saveState();
+            syncPendingTurnObservability(folder);
+            const sendResult = queue.sendMessage(
+              chatJid,
+              formatted,
+              imagesForAgent,
+              intent,
+            );
+            if (sendResult === 'sent') {
+              updateTriggerMap();
+              logger.info(
+                {
+                  chatJid,
+                  count: messagesToSend.length,
+                  imageCount: images.length,
+                  turnId: route.turnId,
+                },
+                'Turn: injected messages into active turn via IPC',
+              );
+              trackIpcDelivery(chatJid);
+              const lastProcessed = messagesToSend[messagesToSend.length - 1];
+              lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
+              saveState();
+            } else if (sendResult === 'interrupted_stop') {
+              const lastProcessed = messagesToSend[messagesToSend.length - 1];
+              lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
+              saveState();
+              broadcastInterruptedTurn(folder, chatJid, '用户主动中断');
+            } else if (sendResult === 'interrupted_correction') {
+              const lastProcessed = messagesToSend[messagesToSend.length - 1];
+              lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
+              saveState();
+            } else {
+              // no_active — shouldn't happen if TurnManager thinks there's an active turn,
+              // but handle gracefully by treating as start_new
+              broadcastRunnerState(chatJid, 'queued', '当前 Turn 尚未接管，请稍候');
+              queue.enqueueMessageCheck(chatJid);
+            }
           } else {
-            // no_active — enqueue for a new one
-            queue.enqueueMessageCheck(chatJid);
+            // start_new — new Turn created
+            const activeTurn = turnManager.getActiveTurn(folder);
+            if (activeTurn) {
+              turnObservabilityManager.beginTurn(folder, activeTurn);
+              syncPendingTurnObservability(folder);
+            }
+            broadcastTurnEvent(chatJid, {
+              eventType: 'turn_started',
+              turnId: route.turnId,
+              turnStatus: 'started',
+              turnChannel: channel,
+              turnMessageCount: messageIds.length,
+            });
+
+            // Try to inject into an already-running agent first.
+            // An agent might be idle in waitForIpcMessage() from a previous Turn
+            // or from before the Turn system was deployed.
+            const sendResult = queue.sendMessage(
+              chatJid,
+              formatted,
+              imagesForAgent,
+              intent,
+            );
+            if (sendResult === 'sent') {
+              updateTriggerMap();
+              logger.info(
+                {
+                  chatJid,
+                  count: messagesToSend.length,
+                  turnId: route.turnId,
+                },
+                'Turn: start_new but agent already running, injected via IPC',
+              );
+              trackIpcDelivery(chatJid);
+              const lastProcessed = messagesToSend[messagesToSend.length - 1];
+              lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
+              saveState();
+            } else if (sendResult === 'interrupted_stop') {
+              const lastProcessed = messagesToSend[messagesToSend.length - 1];
+              lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
+              saveState();
+              broadcastInterruptedTurn(folder, chatJid, '用户主动中断');
+            } else if (sendResult === 'interrupted_correction') {
+              const lastProcessed = messagesToSend[messagesToSend.length - 1];
+              lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
+              saveState();
+            } else {
+              // no_active — truly no agent running, start a new one
+              broadcastRunnerState(chatJid, 'queued', '等待当前工作区开始处理这一轮');
+              queue.enqueueMessageCheck(chatJid);
+            }
           }
         }
       }
@@ -3580,6 +3894,7 @@ function recoverPendingMessages(): void {
         { group: group.name, pendingCount: pending.length },
         'Recovery: found unprocessed messages',
       );
+      broadcastRunnerState(chatJid, 'queued', '发现未处理消息，等待重新接管');
       queue.enqueueMessageCheck(chatJid);
     }
   }
@@ -3596,7 +3911,9 @@ async function ensureDockerRunning(): Promise<void> {
     await execFileAsync('docker', ['info'], { timeout: 10000 });
     logger.debug('Docker daemon is running');
   } catch {
-    logger.warn('Docker daemon is not running — container-mode groups will not work until Docker is available');
+    logger.warn(
+      'Docker daemon is not running — container-mode groups will not work until Docker is available',
+    );
     console.error(
       '\n╔════════════════════════════════════════════════════════════════╗',
     );
@@ -4146,7 +4463,10 @@ async function main(): Promise<void> {
   const memoryAgentManager = new MemoryAgentManager();
   memoryAgentManagerRef = memoryAgentManager;
   const memoryAgentToken = crypto.randomBytes(32).toString('hex');
-  injectMemoryAgentDeps({ manager: memoryAgentManager, token: memoryAgentToken });
+  injectMemoryAgentDeps({
+    manager: memoryAgentManager,
+    token: memoryAgentToken,
+  });
   injectFeishuApiDeps({ token: memoryAgentToken }); // Reuse same internal token
   injectMemoryDeps({ manager: memoryAgentManager, queue });
   memoryAgentManager.startIdleChecks();
@@ -4174,7 +4494,10 @@ async function main(): Promise<void> {
       allJids,
       memoryAgentManager,
     ).catch((err) => {
-      logger.warn({ groupJid, err }, 'Memory Agent session_wrapup failed (non-blocking)');
+      logger.warn(
+        { groupJid, err },
+        'Memory Agent session_wrapup failed (non-blocking)',
+      );
     });
   });
 
@@ -4512,6 +4835,9 @@ async function main(): Promise<void> {
         memoryAgentManager,
       );
     },
+    getActiveTurnRuntime: (folder: string) => turnManager.getActiveTurn(folder),
+    getPendingTurnCounts: (folder: string) => turnManager.getPendingCounts(folder),
+    getTurnObservability: (folder: string) => turnObservabilityManager.get(folder),
   });
 
   // Clean expired sessions every hour
@@ -4578,6 +4904,20 @@ async function main(): Promise<void> {
       } catch (err) {
         logger.error({ err }, 'Failed to cleanup old billing data');
       }
+      // Cleanup old turns and trace files
+      try {
+        const retentionDays = getSystemSettings().traceRetentionDays;
+        const deletedTurns = cleanupOldTurns(retentionDays);
+        const deletedTraces = cleanupOldTraces(retentionDays);
+        if (deletedTurns > 0 || deletedTraces > 0) {
+          logger.info(
+            { deletedTurns, deletedTraces, retentionDays },
+            'Cleaned up old turn data',
+          );
+        }
+      } catch (err) {
+        logger.error({ err }, 'Failed to cleanup old turn data');
+      }
     },
     24 * 60 * 60 * 1000,
   );
@@ -4585,6 +4925,25 @@ async function main(): Promise<void> {
   await ensureDockerRunning();
 
   queue.setProcessMessagesFn(processGroupMessages);
+  queue.setLifecycleEmitter((groupJid, state, detail) => {
+    broadcastRunnerState(groupJid, state, detail);
+    const folder = resolveGroupFolder(groupJid);
+    turnObservabilityManager.setRunnerState(
+      folder,
+      state as
+        | 'queued'
+        | 'capacity_wait'
+        | 'starting'
+        | 'running'
+        | 'interrupted'
+        | 'completed'
+        | 'error'
+        | 'drained',
+      detail,
+      turnManager.getActiveTurn(folder),
+    );
+    syncPendingTurnObservability(folder);
+  });
   queue.setHostModeChecker((groupJid: string) => {
     let group = registeredGroups[groupJid];
     if (!group) {
@@ -4651,6 +5010,13 @@ async function main(): Promise<void> {
     },
   });
   startIpcWatcher();
+  // Mark any turns that were running when the process crashed/restarted
+  try {
+    markStaleTurnsAsError();
+  } catch (err) {
+    logger.warn({ err }, 'Failed to recover stale turns');
+  }
+  turnManager.recoverOnStartup();
   recoverPendingMessages();
   startMessageLoop();
 

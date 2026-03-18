@@ -24,10 +24,12 @@ export interface ContainerInput {
   agentName?: string;
   /** Owner user ID. Used by memory tools to identify the user. */
   userId?: string;
+  /** Turn ID for tracking this execution. */
+  turnId?: string;
 }
 
 export interface ContainerOutput {
-  status: 'success' | 'error' | 'stream' | 'closed';
+  status: 'success' | 'error' | 'stream' | 'closed' | 'drained';
   result: string | null;
   newSessionId?: string;
   error?: string;
