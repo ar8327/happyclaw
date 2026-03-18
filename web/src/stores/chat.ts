@@ -713,11 +713,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
             s.messages[jid] || [],
             data.messages,
           );
-          // Check if agent has replied (any new message with is_from_me=true)
+          // Check if agent has replied with a *new* message (not already in local state)
+          const existingIds = new Set((s.messages[jid] || []).map(m => m.id));
           const agentReplied = data.messages.some(
-            (m) => m.is_from_me && m.sender !== '__system__',
+            (m) => m.is_from_me && m.sender !== '__system__' && !existingIds.has(m.id),
           );
-          const hasSystemError = data.messages.some((m) => isTerminalSystemMessage(m));
+          const hasSystemError = data.messages.some(
+            (m) => isTerminalSystemMessage(m) && !existingIds.has(m.id),
+          );
 
           // Transfer pending thinking to thinkingCache
           let nextThinkingCache = s.thinkingCache;
@@ -1426,11 +1429,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // ⑥ 主对话 streaming — 使用 applyStreamEvent 共享函数
     set((s) => {
-      // If streaming state was already cleared (final message received),
-      // ignore late-arriving stream events to prevent "thinking" from reappearing.
-      if (!s.streaming[chatJid] && s.waiting[chatJid] === false) {
-        return s;
-      }
       const MAX_STREAMING_TEXT = 8000;
       const prev = s.streaming[chatJid] || { ...DEFAULT_STREAMING_STATE };
       const next = { ...prev };
@@ -1524,9 +1522,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         };
       }
 
-      // 普通消息（如其他用户发送的消息）：只添加到列表
+      // 普通消息（如 IM 用户发送的消息）：添加到列表并标记等待
+      const shouldWait = msg.sender !== '__system__' && !isTerminalSystemMessage(msg);
       return {
         messages: { ...s.messages, [chatJid]: updated },
+        ...(shouldWait ? { waiting: { ...s.waiting, [chatJid]: true } } : {}),
       };
     });
   },
@@ -1942,9 +1942,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
             latest.is_from_me === false;
           if (inferredWaiting) {
             nextWaiting[g.jid] = true;
-          } else {
-            delete nextWaiting[g.jid];
           }
+          // active 且最新消息是 Agent 回复时：不删除 waiting，
+          // 让 stream_event / new_message 自然管理状态。
         }
         return { waiting: nextWaiting, streaming: nextStreaming };
       });
