@@ -4,6 +4,8 @@ import { WebSocket } from 'ws';
 import { RegisteredGroup, UserRole } from './types.js';
 import { GroupQueue } from './group-queue.js';
 import type { AuthUser, NewMessage, MessageCursor } from './types.js';
+import type { ActiveTurn } from './turn-manager.js';
+import type { TurnObservabilitySnapshot } from './turn-observability.js';
 import {
   getJidsByFolder,
   getRegisteredGroup,
@@ -60,6 +62,9 @@ export interface WebDeps {
   } | null>;
   clearImFailCounts?: (jid: string) => void;
   triggerSessionWrapup?: (folder: string) => Promise<void>;
+  getActiveTurnRuntime?: (folder: string) => ActiveTurn | null;
+  getPendingTurnCounts?: (folder: string) => Map<string, number>;
+  getTurnObservability?: (folder: string) => TurnObservabilitySnapshot | null;
 }
 
 export type Variables = {

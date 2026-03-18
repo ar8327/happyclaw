@@ -149,6 +149,8 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
         if (msg.sender === '__system__') {
           if (msg.content === 'context_reset') {
             items.push({ type: 'divider', content: '上下文已清除' });
+          } else if (msg.content === 'query_interrupted') {
+            items.push({ type: 'divider', content: '当前 Turn 已中断' });
           } else if (msg.content.startsWith('agent_error:')) {
             items.push({ type: 'error', content: msg.content.slice('agent_error:'.length) });
           } else if (msg.content.startsWith('agent_max_retries:')) {

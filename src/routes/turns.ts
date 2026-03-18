@@ -13,6 +13,7 @@ import {
 import { authMiddleware } from '../middleware/auth.js';
 import type { AuthUser } from '../types.js';
 import { canAccessGroup, type Variables } from '../web-context.js';
+import { getWebDeps } from '../web-context.js';
 import { loadTurnTrace } from '../turn-trace.js';
 
 const turnsRoutes = new Hono<{ Variables: Variables }>();
@@ -63,23 +64,45 @@ turnsRoutes.get('/:jid/turns/active', (c) => {
     return c.json({ error: 'Not found' }, 404);
   }
 
-  // Active turn info is broadcast via WebSocket stream_events.
-  // This endpoint returns the DB state as a fallback.
-  const activeTurn = getActiveTurnByFolder(group.folder);
+  const deps = getWebDeps();
+  const runtimeTurn = deps?.getActiveTurnRuntime?.(group.folder) || null;
+  const dbTurn = !runtimeTurn ? getActiveTurnByFolder(group.folder) : null;
+  const activeTurn = runtimeTurn
+    ? {
+        id: runtimeTurn.id,
+        chatJid: runtimeTurn.chatJid,
+        channel: runtimeTurn.channel,
+        messageIds: runtimeTurn.messageIds,
+        startedAt: new Date(runtimeTurn.startedAt).toISOString(),
+      }
+    : dbTurn
+      ? {
+          id: dbTurn.id,
+          chatJid: dbTurn.chat_jid,
+          channel: dbTurn.channel,
+          messageIds: dbTurn.message_ids ? JSON.parse(dbTurn.message_ids) : [],
+          startedAt: dbTurn.started_at,
+        }
+      : null;
+  const pendingCounts = deps?.getPendingTurnCounts?.(group.folder) || new Map();
+  const observability = deps?.getTurnObservability?.(group.folder) || null;
+  const pendingBuffer = Array.from(pendingCounts.entries())
+    .filter(([, count]) => count > 0)
+    .map(([channel, count]) => ({ channel, count }));
 
   return c.json({
     activeTurn: activeTurn
       ? {
           id: activeTurn.id,
-          chatJid: activeTurn.chat_jid,
+          chatJid: activeTurn.chatJid,
           channel: activeTurn.channel,
-          messageIds: activeTurn.message_ids
-            ? JSON.parse(activeTurn.message_ids)
-            : [],
-          startedAt: activeTurn.started_at,
-          status: activeTurn.status,
+          messageIds: activeTurn.messageIds,
+          startedAt: activeTurn.startedAt,
+          status: observability?.runnerState?.state || 'running',
+          observability,
         }
       : null,
+    pendingBuffer,
   });
 });
 

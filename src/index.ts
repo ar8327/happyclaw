@@ -147,6 +147,7 @@ import {
   shutdownWebServer,
 } from './web.js';
 import { streamingBlocksManager } from './streaming-blocks.js';
+import { turnObservabilityManager } from './turn-observability.js';
 import { verifyPairingCode } from './telegram-pairing.js';
 import {
   MemoryAgentManager,
@@ -1535,6 +1536,37 @@ function resolveGroupFolder(chatJid: string): string {
   return group?.folder || chatJid;
 }
 
+function syncPendingTurnObservability(folder: string): void {
+  turnObservabilityManager.setPendingCounts(
+    folder,
+    turnManager.getPendingCounts(folder),
+  );
+}
+
+function broadcastInterruptedTurn(
+  folder: string,
+  chatJid: string,
+  detail?: string,
+): void {
+  const activeTurn = turnManager.getActiveTurn(folder);
+  if (!activeTurn) return;
+  turnObservabilityManager.markInterrupted(folder, activeTurn, detail);
+  broadcastTurnEvent(chatJid, {
+    eventType: 'status',
+    statusText: 'interrupted',
+  });
+  turnManager.interruptTurn(folder);
+  broadcastTurnEvent(chatJid, {
+    eventType: 'turn_completed',
+    turnId: activeTurn.id,
+    turnStatus: 'interrupted',
+    turnChannel: activeTurn.channel,
+    turnMessageCount: activeTurn.messageIds.length,
+  });
+  turnObservabilityManager.clear(folder);
+  syncPendingTurnObservability(folder);
+}
+
 /**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
@@ -1685,8 +1717,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // 新一轮从干净状态开始
   streamingBlocksManager.reset(group.folder);
+  turnObservabilityManager.syncTurn(
+    group.folder,
+    turnManager.getActiveTurn(group.folder),
+  );
   broadcastRunnerState(chatJid, 'starting');
 
+  let wasInterrupted = false;
   const output = await runAgent(
     effectiveGroup,
     prompt,
@@ -1700,6 +1737,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           streamingBlocksManager
             .getOrCreate(group.folder)
             .feed(result.streamEvent);
+          turnObservabilityManager.feedEvent(
+            group.folder,
+            result.streamEvent,
+            turnManager.getActiveTurn(group.folder),
+          );
 
           // IPC delivery acknowledgement from agent-runner
           const se = result.streamEvent;
@@ -1708,6 +1750,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             se.statusText === 'ipc_message_received'
           ) {
             ackIpcDelivery(chatJid);
+          }
+          if (se.eventType === 'status' && se.statusText === 'interrupted') {
+            wasInterrupted = true;
           }
 
           // Persist SDK Task lifecycle to DB so tabs survive page refresh
@@ -1990,6 +2035,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (activeTurn) {
     const isErrorExit_ = output.status === 'error' || hadError;
     const isDrained = output.status === 'drained';
+    const isInterrupted = wasInterrupted;
 
     // Save turn trace with finalized streaming blocks
     let traceFile: string | undefined;
@@ -2004,7 +2050,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           messageIds: activeTurn.messageIds,
           startedAt: new Date(activeTurn.startedAt).toISOString(),
           completedAt: new Date().toISOString(),
-          status: isErrorExit_ ? 'error' : isDrained ? 'drained' : 'completed',
+          status: isInterrupted
+            ? 'interrupted'
+            : isErrorExit_
+              ? 'error'
+              : isDrained
+                ? 'drained'
+                : 'completed',
           blocks: finalBlocks,
         });
       }
@@ -2012,7 +2064,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       logger.warn({ err, turnId: activeTurn.id }, 'Failed to save turn trace');
     }
 
-    if (isErrorExit_) {
+    if (isInterrupted) {
+      turnManager.interruptTurn(group.folder);
+    } else if (isErrorExit_) {
       turnManager.failTurn(group.folder, output.error || lastError);
     } else {
       turnManager.completeTurn(group.folder, {
@@ -2023,11 +2077,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
 
     // Broadcast turn completion
-    const turnStatus = isErrorExit_
-      ? 'error'
-      : isDrained
-        ? 'drained'
-        : 'completed';
+    const turnStatus = isInterrupted
+      ? 'interrupted'
+      : isErrorExit_
+        ? 'error'
+        : isDrained
+          ? 'drained'
+          : 'completed';
     broadcastTurnEvent(chatJid, {
       eventType: 'turn_completed',
       turnId: activeTurn.id,
@@ -2035,9 +2091,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       turnChannel: activeTurn.channel,
       turnMessageCount: activeTurn.messageIds.length,
     });
+    turnObservabilityManager.clear(group.folder);
 
     // Check if there are queued turns to process next
     const nextEntry = turnManager.drainNext(group.folder);
+    syncPendingTurnObservability(group.folder);
     if (nextEntry) {
       logger.info(
         {
@@ -2049,7 +2107,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       );
       // The next message poll cycle will pick up the queued chatJid's messages
       // via the normal cursor mechanism since we didn't advance cursor for queued messages
-      broadcastRunnerState(nextEntry.chatJid, 'queued');
+      const queuedDetail =
+        nextEntry.chatJid === chatJid
+          ? '上一轮已结束，等待下一轮开始'
+          : `正在等待当前 Turn 结束 · ${nextEntry.channel}`;
+      broadcastRunnerState(nextEntry.chatJid, 'queued', queuedDetail);
       queue.enqueueMessageCheck(nextEntry.chatJid);
     }
   }
@@ -3584,6 +3646,7 @@ async function startMessageLoop(): Promise<void> {
             if (route.needsDrain) {
               queue.sendDrain(chatJid);
             }
+            syncPendingTurnObservability(folder);
             logger.info(
               { chatJid, channel, folder, needsDrain: route.needsDrain },
               'Turn: message queued (different channel or window expired)',
@@ -3603,6 +3666,11 @@ async function startMessageLoop(): Promise<void> {
 
           if (route.action === 'inject') {
             // Same channel, within window — inject into running agent
+            turnObservabilityManager.syncTurn(
+              folder,
+              turnManager.getActiveTurn(folder),
+            );
+            syncPendingTurnObservability(folder);
             const sendResult = queue.sendMessage(
               chatJid,
               formatted,
@@ -3627,7 +3695,7 @@ async function startMessageLoop(): Promise<void> {
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
               lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
               saveState();
-              turnManager.interruptTurn(folder);
+              broadcastInterruptedTurn(folder, chatJid, '用户主动中断');
             } else if (sendResult === 'interrupted_correction') {
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
               lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
@@ -3635,11 +3703,16 @@ async function startMessageLoop(): Promise<void> {
             } else {
               // no_active — shouldn't happen if TurnManager thinks there's an active turn,
               // but handle gracefully by treating as start_new
-              broadcastRunnerState(chatJid, 'queued');
+              broadcastRunnerState(chatJid, 'queued', '当前 Turn 尚未接管，请稍候');
               queue.enqueueMessageCheck(chatJid);
             }
           } else {
             // start_new — new Turn created
+            const activeTurn = turnManager.getActiveTurn(folder);
+            if (activeTurn) {
+              turnObservabilityManager.beginTurn(folder, activeTurn);
+              syncPendingTurnObservability(folder);
+            }
             broadcastTurnEvent(chatJid, {
               eventType: 'turn_started',
               turnId: route.turnId,
@@ -3674,14 +3747,14 @@ async function startMessageLoop(): Promise<void> {
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
               lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
               saveState();
-              turnManager.interruptTurn(folder);
+              broadcastInterruptedTurn(folder, chatJid, '用户主动中断');
             } else if (sendResult === 'interrupted_correction') {
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
               lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
               saveState();
             } else {
               // no_active — truly no agent running, start a new one
-              broadcastRunnerState(chatJid, 'queued');
+              broadcastRunnerState(chatJid, 'queued', '等待当前工作区开始处理这一轮');
               queue.enqueueMessageCheck(chatJid);
             }
           }
@@ -3707,7 +3780,7 @@ function recoverPendingMessages(): void {
         { group: group.name, pendingCount: pending.length },
         'Recovery: found unprocessed messages',
       );
-      broadcastRunnerState(chatJid, 'queued');
+      broadcastRunnerState(chatJid, 'queued', '发现未处理消息，等待重新接管');
       queue.enqueueMessageCheck(chatJid);
     }
   }
@@ -4647,6 +4720,9 @@ async function main(): Promise<void> {
         memoryAgentManager,
       );
     },
+    getActiveTurnRuntime: (folder: string) => turnManager.getActiveTurn(folder),
+    getPendingTurnCounts: (folder: string) => turnManager.getPendingCounts(folder),
+    getTurnObservability: (folder: string) => turnObservabilityManager.get(folder),
   });
 
   // Clean expired sessions every hour
@@ -4736,6 +4812,22 @@ async function main(): Promise<void> {
   queue.setProcessMessagesFn(processGroupMessages);
   queue.setLifecycleEmitter((groupJid, state, detail) => {
     broadcastRunnerState(groupJid, state, detail);
+    const folder = resolveGroupFolder(groupJid);
+    turnObservabilityManager.setRunnerState(
+      folder,
+      state as
+        | 'queued'
+        | 'capacity_wait'
+        | 'starting'
+        | 'running'
+        | 'interrupted'
+        | 'completed'
+        | 'error'
+        | 'drained',
+      detail,
+      turnManager.getActiveTurn(folder),
+    );
+    syncPendingTurnObservability(folder);
   });
   queue.setHostModeChecker((groupJid: string) => {
     let group = registeredGroups[groupJid];

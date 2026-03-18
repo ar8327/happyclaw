@@ -35,11 +35,36 @@ export interface TurnInfo {
   status: string;
 }
 
+export interface TurnActiveRuntime {
+  turnId: string;
+  channel: string;
+  messageCount: number;
+  startedAt: number;
+  status:
+    | 'started'
+    | 'queued'
+    | 'capacity_wait'
+    | 'starting'
+    | 'interrupting'
+    | 'running'
+    | 'interrupted'
+    | 'error'
+    | 'drained'
+    | 'completed';
+  runnerState?: {
+    state: string;
+    detail?: string;
+    updatedAt: string;
+  } | null;
+  lastEventAt?: string;
+  lastInterruptAt?: string;
+}
+
 export interface StreamingTimelineEvent {
   id: string;
   timestamp: number;
   text: string;
-  kind: 'tool' | 'skill' | 'hook' | 'status';
+  kind: 'tool' | 'skill' | 'hook' | 'status' | 'runner';
 }
 
 export interface StreamingBlock {
@@ -161,14 +186,15 @@ interface ChatState {
   agentWaiting: Record<string, boolean>;             // agentId → waiting for reply
   agentHasMore: Record<string, boolean>;             // agentId → has more messages
   traceCache: Record<string, StreamingBlock[]>;       // messageId → loaded trace blocks (lazy)
-  runnerState: Record<string, { state: string; detail?: string }>;
+  runnerState: Record<string, { state: string; detail?: string; updatedAt: string }>;
   // Turn state (populated from turn_started/turn_completed stream events)
-  activeTurn: Record<string, { turnId: string; channel: string; messageCount: number; startedAt: number } | null>;
+  activeTurn: Record<string, TurnActiveRuntime | null>;
   pendingBuffer: Record<string, Record<string, number>>;  // chatJid → channel → pending count
   // Historical turn data (loaded from API)
   turns: Record<string, TurnInfo[]>;  // jid → turns (chronological)
   loadTurns: (jid: string) => Promise<void>;
   handleRunnerState: (chatJid: string, state: string, detail?: string) => void;
+  loadActiveTurnState: (jid: string) => Promise<void>;
   loadGroups: () => Promise<void>;
   selectGroup: (jid: string) => void;
   loadMessages: (jid: string, loadMore?: boolean) => Promise<void>;
@@ -545,6 +571,51 @@ function applyStreamEvent(
   }
 }
 
+interface ActiveTurnObservabilityResponse {
+  activeTurn: null | {
+    id: string;
+    chatJid: string;
+    channel: string;
+    messageIds: string[];
+    startedAt: string;
+    status: string;
+    observability?: {
+      runnerState: { state: string; detail?: string; updatedAt: string } | null;
+      pendingBuffer: Array<{ channel: string; count: number }>;
+      lastEventAt?: string;
+      lastInterruptAt?: string;
+      streaming: StreamingState;
+    } | null;
+  };
+  pendingBuffer: Array<{ channel: string; count: number }>;
+}
+
+function restoreStreamingFromSnapshot(snapshot?: StreamingState | null): StreamingState | undefined {
+  if (!snapshot) return undefined;
+  return {
+    partialText: snapshot.partialText || '',
+    thinkingText: snapshot.thinkingText || '',
+    isThinking: !!snapshot.isThinking,
+    activeTools: Array.isArray(snapshot.activeTools)
+      ? snapshot.activeTools.map((tool) => ({
+          ...tool,
+          startTime: tool.startTime || Date.now(),
+          ...(tool.toolInput ? { toolInput: { ...tool.toolInput } } : {}),
+        }))
+      : [],
+    activeHook: snapshot.activeHook ? { ...snapshot.activeHook } : null,
+    systemStatus: snapshot.systemStatus || null,
+    recentEvents: Array.isArray(snapshot.recentEvents)
+      ? snapshot.recentEvents.map((item) => ({ ...item }))
+      : [],
+    ...(snapshot.todos
+      ? {
+          todos: snapshot.todos.map((todo) => ({ ...todo })),
+        }
+      : {}),
+  };
+}
+
 export const useChatStore = create<ChatState>((set, get) => ({
   groups: {},
   currentGroup: null,
@@ -598,8 +669,108 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
     set((s) => ({
-      runnerState: { ...s.runnerState, [chatJid]: { state, detail } },
+      runnerState: {
+        ...s.runnerState,
+        [chatJid]: { state, ...(detail ? { detail } : {}), updatedAt: new Date().toISOString() },
+      },
+      activeTurn: s.activeTurn[chatJid]
+        ? {
+            ...s.activeTurn,
+            [chatJid]: {
+              ...s.activeTurn[chatJid]!,
+              status: state as TurnActiveRuntime['status'],
+              runnerState: {
+                state,
+                ...(detail ? { detail } : {}),
+                updatedAt: new Date().toISOString(),
+              },
+            },
+          }
+        : s.activeTurn,
     }));
+  },
+
+  loadActiveTurnState: async (jid: string) => {
+    try {
+      const data = await api.get<ActiveTurnObservabilityResponse>(
+        `/api/groups/${encodeURIComponent(jid)}/turns/active`,
+      );
+      set((s) => {
+        const nextActiveTurn = { ...s.activeTurn };
+        const nextPendingBuffer = { ...s.pendingBuffer };
+        const nextRunnerState = { ...s.runnerState };
+        const nextStreaming = { ...s.streaming };
+        const nextWaiting = { ...s.waiting };
+        const pendingRecord: Record<string, number> = {};
+        for (const entry of data.pendingBuffer || []) {
+          if (entry.count > 0) pendingRecord[entry.channel] = entry.count;
+        }
+
+        if (data.activeTurn) {
+          const startedAtMs = Date.parse(data.activeTurn.startedAt);
+          const obs = data.activeTurn.observability || null;
+          nextActiveTurn[jid] = {
+            turnId: data.activeTurn.id,
+            channel: data.activeTurn.channel,
+            messageCount: data.activeTurn.messageIds.length,
+            startedAt: Number.isFinite(startedAtMs) ? startedAtMs : Date.now(),
+            status: (data.activeTurn.status as TurnActiveRuntime['status']) || 'running',
+            runnerState: obs?.runnerState || null,
+            ...(obs?.lastEventAt ? { lastEventAt: obs.lastEventAt } : {}),
+            ...(obs?.lastInterruptAt ? { lastInterruptAt: obs.lastInterruptAt } : {}),
+          };
+          nextPendingBuffer[jid] = pendingRecord;
+          if (obs?.runnerState) {
+            nextRunnerState[jid] = { ...obs.runnerState };
+          } else {
+            delete nextRunnerState[jid];
+          }
+          const restoredStreaming = restoreStreamingFromSnapshot(obs?.streaming);
+          if (restoredStreaming) {
+            nextStreaming[jid] = restoredStreaming;
+          } else {
+            delete nextStreaming[jid];
+          }
+          nextWaiting[jid] = true;
+          return {
+            activeTurn: nextActiveTurn,
+            pendingBuffer: nextPendingBuffer,
+            runnerState: nextRunnerState,
+            streaming: nextStreaming,
+            waiting: nextWaiting,
+          };
+        }
+
+        nextActiveTurn[jid] = null;
+        delete nextPendingBuffer[jid];
+        delete nextRunnerState[jid];
+        const localStreaming = s.streaming[jid];
+        const hasVisibleStreaming = !!(
+          localStreaming &&
+          (
+            localStreaming.partialText ||
+            localStreaming.thinkingText ||
+            localStreaming.activeTools.length > 0 ||
+            localStreaming.activeHook ||
+            localStreaming.systemStatus ||
+            localStreaming.recentEvents.length > 0 ||
+            (localStreaming.todos && localStreaming.todos.length > 0)
+          )
+        );
+        if (!hasVisibleStreaming) {
+          delete nextStreaming[jid];
+        }
+        return {
+          activeTurn: nextActiveTurn,
+          pendingBuffer: nextPendingBuffer,
+          runnerState: nextRunnerState,
+          streaming: nextStreaming,
+          waiting: nextWaiting,
+        };
+      });
+    } catch {
+      // 静默失败
+    }
   },
 
   loadGroups: async () => {
@@ -1100,15 +1271,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
             channel: event.turnChannel || '',
             messageCount: event.turnMessageCount || 0,
             startedAt: Date.now(),
+            status: 'started',
           },
         },
       }));
       return;
     }
     if (event.eventType === 'turn_completed' && event.turnId) {
-      set((s) => ({
-        activeTurn: { ...s.activeTurn, [chatJid]: null },
-      }));
+      set((s) => {
+        const nextRunnerState = { ...s.runnerState };
+        delete nextRunnerState[chatJid];
+        return {
+          activeTurn: { ...s.activeTurn, [chatJid]: null },
+          pendingBuffer: (() => {
+            const next = { ...s.pendingBuffer };
+            delete next[chatJid];
+            return next;
+          })(),
+          runnerState: nextRunnerState,
+        };
+      });
       // Refresh turns to include the newly completed turn with full message_ids
       get().loadTurns(chatJid);
       return;
@@ -1438,10 +1620,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
       applyStreamEvent(event, prev, next, MAX_STREAMING_TEXT);
       const nextRunnerState = { ...s.runnerState };
       delete nextRunnerState[chatJid];
+      const nextActiveTurn = s.activeTurn[chatJid]
+        ? {
+            ...s.activeTurn,
+            [chatJid]: {
+              ...s.activeTurn[chatJid]!,
+              status: 'running' as const,
+              runnerState: {
+                state: 'running',
+                updatedAt: new Date().toISOString(),
+              },
+              lastEventAt: new Date().toISOString(),
+            },
+          }
+        : s.activeTurn;
       return {
         waiting: { ...s.waiting, [chatJid]: true },
         streaming: { ...s.streaming, [chatJid]: next },
         runnerState: nextRunnerState,
+        activeTurn: nextActiveTurn,
       };
     });
   },

@@ -75,8 +75,13 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import net from 'node:net';
 import { z } from 'zod';
-import { broadcastNewMessage, invalidateAllowedUserCache } from '../web.js';
+import {
+  broadcastNewMessage,
+  broadcastRunnerState,
+  invalidateAllowedUserCache,
+} from '../web.js';
 import { loadTurnTrace } from '../turn-trace.js';
+import { turnObservabilityManager } from '../turn-observability.js';
 
 /** Annotate AI reply messages with has_trace flag based on turns table */
 function annotateMessagesWithTrace(
@@ -940,6 +945,15 @@ groupRoutes.post('/:jid/interrupt', authMiddleware, async (c) => {
 
   const interrupted = deps.queue.interruptQuery(jid);
   if (interrupted) {
+    broadcastRunnerState(jid, 'interrupting', '正在中断当前 Turn');
+    if (agentSep < 0) {
+      turnObservabilityManager.setRunnerState(
+        group.folder,
+        'interrupting',
+        '正在中断当前 Turn',
+        deps.getActiveTurnRuntime?.(group.folder) || null,
+      );
+    }
     // Persist interrupt as a system marker so refresh/state-restore can
     // deterministically clear waiting even when no assistant reply exists.
     const messageId = crypto.randomUUID();

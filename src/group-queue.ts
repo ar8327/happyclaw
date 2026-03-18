@@ -193,7 +193,11 @@ export class GroupQueue {
     if (state.active || (activeRunner && activeRunner !== groupJid)) {
       state.pendingMessages = true;
       this.waitingGroups.add(groupJid);
-      this.lifecycleEmitter?.(groupJid, 'queued');
+      const detail =
+        activeRunner && activeRunner !== groupJid
+          ? '当前共享工作区正在处理其它渠道的 Turn'
+          : '当前工作区仍在处理上一轮消息';
+      this.lifecycleEmitter?.(groupJid, 'queued', detail);
       logger.debug(
         { groupJid, activeRunner: activeRunner || groupJid },
         'Group runner active, message queued',
@@ -691,7 +695,11 @@ export class GroupQueue {
     // causing sendMessage() to return 'no_active' and silently queue messages.
     state.groupFolder = this.getSerializationKey(groupJid);
     this.waitingGroups.delete(groupJid);
-    this.lifecycleEmitter?.(groupJid, 'starting');
+    this.lifecycleEmitter?.(
+      groupJid,
+      'starting',
+      reason === 'drain' ? '上一轮已结束，正在接手这一轮' : '正在启动当前 Turn',
+    );
     this.activeCount++;
     if (isHostMode) {
       this.activeHostProcessCount++;

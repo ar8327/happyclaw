@@ -107,6 +107,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const loading = useChatStore(s => s.loading);
   const loadMessages = useChatStore(s => s.loadMessages);
   const loadTurns = useChatStore(s => s.loadTurns);
+  const loadActiveTurnState = useChatStore(s => s.loadActiveTurnState);
   const refreshMessages = useChatStore(s => s.refreshMessages);
   const sendMessage = useChatStore(s => s.sendMessage);
   const interruptQuery = useChatStore(s => s.interruptQuery);
@@ -179,6 +180,12 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     }
   }, [groupJid, hasTurns, loadTurns]);
 
+  useEffect(() => {
+    if (groupJid) {
+      loadActiveTurnState(groupJid);
+    }
+  }, [groupJid, loadActiveTurnState]);
+
   // Poll for new messages — use setTimeout recursion to avoid request piling up
   // Pauses when the page is not visible to save resources
   useEffect(() => {
@@ -193,6 +200,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       if (!active) return;
       try {
         await refreshMessages(groupJid);
+        await loadActiveTurnState(groupJid);
       } catch { /* handled in store */ }
       schedulePoll();
     };
@@ -214,19 +222,21 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       if (pollRef.current) clearTimeout(pollRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupJid]);
+  }, [groupJid, refreshMessages, loadActiveTurnState]);
 
   // WS 重连时恢复正在运行的 agent 状态（独立于 groupJid，避免切换会话时重复调用）
   // wsManager.connect() 已提升到 AppLayout 级别
   const restoreActiveState = useChatStore(s => s.restoreActiveState);
   useEffect(() => {
     restoreActiveState();
+    loadActiveTurnState(groupJid);
     const unsub = wsManager.on('connected', () => {
       restoreActiveState();
+      loadActiveTurnState(groupJid);
     });
     return () => { unsub(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [groupJid, loadActiveTurnState]);
 
   // Derived: active agent info and kind
   const activeAgent = activeAgentTab ? agents.find(a => a.id === activeAgentTab) : null;

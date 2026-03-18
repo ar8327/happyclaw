@@ -303,11 +303,17 @@ export function StreamingDisplay({ groupJid, isWaiting, senderName: senderNamePr
     const statusText = (() => {
       if (!runnerState) return '正在思考...';
       switch (runnerState.state) {
-        case 'queued': return '消息已接收，准备处理...';
+        case 'queued': return runnerState.detail
+          ? `排队中，${runnerState.detail}...`
+          : '排队中，等待当前 Turn 开始...';
         case 'capacity_wait': return runnerState.detail
           ? `等待可用资源（${runnerState.detail}）...`
           : '等待可用资源...';
-        case 'starting': return '正在启动 Agent...';
+        case 'starting': return runnerState.detail
+          ? `${runnerState.detail}...`
+          : '正在启动 Agent...';
+        case 'interrupting': return '正在中断当前 Turn...';
+        case 'interrupted': return '当前 Turn 已中断';
         default: return '正在思考...';
       }
     })();
