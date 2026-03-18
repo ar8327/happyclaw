@@ -3629,7 +3629,7 @@ async function startMessageLoop(): Promise<void> {
               queue.enqueueMessageCheck(chatJid);
             }
           } else {
-            // start_new — broadcast turn_started and enqueue
+            // start_new — new Turn created
             broadcastTurnEvent(chatJid, {
               eventType: 'turn_started',
               turnId: route.turnId,
@@ -3637,8 +3637,52 @@ async function startMessageLoop(): Promise<void> {
               turnChannel: channel,
               turnMessageCount: messageIds.length,
             });
-            broadcastRunnerState(chatJid, 'queued');
-            queue.enqueueMessageCheck(chatJid);
+
+            // Try to inject into an already-running agent first.
+            // An agent might be idle in waitForIpcMessage() from a previous Turn
+            // or from before the Turn system was deployed.
+            const sendResult = queue.sendMessage(
+              chatJid,
+              formatted,
+              imagesForAgent,
+              intent,
+            );
+            if (sendResult === 'sent') {
+              logger.info(
+                {
+                  chatJid,
+                  count: messagesToSend.length,
+                  turnId: route.turnId,
+                },
+                'Turn: start_new but agent already running, injected via IPC',
+              );
+              trackIpcDelivery(chatJid);
+              const lastProcessed = messagesToSend[messagesToSend.length - 1];
+              lastAgentTimestamp[chatJid] = {
+                timestamp: lastProcessed.timestamp,
+                id: lastProcessed.id,
+              };
+              saveState();
+            } else if (sendResult === 'interrupted_stop') {
+              const lastProcessed = messagesToSend[messagesToSend.length - 1];
+              lastAgentTimestamp[chatJid] = {
+                timestamp: lastProcessed.timestamp,
+                id: lastProcessed.id,
+              };
+              saveState();
+              turnManager.interruptTurn(folder);
+            } else if (sendResult === 'interrupted_correction') {
+              const lastProcessed = messagesToSend[messagesToSend.length - 1];
+              lastAgentTimestamp[chatJid] = {
+                timestamp: lastProcessed.timestamp,
+                id: lastProcessed.id,
+              };
+              saveState();
+            } else {
+              // no_active — truly no agent running, start a new one
+              broadcastRunnerState(chatJid, 'queued');
+              queue.enqueueMessageCheck(chatJid);
+            }
           }
         }
       }
