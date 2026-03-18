@@ -1489,8 +1489,7 @@ function escapeXml(s: string): string {
     .replace(/"/g, '&quot;');
 }
 
-function formatMessages(messages: NewMessage[], isShared = false, agentReplyMode = false): string {
-  const agentMode = agentReplyMode;
+function formatMessages(messages: NewMessage[], isShared = false, feishuAgentReply = false): string {
   const lines = messages.map((m) => {
     const content = isShared ? `[${m.sender_name}] ${m.content}` : m.content;
     const sourceJid = m.source_jid || m.chat_jid;
@@ -1500,9 +1499,10 @@ function formatMessages(messages: NewMessage[], isShared = false, agentReplyMode
       const chatId = extractChatId(sourceJid);
       sourceAttr = ` source="${escapeXml(channelType)}:${escapeXml(chatId)}"`;
     }
-    // In agent-driven reply threading mode, expose message IDs so the agent
-    // can specify which message to reply to via send_message(reply_to_message_id=...)
-    const idAttr = agentMode ? ` id="${escapeXml(m.id)}"` : '';
+    // In agent-driven reply threading mode, expose message IDs for Feishu messages only,
+    // so the agent can specify which message to reply to via send_message(reply_to_message_id=...)
+    const isFeishuMsg = channelType === 'feishu';
+    const idAttr = feishuAgentReply && isFeishuMsg ? ` id="${escapeXml(m.id)}"` : '';
     return `<message sender="${escapeXml(m.sender_name)}"${sourceAttr}${idAttr} time="${m.timestamp}">${escapeXml(content)}</message>`;
   });
   return `<messages>\n${lines.join('\n')}\n</messages>`;
@@ -2804,11 +2804,12 @@ function startIpcWatcher(): void {
                       );
                       // Resolve reply target: in 'agent' mode, prefer agent-supplied replyToMsgId;
                       // in 'auto' mode (or fallback), use trigger map → DB lookup.
+                      // Agent reply mode only applies to Feishu channels.
+                      const isFeishuTarget = data.targetChannel.startsWith('feishu:');
                       const ownerUserId = sourceGroupEntry?.created_by;
-                      const feishuReplyMode = ownerUserId
-                        ? getUserFeishuConfig(ownerUserId)?.replyThreadingMode
-                        : undefined;
-                      const agentReplyMode = feishuReplyMode === 'agent';
+                      const agentReplyMode = isFeishuTarget && ownerUserId
+                        ? getUserFeishuConfig(ownerUserId)?.replyThreadingMode === 'agent'
+                        : false;
                       const triggerMap = triggerMessagesByFolder.get(sourceGroup);
                       const triggerMsg = triggerMap?.get(data.targetChannel);
                       const lastInbound = triggerMsg || getLastInboundMessage(
