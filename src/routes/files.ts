@@ -453,11 +453,18 @@ fileRoutes.get('/:jid/files/download/:path', authMiddleware, (c) => {
 
     const fileName = path.basename(absolutePath);
     const fileSize = stats.size;
+    const ext = path.extname(fileName).slice(1).toLowerCase();
+    const mimeType = MIME_MAP[ext];
+    const isImage = mimeType?.startsWith('image/');
     const commonHeaders = {
-      'Content-Disposition': buildAttachmentContentDisposition(fileName),
-      'Content-Type': 'application/octet-stream',
+      'Content-Disposition': isImage
+        ? `inline; filename="${fileName.replace(/["\\\r\n]/g, '_')}"`
+        : buildAttachmentContentDisposition(fileName),
+      'Content-Type': isImage ? mimeType : 'application/octet-stream',
       'X-Content-Type-Options': 'nosniff',
-      'Content-Security-Policy': "default-src 'none'; sandbox",
+      'Content-Security-Policy': isImage
+        ? "default-src 'none'"
+        : "default-src 'none'; sandbox",
       'Accept-Ranges': 'bytes',
     };
 
