@@ -64,16 +64,10 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
   const [atTop, setAtTop] = useState(false);
   const prevMessageCount = useRef(messages.length);
 
-  // Build messageId → TurnInfo lookup
-  const turnByMessageId = useMemo(() => {
-    const map = new Map<string, TurnInfo>();
-    if (!turns) return map;
-    for (const turn of turns) {
-      for (const msgId of turn.messageIds) {
-        map.set(msgId, turn);
-      }
-    }
-    return map;
+  // Turn boundaries: skip the first turn, collect startedAt for subsequent turns
+  const turnBoundaries = useMemo(() => {
+    if (!turns || turns.length <= 1) return [];
+    return turns.slice(1).map(t => ({ timestamp: t.startedAt, turn: t }));
   }, [turns]);
 
   // Compute flatMessages (with date headers and turn boundaries) before virtualizer
@@ -90,8 +84,9 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
     }, {} as Record<string, Message[]>);
 
     const items: FlatItem[] = [];
-    let currentTurnId: string | null = null;
-    let turnCount = 0;
+    // Time-based turn boundary insertion: advance through sorted boundaries
+    // as we iterate messages chronologically.
+    let bIdx = 0;
 
     Object.entries(grouped).forEach(([date, msgs]) => {
       items.push({ type: 'date', content: date });
@@ -99,30 +94,23 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
         if (msg.sender === '__system__') {
           if (msg.content === 'context_reset') {
             items.push({ type: 'divider', content: '上下文已清除' });
-            // Reset turn tracking across context resets
-            currentTurnId = null;
-            turnCount = 0;
           } else if (msg.content.startsWith('agent_error:')) {
             items.push({ type: 'error', content: msg.content.slice('agent_error:'.length) });
           } else if (msg.content.startsWith('agent_max_retries:')) {
             items.push({ type: 'error', content: msg.content.slice('agent_max_retries:'.length) });
           }
         } else {
-          // Check for turn boundary (only on input messages, not agent replies)
-          const turn = turnByMessageId.get(msg.id);
-          if (turn && turn.id !== currentTurnId) {
-            currentTurnId = turn.id;
-            turnCount++;
-            if (turnCount > 1) {
-              items.push({ type: 'turn_start', content: turn });
-            }
+          // Insert any turn boundaries whose startedAt <= this message's timestamp
+          while (bIdx < turnBoundaries.length && turnBoundaries[bIdx].timestamp <= msg.timestamp) {
+            items.push({ type: 'turn_start', content: turnBoundaries[bIdx].turn });
+            bIdx++;
           }
           items.push({ type: 'message', content: msg });
         }
       });
     });
     return items;
-  }, [messages, turnByMessageId]);
+  }, [messages, turnBoundaries]);
 
   // Chat always starts at bottom — no scroll position restoration.
   // key={...} on <MessageList> guarantees a fresh mount on group/tab switch.
