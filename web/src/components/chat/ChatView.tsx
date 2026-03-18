@@ -101,10 +101,12 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   // Individual selectors: avoid re-renders from unrelated store changes (e.g. streaming)
   const group = useChatStore(s => s.groups[groupJid]);
   const groupMessages = useChatStore(s => s.messages[groupJid]);
+  const groupTurns = useChatStore(s => s.turns[groupJid]);
   const isWaiting = useChatStore(s => !!s.waiting[groupJid]);
   const hasMoreMessages = useChatStore(s => !!s.hasMore[groupJid]);
   const loading = useChatStore(s => s.loading);
   const loadMessages = useChatStore(s => s.loadMessages);
+  const loadTurns = useChatStore(s => s.loadTurns);
   const refreshMessages = useChatStore(s => s.refreshMessages);
   const sendMessage = useChatStore(s => s.sendMessage);
   const interruptQuery = useChatStore(s => s.interruptQuery);
@@ -169,6 +171,13 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       loadMessages(groupJid);
     }
   }, [groupJid, hasMessages, loadMessages]);
+
+  const hasTurns = !!groupTurns;
+  useEffect(() => {
+    if (groupJid && !hasTurns) {
+      loadTurns(groupJid);
+    }
+  }, [groupJid, hasTurns, loadTurns]);
 
   // Poll for new messages — use setTimeout recursion to avoid request piling up
   // Pauses when the page is not visible to save resources
