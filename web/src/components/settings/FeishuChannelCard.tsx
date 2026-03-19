@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Loader2, ExternalLink, ShieldCheck, ShieldX, Info, Copy, Check } from 'lucide-react';
+import { Loader2, ExternalLink, ShieldCheck, ShieldX, Info, Copy, Check, ChevronDown } from 'lucide-react';
 
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -30,6 +30,7 @@ interface OAuthStatus {
 function RedirectUrlHint() {
   const redirectUrl = `${window.location.origin}/feishu-oauth-callback`;
   const [copied, setCopied] = useState(false);
+  const [expanded, setExpanded] = useState(false);
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(redirectUrl);
@@ -38,36 +39,43 @@ function RedirectUrlHint() {
   };
 
   return (
-    <div className="rounded-md bg-amber-50 border border-amber-200 p-2.5 text-xs text-amber-800">
-      <div className="flex items-start gap-1.5">
-        <Info className="size-3.5 mt-0.5 shrink-0 text-amber-500" />
-        <div className="min-w-0">
-          <p className="font-medium">授权前请确认：飞书开放平台已配置重定向 URL</p>
-          <p className="mt-1 text-amber-700">
+    <div className="rounded-md bg-slate-50 border border-slate-200 p-2.5 text-xs text-slate-600">
+      <button
+        type="button"
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-1.5 w-full text-left"
+      >
+        <Info className="size-3.5 shrink-0 text-slate-400" />
+        <span className="font-medium">授权前请确认：飞书开放平台已配置重定向 URL</span>
+        <ChevronDown className={`size-3 shrink-0 ml-auto text-slate-400 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+      </button>
+      {expanded && (
+        <div className="mt-2 ml-5">
+          <p className="text-slate-500">
             在飞书开放平台 {'>'} 应用详情 {'>'} 安全设置 {'>'} 重定向 URL 中，添加以下地址：
           </p>
           <div className="mt-1.5 flex items-center gap-1.5">
-            <code className="flex-1 rounded bg-amber-100 px-1.5 py-0.5 text-[11px] break-all select-all">
+            <code className="flex-1 rounded bg-slate-100 px-1.5 py-0.5 text-[11px] break-all select-all text-slate-700">
               {redirectUrl}
             </code>
             <button
               type="button"
               onClick={handleCopy}
-              className="shrink-0 rounded p-1 hover:bg-amber-100 transition-colors"
+              className="shrink-0 rounded p-1 hover:bg-slate-100 transition-colors"
               title="复制"
             >
               {copied ? (
                 <Check className="size-3 text-emerald-600" />
               ) : (
-                <Copy className="size-3 text-amber-600" />
+                <Copy className="size-3 text-slate-400" />
               )}
             </button>
           </div>
-          <p className="mt-1 text-amber-600">
+          <p className="mt-1 text-slate-400">
             未配置会导致授权时出现「重定向 URL 有误」错误（错误码 20029）。
           </p>
         </div>
-      </div>
+      )}
     </div>
   );
 }
