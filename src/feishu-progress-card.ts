@@ -51,10 +51,20 @@ function toolDisplayName(tool: { toolName: string; skillName?: string }): string
   return tool.toolName;
 }
 
+function truncateThinking(text: string, maxLen = 120): string {
+  // Take the last portion of thinking text to show the most recent reasoning
+  const trimmed = text.trim();
+  if (!trimmed) return '';
+  const lastChunk = trimmed.length > maxLen ? '...' + trimmed.slice(-maxLen) : trimmed;
+  // Collapse newlines for compact display
+  return lastChunk.replace(/\n+/g, ' ').trim();
+}
+
 function buildProgressCard(
   activeTools: ActiveTool[],
   completedTools: CompletedTool[],
   isThinking: boolean,
+  thinkingText: string,
   elapsedMs: number,
   state: 'active' | 'completed' | 'aborted',
   abortReason?: string,
@@ -69,11 +79,15 @@ function buildProgressCard(
     content: `${statusEmoji} **${statusLabel}** · ⏱ ${formatElapsed(elapsedMs)}`,
   });
 
-  // Thinking indicator
+  // Thinking indicator with content preview
   if (isThinking && state === 'active') {
+    const preview = truncateThinking(thinkingText);
+    const thinkingContent = preview
+      ? `💭 正在思考...\n> ${preview}`
+      : '💭 正在思考...';
     elements.push({
       tag: 'markdown',
-      content: '💭 正在思考...',
+      content: thinkingContent,
     });
   }
 
@@ -129,6 +143,7 @@ export class ProgressCardController {
   private activeTools = new Map<string, ActiveTool>();
   private completedTools: CompletedTool[] = [];
   private isThinking = false;
+  private thinkingText = '';
   private dirty = false;
   private abortReason?: string;
   private patchFailCount = 0;
@@ -162,12 +177,15 @@ export class ProgressCardController {
 
     if (type === 'thinking_delta') {
       this.isThinking = true;
+      if (event.text) this.thinkingText += event.text;
       this.dirty = true;
     } else if (type === 'text_delta') {
       this.isThinking = false;
+      this.thinkingText = '';
       this.dirty = true;
     } else if (type === 'tool_use_start' && event.toolUseId && event.toolName) {
       this.isThinking = false;
+      this.thinkingText = '';
       this.activeTools.set(event.toolUseId, {
         toolName: event.toolName,
         startTime: Date.now(),
@@ -262,6 +280,7 @@ export class ProgressCardController {
       Array.from(this.activeTools.values()),
       this.completedTools,
       this.isThinking,
+      this.thinkingText,
       Date.now() - this.startedAt,
       'active',
     );
@@ -343,6 +362,7 @@ export class ProgressCardController {
       Array.from(this.activeTools.values()),
       this.completedTools,
       this.isThinking,
+      this.thinkingText,
       Date.now() - this.startedAt,
       displayState,
       this.abortReason,
