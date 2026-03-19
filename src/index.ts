@@ -418,31 +418,57 @@ function extractLocalImImagePaths(
   return imagePaths;
 }
 
+/**
+ * Send an IM message with retry + exponential backoff.
+ * On final failure, increments imSendFailCounts and may auto-unbind the IM group.
+ * Used by both main session and sub-agent paths for consistent reliability.
+ */
+const IM_SEND_MAX_RETRIES = 3;
+const IM_SEND_RETRY_DELAY_MS = 2_000;
+
+async function sendImWithRetry(
+  imJid: string,
+  text: string,
+  localImagePaths: string[],
+): Promise<boolean> {
+  for (let attempt = 0; attempt < IM_SEND_MAX_RETRIES; attempt++) {
+    try {
+      await imManager.sendMessage(imJid, text, localImagePaths);
+      imSendFailCounts.delete(imJid);
+      return true;
+    } catch (err) {
+      logger.warn(
+        { imJid, attempt, err },
+        'IM send attempt failed',
+      );
+      if (attempt < IM_SEND_MAX_RETRIES - 1) {
+        await new Promise(r => setTimeout(r, IM_SEND_RETRY_DELAY_MS * (attempt + 1)));
+      }
+    }
+  }
+  // All retries exhausted
+  const count = (imSendFailCounts.get(imJid) ?? 0) + 1;
+  imSendFailCounts.set(imJid, count);
+  if (count >= IM_SEND_FAIL_THRESHOLD) {
+    try {
+      unbindImGroup(
+        imJid,
+        'Auto-unbound IM group after consecutive send failures',
+      );
+    } catch (unbindErr) {
+      logger.error({ imJid, unbindErr }, 'Failed to auto-unbind IM group');
+    }
+  }
+  return false;
+}
+
+/** Fire-and-forget wrapper for sendImWithRetry (used in non-await contexts). */
 function sendImWithFailTracking(
   imJid: string,
   text: string,
   localImagePaths: string[],
 ): void {
-  imManager
-    .sendMessage(imJid, text, localImagePaths)
-    .then(() => {
-      imSendFailCounts.delete(imJid);
-    })
-    .catch((err) => {
-      logger.warn({ imJid, err }, 'Failed to relay message to IM');
-      const count = (imSendFailCounts.get(imJid) ?? 0) + 1;
-      imSendFailCounts.set(imJid, count);
-      if (count >= IM_SEND_FAIL_THRESHOLD) {
-        try {
-          unbindImGroup(
-            imJid,
-            'Auto-unbound IM group after consecutive send failures',
-          );
-        } catch (unbindErr) {
-          logger.error({ imJid, unbindErr }, 'Failed to auto-unbind IM group');
-        }
-      }
-    });
+  sendImWithRetry(imJid, text, localImagePaths).catch(() => {});
 }
 
 function isCursorAfter(candidate: MessageCursor, base: MessageCursor): boolean {
@@ -4232,33 +4258,11 @@ async function processAgentConversation(
         }
 
         if (replySourceImJid && !streamingCardHandledIM) {
-          // Retry IM send with backoff — connection may be briefly down after
-          // compact / force-restart.  Without retry, fire-and-forget silently
-          // drops the message when findChannelForJid returns null (#221).
-          const IM_SEND_MAX_RETRIES = 3;
-          const IM_SEND_RETRY_DELAY_MS = 2_000;
-          let imSent = false;
-          for (let attempt = 0; attempt < IM_SEND_MAX_RETRIES; attempt++) {
-            try {
-              await imManager.sendMessage(
-                replySourceImJid,
-                text,
-                localImagePaths,
-              );
-              imSent = true;
-              break;
-            } catch (imErr) {
-              logger.warn(
-                { chatJid, agentId, replySourceImJid, sourceKind: output.sourceKind, attempt, err: imErr },
-                'Agent conversation: IM send attempt failed',
-              );
-              if (attempt < IM_SEND_MAX_RETRIES - 1) {
-                await new Promise(r => setTimeout(r, IM_SEND_RETRY_DELAY_MS * (attempt + 1)));
-              }
-            }
-          }
+          // Await retry so agent conversation blocks until IM delivery is
+          // confirmed (or exhausted).  Uses shared sendImWithRetry for
+          // consistent retry + fail-tracking with the main session path.
+          const imSent = await sendImWithRetry(replySourceImJid, text, localImagePaths);
           if (imSent) {
-            imSendFailCounts.delete(replySourceImJid);
             logger.info(
               { chatJid, agentId, replySourceImJid, sourceKind: output.sourceKind, textLen: text.length },
               'Agent conversation: static IM message sent',
@@ -4268,8 +4272,6 @@ async function processAgentConversation(
               { chatJid, agentId, replySourceImJid, sourceKind: output.sourceKind },
               'Agent conversation: IM send failed after all retries, message lost',
             );
-            const count = (imSendFailCounts.get(replySourceImJid) ?? 0) + 1;
-            imSendFailCounts.set(replySourceImJid, count);
           }
         } else if (!replySourceImJid) {
           logger.debug(

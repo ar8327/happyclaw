@@ -371,6 +371,7 @@ function trimSessionJsonl(jsonlPath: string): void {
 
     // Find the last compact_boundary entry
     let lastBoundaryPos = -1;
+    let parseSkipped = 0;
     for (let i = nonEmptyLines.length - 1; i >= 0; i--) {
       try {
         const entry = JSON.parse(nonEmptyLines[i].line);
@@ -378,7 +379,12 @@ function trimSessionJsonl(jsonlPath: string): void {
           lastBoundaryPos = i;
           break;
         }
-      } catch {}
+      } catch {
+        parseSkipped++;
+      }
+    }
+    if (parseSkipped > 0) {
+      log(`Session trim: skipped ${parseSkipped} unparseable JSONL lines`);
     }
 
     if (lastBoundaryPos <= 0) {
@@ -391,8 +397,8 @@ function trimSessionJsonl(jsonlPath: string): void {
     const trimmedLines = nonEmptyLines.slice(lastBoundaryPos).map(e => e.line);
     const removedCount = lastBoundaryPos;
 
-    if (removedCount < 50) {
-      // Not worth trimming for small files
+    const TRIM_MIN_ENTRIES = 50; // Skip trimming if fewer entries before boundary (not worth the I/O)
+    if (removedCount < TRIM_MIN_ENTRIES) {
       log(`Session trim: only ${removedCount} entries before boundary, skipping`);
       return;
     }
