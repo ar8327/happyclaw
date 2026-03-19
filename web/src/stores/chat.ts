@@ -186,6 +186,7 @@ interface ChatState {
   agentWaiting: Record<string, boolean>;             // agentId → waiting for reply
   agentHasMore: Record<string, boolean>;             // agentId → has more messages
   traceCache: Record<string, StreamingBlock[]>;       // messageId → loaded trace blocks (lazy)
+  highlightMessageId: Record<string, string | null>;  // jid → message ID to highlight & scroll to
   runnerState: Record<string, { state: string; detail?: string; updatedAt: string }>;
   // Turn state (populated from turn_started/turn_completed stream events)
   activeTurn: Record<string, TurnActiveRuntime | null>;
@@ -233,6 +234,9 @@ interface ChatState {
   unbindImGroup: (jid: string, agentId: string, imJid: string) => Promise<boolean>;
   bindMainImGroup: (jid: string, imJid: string, force?: boolean) => Promise<boolean>;
   unbindMainImGroup: (jid: string, imJid: string) => Promise<boolean>;
+  // Search scroll-to-message
+  loadMessagesAroundTimestamp: (jid: string, timestamp: string, messageId: string) => Promise<void>;
+  clearHighlight: (jid: string) => void;
 }
 
 const DEFAULT_STREAMING_STATE: StreamingState = {
@@ -637,6 +641,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   agentWaiting: {},
   agentHasMore: {},
   traceCache: {},
+  highlightMessageId: {},
   runnerState: {},
   activeTurn: {},
   pendingBuffer: {},
@@ -2224,6 +2229,51 @@ export const useChatStore = create<ChatState>((set, get) => ({
         pendingThinking: nextPendingThinking,
         runnerState: nextRunnerState,
       };
+    });
+  },
+
+  // --- Search scroll-to-message ---
+
+  loadMessagesAroundTimestamp: async (jid: string, timestamp: string, messageId: string) => {
+    set((s) => ({
+      highlightMessageId: { ...s.highlightMessageId, [jid]: messageId },
+    }));
+
+    try {
+      // Load messages before (including target) and after target in parallel.
+      // API uses strict < for before and strict > for after, so bump timestamp by 1ms
+      // to include the target message in the "before" result set.
+      const tsPlusOne = new Date(new Date(timestamp).getTime() + 1).toISOString();
+      const encJid = encodeURIComponent(jid);
+      const [beforeData, afterData] = await Promise.all([
+        api.get<{ messages: Message[]; hasMore: boolean }>(
+          `/api/groups/${encJid}/messages?${new URLSearchParams({ before: tsPlusOne, limit: '30' })}`,
+        ),
+        api.get<{ messages: Message[] }>(
+          `/api/groups/${encJid}/messages?${new URLSearchParams({ after: timestamp, limit: '20' })}`,
+        ),
+      ]);
+
+      // beforeData.messages is DESC order, reverse to chronological
+      const beforeMsgs = [...beforeData.messages].reverse();
+      // afterData.messages is ASC order (already chronological)
+      const merged = mergeMessagesChronologically(beforeMsgs, afterData.messages);
+
+      set((s) => ({
+        messages: { ...s.messages, [jid]: merged },
+        hasMore: { ...s.hasMore, [jid]: beforeData.hasMore },
+        error: null,
+      }));
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+    }
+  },
+
+  clearHighlight: (jid: string) => {
+    set((s) => {
+      const next = { ...s.highlightMessageId };
+      delete next[jid];
+      return { highlightMessageId: next };
     });
   },
 }));

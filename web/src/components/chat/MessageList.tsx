@@ -51,6 +51,8 @@ const quickPrompts = [
 export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrigger, groupJid, isWaiting, onInterrupt, agents, onAgentClick, agentId, onSend }: MessageListProps) {
   const { mode: displayMode } = useDisplayMode();
   const thinkingCache = useChatStore(s => s.thinkingCache ?? {});
+  const highlightMessageId = useChatStore(s => s.highlightMessageId[groupJid ?? ''] ?? null);
+  const clearHighlight = useChatStore(s => s.clearHighlight);
   const isShared = useChatStore(s => !!s.groups[groupJid ?? '']?.is_shared);
   const currentUser = useAuthStore(s => s.user);
   const appearance = useAuthStore(s => s.appearance);
@@ -275,18 +277,21 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
     if (!initialScrollDone.current && flatMessages.length > 0) {
       initialScrollDone.current = true;
       prevMessageCount.current = messages.length;
-      virtualizer.scrollToIndex(flatMessages.length - 1, { align: 'end' });
-      if (parentRef.current) {
-        parentRef.current.scrollTop = parentRef.current.scrollHeight;
+      // Skip scroll-to-bottom if we have a highlight target (search result navigation)
+      if (!highlightMessageId) {
+        virtualizer.scrollToIndex(flatMessages.length - 1, { align: 'end' });
+        if (parentRef.current) {
+          parentRef.current.scrollTop = parentRef.current.scrollHeight;
+        }
+        setAutoScroll(true);
       }
-      setAutoScroll(true);
     }
-  }, [flatMessages.length, virtualizer, messages.length]);
+  }, [flatMessages.length, virtualizer, messages.length, highlightMessageId]);
 
   // Safety net: initialOffset relies on estimated sizes which may be inaccurate.
   // After mount, verify we're actually at the bottom and correct if not.
   useEffect(() => {
-    if (flatMessages.length === 0) return;
+    if (flatMessages.length === 0 || highlightMessageId) return;
     const raf1 = requestAnimationFrame(() => {
       const el = parentRef.current;
       if (!el) return;
@@ -299,6 +304,34 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
     // Only on mount
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Scroll to highlighted message (from search results)
+  const lastHighlightRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!highlightMessageId || highlightMessageId === lastHighlightRef.current) return;
+    // Find the target message in flatMessages
+    const targetIndex = flatMessages.findIndex(
+      (item) => item.type === 'message' && item.content.id === highlightMessageId,
+    );
+    if (targetIndex < 0) return;
+
+    lastHighlightRef.current = highlightMessageId;
+    setAutoScroll(false);
+    // Scroll with a small delay to let virtualizer measure
+    requestAnimationFrame(() => {
+      virtualizer.scrollToIndex(targetIndex, { align: 'center' });
+      // Double-scroll for accuracy after measurement
+      requestAnimationFrame(() => {
+        virtualizer.scrollToIndex(targetIndex, { align: 'center' });
+      });
+    });
+
+    // Auto-clear highlight after 3 seconds
+    const timer = setTimeout(() => {
+      if (groupJid) clearHighlight(groupJid);
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [highlightMessageId, flatMessages, virtualizer, groupJid, clearHighlight]);
 
   // Auto-scroll when streaming content updates
   const streaming = useChatStore(s => agentId ? s.agentStreaming[agentId] : s.streaming[groupJid ?? '']);
@@ -459,6 +492,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
 
             const message = item.content;
             const showTime = true;
+            const isHighlighted = highlightMessageId === message.id;
 
             return (
               <div
@@ -472,6 +506,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
                 }}
                 ref={virtualizer.measureElement}
                 data-index={virtualItem.index}
+                className={isHighlighted ? 'animate-highlight-fade' : undefined}
               >
                 <MessageBubble message={message} showTime={showTime} thinkingContent={thinkingCache[message.id]} chatJid={groupJid || ''} isShared={isShared} />
               </div>
