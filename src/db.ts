@@ -107,6 +107,17 @@ export function initDatabase(): void {
   // Enable WAL mode for better concurrency and performance
   db.pragma('journal_mode = WAL');
   db.pragma('busy_timeout = 5000');
+
+  // Custom function: word-boundary prefix match.
+  // Returns 1 if `term` appears at a word boundary in `content` (not mid-word).
+  // e.g. "kill" matches "kill 2035" and "被 kill" but NOT "skill" or "skills".
+  //      "e33" matches "e33ecs" and "成e33ecs" (CJK→Latin is a word boundary).
+  db.function('word_match', (content: unknown, term: unknown) => {
+    if (typeof content !== 'string' || typeof term !== 'string') return 0;
+    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`\\b${escaped}`, 'i');
+    return regex.test(content) ? 1 : 0;
+  });
   db.exec(`
     CREATE TABLE IF NOT EXISTS chats (
       jid TEXT PRIMARY KEY,
@@ -2666,16 +2677,17 @@ export function searchMessages(
   const sanitized = query.trim();
   if (!sanitized) return [];
 
-  // Use LIKE for comprehensive substring matching (handles CJK+Latin mixed tokens
-  // that FTS5 unicode61 tokenizer merges, e.g. "成e33ecs" becomes one token).
-  // With time range filtering this is performant enough for typical datasets.
-  const likeTerms = sanitized.split(/\s+/).filter(Boolean);
-  const likeConditions = likeTerms
-    .map(() => 'm.content LIKE ?')
+  // Word-boundary prefix matching: LIKE pre-filters candidates, then word_match()
+  // ensures the term appears at a word boundary (not mid-word).
+  // e.g. "kill" matches "kill 2035" but NOT "skill"; "e33" matches "e33ecs".
+  const terms = sanitized.split(/\s+/).filter(Boolean);
+  const likeConditions = terms
+    .map(() => '(m.content LIKE ? ESCAPE \'\\\' AND word_match(m.content, ?) = 1)')
     .join(' AND ');
-  const likeParams = likeTerms.map(
-    (t) => `%${t.replace(/%/g, '\\%').replace(/_/g, '\\_')}%`,
-  );
+  const likeParams = terms.flatMap((t) => [
+    `%${t.replace(/%/g, '\\%').replace(/_/g, '\\_')}%`,
+    t,
+  ]);
 
   const placeholders = chatJids.map(() => '?').join(',');
   const timeFilter = sinceTs ? 'AND m.timestamp >= ?' : '';
@@ -2720,13 +2732,14 @@ export function countSearchResults(
   const sanitized = query.trim();
   if (!sanitized) return 0;
 
-  const likeTerms = sanitized.split(/\s+/).filter(Boolean);
-  const likeConditions = likeTerms
-    .map(() => 'm.content LIKE ?')
+  const terms = sanitized.split(/\s+/).filter(Boolean);
+  const likeConditions = terms
+    .map(() => '(m.content LIKE ? ESCAPE \'\\\' AND word_match(m.content, ?) = 1)')
     .join(' AND ');
-  const likeParams = likeTerms.map(
-    (t) => `%${t.replace(/%/g, '\\%').replace(/_/g, '\\_')}%`,
-  );
+  const likeParams = terms.flatMap((t) => [
+    `%${t.replace(/%/g, '\\%').replace(/_/g, '\\_')}%`,
+    t,
+  ]);
 
   const placeholders = chatJids.map(() => '?').join(',');
   const timeFilter = sinceTs ? 'AND m.timestamp >= ?' : '';
