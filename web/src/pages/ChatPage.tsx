@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { PanelLeftOpen } from 'lucide-react';
 import { useChatStore } from '../stores/chat';
 import { useAuthStore } from '../stores/auth';
@@ -24,6 +24,9 @@ export function ChatPage() {
       Object.entries(groups).find(([_, info]) => info.folder === groupFolder);
     return entry?.[0] || null;
   }, [groupFolder, groups]);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const highlightId = searchParams.get('highlightId');
+  const highlightTs = searchParams.get('ts');
   const appearance = useAuthStore((s) => s.appearance);
   const hasGroups = Object.keys(groups).length > 0;
 
@@ -43,6 +46,16 @@ export function ChatPage() {
   const activeGroupJid = groupFolder ? routeGroupJid : currentGroup;
   const chatViewRef = useRef<HTMLDivElement>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const loadMessagesAroundTimestamp = useChatStore((s) => s.loadMessagesAroundTimestamp);
+
+  // Handle search highlight: load messages around the target and clear URL params
+  useEffect(() => {
+    if (highlightId && highlightTs && activeGroupJid) {
+      loadMessagesAroundTimestamp(activeGroupJid, highlightTs, highlightId);
+      // Clear URL params to avoid re-triggering on refresh
+      setSearchParams({}, { replace: true });
+    }
+  }, [highlightId, highlightTs, activeGroupJid, loadMessagesAroundTimestamp, setSearchParams]);
 
   const handleBackToList = () => {
     navigate('/chat');

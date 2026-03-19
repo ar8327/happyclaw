@@ -82,7 +82,7 @@ export function SearchPage() {
   const handleResultClick = useCallback(
     (result: GlobalSearchResult) => {
       if (result.group_folder) {
-        navigate(`/chat/${result.group_folder}`);
+        navigate(`/chat/${result.group_folder}?highlightId=${encodeURIComponent(result.id)}&ts=${encodeURIComponent(result.timestamp)}`);
       }
     },
     [navigate],

@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { Search, X, Loader2 } from 'lucide-react';
 import { api } from '../../api/client';
+import { useChatStore } from '../../stores/chat';
 import { cn } from '@/lib/utils';
 
 interface SearchResult {
@@ -48,6 +49,7 @@ function buildExcerpt(content: string, query: string): { before: string; match: 
 }
 
 export function SearchPanel({ groupJid }: SearchPanelProps) {
+  const loadMessagesAroundTimestamp = useChatStore((s) => s.loadMessagesAroundTimestamp);
   const [query, setQuery] = useState('');
   const [days, setDays] = useState(7);
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -241,7 +243,8 @@ export function SearchPanel({ groupJid }: SearchPanelProps) {
             {results.map((result) => (
               <div
                 key={result.id}
-                className="grid items-center px-3 py-2 hover:bg-accent/50 transition-colors border-b border-border/50"
+                onClick={() => loadMessagesAroundTimestamp(groupJid, result.timestamp, result.id)}
+                className="grid items-center px-3 py-2 hover:bg-accent/50 transition-colors cursor-pointer border-b border-border/50"
                 style={{ gridTemplateColumns: '3.5rem 6rem 1fr' }}
               >
                 <span className={cn(

@@ -430,6 +430,23 @@ pre code.hljs {
   }
 }
 
+/* Search result highlight animation */
+@keyframes highlight-fade {
+  0% { background-color: oklch(0.85 0.15 85); }
+  100% { background-color: transparent; }
+}
+.dark .animate-highlight-fade {
+  animation: highlight-fade-dark 3s ease-out forwards;
+}
+.animate-highlight-fade {
+  animation: highlight-fade 3s ease-out forwards;
+  border-radius: 0.5rem;
+}
+@keyframes highlight-fade-dark {
+  0% { background-color: oklch(0.45 0.12 85); }
+  100% { background-color: transparent; }
+}
+
 /* Terminal visual safety: avoid last line clipping at the bottom edge */
 .terminal-panel .xterm-viewport {
   padding-bottom: 8px;
