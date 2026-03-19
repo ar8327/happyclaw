@@ -276,7 +276,7 @@ class IMConnectionManager {
   async connectUserFeishu(
     userId: string,
     config: FeishuConnectConfig,
-    onNewChat: (chatJid: string, chatName: string) => void,
+    onNewChat: (chatJid: string, chatName: string, chatType?: 'p2p' | 'group') => void,
     options?: ConnectFeishuOptions,
   ): Promise<boolean> {
     if (!config.appId || !config.appSecret) {
@@ -312,7 +312,7 @@ class IMConnectionManager {
   async connectUserTelegram(
     userId: string,
     config: TelegramConnectConfig,
-    onNewChat: (chatJid: string, chatName: string) => void,
+    onNewChat: (chatJid: string, chatName: string, chatType?: 'p2p' | 'group') => void,
     isChatAuthorized?: (jid: string) => boolean,
     onPairAttempt?: (
       jid: string,
@@ -367,7 +367,7 @@ class IMConnectionManager {
   async connectUserQQ(
     userId: string,
     config: QQConnectConfig,
-    onNewChat: (chatJid: string, chatName: string) => void,
+    onNewChat: (chatJid: string, chatName: string, chatType?: 'p2p' | 'group') => void,
     isChatAuthorized?: (jid: string) => boolean,
     onPairAttempt?: (
       jid: string,

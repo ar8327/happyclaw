@@ -29,7 +29,7 @@ import {
 
 export interface IMChannelConnectOpts {
   onReady: () => void;
-  onNewChat: (chatJid: string, chatName: string) => void;
+  onNewChat: (chatJid: string, chatName: string, chatType?: 'p2p' | 'group') => void;
   onMessage?: (chatJid: string, text: string, senderName: string) => void;
   ignoreMessagesBefore?: number;
   isChatAuthorized?: (jid: string) => boolean;

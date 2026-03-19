@@ -53,7 +53,7 @@ export interface QQConnectionConfig {
 
 export interface QQConnectOpts {
   onReady?: () => void;
-  onNewChat: (jid: string, name: string) => void;
+  onNewChat: (jid: string, name: string, chatType?: 'p2p' | 'group') => void;
   isChatAuthorized: (jid: string) => boolean;
   ignoreMessagesBefore?: number;
   onPairAttempt?: (
@@ -748,7 +748,7 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
       // ── Authorized: process message ──
       storeChatMetadata(jid, new Date().toISOString());
       updateChatName(jid, chatName);
-      opts.onNewChat(jid, chatName);
+      opts.onNewChat(jid, chatName, jid.startsWith('qq:c2c:') ? 'p2p' : 'group');
 
       // Handle slash commands
       const slashMatch = content.match(/^\/(\S+)(?:\s+(.*))?$/i);
@@ -946,7 +946,7 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
       // ── Authorized: process message ──
       storeChatMetadata(jid, new Date().toISOString());
       updateChatName(jid, chatName);
-      opts.onNewChat(jid, chatName);
+      opts.onNewChat(jid, chatName, jid.startsWith('qq:c2c:') ? 'p2p' : 'group');
 
       // Handle slash commands
       const slashMatch = content.match(/^\/(\S+)(?:\s+(.*))?$/i);

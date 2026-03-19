@@ -34,7 +34,7 @@ interface FeishuFileInfo {
 export interface ConnectOptions {
   onReady: () => void;
   /** 收到消息后调用，让调用方自动注册未知的飞书聊天 */
-  onNewChat?: (chatJid: string, chatName: string) => void;
+  onNewChat?: (chatJid: string, chatName: string, chatType?: 'p2p' | 'group') => void;
   /** 热重连时设置：丢弃 create_time 早于此时间戳（epoch ms）的消息，避免处理渠道关闭期间的堆积消息 */
   ignoreMessagesBefore?: number;
   /** 斜杠指令回调（如 /clear），返回回复文本或 null */
@@ -891,7 +891,7 @@ export function createFeishuConnection(
     const resolvedChatName = chatType === 'p2p' ? '飞书私聊' : '飞书群聊';
 
     // 先注册会话，确保 resolveGroupFolder 能正确解析 folder（含首条文件消息场景）
-    onNewChat?.(chatJid, resolvedChatName);
+    onNewChat?.(chatJid, resolvedChatName, chatType === 'p2p' ? 'p2p' : 'group');
 
     let attachmentsJson: string | undefined;
 
@@ -1935,7 +1935,7 @@ let _defaultInstance: FeishuConnection | null = null;
 export interface ConnectFeishuOptions {
   onReady: () => void;
   /** 收到消息后调用，让主模块自动注册未知的飞书聊天到主容器 */
-  onNewChat?: (chatJid: string, chatName: string) => void;
+  onNewChat?: (chatJid: string, chatName: string, chatType?: 'p2p' | 'group') => void;
   /** 热重连时设置：丢弃 create_time 早于此时间戳（epoch ms）的消息，避免处理渠道关闭期间的堆积消息 */
   ignoreMessagesBefore?: number;
 }

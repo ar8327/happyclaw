@@ -25,7 +25,7 @@ export interface TelegramConnectionConfig {
 export interface TelegramConnectOpts {
   onReady?: () => void;
   /** 收到消息后调用，让调用方自动注册未知的 Telegram 聊天 */
-  onNewChat: (jid: string, name: string) => void;
+  onNewChat: (jid: string, name: string, chatType?: 'p2p' | 'group') => void;
   /** 检查聊天是否已注册（已在 registered_groups 中） */
   isChatAuthorized: (jid: string) => boolean;
   /** 配对尝试回调：验证码并注册聊天，返回是否成功 */
@@ -468,7 +468,7 @@ export function createTelegramConnection(
           // 自动注册（确保 metadata 和名称同步）
           storeChatMetadata(jid, new Date().toISOString());
           updateChatName(jid, chatName);
-          opts.onNewChat(jid, chatName);
+          opts.onNewChat(jid, chatName, ctx.chat.type === 'private' ? 'p2p' : 'group');
 
           // ── 斜杠指令：拦截已知 /xxx 命令，不进入消息流 ──
           // Telegram 群聊中会追加 @BotUsername，需要去掉
@@ -619,7 +619,7 @@ export function createTelegramConnection(
 
           storeChatMetadata(jid, new Date().toISOString());
           updateChatName(jid, chatName);
-          opts.onNewChat(jid, chatName);
+          opts.onNewChat(jid, chatName, ctx.chat.type === 'private' ? 'p2p' : 'group');
 
           // 取最高分辨率，下载为 base64 供 Vision
           const photo = ctx.message.photo.at(-1);
@@ -762,7 +762,7 @@ export function createTelegramConnection(
 
           storeChatMetadata(jid, new Date().toISOString());
           updateChatName(jid, chatName);
-          opts.onNewChat(jid, chatName);
+          opts.onNewChat(jid, chatName, ctx.chat.type === 'private' ? 'p2p' : 'group');
 
           const doc = ctx.message.document;
           const originalFilename = doc.file_name || 'file';

@@ -28,6 +28,7 @@ import {
   RegistrationConfigSchema,
   AppearanceConfigSchema,
   SystemSettingsSchema,
+  UserIMPreferencesSchema,
 } from '../schemas.js';
 import {
   getClaudeProviderConfig,
@@ -70,6 +71,8 @@ import {
   updateAllSessionCredentials,
   detectLocalClaudeCode,
   importLocalClaudeCredentials,
+  getUserIMPreferences,
+  saveUserIMPreferences,
 } from '../runtime-config.js';
 import type { ClaudeOAuthCredentials } from '../runtime-config.js';
 import type { AuthUser, RegisteredGroup } from '../types.js';
@@ -2106,6 +2109,21 @@ configRoutes.delete('/user-im/qq/paired-chats/:jid', authMiddleware, (c) => {
   delete groups[jid];
   logger.info({ jid, userId: user.id }, 'QQ chat unpaired');
   return c.json({ success: true });
+});
+
+// ─── User IM Preferences ────────────────────────────────────────
+
+configRoutes.get('/user-im/preferences', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const prefs = getUserIMPreferences(user.id);
+  return c.json(prefs);
+});
+
+configRoutes.put('/user-im/preferences', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const body = UserIMPreferencesSchema.parse(await c.req.json());
+  const saved = saveUserIMPreferences(user.id, body);
+  return c.json(saved);
 });
 
 // ─── IM Binding management (bindings panoramic page) ────────────

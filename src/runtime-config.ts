@@ -3087,3 +3087,37 @@ export function saveSystemSettings(
 
   return merged;
 }
+
+// ─── User IM Preferences ─────────────────────────────────────────
+
+export interface UserIMPreferences {
+  autoCreateWorkspaceForGroups?: boolean;
+  autoCreateExecutionMode?: 'host' | 'container';
+}
+
+export function getUserIMPreferences(userId: string): UserIMPreferences {
+  const filePath = path.join(userImDir(userId), 'preferences.json');
+  try {
+    if (!fs.existsSync(filePath)) return {};
+    const content = fs.readFileSync(filePath, 'utf-8');
+    return JSON.parse(content) as UserIMPreferences;
+  } catch (err) {
+    logger.warn({ err, userId }, 'Failed to read user IM preferences');
+    return {};
+  }
+}
+
+export function saveUserIMPreferences(
+  userId: string,
+  prefs: UserIMPreferences,
+): UserIMPreferences {
+  const dir = userImDir(userId);
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, 'preferences.json');
+  const merged: UserIMPreferences = {
+    ...getUserIMPreferences(userId),
+    ...prefs,
+  };
+  fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), 'utf-8');
+  return merged;
+}

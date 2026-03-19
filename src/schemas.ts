@@ -590,3 +590,8 @@ export interface MemorySearchHit extends MemorySource {
   hits: number;
   snippet: string;
 }
+
+export const UserIMPreferencesSchema = z.object({
+  autoCreateWorkspaceForGroups: z.boolean().optional(),
+  autoCreateExecutionMode: z.enum(['host', 'container']).optional(),
+});
