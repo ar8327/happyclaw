@@ -12,6 +12,7 @@ interface GroupsState {
   members: Record<string, GroupMember[]>;
   membersLoading: boolean;
   loadGroups: () => Promise<void>;
+  updateGroup: (jid: string, updates: Record<string, unknown>) => Promise<void>;
   loadMembers: (jid: string) => Promise<void>;
   addMember: (jid: string, userId: string) => Promise<void>;
   removeMember: (jid: string, userId: string) => Promise<void>;
@@ -32,6 +33,12 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
     } catch (err) {
       set({ loading: false, error: err instanceof Error ? err.message : String(err) });
     }
+  },
+
+  updateGroup: async (jid: string, updates: Record<string, unknown>) => {
+    await api.patch(`/api/groups/${encodeURIComponent(jid)}`, updates);
+    await get().loadGroups();
+    useChatStore.getState().loadGroups();
   },
 
   loadMembers: async (jid: string) => {

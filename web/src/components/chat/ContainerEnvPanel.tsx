@@ -1,6 +1,8 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { Loader2, Save, Plus, X, RefreshCw, Trash2 } from 'lucide-react';
 import { useContainerEnvStore } from '../../stores/container-env';
+import { useGroupsStore } from '../../stores/groups';
+import { api } from '../../api/client';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 
@@ -11,23 +13,55 @@ interface ContainerEnvPanelProps {
 
 const MODEL_ENV_KEY = 'ANTHROPIC_MODEL';
 const MODEL_PRESETS = ['opus', 'sonnet', 'haiku'] as const;
+const OPENAI_MODEL_ENV_KEY = 'OPENAI_MODEL';
+const OPENAI_MODEL_PRESETS = ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5.3-codex-spark'] as const;
+const OPENAI_REASONING_EFFORT_KEY = 'OPENAI_REASONING_EFFORT';
+const OPENAI_REASONING_SUMMARY_KEY = 'OPENAI_REASONING_SUMMARY';
+const REASONING_EFFORT_OPTIONS = ['', 'low', 'medium', 'high'] as const;
+const REASONING_SUMMARY_OPTIONS = ['', 'auto', 'concise', 'detailed', 'none'] as const;
 
 export function ContainerEnvPanel({ groupJid, onClose }: ContainerEnvPanelProps) {
   const { configs, loading, saving, loadConfig, saveConfig } = useContainerEnvStore();
   const config = configs[groupJid];
+  const { groups, loadGroups } = useGroupsStore();
+  const group = groups[groupJid];
+
+  // LLM Provider state
+  const [llmProvider, setLlmProvider] = useState<'claude' | 'openai'>(group?.llm_provider || 'claude');
+  const [providerSaving, setProviderSaving] = useState(false);
+
+  // Sync llmProvider when group data changes (always sync, including 'claude' default)
+  useEffect(() => {
+    setLlmProvider(group?.llm_provider || 'claude');
+  }, [group?.llm_provider]);
+
+  const handleProviderChange = useCallback(async (provider: 'claude' | 'openai') => {
+    setLlmProvider(provider);
+    setProviderSaving(true);
+    try {
+      await api.patch(`/api/groups/${encodeURIComponent(groupJid)}`, { llm_provider: provider });
+      await loadGroups();
+    } catch { /* ignore */ }
+    setProviderSaving(false);
+  }, [groupJid, loadGroups]);
 
   // Draft state for form fields
   const [baseUrl, setBaseUrl] = useState('');
   const [authToken, setAuthToken] = useState('');
   const [authTokenDirty, setAuthTokenDirty] = useState(false);
   const [model, setModel] = useState('');
+  const [reasoningEffort, setReasoningEffort] = useState('');
+  const [reasoningSummary, setReasoningSummary] = useState('');
   const [customEnv, setCustomEnv] = useState<{ key: string; value: string }[]>([]);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [clearing, setClearing] = useState(false);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   useEffect(() => {
-    if (groupJid) loadConfig(groupJid);
+    if (groupJid) {
+      loadConfig(groupJid);
+      loadGroups(); // Refresh group data to get latest llm_provider
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groupJid]);
 
@@ -45,9 +79,12 @@ export function ContainerEnvPanel({ groupJid, onClose }: ContainerEnvPanelProps)
     setAuthToken('');
     setAuthTokenDirty(false);
     const entries = Object.entries(config.customEnv || {}).map(([key, value]) => ({ key, value }));
-    const modelFromConfig = (config.customEnv && config.customEnv[MODEL_ENV_KEY]) || '';
+    const modelFromConfig =
+      (config.customEnv && (config.customEnv[MODEL_ENV_KEY] || config.customEnv[OPENAI_MODEL_ENV_KEY])) || '';
     setModel(modelFromConfig);
-    setCustomEnv(entries.filter(({ key }) => key !== MODEL_ENV_KEY));
+    setReasoningEffort((config.customEnv && config.customEnv[OPENAI_REASONING_EFFORT_KEY]) || '');
+    setReasoningSummary((config.customEnv && config.customEnv[OPENAI_REASONING_SUMMARY_KEY]) || '');
+    setCustomEnv(entries.filter(({ key }) => key !== MODEL_ENV_KEY && key !== OPENAI_MODEL_ENV_KEY && key !== OPENAI_REASONING_EFFORT_KEY && key !== OPENAI_REASONING_SUMMARY_KEY));
   }, [config]);
 
   const handleSave = async () => {
@@ -62,14 +99,17 @@ export function ContainerEnvPanel({ groupJid, onClose }: ContainerEnvPanelProps)
 
     // Build custom env (filter empty keys)
     const envMap: Record<string, string> = {};
+    const activeModelKey = llmProvider === 'openai' ? OPENAI_MODEL_ENV_KEY : MODEL_ENV_KEY;
     for (const { key, value } of customEnv) {
       const k = key.trim();
-      if (!k || k === MODEL_ENV_KEY) continue;
+      if (!k || k === MODEL_ENV_KEY || k === OPENAI_MODEL_ENV_KEY || k === OPENAI_REASONING_EFFORT_KEY || k === OPENAI_REASONING_SUMMARY_KEY) continue;
       envMap[k] = value;
     }
+    if (reasoningEffort) envMap[OPENAI_REASONING_EFFORT_KEY] = reasoningEffort;
+    if (reasoningSummary) envMap[OPENAI_REASONING_SUMMARY_KEY] = reasoningSummary;
     const normalizedModel = model.trim();
     if (normalizedModel) {
-      envMap[MODEL_ENV_KEY] = normalizedModel;
+      envMap[activeModelKey] = normalizedModel;
     }
     data.customEnv = envMap;
 
@@ -151,71 +191,166 @@ export function ContainerEnvPanel({ groupJid, onClose }: ContainerEnvPanelProps)
 
       {/* Content */}
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-4">
+        {/* LLM Provider Selector */}
+        <div>
+          <label className="block text-xs font-medium text-slate-600 mb-1.5">LLM 提供商</label>
+          <div className="flex gap-2">
+            {(['claude', 'openai'] as const).map((p) => (
+              <button
+                key={p}
+                onClick={() => handleProviderChange(p)}
+                disabled={providerSaving}
+                className={`flex-1 px-3 py-1.5 rounded-md text-xs font-medium border transition-colors cursor-pointer ${
+                  llmProvider === p
+                    ? 'border-primary bg-primary/5 text-primary'
+                    : 'border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-700'
+                }`}
+              >
+                {p === 'claude' ? 'Claude' : 'OpenAI'}
+              </button>
+            ))}
+          </div>
+          <p className="text-[10px] text-slate-400 mt-1">选择此工作区使用的 AI 模型提供商。切换后需重建工作区。</p>
+        </div>
+
+        <div className="border-t border-slate-100" />
+
         <p className="text-[11px] text-slate-400 leading-relaxed">
-          覆盖全局 Claude 配置，仅对当前工作区生效。留空则使用全局配置。保存后工作区将自动重建。
+          覆盖全局配置，仅对当前工作区生效。留空则使用全局配置。保存后工作区将自动重建。
         </p>
 
-        {/* Claude Provider Fields */}
-        <div className="space-y-3">
-          <div>
-            <label className="block text-xs font-medium text-slate-600 mb-1">
-              ANTHROPIC_BASE_URL
-            </label>
-            <Input
-              type="text"
-              value={baseUrl}
-              onChange={(e) => setBaseUrl(e.target.value)}
-              placeholder="留空使用全局配置"
-              className="px-2.5 py-1.5 text-xs h-auto"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-slate-600 mb-1">
-              ANTHROPIC_AUTH_TOKEN
-              {config?.hasAnthropicAuthToken && (
-                <span className="ml-1.5 text-[10px] text-slate-400 font-normal">
-                  ({config.anthropicAuthTokenMasked})
-                </span>
-              )}
-            </label>
-            <Input
-              type="password"
-              value={authToken}
-              onChange={(e) => {
-                setAuthToken(e.target.value);
-                setAuthTokenDirty(true);
-              }}
-              placeholder={config?.hasAnthropicAuthToken ? '已设置，输入新值覆盖；留空可清除覆盖' : '留空使用全局配置'}
-              className="px-2.5 py-1.5 text-xs h-auto"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-slate-600 mb-1">
-              模型（ANTHROPIC_MODEL）
-            </label>
-            <div className="space-y-1.5">
+        {/* Provider-specific Fields */}
+        {llmProvider === 'claude' ? (
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">
+                ANTHROPIC_BASE_URL
+              </label>
               <Input
                 type="text"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder="opus / sonnet / haiku 或完整模型 ID"
-                className="px-2.5 py-1.5 text-xs h-auto font-mono"
-                list="anthropic-model-presets"
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
+                placeholder="留空使用全局配置"
+                className="px-2.5 py-1.5 text-xs h-auto"
               />
-              <datalist id="anthropic-model-presets">
-                {MODEL_PRESETS.map((preset) => (
-                  <option key={preset} value={preset} />
-                ))}
-              </datalist>
-              <p className="text-[11px] text-slate-400">
-                留空则回退到全局配置（默认值通常为 <code className="bg-slate-100 px-1 rounded">opus</code>）。
-              </p>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">
+                ANTHROPIC_AUTH_TOKEN
+                {config?.hasAnthropicAuthToken && (
+                  <span className="ml-1.5 text-[10px] text-slate-400 font-normal">
+                    ({config.anthropicAuthTokenMasked})
+                  </span>
+                )}
+              </label>
+              <Input
+                type="password"
+                value={authToken}
+                onChange={(e) => {
+                  setAuthToken(e.target.value);
+                  setAuthTokenDirty(true);
+                }}
+                placeholder={config?.hasAnthropicAuthToken ? '已设置，输入新值覆盖；留空可清除覆盖' : '留空使用全局配置'}
+                className="px-2.5 py-1.5 text-xs h-auto"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">
+                模型（ANTHROPIC_MODEL）
+              </label>
+              <div className="space-y-1.5">
+                <Input
+                  type="text"
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  placeholder="opus / sonnet / haiku 或完整模型 ID"
+                  className="px-2.5 py-1.5 text-xs h-auto font-mono"
+                  list="anthropic-model-presets"
+                />
+                <datalist id="anthropic-model-presets">
+                  {MODEL_PRESETS.map((preset) => (
+                    <option key={preset} value={preset} />
+                  ))}
+                </datalist>
+                <p className="text-[11px] text-slate-400">
+                  留空则回退到全局配置（默认值通常为 <code className="bg-slate-100 px-1 rounded">opus</code>）。
+                </p>
+              </div>
             </div>
           </div>
+        ) : (
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">
+                模型（OPENAI_MODEL）
+              </label>
+              <div className="space-y-1.5">
+                <Input
+                  type="text"
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  placeholder="gpt-5.4 / gpt-5.3-codex 或完整模型 ID"
+                  className="px-2.5 py-1.5 text-xs h-auto font-mono"
+                  list="openai-model-presets"
+                />
+                <datalist id="openai-model-presets">
+                  {OPENAI_MODEL_PRESETS.map((preset) => (
+                    <option key={preset} value={preset} />
+                  ))}
+                </datalist>
+                <p className="text-[11px] text-slate-400">
+                  留空则使用全局设置页配置的模型。认证信息在「设置 → OpenAI 提供商」中配置。
+                </p>
+              </div>
+            </div>
 
-        </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">
+                Reasoning Effort
+              </label>
+              <div className="flex gap-1.5">
+                {REASONING_EFFORT_OPTIONS.map((opt) => (
+                  <button
+                    key={opt || '_none'}
+                    onClick={() => setReasoningEffort(opt)}
+                    className={`flex-1 px-2 py-1.5 rounded-md text-[11px] font-medium border transition-colors cursor-pointer ${
+                      reasoningEffort === opt
+                        ? 'border-primary bg-primary/5 text-primary'
+                        : 'border-slate-200 text-slate-500 hover:border-slate-300'
+                    }`}
+                  >
+                    {opt || '默认'}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[10px] text-slate-400 mt-1">控制模型的推理深度。默认由模型自行决定。</p>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">
+                Reasoning Summary
+              </label>
+              <div className="flex gap-1.5 flex-wrap">
+                {REASONING_SUMMARY_OPTIONS.map((opt) => (
+                  <button
+                    key={opt || '_none'}
+                    onClick={() => setReasoningSummary(opt)}
+                    className={`px-2 py-1.5 rounded-md text-[11px] font-medium border transition-colors cursor-pointer ${
+                      reasoningSummary === opt
+                        ? 'border-primary bg-primary/5 text-primary'
+                        : 'border-slate-200 text-slate-500 hover:border-slate-300'
+                    }`}
+                  >
+                    {opt || '默认'}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[10px] text-slate-400 mt-1">是否在响应中包含推理过程摘要。</p>
+            </div>
+          </div>
+        )}
 
         {/* Separator */}
         <div className="border-t border-slate-100" />

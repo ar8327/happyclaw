@@ -181,6 +181,8 @@ interface GroupPayloadItem {
   selected_skills?: string[] | null;
   pinned_at?: string;
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+  llm_provider?: 'claude' | 'openai';
+  model?: string;
 }
 
 function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
@@ -290,6 +292,8 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       selected_skills: group.selected_skills ?? null,
       pinned_at: pins[jid] || undefined,
       activation_mode: group.activation_mode ?? 'auto',
+      llm_provider: group.llm_provider ?? 'claude',
+      model: group.model ?? undefined,
     };
   }
 
@@ -719,6 +723,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     selected_skills,
     is_pinned,
     activation_mode,
+    llm_provider,
+    model,
   } = validation.data;
   const name = rawName ? normalizeGroupName(rawName) : undefined;
 
@@ -727,7 +733,9 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     !name &&
     selected_skills === undefined &&
     is_pinned === undefined &&
-    activation_mode === undefined
+    activation_mode === undefined &&
+    llm_provider === undefined &&
+    model === undefined
   ) {
     return c.json({ error: 'No fields to update' }, 400);
   }
@@ -737,7 +745,9 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     is_pinned !== undefined &&
     !name &&
     selected_skills === undefined &&
-    activation_mode === undefined;
+    activation_mode === undefined &&
+    llm_provider === undefined &&
+    model === undefined;
   if (isPinOnly) {
     if (
       !canAccessGroup(
@@ -779,8 +789,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     unpinGroup(authUser.id, jid);
   }
 
-  // Update registered group if name, skills, or activation_mode changed
-  if (name || selected_skills !== undefined || activation_mode !== undefined) {
+  // Update registered group if name, skills, activation_mode, llm_provider, or model changed
+  if (name || selected_skills !== undefined || activation_mode !== undefined || llm_provider !== undefined || model !== undefined) {
     const updated: RegisteredGroup = {
       name: name || existing.name,
       folder: existing.folder,
@@ -804,6 +814,14 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
         activation_mode !== undefined
           ? activation_mode
           : existing.activation_mode,
+      llm_provider:
+        llm_provider !== undefined
+          ? llm_provider
+          : existing.llm_provider,
+      model:
+        model !== undefined
+          ? (model || undefined)
+          : existing.model,
     };
 
     setRegisteredGroup(jid, updated);

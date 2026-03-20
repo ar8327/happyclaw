@@ -55,6 +55,36 @@ export interface SubscriptionResponse {
   message?: string;
 }
 
+// --- OpenAI account / rate limits ---
+
+export interface OpenAIRateWindow {
+  label: string;
+  used_percent: number;
+  resets_at?: string;
+  window_minutes?: number;
+}
+
+export interface OpenAICredits {
+  has_credits: boolean;
+  unlimited: boolean;
+  balance?: number;
+}
+
+export interface OpenAIAccountData {
+  plan_type?: string;
+  rate_windows?: OpenAIRateWindow[];
+  credits?: OpenAICredits;
+}
+
+export interface OpenAIAccountResponse {
+  account: OpenAIAccountData | null;
+  cached: boolean;
+  cached_at: string;
+  rate_limited?: boolean;
+  error?: string;
+  message?: string;
+}
+
 interface UsageState {
   summary: UsageSummary | null;
   breakdown: UsageBreakdown[];
@@ -75,6 +105,12 @@ interface UsageState {
   subscriptionError: string | null;
   subscriptionErrorCode: string | null; // 'no_credentials' means user isn't on OAuth
 
+  // OpenAI account
+  openaiAccount: OpenAIAccountData | null;
+  openaiAccountLoading: boolean;
+  openaiAccountError: string | null;
+  openaiAccountErrorCode: string | null;
+
   // Actions
   loadStats: (days?: number) => Promise<void>;
   setDays: (days: number) => void;
@@ -82,6 +118,7 @@ interface UsageState {
   setSelectedModel: (model: string | null) => void;
   loadFilters: () => Promise<void>;
   loadSubscription: () => Promise<void>;
+  loadOpenAIAccount: () => Promise<void>;
 }
 
 export const useUsageStore = create<UsageState>((set, get) => ({
@@ -99,6 +136,10 @@ export const useUsageStore = create<UsageState>((set, get) => ({
   subscriptionLoading: false,
   subscriptionError: null,
   subscriptionErrorCode: null,
+  openaiAccount: null,
+  openaiAccountLoading: false,
+  openaiAccountError: null,
+  openaiAccountErrorCode: null,
 
   loadStats: async (days?: number) => {
     const d = days ?? get().days;
@@ -181,6 +222,34 @@ export const useUsageStore = create<UsageState>((set, get) => ({
         subscriptionLoading: false,
         subscriptionError: errorMessage,
         subscriptionErrorCode: 'fetch_error',
+      });
+    }
+  },
+
+  loadOpenAIAccount: async () => {
+    set({ openaiAccountLoading: true, openaiAccountError: null, openaiAccountErrorCode: null });
+    try {
+      const data = await api.get<OpenAIAccountResponse>('/api/usage/openai-subscription');
+      if (data.error) {
+        set({
+          openaiAccountLoading: false,
+          openaiAccountError: data.message || data.error,
+          openaiAccountErrorCode: data.error,
+        });
+      } else {
+        set({ openaiAccount: data.account, openaiAccountLoading: false });
+      }
+    } catch (err) {
+      const errorMessage =
+        err instanceof Error
+          ? err.message
+          : typeof err === 'object' && err !== null && 'message' in err
+            ? String((err as { message: unknown }).message)
+            : String(err);
+      set({
+        openaiAccountLoading: false,
+        openaiAccountError: errorMessage,
+        openaiAccountErrorCode: 'fetch_error',
       });
     }
   },

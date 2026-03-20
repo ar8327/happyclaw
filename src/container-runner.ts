@@ -22,6 +22,7 @@ import {
   buildContainerEnvLines,
   getClaudeProviderConfig,
   getContainerEnvConfig,
+  getOpenAIProviderConfig,
   getSystemSettings,
   mergeClaudeEnvConfig,
   shellQuoteEnvLines,
@@ -314,6 +315,14 @@ function buildVolumeMounts(
   const globalConfig = getClaudeProviderConfig();
   const containerOverride = getContainerEnvConfig(group.folder);
   const envLines = buildContainerEnvLines(globalConfig, containerOverride);
+
+  // Per-workspace model override (takes priority over global and container-env config)
+  if (group.model) {
+    const filteredLines = envLines.filter((l) => !l.startsWith('HAPPYCLAW_MODEL='));
+    envLines.length = 0;
+    envLines.push(...filteredLines);
+    envLines.push(`HAPPYCLAW_MODEL=${group.model}`);
+  }
 
   // Agent-browser isolation: each workspace gets its own browser session + profile
   envLines.push(`AGENT_BROWSER_SESSION=${group.folder}`);
@@ -709,8 +718,6 @@ export async function runHostAgent(
   ownerHomeFolder?: string,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
-  const setupInstallHint = 'npm --prefix container/agent-runner install';
-  const setupBuildHint = 'npm --prefix container/agent-runner run build';
   const hostModeSetupError = (message: string): ContainerOutput => ({
     status: 'error',
     result: `宿主机模式启动失败：${message}`,
@@ -912,6 +919,11 @@ export async function runHostAgent(
     }
   }
 
+  // Per-workspace model override (takes priority over global and container-env config)
+  if (group.model) {
+    hostEnv['HAPPYCLAW_MODEL'] = group.model;
+  }
+
   // Write .credentials.json for OAuth credentials
   const mergedConfig = mergeClaudeEnvConfig(globalConfig, containerOverride);
   if (mergedConfig.claudeOAuthCredentials) {
@@ -981,12 +993,20 @@ export async function runHostAgent(
     hostEnv['IS_SANDBOX'] = '1';
   }
 
-  // 6. 编译检查
+  // 6. 编译检查 — 根据 llmProvider 选择对应的 agent-runner
   const projectRoot = process.cwd();
-  const agentRunnerRoot = path.join(projectRoot, 'container', 'agent-runner');
+  const llmProvider = group.llm_provider || 'claude';
+  const isOpenAI = llmProvider === 'openai';
+
+  const runnerSubdir = isOpenAI ? 'agent-runner-openai' : 'agent-runner';
+  const agentRunnerRoot = path.join(projectRoot, 'container', runnerSubdir);
   const agentRunnerNodeModules = path.join(agentRunnerRoot, 'node_modules');
   const agentRunnerDist = path.join(agentRunnerRoot, 'dist', 'index.js');
-  const requiredDeps = ['@anthropic-ai/claude-agent-sdk'];
+
+  const requiredDeps = isOpenAI ? ['openai'] : ['@anthropic-ai/claude-agent-sdk'];
+  const installHint = `npm --prefix container/${runnerSubdir} install`;
+  const buildHint = `npm --prefix container/${runnerSubdir} run build`;
+
   const missingDeps = requiredDeps.filter((dep) => {
     const depJson = path.join(
       agentRunnerNodeModules,
@@ -998,20 +1018,20 @@ export async function runHostAgent(
   if (missingDeps.length > 0) {
     const missing = missingDeps.join(', ');
     logger.error(
-      { group: group.name, missingDeps },
+      { group: group.name, missingDeps, llmProvider },
       'Host agent preflight failed: dependencies missing',
     );
     return hostModeSetupError(
-      `缺少 agent-runner 依赖（${missing}）。请先执行：${setupInstallHint}`,
+      `缺少 ${runnerSubdir} 依赖（${missing}）。请先执行：${installHint}`,
     );
   }
   if (!fs.existsSync(agentRunnerDist)) {
     logger.error(
-      { group: group.name, agentRunnerDist },
+      { group: group.name, agentRunnerDist, llmProvider },
       'Host agent preflight failed: dist not found',
     );
     return hostModeSetupError(
-      `agent-runner 未编译。请先执行：${setupBuildHint}`,
+      `${runnerSubdir} 未编译。请先执行：${buildHint}`,
     );
   }
 
@@ -1026,11 +1046,40 @@ export async function runHostAgent(
     if (newestSrc > distMtime) {
       logger.warn(
         { group: group.name },
-        `agent-runner dist 可能已过期（src 比 dist 新）。建议执行：${setupBuildHint}`,
+        `${runnerSubdir} dist 可能已过期（src 比 dist 新）。建议执行：${buildHint}`,
       );
     }
   } catch {
     // Best effort, don't block execution
+  }
+
+  // OpenAI runner: inject auth credentials based on authMode
+  if (isOpenAI) {
+    const openaiConfig = getOpenAIProviderConfig();
+
+    if (openaiConfig.authMode === 'chatgpt_oauth' && openaiConfig.oauthTokens?.accessToken) {
+      // OAuth mode — Codex Responses API
+      hostEnv['OPENAI_AUTH_MODE'] = 'chatgpt_oauth';
+      hostEnv['OPENAI_ACCESS_TOKEN'] = openaiConfig.oauthTokens.accessToken;
+      if (openaiConfig.oauthTokens.refreshToken) {
+        hostEnv['OPENAI_REFRESH_TOKEN'] = openaiConfig.oauthTokens.refreshToken;
+      }
+    } else if (openaiConfig.apiKey) {
+      // API Key mode — standard Chat Completions
+      hostEnv['OPENAI_AUTH_MODE'] = 'api_key';
+      hostEnv['OPENAI_API_KEY'] = openaiConfig.apiKey;
+    } else {
+      return hostModeSetupError(
+        'OpenAI 未配置认证信息。请在设置页面配置 API Key 或通过 ChatGPT OAuth 登录。',
+      );
+    }
+
+    if (openaiConfig.baseUrl) {
+      hostEnv['OPENAI_BASE_URL'] = openaiConfig.baseUrl;
+    }
+    if (openaiConfig.model) {
+      hostEnv['OPENAI_MODEL'] = openaiConfig.model;
+    }
   }
 
   logger.info(
@@ -1138,7 +1187,7 @@ export async function runHostAgent(
             /Cannot find package '([^']+)' imported from/u,
           );
           const userFacingError = missingPackageMatch
-            ? `宿主机模式启动失败：缺少依赖 ${missingPackageMatch[1]}。请先执行：${setupInstallHint}`
+            ? `宿主机模式启动失败：缺少依赖 ${missingPackageMatch[1]}。请先执行：${installHint}`
             : null;
           return {
             result: userFacingError,

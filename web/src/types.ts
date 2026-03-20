@@ -18,6 +18,8 @@ export interface GroupInfo {
   selected_skills?: string[] | null;
   pinned_at?: string;
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+  llm_provider?: 'claude' | 'openai';
+  model?: string;
 }
 
 export interface AgentInfo {

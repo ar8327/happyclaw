@@ -17,6 +17,7 @@ import {
   parseFeishuDocUrl,
   searchFeishuDocs,
   searchFeishuWiki,
+  batchResolveUserNames,
 } from '../feishu-oauth.js';
 
 let internalToken: string | null = null;
@@ -212,10 +213,27 @@ feishuApiRoutes.post('/search', async (c) => {
       }
     }
 
+    // Resolve owner open_ids to display names
+    const ownerIds = merged.map((r) => r.owner).filter(Boolean);
+    let ownerNames = new Map<string, string>();
+    if (ownerIds.length > 0) {
+      try {
+        ownerNames = await batchResolveUserNames(accessToken, ownerIds);
+      } catch (err) {
+        logger.warn({ err, userId }, 'Failed to resolve owner names, returning open_ids');
+      }
+    }
+
+    // Replace owner open_ids with display names where available
+    const enriched = merged.map((r) => ({
+      ...r,
+      owner: ownerNames.get(r.owner) || r.owner,
+    }));
+
     return c.json({
-      results: merged,
+      results: enriched,
       hasMore: docResults.hasMore || wikiResults.hasMore,
-      total: merged.length,
+      total: enriched.length,
     });
   } catch (err) {
     const message =

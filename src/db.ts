@@ -528,6 +528,9 @@ export function initDatabase(): void {
   ensureColumn('registered_groups', 'mcp_mode', "TEXT DEFAULT 'inherit'");
   ensureColumn('registered_groups', 'selected_mcps', 'TEXT');
   ensureColumn('registered_groups', 'activation_mode', "TEXT DEFAULT 'auto'");
+  ensureColumn('registered_groups', 'llm_provider', "TEXT DEFAULT 'claude'");
+  ensureColumn('registered_groups', 'model', 'TEXT');
+  ensureColumn('scheduled_tasks', 'model', 'TEXT');
   ensureColumn('messages', 'token_usage', 'TEXT');
 
   // Add index on target_agent_id for fast lookup of IM bindings
@@ -1116,7 +1119,7 @@ export function initDatabase(): void {
     logger.info('FTS5 rebuild complete');
   }
 
-  const SCHEMA_VERSION = '32';
+  const SCHEMA_VERSION = '34';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -1887,8 +1890,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, execution_type, script_command, next_run, status, created_at, created_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, execution_type, script_command, next_run, status, created_at, created_by, model)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -1904,6 +1907,7 @@ export function createTask(
     task.status,
     task.created_at,
     task.created_by ?? null,
+    task.model ?? null,
   );
 }
 
@@ -1941,7 +1945,7 @@ export function updateTask(
       | 'next_run'
       | 'status'
     >
-  >,
+  > & { model?: string | null },
 ): void {
   const fields: string[] = [];
   const values: unknown[] = [];
@@ -1977,6 +1981,10 @@ export function updateTask(
   if (updates.status !== undefined) {
     fields.push('status = ?');
     values.push(updates.status);
+  }
+  if (updates.model !== undefined) {
+    fields.push('model = ?');
+    values.push(updates.model);
   }
 
   if (fields.length === 0) return;
@@ -2189,6 +2197,8 @@ type RegisteredGroupRow = {
   activation_mode: string | null;
   mcp_mode: string | null;
   selected_mcps: string | null;
+  llm_provider: string | null;
+  model: string | null;
 };
 
 /** Convert a raw DB row into a RegisteredGroup domain object. */
@@ -2219,6 +2229,8 @@ function parseGroupRow(
     activation_mode: parseActivationMode(row.activation_mode),
     mcp_mode: row.mcp_mode === 'custom' ? 'custom' : 'inherit',
     selected_mcps: row.selected_mcps ? JSON.parse(row.selected_mcps) : null,
+    llm_provider: row.llm_provider === 'openai' ? 'openai' : 'claude',
+    model: row.model ?? undefined,
   };
 }
 
@@ -2249,8 +2261,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps, llm_provider, model)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -2271,6 +2283,8 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.activation_mode ?? 'auto',
     group.mcp_mode ?? 'inherit',
     group.selected_mcps ? JSON.stringify(group.selected_mcps) : null,
+    group.llm_provider ?? 'claude',
+    group.model ?? null,
   );
 }
 

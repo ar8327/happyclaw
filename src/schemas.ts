@@ -14,6 +14,7 @@ export const TaskPatchSchema = z.object({
   script_command: z.string().max(4096).nullable().optional(),
   status: z.enum(['active', 'paused']).optional(),
   next_run: z.string().optional(),
+  model: z.string().max(128).nullable().optional(),
 });
 
 // 简单 cron 表达式验证：5 或 6 段，每段允许 * 和常见 cron 语法
@@ -29,6 +30,7 @@ export const TaskCreateSchema = z
     context_mode: z.enum(['group', 'isolated']).optional(),
     execution_type: z.enum(['agent', 'script']).optional(),
     script_command: z.string().max(4096).optional(),
+    model: z.string().max(128).optional(),
   })
   .superRefine((data, ctx) => {
     const execType = data.execution_type || 'agent';
@@ -195,6 +197,8 @@ export const GroupPatchSchema = z.object({
   activation_mode: z
     .enum(['auto', 'always', 'when_mentioned', 'disabled'])
     .optional(),
+  llm_provider: z.enum(['claude', 'openai']).optional(),
+  model: z.string().max(128).nullable().optional(),
 });
 
 export const LoginSchema = z.object({

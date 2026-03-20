@@ -11,6 +11,7 @@ export interface ScheduledTask {
   context_mode: 'group' | 'isolated';
   execution_type?: 'agent' | 'script';
   script_command?: string | null;
+  model?: string | null;
   next_run: string | null;
   last_run?: string | null;
   last_result?: string | null;
@@ -43,6 +44,7 @@ interface TasksState {
     contextMode: 'group' | 'isolated',
     executionType?: 'agent' | 'script',
     scriptCommand?: string,
+    model?: string,
   ) => Promise<void>;
   updateTaskStatus: (id: string, status: 'active' | 'paused') => Promise<void>;
   deleteTask: (id: string) => Promise<void>;
@@ -83,6 +85,7 @@ export const useTasksStore = create<TasksState>((set, get) => ({
     contextMode: 'group' | 'isolated',
     executionType?: 'agent' | 'script',
     scriptCommand?: string,
+    model?: string,
   ) => {
     try {
       const normalizedScheduleValue =
@@ -103,6 +106,9 @@ export const useTasksStore = create<TasksState>((set, get) => ({
       }
       if (scriptCommand) {
         body.script_command = scriptCommand;
+      }
+      if (model) {
+        body.model = model;
       }
       await api.post('/api/tasks', body);
       set({ error: null });

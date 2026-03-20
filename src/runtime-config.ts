@@ -1,6 +1,9 @@
 import crypto from 'crypto';
 import fs from 'fs';
+import https from 'https';
 import path from 'path';
+
+import { HttpsProxyAgent } from 'https-proxy-agent';
 
 import { ASSISTANT_NAME, DATA_DIR } from './config.js';
 import { logger } from './logger.js';
@@ -3172,4 +3175,562 @@ export function saveUserIMPreferences(
   };
   fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), 'utf-8');
   return merged;
+}
+
+// ─── OpenAI Provider Config ──────────────────────────────────
+
+const OPENAI_CONFIG_FILE = path.join(CLAUDE_CONFIG_DIR, 'openai-provider.json');
+
+/** Codex CLI OAuth constants */
+const CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
+const CODEX_AUTH_BASE = 'https://auth.openai.com';
+const CODEX_SCOPES =
+  'openid profile email offline_access api.connectors.read api.connectors.invoke';
+
+export type OpenAIAuthMode = 'api_key' | 'chatgpt_oauth';
+
+export interface OpenAIOAuthTokens {
+  accessToken: string;
+  refreshToken: string;
+  idToken?: string;
+  expiresAt?: number; // Unix ms
+}
+
+export interface OpenAIProviderConfig {
+  authMode: OpenAIAuthMode;
+  apiKey: string;
+  baseUrl?: string;
+  model?: string;
+  proxyUrl?: string;
+  oauthTokens?: OpenAIOAuthTokens;
+  updatedAt?: string;
+}
+
+/** Stored on disk (encrypted secrets + plaintext metadata) */
+interface OpenAIStoredConfig {
+  authMode: string;
+  secrets: EncryptedSecrets;
+  baseUrl: string;
+  model: string;
+  proxyUrl?: string;
+  updatedAt: string;
+}
+
+interface OpenAISecretPayload {
+  apiKey?: string;
+  accessToken?: string;
+  refreshToken?: string;
+  idToken?: string;
+  expiresAt?: number;
+}
+
+function encryptOpenAISecrets(payload: OpenAISecretPayload): EncryptedSecrets {
+  const key = getOrCreateEncryptionKey();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const plaintext = Buffer.from(JSON.stringify(payload), 'utf-8');
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return {
+    iv: iv.toString('base64'),
+    tag: tag.toString('base64'),
+    data: encrypted.toString('base64'),
+  };
+}
+
+function decryptOpenAISecrets(secrets: EncryptedSecrets): OpenAISecretPayload {
+  const key = getOrCreateEncryptionKey();
+  const iv = Buffer.from(secrets.iv, 'base64');
+  const tag = Buffer.from(secrets.tag, 'base64');
+  const encrypted = Buffer.from(secrets.data, 'base64');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+  const decrypted = Buffer.concat([
+    decipher.update(encrypted),
+    decipher.final(),
+  ]).toString('utf-8');
+  return JSON.parse(decrypted) as OpenAISecretPayload;
+}
+
+export function getOpenAIProviderConfig(): OpenAIProviderConfig {
+  try {
+    if (fs.existsSync(OPENAI_CONFIG_FILE)) {
+      const raw = JSON.parse(
+        fs.readFileSync(OPENAI_CONFIG_FILE, 'utf-8'),
+      ) as OpenAIStoredConfig;
+      const authMode: OpenAIAuthMode =
+        raw.authMode === 'chatgpt_oauth' ? 'chatgpt_oauth' : 'api_key';
+      const config: OpenAIProviderConfig = { authMode, apiKey: '' };
+
+      if (raw.secrets) {
+        const decrypted = decryptOpenAISecrets(raw.secrets);
+        config.apiKey = decrypted.apiKey || '';
+        if (decrypted.accessToken && decrypted.refreshToken) {
+          config.oauthTokens = {
+            accessToken: decrypted.accessToken,
+            refreshToken: decrypted.refreshToken,
+            idToken: decrypted.idToken,
+            expiresAt: decrypted.expiresAt,
+          };
+        }
+      }
+      if (raw.baseUrl) config.baseUrl = raw.baseUrl;
+      if (raw.model) config.model = raw.model;
+      if (raw.proxyUrl) config.proxyUrl = raw.proxyUrl;
+      if (raw.updatedAt) config.updatedAt = raw.updatedAt;
+      return config;
+    }
+  } catch (err) {
+    logger.warn({ err }, 'Failed to read OpenAI provider config');
+  }
+  return {
+    authMode: 'api_key',
+    apiKey: process.env.OPENAI_API_KEY || '',
+    baseUrl: process.env.OPENAI_BASE_URL || undefined,
+    model: process.env.OPENAI_MODEL || undefined,
+  };
+}
+
+export function saveOpenAIProviderConfig(
+  config: Omit<OpenAIProviderConfig, 'updatedAt'>,
+): OpenAIProviderConfig {
+  fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
+
+  const secretPayload: OpenAISecretPayload = { apiKey: config.apiKey };
+  if (config.oauthTokens) {
+    secretPayload.accessToken = config.oauthTokens.accessToken;
+    secretPayload.refreshToken = config.oauthTokens.refreshToken;
+    secretPayload.idToken = config.oauthTokens.idToken;
+    secretPayload.expiresAt = config.oauthTokens.expiresAt;
+  }
+
+  const stored: OpenAIStoredConfig = {
+    authMode: config.authMode,
+    secrets: encryptOpenAISecrets(secretPayload),
+    baseUrl: config.baseUrl || '',
+    model: config.model || '',
+    proxyUrl: config.proxyUrl || undefined,
+    updatedAt: new Date().toISOString(),
+  };
+
+  fs.writeFileSync(
+    OPENAI_CONFIG_FILE,
+    JSON.stringify(stored, null, 2),
+    'utf-8',
+  );
+  return { ...config, updatedAt: stored.updatedAt };
+}
+
+// ─── Codex Device Code OAuth Flow ────────────────────────────
+
+export interface DeviceCodeInitResult {
+  userCode: string;
+  verificationUrl: string;
+  deviceAuthId: string;
+  interval: number; // seconds
+  expiresIn: number; // seconds
+}
+
+export interface DeviceCodePollResult {
+  status: 'pending' | 'complete' | 'expired' | 'error';
+  error?: string;
+}
+
+/**
+ * Make an HTTPS request, optionally through a proxy.
+ * Falls back to native fetch when no proxy is configured.
+ */
+function proxiedFetch(
+  url: string,
+  options: {
+    method: string;
+    headers: Record<string, string>;
+    body: string;
+  },
+  proxyUrl?: string,
+): Promise<{ ok: boolean; status: number; text: () => Promise<string>; json: () => Promise<unknown> }> {
+  if (!proxyUrl) {
+    return fetch(url, options);
+  }
+
+  const agent = new HttpsProxyAgent(proxyUrl);
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const req = https.request(
+      {
+        hostname: parsed.hostname,
+        port: parsed.port || 443,
+        path: parsed.pathname + parsed.search,
+        method: options.method,
+        headers: {
+          ...options.headers,
+          'User-Agent': 'HappyClaw/1.0',
+        },
+        agent,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('end', () => {
+          const body = Buffer.concat(chunks).toString('utf-8');
+          resolve({
+            ok: res.statusCode! >= 200 && res.statusCode! < 300,
+            status: res.statusCode!,
+            text: () => Promise.resolve(body),
+            json: () => Promise.resolve(JSON.parse(body)),
+          });
+        });
+      },
+    );
+    req.on('error', reject);
+    if (options.body) req.write(options.body);
+    req.end();
+  });
+}
+
+/**
+ * Initiate Codex Device Code flow.
+ * Returns a user code + verification URL for the user to authenticate.
+ */
+export async function initiateDeviceCodeAuth(): Promise<DeviceCodeInitResult> {
+  const { proxyUrl } = getOpenAIProviderConfig();
+  const resp = await proxiedFetch(
+    `${CODEX_AUTH_BASE}/deviceauth/usercode`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: CODEX_CLIENT_ID,
+        scope: CODEX_SCOPES,
+      }),
+    },
+    proxyUrl,
+  );
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Device code request failed (${resp.status}): ${text}`);
+  }
+
+  const data = (await resp.json()) as {
+    device_auth_id: string;
+    user_code: string;
+    interval: number;
+    expires_in: number;
+  };
+
+  return {
+    userCode: data.user_code,
+    verificationUrl: `${CODEX_AUTH_BASE}/codex/device`,
+    deviceAuthId: data.device_auth_id,
+    interval: data.interval || 5,
+    expiresIn: data.expires_in || 900,
+  };
+}
+
+/**
+ * Poll the device code token endpoint.
+ * Returns 'pending' until the user completes auth, then 'complete'.
+ * On 'complete', tokens are automatically saved.
+ */
+export async function pollDeviceCodeAuth(
+  deviceAuthId: string,
+  model?: string,
+): Promise<DeviceCodePollResult> {
+  try {
+    const { proxyUrl } = getOpenAIProviderConfig();
+    const resp = await proxiedFetch(
+      `${CODEX_AUTH_BASE}/deviceauth/token`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          client_id: CODEX_CLIENT_ID,
+          device_auth_id: deviceAuthId,
+        }),
+      },
+      proxyUrl,
+    );
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      // 403 = still pending
+      if (resp.status === 403) return { status: 'pending' };
+      // 410 = expired
+      if (resp.status === 410) return { status: 'expired' };
+      return { status: 'error', error: `Token poll failed (${resp.status}): ${text}` };
+    }
+
+    const data = (await resp.json()) as {
+      authorization_code: string;
+      code_challenge: string;
+      code_verifier: string;
+    };
+
+    // Exchange authorization code for tokens
+    const tokenResp = await proxiedFetch(
+      `${CODEX_AUTH_BASE}/oauth/token`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: data.authorization_code,
+          client_id: CODEX_CLIENT_ID,
+          code_verifier: data.code_verifier,
+          redirect_uri: `http://localhost:1455/auth/callback`,
+        }).toString(),
+      },
+      proxyUrl,
+    );
+
+    if (!tokenResp.ok) {
+      const text = await tokenResp.text();
+      return {
+        status: 'error',
+        error: `Token exchange failed (${tokenResp.status}): ${text}`,
+      };
+    }
+
+    const tokens = (await tokenResp.json()) as {
+      access_token: string;
+      refresh_token: string;
+      id_token?: string;
+      expires_in?: number;
+    };
+
+    // Save tokens
+    const existing = getOpenAIProviderConfig();
+    saveOpenAIProviderConfig({
+      authMode: 'chatgpt_oauth',
+      apiKey: existing.apiKey,
+      baseUrl: existing.baseUrl,
+      model: model || existing.model,
+      oauthTokens: {
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token,
+        idToken: tokens.id_token,
+        expiresAt: tokens.expires_in
+          ? Date.now() + tokens.expires_in * 1000
+          : undefined,
+      },
+    });
+
+    return { status: 'complete' };
+  } catch (err) {
+    return {
+      status: 'error',
+      error: err instanceof Error ? err.message : 'Unknown error',
+    };
+  }
+}
+
+/**
+ * Refresh OAuth tokens using the refresh_token grant.
+ * Updates stored config on success.
+ */
+export async function refreshOpenAIOAuthTokens(): Promise<boolean> {
+  const config = getOpenAIProviderConfig();
+  if (!config.oauthTokens?.refreshToken) return false;
+
+  try {
+    const resp = await proxiedFetch(
+      `${CODEX_AUTH_BASE}/oauth/token`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'refresh_token',
+          client_id: CODEX_CLIENT_ID,
+          refresh_token: config.oauthTokens.refreshToken,
+        }).toString(),
+      },
+      config.proxyUrl,
+    );
+
+    if (!resp.ok) {
+      logger.warn(
+        { status: resp.status },
+        'OpenAI OAuth token refresh failed',
+      );
+      return false;
+    }
+
+    const tokens = (await resp.json()) as {
+      access_token: string;
+      refresh_token: string;
+      id_token?: string;
+      expires_in?: number;
+    };
+
+    saveOpenAIProviderConfig({
+      ...config,
+      oauthTokens: {
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token,
+        idToken: tokens.id_token,
+        expiresAt: tokens.expires_in
+          ? Date.now() + tokens.expires_in * 1000
+          : undefined,
+      },
+    });
+
+    logger.info('OpenAI OAuth tokens refreshed successfully');
+    return true;
+  } catch (err) {
+    logger.warn({ err }, 'OpenAI OAuth token refresh error');
+    return false;
+  }
+}
+
+/** Disconnect OAuth (clear tokens, revert to api_key mode). */
+export function disconnectOpenAIOAuth(): void {
+  const config = getOpenAIProviderConfig();
+  saveOpenAIProviderConfig({
+    authMode: 'api_key',
+    apiKey: config.apiKey,
+    baseUrl: config.baseUrl,
+    model: config.model,
+  });
+}
+
+// ─── PKCE Browser OAuth Flow ─────────────────────────────────
+
+const CODEX_REDIRECT_URI = 'http://localhost:1455/auth/callback';
+
+/** In-memory PKCE state (short-lived, one active session at a time) */
+let pendingPkce: { codeVerifier: string; state: string; createdAt: number } | null = null;
+
+export interface PkceInitResult {
+  authorizeUrl: string;
+  state: string;
+}
+
+/**
+ * Generate PKCE parameters and return the authorize URL for the user to open.
+ */
+export function initiatePkceAuth(): PkceInitResult {
+  const codeVerifier = crypto.randomBytes(32).toString('base64url');
+  const codeChallenge = crypto
+    .createHash('sha256')
+    .update(codeVerifier)
+    .digest('base64url');
+  const state = crypto.randomBytes(16).toString('hex');
+
+  pendingPkce = { codeVerifier, state, createdAt: Date.now() };
+
+  const params = new URLSearchParams({
+    client_id: CODEX_CLIENT_ID,
+    redirect_uri: CODEX_REDIRECT_URI,
+    response_type: 'code',
+    scope: CODEX_SCOPES,
+    code_challenge: codeChallenge,
+    code_challenge_method: 'S256',
+    state,
+  });
+
+  return {
+    authorizeUrl: `${CODEX_AUTH_BASE}/oauth/authorize?${params}`,
+    state,
+  };
+}
+
+/**
+ * Complete PKCE flow: extract code from callback URL and exchange for tokens.
+ */
+export async function completePkceAuth(
+  callbackUrl: string,
+  model?: string,
+): Promise<{ success: boolean; error?: string }> {
+  if (!pendingPkce) {
+    return { success: false, error: '没有待处理的 PKCE 会话，请先点击「生成登录链接」' };
+  }
+
+  // Expire after 15 minutes
+  if (Date.now() - pendingPkce.createdAt > 15 * 60 * 1000) {
+    pendingPkce = null;
+    return { success: false, error: 'PKCE 会话已过期，请重新生成登录链接' };
+  }
+
+  try {
+    // Parse callback URL to extract code and state
+    // Handle both full URLs and just query strings
+    let url: URL;
+    try {
+      url = new URL(callbackUrl);
+    } catch {
+      // Maybe user pasted just the query params
+      url = new URL(`http://localhost${callbackUrl.startsWith('/') ? '' : '/'}${callbackUrl}`);
+    }
+
+    const code = url.searchParams.get('code');
+    const state = url.searchParams.get('state');
+
+    if (!code) {
+      return { success: false, error: '回调 URL 中没有找到 code 参数' };
+    }
+
+    if (state && state !== pendingPkce.state) {
+      return { success: false, error: 'state 参数不匹配，可能是过期的链接' };
+    }
+
+    const { codeVerifier } = pendingPkce;
+    const { proxyUrl } = getOpenAIProviderConfig();
+
+    // Exchange code for tokens
+    const tokenResp = await proxiedFetch(
+      `${CODEX_AUTH_BASE}/oauth/token`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'authorization_code',
+          code,
+          client_id: CODEX_CLIENT_ID,
+          code_verifier: codeVerifier,
+          redirect_uri: CODEX_REDIRECT_URI,
+        }).toString(),
+      },
+      proxyUrl,
+    );
+
+    if (!tokenResp.ok) {
+      const text = await tokenResp.text();
+      return { success: false, error: `Token 交换失败 (${tokenResp.status}): ${text}` };
+    }
+
+    const tokens = (await tokenResp.json()) as {
+      access_token: string;
+      refresh_token: string;
+      id_token?: string;
+      expires_in?: number;
+    };
+
+    // Save tokens
+    const existing = getOpenAIProviderConfig();
+    saveOpenAIProviderConfig({
+      authMode: 'chatgpt_oauth',
+      apiKey: existing.apiKey,
+      baseUrl: existing.baseUrl,
+      model: model || existing.model,
+      proxyUrl: existing.proxyUrl,
+      oauthTokens: {
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token,
+        idToken: tokens.id_token,
+        expiresAt: tokens.expires_in
+          ? Date.now() + tokens.expires_in * 1000
+          : undefined,
+      },
+    });
+
+    pendingPkce = null;
+    logger.info('OpenAI PKCE OAuth completed successfully');
+    return { success: true };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Unknown error',
+    };
+  }
 }

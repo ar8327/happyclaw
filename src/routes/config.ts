@@ -76,6 +76,13 @@ import {
   importLocalClaudeCredentials,
   getUserIMPreferences,
   saveUserIMPreferences,
+  getOpenAIProviderConfig,
+  saveOpenAIProviderConfig,
+  initiateDeviceCodeAuth,
+  pollDeviceCodeAuth,
+  disconnectOpenAIOAuth,
+  initiatePkceAuth,
+  completePkceAuth,
 } from '../runtime-config.js';
 import type { ClaudeOAuthCredentials } from '../runtime-config.js';
 import type { AuthUser, RegisteredGroup } from '../types.js';
@@ -1577,13 +1584,10 @@ configRoutes.post(
       return c.json({ error: 'Missing required fields: code, state, redirectUri' }, 400);
     }
 
-    // Validate state
-    const stateUserId = consumeOAuthState(state);
+    // Validate state — peek first, consume only after userId match
+    const stateUserId = consumeOAuthState(state, user.id);
     if (!stateUserId) {
-      return c.json({ error: '授权状态已过期，请重新发起授权' }, 400);
-    }
-    if (stateUserId !== user.id) {
-      return c.json({ error: '授权状态不匹配' }, 403);
+      return c.json({ error: '授权状态已过期或不匹配，请重新发起授权' }, 400);
     }
 
     // Get app credentials
@@ -2338,6 +2342,225 @@ configRoutes.post(
           ? err.message
           : 'Failed to import local credentials';
       logger.warn({ err }, 'Failed to import local Claude Code credentials');
+      return c.json({ error: message }, 500);
+    }
+  },
+);
+
+// ─── OpenAI Provider Config ──────────────────────────────────
+
+configRoutes.get('/openai', authMiddleware, systemConfigMiddleware, (c) => {
+  const config = getOpenAIProviderConfig();
+  // Mask API key for display: show first 3 and last 4 chars
+  let apiKeyMasked: string | null = null;
+  if (config.apiKey && config.apiKey.length > 8) {
+    apiKeyMasked = `${config.apiKey.slice(0, 3)}...${config.apiKey.slice(-4)}`;
+  } else if (config.apiKey) {
+    apiKeyMasked = '***';
+  }
+  return c.json({
+    authMode: config.authMode,
+    hasApiKey: !!config.apiKey,
+    apiKeyMasked,
+    hasOAuth: !!(config.oauthTokens?.accessToken),
+    oauthExpired: config.oauthTokens?.expiresAt
+      ? config.oauthTokens.expiresAt < Date.now()
+      : false,
+    baseUrl: config.baseUrl || '',
+    model: config.model || '',
+    proxyUrl: config.proxyUrl || '',
+    updatedAt: config.updatedAt || null,
+  });
+});
+
+/** Save API Key mode config */
+configRoutes.put('/openai', authMiddleware, systemConfigMiddleware, async (c) => {
+  try {
+    const body = await c.req.json();
+    const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
+    const baseUrl = typeof body.baseUrl === 'string' ? body.baseUrl.trim() : '';
+    const model = typeof body.model === 'string' ? body.model.trim() : '';
+    const proxyUrl = typeof body.proxyUrl === 'string' ? body.proxyUrl.trim() : '';
+
+    if (!apiKey) {
+      return c.json({ error: 'API Key 不能为空' }, 400);
+    }
+
+    const existing = getOpenAIProviderConfig();
+    const saved = saveOpenAIProviderConfig({
+      authMode: 'api_key',
+      apiKey,
+      baseUrl,
+      model,
+      proxyUrl: proxyUrl || existing.proxyUrl,
+      oauthTokens: existing.oauthTokens, // preserve OAuth tokens
+    });
+    const actor = (c.get('user') as AuthUser).username;
+    logger.info({ actor }, 'OpenAI API Key config updated');
+
+    return c.json({
+      authMode: saved.authMode,
+      hasApiKey: true,
+      hasOAuth: !!(saved.oauthTokens?.accessToken),
+      baseUrl: saved.baseUrl || '',
+      model: saved.model || '',
+      proxyUrl: saved.proxyUrl || '',
+      updatedAt: saved.updatedAt || null,
+    });
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : 'Failed to save OpenAI config';
+    return c.json({ error: message }, 500);
+  }
+});
+
+/** Initiate Codex Device Code OAuth flow */
+configRoutes.post(
+  '/openai/oauth/login',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    try {
+      const result = await initiateDeviceCodeAuth();
+      const actor = (c.get('user') as AuthUser).username;
+      logger.info({ actor }, 'OpenAI device code OAuth initiated');
+      return c.json(result);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Failed to initiate OAuth';
+      logger.warn({ err }, 'OpenAI device code OAuth initiation failed');
+      return c.json({ error: message }, 500);
+    }
+  },
+);
+
+/** Poll for device code completion */
+configRoutes.post(
+  '/openai/oauth/poll',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    try {
+      const body = await c.req.json();
+      const deviceAuthId =
+        typeof body.deviceAuthId === 'string' ? body.deviceAuthId : '';
+      const model =
+        typeof body.model === 'string' ? body.model.trim() : undefined;
+
+      if (!deviceAuthId) {
+        return c.json({ error: 'deviceAuthId is required' }, 400);
+      }
+
+      const result = await pollDeviceCodeAuth(deviceAuthId, model);
+
+      if (result.status === 'complete') {
+        const actor = (c.get('user') as AuthUser).username;
+        logger.info({ actor }, 'OpenAI OAuth login completed');
+      }
+
+      return c.json(result);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Failed to poll OAuth';
+      return c.json({ error: message }, 500);
+    }
+  },
+);
+
+/** Disconnect OAuth, revert to API Key mode */
+configRoutes.post(
+  '/openai/oauth/disconnect',
+  authMiddleware,
+  systemConfigMiddleware,
+  (c) => {
+    disconnectOpenAIOAuth();
+    const actor = (c.get('user') as AuthUser).username;
+    logger.info({ actor }, 'OpenAI OAuth disconnected');
+    return c.json({ success: true });
+  },
+);
+
+/** PKCE flow: generate authorize URL for user to open in browser */
+configRoutes.post(
+  '/openai/oauth/pkce-init',
+  authMiddleware,
+  systemConfigMiddleware,
+  (c) => {
+    const result = initiatePkceAuth();
+    const actor = (c.get('user') as AuthUser).username;
+    logger.info({ actor }, 'OpenAI PKCE OAuth initiated');
+    return c.json(result);
+  },
+);
+
+/** PKCE flow: complete auth with callback URL pasted by user */
+configRoutes.post(
+  '/openai/oauth/pkce-callback',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    try {
+      const body = await c.req.json();
+      const callbackUrl = typeof body.callbackUrl === 'string' ? body.callbackUrl.trim() : '';
+      const model = typeof body.model === 'string' ? body.model.trim() : undefined;
+
+      if (!callbackUrl) {
+        return c.json({ error: '请粘贴回调 URL' }, 400);
+      }
+
+      const result = await completePkceAuth(callbackUrl, model);
+      if (result.success) {
+        const actor = (c.get('user') as AuthUser).username;
+        logger.info({ actor }, 'OpenAI PKCE OAuth completed');
+        return c.json({ success: true });
+      }
+      return c.json({ error: result.error }, 400);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'PKCE callback failed';
+      return c.json({ error: message }, 500);
+    }
+  },
+);
+
+/** Update model/baseUrl without changing auth */
+configRoutes.patch(
+  '/openai',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    try {
+      const body = await c.req.json();
+      const existing = getOpenAIProviderConfig();
+      const model =
+        typeof body.model === 'string' ? body.model.trim() : existing.model;
+      const baseUrl =
+        typeof body.baseUrl === 'string'
+          ? body.baseUrl.trim()
+          : existing.baseUrl;
+      const proxyUrl =
+        typeof body.proxyUrl === 'string'
+          ? body.proxyUrl.trim()
+          : existing.proxyUrl;
+
+      const saved = saveOpenAIProviderConfig({
+        ...existing,
+        model,
+        baseUrl,
+        proxyUrl,
+      });
+
+      return c.json({
+        authMode: saved.authMode,
+        hasApiKey: !!saved.apiKey,
+        hasOAuth: !!(saved.oauthTokens?.accessToken),
+        baseUrl: saved.baseUrl || '',
+        model: saved.model || '',
+        proxyUrl: saved.proxyUrl || '',
+        updatedAt: saved.updatedAt || null,
+      });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Failed to update config';
       return c.json({ error: message }, 500);
     }
   },

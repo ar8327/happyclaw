@@ -11,6 +11,7 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.77",
     "cron-parser": "^5.0.0",
+    "happyclaw-agent-runner-core": "file:../agent-runner-core",
     "zod": "^4.0.0"
   },
   "devDependencies": {

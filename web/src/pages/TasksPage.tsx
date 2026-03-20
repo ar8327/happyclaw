@@ -31,6 +31,7 @@ export function TasksPage() {
     contextMode: 'group' | 'isolated';
     executionType: 'agent' | 'script';
     scriptCommand: string;
+    model: string;
   }) => {
     await createTask(
       data.groupFolder,
@@ -41,6 +42,7 @@ export function TasksPage() {
       data.contextMode,
       data.executionType,
       data.scriptCommand,
+      data.model && data.model !== '__default__' ? data.model : undefined,
     );
     setShowCreateForm(false);
   };

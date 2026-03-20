@@ -76,6 +76,11 @@ export function TaskCard({ task, onPause, onResume, onDelete }: TaskCardProps) {
                   脚本
                 </span>
               )}
+              {task.model && (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
+                  {task.model}
+                </span>
+              )}
               <div className="flex items-center gap-2">
                 <span className="text-slate-500">调度:</span>
                 <span className="text-foreground font-medium">

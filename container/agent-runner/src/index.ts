@@ -31,7 +31,8 @@ export type { StreamEventType, StreamEvent } from './types.js';
 import { sanitizeFilename, generateFallbackName } from './utils.js';
 import { StreamEventProcessor } from './stream-processor.js';
 import { PREDEFINED_AGENTS } from './agent-definitions.js';
-import { createMcpTools, writeIpcFile } from './mcp-tools.js';
+import { createContextManager, coreToolsToSdkTools } from './mcp-adapter.js';
+import { writeIpcFile } from 'happyclaw-agent-runner-core';
 
 // 路径解析：优先读取环境变量，降级到容器内默认路径（保持向后兼容）
 const WORKSPACE_GROUP = process.env.HAPPYCLAW_WORKSPACE_GROUP || '/workspace/group';
@@ -1314,8 +1315,8 @@ async function main(): Promise<void> {
   let sessionId = containerInput.sessionId;
   const { isHome, isAdminHome } = normalizeHomeFlags(containerInput);
 
-  // Create in-process SDK MCP server (replaces the stdio subprocess)
-  const mcpToolsConfig = {
+  // Create ContextManager with all plugins, then convert to SDK tools
+  const pluginCtx = {
     chatJid: containerInput.chatJid,
     groupFolder: containerInput.groupFolder,
     isHome,
@@ -1326,10 +1327,11 @@ async function main(): Promise<void> {
     workspaceMemory: WORKSPACE_MEMORY,
     userId: containerInput.userId,
   };
+  const ctxMgr = createContextManager(pluginCtx);
   const buildMcpServerConfig = () => createSdkMcpServer({
     name: 'happyclaw',
     version: '1.0.0',
-    tools: createMcpTools(mcpToolsConfig),
+    tools: coreToolsToSdkTools(ctxMgr),
   });
   let mcpServerConfig = buildMcpServerConfig();
   const memoryRecallPrompt = buildMemoryRecallPrompt(isHome, isAdminHome);

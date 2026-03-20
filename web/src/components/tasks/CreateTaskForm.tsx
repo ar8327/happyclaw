@@ -29,6 +29,7 @@ interface CreateTaskFormProps {
     contextMode: 'group' | 'isolated';
     executionType: 'agent' | 'script';
     scriptCommand: string;
+    model: string;
   }) => Promise<void>;
   onClose: () => void;
   isAdmin?: boolean;
@@ -51,6 +52,7 @@ export function CreateTaskForm({ groups, onSubmit, onClose, isAdmin }: CreateTas
     contextMode: 'group' as 'group' | 'isolated',
     executionType: 'agent' as 'agent' | 'script',
     scriptCommand: '',
+    model: '__default__',
   });
   const [intervalNumber, setIntervalNumber] = useState('');
   const [intervalUnit, setIntervalUnit] = useState('60000'); // default: minutes
@@ -353,6 +355,34 @@ export function CreateTaskForm({ groups, onSubmit, onClose, isAdmin }: CreateTas
               <p className="mt-1 text-sm text-red-600">{errors.scheduleValue}</p>
             )}
           </div>
+
+          {/* Model Override */}
+          {!isScript && (
+            <div>
+              <label className="block text-sm font-medium text-foreground mb-2">
+                模型
+              </label>
+              <Select
+                value={formData.model}
+                onValueChange={(value) =>
+                  setFormData({ ...formData, model: value })
+                }
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="默认（跟随工作区配置）" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__default__">默认（跟随工作区配置）</SelectItem>
+                  <SelectItem value="opus">Opus（最强）</SelectItem>
+                  <SelectItem value="sonnet">Sonnet（均衡）</SelectItem>
+                  <SelectItem value="haiku">Haiku（快速/低成本）</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="mt-1 text-xs text-slate-500">
+                覆盖此任务使用的模型，留空则跟随工作区配置
+              </p>
+            </div>
+          )}
 
           {/* Actions */}
           <div className="flex items-center justify-end gap-3 pt-4 border-t border-border">

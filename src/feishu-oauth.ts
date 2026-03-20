@@ -59,17 +59,23 @@ export function createOAuthState(userId: string): string {
   return state;
 }
 
-/** Validate and consume an OAuth state token. Returns userId if valid. */
-export function consumeOAuthState(state: string): string | null {
+/** Validate and consume an OAuth state token. Returns userId if valid.
+ *  When expectedUserId is provided, only consumes the token if it matches —
+ *  prevents a mismatched request from destroying a legitimate user's state. */
+export function consumeOAuthState(state: string, expectedUserId?: string): string | null {
   const entry = oauthStates.get(state);
   if (!entry) return null;
 
-  oauthStates.delete(state);
-
   if (Date.now() - entry.createdAt > STATE_TTL_MS) {
-    return null; // expired
+    oauthStates.delete(state); // expired — safe to clean up
+    return null;
   }
 
+  if (expectedUserId && entry.userId !== expectedUserId) {
+    return null; // mismatch — don't consume
+  }
+
+  oauthStates.delete(state);
   return entry.userId;
 }
 
@@ -581,6 +587,51 @@ export async function searchFeishuWiki(
     hasMore: data.data?.has_more || false,
     total: items.length, // Wiki API doesn't return total count
   };
+}
+
+// ─── User Info API ──────────────────────────────────────────────────
+
+/**
+ * Batch resolve Feishu open_ids to user names.
+ * Uses GET /open-apis/contact/v3/users/:user_id (user_id_type=open_id).
+ * Returns a map of open_id → display name. Unknown IDs are omitted.
+ */
+export async function batchResolveUserNames(
+  accessToken: string,
+  openIds: string[],
+): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  // Deduplicate and filter empty
+  const unique = [...new Set(openIds.filter((id) => id))];
+  if (unique.length === 0) return result;
+
+  // Fetch in parallel (max 20 concurrent to avoid rate limiting)
+  const batchSize = 20;
+  for (let i = 0; i < unique.length; i += batchSize) {
+    const batch = unique.slice(i, i + batchSize);
+    const promises = batch.map(async (openId) => {
+      try {
+        const resp = await fetch(
+          `https://open.feishu.cn/open-apis/contact/v3/users/${openId}?user_id_type=open_id`,
+          {
+            headers: { Authorization: `Bearer ${accessToken}` },
+          },
+        );
+        const data = (await resp.json()) as {
+          code?: number;
+          data?: { user?: { name?: string } };
+        };
+        if (data.code === 0 && data.data?.user?.name) {
+          result.set(openId, data.data.user.name);
+        }
+      } catch {
+        // Silently skip failed lookups
+      }
+    });
+    await Promise.all(promises);
+  }
+
+  return result;
 }
 
 /** Build a Feishu document URL from token and type. Uses configurable domain from system settings. */

@@ -22,8 +22,8 @@ export function GroupsPage() {
     <div className="min-h-full bg-background p-4 lg:p-8">
       <div className="max-w-7xl mx-auto">
         <PageHeader
-          title="群组管理"
-          subtitle={`${groupsArray.length} 个已注册群组`}
+          title="会话管理"
+          subtitle={`${groupsArray.length} 个已注册会话`}
           className="mb-6"
         />
 

@@ -93,6 +93,10 @@ import {
   unregisterProgressSession,
   abortAllProgressSessions,
   cleanupStaleProgressCards,
+  feedProgressSessionsForFolder,
+  completeAndResetProgressSessionsForFolder,
+  finalizeProgressSessionsForFolder,
+  hasActiveProgressSession,
 } from './feishu-progress-card.js';
 import {
   formatContextMessages,
@@ -1896,7 +1900,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   ) {
     progressCard = imManager.createProgressCard(sourceChannel);
     if (progressCard) {
-      registerProgressSession(chatJid, progressCard);
+      registerProgressSession(chatJid, progressCard, group.folder);
     }
   }
 
@@ -1914,10 +1918,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           streamingBlocksManager
             .getOrCreate(group.folder)
             .feed(result.streamEvent);
-          // Feed progress card (Feishu real-time tool trace)
-          if (progressCard) {
-            progressCard.feedEvent(result.streamEvent);
-          }
+          // Feed progress cards (Feishu real-time tool trace) — feeds ALL
+          // active sessions for this folder, including cards created for
+          // IPC-injected Feishu chats that share the same workspace.
+          feedProgressSessionsForFolder(group.folder, result.streamEvent);
           turnObservabilityManager.feedEvent(
             group.folder,
             result.streamEvent,
@@ -2184,11 +2188,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           streamingBlocksManager.finalize(group.folder);
         }
 
-        // Complete the progress card after each turn so it doesn't stay at
-        // "执行中" while the agent idles between IPC messages.  The card
-        // resets to idle and will lazily create a new one on the next turn.
-        if (result.status === 'success' && progressCard) {
-          await progressCard.completeAndReset().catch(() => {});
+        // Complete all progress cards for this folder after each turn so they
+        // don't stay at "执行中" while the agent idles between IPC messages.
+        // Cards reset to idle and will lazily create new ones on the next turn.
+        if (result.status === 'success') {
+          await completeAndResetProgressSessionsForFolder(group.folder);
         }
 
           // Query 返回无文本结果（仅工具调用、send_message 等）：通知前端清除
@@ -2234,16 +2238,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (idleTimer) clearTimeout(idleTimer);
   clearIpcDeliveryTracker(chatJid);
 
-  // Complete or abort the Feishu progress card
-  if (progressCard) {
+  // Complete or abort ALL Feishu progress cards for this folder
+  // (includes cards created via IPC injection for sibling Feishu chats).
+  {
     const isError = output.status === 'error' || hadError;
     if (isError || wasInterrupted) {
-      await progressCard.abort(isError ? '执行出错' : '已中断').catch(() => {});
+      await finalizeProgressSessionsForFolder(
+        group.folder,
+        'abort',
+        isError ? '执行出错' : '已中断',
+      );
     } else {
-      await progressCard.complete().catch(() => {});
+      await finalizeProgressSessionsForFolder(group.folder, 'complete');
     }
-    progressCard.dispose();
-    unregisterProgressSession(chatJid);
   }
 
   // Agent 进程已退出：通知前端清除流式状态（"正在思考..."）。
@@ -3217,6 +3224,7 @@ async function processTaskIpc(
     context_mode?: string;
     execution_type?: string;
     script_command?: string;
+    model?: string;
     groupFolder?: string;
     chatJid?: string;
     targetJid?: string;
@@ -3342,6 +3350,7 @@ async function processTaskIpc(
           next_run: nextRun,
           status: 'active',
           created_at: new Date().toISOString(),
+          model: data.model ?? undefined,
         });
         logger.info(
           { taskId, sourceGroup, targetFolder, contextMode, execType },
@@ -4061,6 +4070,23 @@ async function startMessageLoop(): Promise<void> {
                 },
                 'Turn: start_new but agent already running, injected via IPC',
               );
+              // Create a progress card for IPC-injected Feishu chats that don't
+              // have one yet (e.g. after restart, recovery only creates a card
+              // for one chatJid per folder — siblings need cards too).
+              if (
+                !hasActiveProgressSession(chatJid) &&
+                getChannelType(channel) === 'feishu'
+              ) {
+                const resolved = resolveEffectiveGroup(group);
+                const ownerId = resolved.effectiveGroup.created_by;
+                const fc = ownerId ? getUserFeishuConfig(ownerId) : null;
+                if (fc?.streamingCard) {
+                  const card = imManager.createProgressCard(channel);
+                  if (card) {
+                    registerProgressSession(chatJid, card, folder);
+                  }
+                }
+              }
               trackIpcDelivery(chatJid);
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
               lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };

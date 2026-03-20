@@ -671,33 +671,101 @@ export class ProgressCardController {
 
 // ─── Progress Card Session Registry ──────────────────────────
 
-const activeProgressSessions = new Map<string, ProgressCardController>();
+interface ProgressSessionEntry {
+  session: ProgressCardController;
+  folder: string;
+}
+
+const activeProgressSessions = new Map<string, ProgressSessionEntry>();
 
 export function registerProgressSession(
   chatJid: string,
   session: ProgressCardController,
+  folder: string,
 ): void {
   const existing = activeProgressSessions.get(chatJid);
-  if (existing?.isActive()) {
-    existing.abort('新的执行已开始').catch(() => {});
+  if (existing?.session.isActive()) {
+    existing.session.abort('新的执行已开始').catch(() => {});
   }
-  activeProgressSessions.set(chatJid, session);
+  activeProgressSessions.set(chatJid, { session, folder });
 }
 
 export function unregisterProgressSession(chatJid: string): void {
   activeProgressSessions.delete(chatJid);
 }
 
+/**
+ * Feed a stream event to ALL active progress sessions for the given folder.
+ * Used so that IPC-injected Feishu chats also see progress while the agent runs.
+ */
+export function feedProgressSessionsForFolder(
+  folder: string,
+  event: StreamEvent,
+): void {
+  for (const entry of activeProgressSessions.values()) {
+    if (entry.folder === folder && entry.session.isActive()) {
+      entry.session.feedEvent(event);
+    }
+  }
+}
+
+/**
+ * Complete and reset all active progress sessions for the given folder.
+ * Used between turns when the agent stays alive via IPC.
+ */
+export async function completeAndResetProgressSessionsForFolder(
+  folder: string,
+): Promise<void> {
+  for (const entry of activeProgressSessions.values()) {
+    if (entry.folder === folder && entry.session.isActive()) {
+      await entry.session.completeAndReset().catch(() => {});
+    }
+  }
+}
+
+/**
+ * Complete or abort all progress sessions for a folder, then unregister them.
+ * Called when the agent process exits.
+ */
+export async function finalizeProgressSessionsForFolder(
+  folder: string,
+  mode: 'complete' | 'abort',
+  reason?: string,
+): Promise<void> {
+  const toRemove: string[] = [];
+  for (const [chatJid, entry] of activeProgressSessions.entries()) {
+    if (entry.folder !== folder) continue;
+    if (mode === 'abort') {
+      await entry.session.abort(reason).catch(() => {});
+    } else {
+      await entry.session.complete().catch(() => {});
+    }
+    entry.session.dispose();
+    toRemove.push(chatJid);
+  }
+  for (const jid of toRemove) {
+    activeProgressSessions.delete(jid);
+  }
+}
+
+/**
+ * Check if an active progress session exists for a chatJid.
+ */
+export function hasActiveProgressSession(chatJid: string): boolean {
+  const entry = activeProgressSessions.get(chatJid);
+  return !!entry?.session.isActive();
+}
+
 export async function abortAllProgressSessions(
   reason = '服务维护中',
 ): Promise<void> {
   const promises: Promise<void>[] = [];
-  for (const [chatJid, session] of activeProgressSessions.entries()) {
+  for (const [chatJid, entry] of activeProgressSessions.entries()) {
     // Force cleanup ALL sessions during shutdown, regardless of current state.
     // Sessions may be in 'aborted' state (from registry replacement) but their
     // Feishu card is still showing "执行中" and needs to be cleaned up.
     promises.push(
-      session.forceCleanup(reason).catch((err) => {
+      entry.session.forceCleanup(reason).catch((err) => {
         logger.debug({ err, chatJid }, 'Failed to cleanup progress session');
       }),
     );

@@ -62,6 +62,7 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
     context_mode,
     execution_type,
     script_command,
+    model,
   } = validation.data;
   const group = getRegisteredGroup(chat_jid);
   if (!group) return c.json({ error: 'Group not found' }, 404);
@@ -118,6 +119,7 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
     status: 'active',
     created_at: now,
     created_by: authUser.id,
+    model: model ?? undefined,
   });
 
   return c.json({ success: true, taskId });
