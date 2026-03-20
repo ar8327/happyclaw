@@ -300,6 +300,19 @@ class IMConnectionManager {
     return undefined;
   }
 
+  /**
+   * Get any available Feishu Lark client (for cleanup tasks that don't need a specific chat).
+   */
+  getAnyLarkClient(): ReturnType<NonNullable<IMChannel['getLarkClient']>> | undefined {
+    for (const conn of this.connections.values()) {
+      const ch = conn.channels.get('feishu');
+      if (ch?.isConnected()) {
+        return ch.getLarkClient?.();
+      }
+    }
+    return undefined;
+  }
+
   // ─── Convenience Methods (API-compatible wrappers) ──────────
 
   /**

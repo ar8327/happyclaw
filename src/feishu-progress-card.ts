@@ -8,8 +8,82 @@
  * Throttle: updates every ~2s to respect Feishu API rate limits.
  */
 import * as lark from '@larksuiteoapi/node-sdk';
+import * as fs from 'fs';
+import * as path from 'path';
+import { DATA_DIR } from './config.js';
 import { logger } from './logger.js';
 import type { StreamEvent } from './stream-event.types.js';
+
+// ─── Persistent Card Store ───────────────────────────────────
+// Tracks active card messageIds on disk so they survive restarts.
+
+const CARD_STORE_PATH = path.join(DATA_DIR, 'state', 'progress-cards.json');
+
+interface CardStoreEntry {
+  chatId: string;
+  messageId: string;
+  createdAt: number;
+}
+
+function loadCardStore(): CardStoreEntry[] {
+  try {
+    const data = fs.readFileSync(CARD_STORE_PATH, 'utf-8');
+    return JSON.parse(data);
+  } catch {
+    return [];
+  }
+}
+
+function saveCardStore(entries: CardStoreEntry[]): void {
+  try {
+    const dir = path.dirname(CARD_STORE_PATH);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(CARD_STORE_PATH, JSON.stringify(entries), 'utf-8');
+  } catch (err) {
+    logger.warn({ err }, 'Progress card: failed to save card store');
+  }
+}
+
+function addToCardStore(chatId: string, messageId: string): void {
+  const entries = loadCardStore().filter((e) => e.chatId !== chatId);
+  entries.push({ chatId, messageId, createdAt: Date.now() });
+  saveCardStore(entries);
+}
+
+function removeFromCardStore(messageId: string): void {
+  const entries = loadCardStore().filter((e) => e.messageId !== messageId);
+  saveCardStore(entries);
+}
+
+/**
+ * Clean up stale progress cards from a previous process.
+ * Call this on startup after Feishu connections are established.
+ */
+export async function cleanupStaleProgressCards(
+  clientResolver: () => lark.Client | undefined,
+): Promise<void> {
+  const entries = loadCardStore();
+  if (entries.length === 0) return;
+
+  logger.info(`Progress card: cleaning up ${entries.length} stale card(s) from previous process`);
+  const client = clientResolver();
+  if (!client) {
+    logger.warn('Progress card: no lark client for stale card cleanup');
+    return;
+  }
+
+  for (const entry of entries) {
+    try {
+      await client.im.v1.message.delete({
+        path: { message_id: entry.messageId },
+      });
+      logger.info(`Progress card: deleted stale card | chatId=${entry.chatId} messageId=${entry.messageId}`);
+    } catch {
+      // Card may already be deleted — that's fine
+    }
+  }
+  saveCardStore([]);
+}
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -494,6 +568,9 @@ export class ProgressCardController {
       this.messageId = resp?.data?.message_id || null;
       if (!this.messageId) throw new Error('No message_id in response');
 
+      // Persist to disk so it can be cleaned up after restart
+      addToCardStore(this.chatId, this.messageId);
+
       // State may have changed during await (complete/abort called while creating)
       if (this.state !== 'creating') {
         const finalState = this.state as 'completed' | 'aborted';
@@ -581,6 +658,7 @@ export class ProgressCardController {
     } catch {
       // Deletion is best-effort
     }
+    removeFromCardStore(messageId);
   }
 
   private clearFlushTimer(): void {

@@ -92,6 +92,7 @@ import {
   registerProgressSession,
   unregisterProgressSession,
   abortAllProgressSessions,
+  cleanupStaleProgressCards,
 } from './feishu-progress-card.js';
 import {
   formatContextMessages,
@@ -5415,6 +5416,13 @@ async function main(): Promise<void> {
         'Failed to connect user IM channels',
       );
     }
+  }
+
+  // Clean up progress cards left over from previous process
+  if (anyFeishuConnected) {
+    cleanupStaleProgressCards(() => imManager.getAnyLarkClient()).catch((err) =>
+      logger.warn({ err }, 'Failed to clean up stale progress cards'),
+    );
   }
 
   // Start Feishu group sync if any connection is active
