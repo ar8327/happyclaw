@@ -451,10 +451,14 @@ function writeUsageRecords(opts: {
 function extractLocalImImagePaths(
   text: string,
   groupFolder?: string,
+  userId?: string,
 ): string[] {
   if (!groupFolder || !text) return [];
 
   const workspaceRoot = path.resolve(GROUPS_DIR, groupFolder);
+  const userGlobalRoot = userId
+    ? path.resolve(GROUPS_DIR, 'user-global', userId)
+    : null;
   const seen = new Set<string>();
   const imagePaths: string[] = [];
   const candidates: string[] = [];
@@ -485,23 +489,29 @@ function extractLocalImImagePaths(
     pushCandidate(match[1] || '');
   }
 
-  for (const candidate of candidates) {
-    const resolved = path.resolve(workspaceRoot, candidate);
+  const tryResolveInRoot = (
+    root: string,
+    candidate: string,
+  ): string | null => {
+    const resolved = path.resolve(root, candidate);
     const ext = path.extname(resolved).toLowerCase();
-    if (!RELATIVE_IMAGE_EXTENSIONS.has(ext)) continue;
-    if (
-      resolved !== workspaceRoot &&
-      !resolved.startsWith(workspaceRoot + path.sep)
-    )
-      continue;
-    if (seen.has(resolved)) continue;
+    if (!RELATIVE_IMAGE_EXTENSIONS.has(ext)) return null;
+    if (resolved !== root && !resolved.startsWith(root + path.sep))
+      return null;
     try {
-      if (!fs.statSync(resolved).isFile()) continue;
-      seen.add(resolved);
-      imagePaths.push(resolved);
-    } catch {
-      continue;
-    }
+      if (fs.statSync(resolved).isFile()) return resolved;
+    } catch { /* ignore */ }
+    return null;
+  };
+
+  for (const candidate of candidates) {
+    // Try group workspace first, then user-global as fallback
+    const resolved =
+      tryResolveInRoot(workspaceRoot, candidate) ||
+      (userGlobalRoot ? tryResolveInRoot(userGlobalRoot, candidate) : null);
+    if (!resolved || seen.has(resolved)) continue;
+    seen.add(resolved);
+    imagePaths.push(resolved);
   }
 
   return imagePaths;
@@ -2757,9 +2767,10 @@ async function sendMessage(
     let externalMsgId: string | undefined;
     if (sendToIM && isIMChannel) {
       try {
+        const groupForImages = registeredGroups[jid] ?? getRegisteredGroup(jid);
         const localImagePaths =
           options.localImagePaths ??
-          extractLocalImImagePaths(text, resolveEffectiveFolder(jid));
+          extractLocalImImagePaths(text, resolveEffectiveFolder(jid), groupForImages?.created_by);
         externalMsgId = await imManager.sendMessage(jid, text, localImagePaths);
       } catch (err) {
         logger.error({ jid, err }, 'Failed to send message to IM channel');
@@ -2907,6 +2918,7 @@ function startIpcWatcher(): void {
                       const localImagePaths = extractLocalImImagePaths(
                         data.text,
                         sourceGroup,
+                        sourceGroupEntry?.created_by,
                       );
                       // Resolve reply target: in 'agent' mode, prefer agent-supplied replyToMsgId;
                       // in 'auto' mode (or fallback), use trigger map → DB lookup.

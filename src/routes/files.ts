@@ -9,6 +9,7 @@ import {
 import type { AuthUser } from '../types.js';
 import type { RegisteredGroup } from '../types.js';
 import { getRegisteredGroup } from '../db.js';
+import { GROUPS_DIR } from '../config.js';
 import { logger } from '../logger.js';
 import {
   listFiles,
@@ -137,6 +138,27 @@ function getFileRootOverride(group: RegisteredGroup): string | undefined {
   return group.executionMode === 'host' && group.customCwd
     ? group.customCwd
     : undefined;
+}
+
+/** Try to resolve a relative path from the user-global directory as fallback. */
+function tryUserGlobalFallback(
+  group: RegisteredGroup,
+  relativePath: string,
+): string | null {
+  const userId = group.created_by;
+  if (!userId) return null;
+  const globalRoot = path.join(GROUPS_DIR, 'user-global', userId);
+  const resolved = path.resolve(globalRoot, path.normalize(relativePath));
+  // Security: must stay within user-global dir
+  if (!resolved.startsWith(globalRoot + path.sep) && resolved !== globalRoot) {
+    return null;
+  }
+  try {
+    if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+      return resolved;
+    }
+  } catch { /* ignore */ }
+  return null;
 }
 
 function buildAttachmentContentDisposition(fileName: string): string {
@@ -436,14 +458,20 @@ fileRoutes.get('/:jid/files/download/:path', authMiddleware, (c) => {
     const relativePath = Buffer.from(encodedPath, 'base64url').toString(
       'utf-8',
     );
-    const absolutePath = validateAndResolvePath(
+    let absolutePath = validateAndResolvePath(
       group.folder,
       relativePath,
       getFileRootOverride(group),
     );
 
     if (!fs.existsSync(absolutePath)) {
-      return c.json({ error: 'File not found' }, 404);
+      // Fallback: try user-global directory (e.g. shared expression images)
+      const globalFallback = tryUserGlobalFallback(group, relativePath);
+      if (globalFallback) {
+        absolutePath = globalFallback;
+      } else {
+        return c.json({ error: 'File not found' }, 404);
+      }
     }
 
     const stats = fs.statSync(absolutePath);
