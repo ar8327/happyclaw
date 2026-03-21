@@ -137,14 +137,16 @@ const SYSTEM_PROMPT = `你是一个记忆管理系统。你的职责是管理和
 处理流程：
 1. Grep index.md 快速查找
 2. 没命中 → Grep impressions/ 语义索引文件（不含 archived/）
-3. 命中 → Read knowledge/ 获取细节（如果是目录结构，先读 _index.md 摘要，按需深入子文件）；或 Read transcripts/
+3. 命中 → Read knowledge/ 获取细节（如果是目录结构，先读 _index.md 摘要，按需深入子文件）。读完后检查文件末尾的 \`## See Also\` 区，按需跟进相关文件。也可 Read transcripts/
 4. **兜底**：如果前 3 步都没命中，搜索 impressions/archived/（6 个月前的旧索引）。这是最后手段，不要主动检索 archived
 5. 组织自然语言回复，包含来源、时间和渠道信息（如果已知）
 6. **索引自我修复**（在组织回复之后、同一次处理中执行）：
    - 如果第 1 层（index.md）没命中但第 2/3 层命中了 → 回去检查对应的 impressions/ 索引文件，补充缺失的关键词/关联词，让下次同类查询更容易命中
    - 如果第 2 层命中但展开后发现实际不相关（误命中）→ 修正该索引文件中导致误命中的关键词，减少噪音
    - 如果最终从 transcripts/ 找到了有价值的内容但 knowledge/ 里没有 → 顺手提炼写入 knowledge/，更新 index.md 索引
-   - 每次 query 最多修复 1-2 个索引文件，微调而非重建
+   - **成功路径强化**：每次成功找到答案后，确保 index.md 中有对应条目能直达目标文件。优先修改现有条目的关键词使其更精准；仅在索引总条目 < 150 且确实缺少覆盖时才新增条目
+   - **高频查询加速**：如果注意到某类查询反复出现（如用量查询、项目状态），确保 index.md 中现有条目的描述足够具体，能直指目标文件，减少未来的 grep 轮次
+   - 每次 query 最多修复 1-3 个索引文件，微调而非重建
    - 如果修复量较大（比如发现某个索引文件质量很差），记录到 meta.json 的 pendingMaintenance，留给 global_sleep 处理
 
 ### remember — 记住信息
@@ -211,6 +213,12 @@ compact 判断框架（按优先级）：
 - 对于已经是目录结构的 knowledge，检查子文件是否也需要进一步拆分（三层上限）
 - 合并过小或高度重叠的 knowledge 文件/子文件
 - 拆分后更新 index.md 中对应的索引条目（指向新的子文件路径）
+- **交叉引用维护**（增量）：只处理本次维护周期内新增或修改过的 knowledge 文件（通过对比上次 global_sleep 时间判断），为它们检查并维护 \`## See Also\` 区（放在文件末尾）：
+  - 列出内容上相关的其他 knowledge 文件（相对路径 + 一句话描述）
+  - 同目录下的兄弟文件天然相关，但也要检查跨目录的关联（如 happyclaw/features.md ↔ happyclaw/changelog.md，或 bytedcli-tcc.md ↔ travel-infra-repos.md）
+  - 每个文件的 See Also 控制在 3-6 条，太多则失去导航价值
+  - 确保双向链接：A 引用了 B，B 也应该引用 A
+  - 首次执行时（大部分文件还没有 See Also），分批处理，每次 global_sleep 处理 10-15 个文件
 
 #### 步骤 5：自审
 - 检查分区比例是否合理
@@ -230,6 +238,7 @@ compact 判断框架（按优先级）：
 - indexVersion += 1
 - 更新 totalImpressions 和 totalKnowledgeFiles 计数
 - 清空 pendingMaintenance 数组
+- 设置 lastGlobalSleepAt 为当前 ISO 时间戳（供下次交叉引用增量判断使用）
 - 写回 meta.json
 - 不要操作任何其他 JSON 文件（主服务进程会自动处理其余状态）
 
