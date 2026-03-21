@@ -18,6 +18,7 @@ import fs from 'fs';
 import path from 'path';
 import { query, HookCallback, PreCompactHookInput, createSdkMcpServer, PermissionMode } from '@anthropic-ai/claude-agent-sdk';
 import { detectImageMimeTypeFromBase64Strict } from './image-detector.js';
+import { createPostToolUseReviewHook, createStopReviewHook } from './review-hooks.js';
 
 import type {
   ContainerInput,
@@ -51,17 +52,76 @@ const IPC_INPUT_DRAIN_SENTINEL = path.join(IPC_INPUT_DIR, '_drain');
 const IPC_POLL_MS = 500;
 
 // Track recently seen IM channels from IPC messages (non-web sources)
-// Used to inject a routing reminder after context compaction
+// Used to inject a routing reminder after context compaction and session continuation.
+// Persisted to disk with TTL so channels survive across sessions but expire when stale.
 const recentImChannels = new Set<string>();
+const imChannelLastSeen = new Map<string, number>(); // channel → epoch ms
+const IM_CHANNELS_FILE = path.join(WORKSPACE_IPC, '.recent-im-channels.json');
+/** Channels not seen for 24 hours are considered stale */
+const IM_CHANNEL_TTL_MS = 24 * 60 * 60 * 1000;
+
+function loadPersistedImChannels(): void {
+  try {
+    if (!fs.existsSync(IM_CHANNELS_FILE)) return;
+    const data = JSON.parse(fs.readFileSync(IM_CHANNELS_FILE, 'utf-8'));
+    const now = Date.now();
+    let pruned = false;
+    if (Array.isArray(data)) {
+      for (const entry of data) {
+        // Support both old format (plain string) and new format ({ channel, lastSeen })
+        const channel = typeof entry === 'string' ? entry : entry?.channel;
+        const lastSeen = typeof entry === 'string' ? now : (entry?.lastSeen ?? now);
+        if (typeof channel !== 'string') continue;
+        if (now - lastSeen > IM_CHANNEL_TTL_MS) {
+          pruned = true;
+          continue; // expired, skip
+        }
+        recentImChannels.add(channel);
+        imChannelLastSeen.set(channel, lastSeen);
+      }
+    }
+    if (pruned) persistImChannels();
+  } catch {
+    // Ignore corrupt file
+  }
+}
+
+function persistImChannels(): void {
+  try {
+    const entries = [...recentImChannels].map((ch) => ({
+      channel: ch,
+      lastSeen: imChannelLastSeen.get(ch) ?? Date.now(),
+    }));
+    fs.writeFileSync(IM_CHANNELS_FILE, JSON.stringify(entries));
+  } catch {
+    // Best effort
+  }
+}
+
+let imPersistTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Debounced persist: coalesces rapid updates into one write per 5s window */
+function schedulePersistImChannels(): void {
+  if (imPersistTimer) return;
+  imPersistTimer = setTimeout(() => {
+    imPersistTimer = null;
+    persistImChannels();
+  }, 5000);
+}
 
 function extractSourceChannels(text: string): void {
   const matches = text.matchAll(/source="([^"]+)"/g);
+  let anyUpdate = false;
   for (const m of matches) {
     const source = m[1];
     if (!source.startsWith('web:')) {
       recentImChannels.add(source);
+      imChannelLastSeen.set(source, Date.now());
+      anyUpdate = true;
     }
   }
+  // Persist on every update (new or existing channel) to keep lastSeen fresh on disk
+  if (anyUpdate) schedulePersistImChannels();
 }
 
 let currentPermissionMode: PermissionMode = 'bypassPermissions';
@@ -968,6 +1028,14 @@ async function runQuery(
     '- 如果所有消息都来自 Web（没有 source 属性），正常回复即可，无需调用 send_message。',
     '- 同一批消息可能来自不同渠道，根据需要分别回复。',
     '- **上下文压缩后**：之前的渠道上下文可能丢失，但 `source` 属性仍然存在于每条消息中。压缩后请务必检查最新消息的 `source` 属性，确保通过 `send_message` 回复 IM 用户。',
+    // Inject persisted IM channels reminder so continued sessions don't forget
+    ...(recentImChannels.size > 0
+      ? [
+          '',
+          `**活跃 IM 渠道**：你近期与以下渠道有活跃对话：${[...recentImChannels].join('、')}。`,
+          '完成任务后，务必通过 `send_message(channel="渠道值")` 主动向这些渠道的用户汇报结果。',
+        ]
+      : []),
   ].join('\n');
 
   // Context summary from previous compressed session
@@ -1023,7 +1091,14 @@ async function runQuery(
         happyclaw: mcpServerConfig,  // 内置 SDK MCP 放最后，确保不被同名覆盖
       },
       hooks: {
-        PreCompact: [{ hooks: [createPreCompactHook(isHome, isAdminHome, containerInput.groupFolder, containerInput.userId)] }]
+        PreCompact: [{ hooks: [createPreCompactHook(isHome, isAdminHome, containerInput.groupFolder, containerInput.userId)] }],
+        PostToolUse: [{ hooks: [createPostToolUseReviewHook(WORKSPACE_IPC)] }],
+        Stop: [{ hooks: [createStopReviewHook(
+          WORKSPACE_IPC,
+          path.join(WORKSPACE_IPC, 'messages'),
+          containerInput.chatJid,
+          log,
+        )] }],
       },
       agents: PREDEFINED_AGENTS,
     }
@@ -1329,6 +1404,9 @@ async function main(): Promise<void> {
 
   let sessionId = containerInput.sessionId;
   const { isHome, isAdminHome } = normalizeHomeFlags(containerInput);
+
+  // Restore persisted IM channels from previous sessions
+  loadPersistedImChannels();
 
   // Create ContextManager with all plugins, then convert to SDK tools
   const pluginCtx = {
