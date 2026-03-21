@@ -970,9 +970,24 @@ async function runQuery(
     '- **上下文压缩后**：之前的渠道上下文可能丢失，但 `source` 属性仍然存在于每条消息中。压缩后请务必检查最新消息的 `source` 属性，确保通过 `send_message` 回复 IM 用户。',
   ].join('\n');
 
+  // Context summary from previous compressed session
+  const contextSummarySection = containerInput.contextSummary
+    ? [
+        '## 上下文摘要',
+        '',
+        '以下是之前对话的压缩摘要。这些信息来自于已压缩的历史对话，你可以基于此继续工作：',
+        '',
+        '<previous-context-summary>',
+        containerInput.contextSummary,
+        '</previous-context-summary>',
+        '',
+      ].join('\n')
+    : '';
+
   const systemPromptAppend = [
     globalClaudeMd,
     heartbeatContent,
+    contextSummarySection,
     interactionGuidelines,
     channelRoutingGuidelines,
     memoryRecall,

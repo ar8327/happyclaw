@@ -26,6 +26,8 @@ export interface ContainerInput {
   userId?: string;
   /** Turn ID for tracking this execution. */
   turnId?: string;
+  /** Compressed conversation summary from previous session. */
+  contextSummary?: string;
 }
 
 export interface ContainerOutput {

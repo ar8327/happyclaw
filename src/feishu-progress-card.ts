@@ -328,6 +328,11 @@ export class ProgressCardController {
     return this.state === 'active' || this.state === 'creating';
   }
 
+  /** Whether this session can still receive events (idle, creating, or active). */
+  canReceiveEvents(): boolean {
+    return this.state !== 'error' && this.state !== 'aborted';
+  }
+
   /**
    * Feed a StreamEvent into the progress card.
    * Creates the card lazily on first thinking or tool_use_start event.
@@ -703,7 +708,10 @@ export function feedProgressSessionsForFolder(
   event: StreamEvent,
 ): void {
   for (const entry of activeProgressSessions.values()) {
-    if (entry.folder === folder && entry.session.isActive()) {
+    // Use canReceiveEvents() instead of isActive() — feedEvent() is what
+    // transitions from 'idle' to 'creating' (lazy init), so we must allow
+    // events to reach idle cards, not just active ones.
+    if (entry.folder === folder && entry.session.canReceiveEvents()) {
       entry.session.feedEvent(event);
     }
   }

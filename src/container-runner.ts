@@ -106,6 +106,7 @@ export interface ContainerInput {
   agentName?: string;
   userId?: string;
   turnId?: string;
+  contextSummary?: string;
 }
 
 export interface ContainerOutput {

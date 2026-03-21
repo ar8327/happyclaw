@@ -530,7 +530,21 @@ export function initDatabase(): void {
   ensureColumn('registered_groups', 'activation_mode', "TEXT DEFAULT 'auto'");
   ensureColumn('registered_groups', 'llm_provider', "TEXT DEFAULT 'claude'");
   ensureColumn('registered_groups', 'model', 'TEXT');
+  ensureColumn('registered_groups', 'context_compression', "TEXT DEFAULT 'off'");
   ensureColumn('scheduled_tasks', 'model', 'TEXT');
+
+  // Context summaries table for conversation compression
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS context_summaries (
+      group_folder TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      message_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      model_used TEXT,
+      PRIMARY KEY (group_folder, chat_jid)
+    )
+  `);
   ensureColumn('messages', 'token_usage', 'TEXT');
 
   // Add index on target_agent_id for fast lookup of IM bindings
@@ -2082,6 +2096,51 @@ export function cleanupOldDailyUsage(retentionDays = 90): number {
   return result.changes;
 }
 
+// ── Context Summaries ───────────────────────────────────────
+
+export interface ContextSummary {
+  group_folder: string;
+  chat_jid: string;
+  summary: string;
+  message_count: number;
+  created_at: string;
+  model_used: string | null;
+}
+
+export function getContextSummary(
+  groupFolder: string,
+  chatJid: string,
+): ContextSummary | undefined {
+  return db
+    .prepare(
+      'SELECT * FROM context_summaries WHERE group_folder = ? AND chat_jid = ?',
+    )
+    .get(groupFolder, chatJid) as ContextSummary | undefined;
+}
+
+export function setContextSummary(summary: ContextSummary): void {
+  db.prepare(
+    `INSERT OR REPLACE INTO context_summaries (group_folder, chat_jid, summary, message_count, created_at, model_used)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    summary.group_folder,
+    summary.chat_jid,
+    summary.summary,
+    summary.message_count,
+    summary.created_at,
+    summary.model_used,
+  );
+}
+
+export function deleteContextSummary(
+  groupFolder: string,
+  chatJid: string,
+): void {
+  db.prepare(
+    'DELETE FROM context_summaries WHERE group_folder = ? AND chat_jid = ?',
+  ).run(groupFolder, chatJid);
+}
+
 export function cleanupOldBillingAuditLog(retentionDays = 365): number {
   const cutoff = new Date(
     Date.now() - retentionDays * 24 * 60 * 60 * 1000,
@@ -2199,6 +2258,7 @@ type RegisteredGroupRow = {
   selected_mcps: string | null;
   llm_provider: string | null;
   model: string | null;
+  context_compression: string | null;
 };
 
 /** Convert a raw DB row into a RegisteredGroup domain object. */
@@ -2231,7 +2291,16 @@ function parseGroupRow(
     selected_mcps: row.selected_mcps ? JSON.parse(row.selected_mcps) : null,
     llm_provider: row.llm_provider === 'openai' ? 'openai' : 'claude',
     model: row.model ?? undefined,
+    context_compression: parseCompressionMode(row.context_compression),
   };
+}
+
+function parseCompressionMode(
+  val: string | null,
+): 'off' | 'auto' | 'manual' | undefined {
+  if (val === 'auto' || val === 'manual') return val;
+  if (val === 'off') return 'off';
+  return undefined;
 }
 
 const VALID_ACTIVATION_MODES = new Set([
@@ -2261,8 +2330,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps, llm_provider, model)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps, llm_provider, model, context_compression)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -2285,6 +2354,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.selected_mcps ? JSON.stringify(group.selected_mcps) : null,
     group.llm_provider ?? 'claude',
     group.model ?? null,
+    group.context_compression ?? 'off',
   );
 }
 

@@ -82,6 +82,7 @@ import {
   markStaleTurnsAsError,
   cleanupOldTurns,
   getMessageById,
+  getContextSummary,
 } from './db.js';
 // feishu.js deprecated exports are no longer needed; imManager handles all connections
 import { imManager } from './im-manager.js';
@@ -1900,7 +1901,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   ) {
     progressCard = imManager.createProgressCard(sourceChannel);
     if (progressCard) {
-      registerProgressSession(chatJid, progressCard, group.folder);
+      registerProgressSession(sourceChannel, progressCard, group.folder);
     }
   }
 
@@ -2623,6 +2624,15 @@ async function runAgent(
   const isAdminHome = isHome && group.folder === MAIN_GROUP_FOLDER;
   const sessionId = sessions[group.folder];
 
+  // Load context summary if session was compressed (no active session)
+  let contextSummary: string | undefined;
+  if (!sessionId) {
+    const summary = getContextSummary(group.folder, chatJid);
+    if (summary) {
+      contextSummary = summary.summary;
+    }
+  }
+
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
   writeTasksSnapshot(
@@ -2695,6 +2705,7 @@ async function runAgent(
           images,
           userId: group.created_by,
           turnId: activeTurnId,
+          contextSummary,
         },
         onProcessCb,
         wrappedOnOutput,
@@ -2714,6 +2725,7 @@ async function runAgent(
           images,
           userId: group.created_by,
           turnId: activeTurnId,
+          contextSummary,
         },
         onProcessCb,
         wrappedOnOutput,
@@ -3624,6 +3636,15 @@ async function processAgentConversation(
   // Get or use agent-specific session
   const sessionId = getSession(effectiveGroup.folder, agentId) || undefined;
 
+  // Load context summary if session was compressed (no active session)
+  let contextSummary: string | undefined;
+  if (!sessionId) {
+    const summary = getContextSummary(effectiveGroup.folder, chatJid);
+    if (summary) {
+      contextSummary = summary.summary;
+    }
+  }
+
   const wrappedOnOutput = async (output: ContainerOutput) => {
     // Track session
     if (output.newSessionId && output.status !== 'error') {
@@ -3740,6 +3761,7 @@ async function processAgentConversation(
       agentName: agent.name,
       images: imagesForAgent,
       userId: effectiveGroup.created_by,
+      contextSummary,
     };
 
     // Write tasks/groups snapshots
@@ -4071,11 +4093,13 @@ async function startMessageLoop(): Promise<void> {
                 'Turn: start_new but agent already running, injected via IPC',
               );
               // Create a progress card for IPC-injected Feishu chats that don't
-              // have one yet (e.g. after restart, recovery only creates a card
-              // for one chatJid per folder — siblings need cards too).
+              // have one yet. Use `channel` (original source JID, e.g.
+              // "feishu:oc_8e1a...") as key, NOT `chatJid` which may be
+              // the resolved effective JID (e.g. "web:main") — that would
+              // collide with the Web progress session and skip creation.
               if (
-                !hasActiveProgressSession(chatJid) &&
-                getChannelType(channel) === 'feishu'
+                getChannelType(channel) === 'feishu' &&
+                !hasActiveProgressSession(channel)
               ) {
                 const resolved = resolveEffectiveGroup(group);
                 const ownerId = resolved.effectiveGroup.created_by;
@@ -4083,7 +4107,7 @@ async function startMessageLoop(): Promise<void> {
                 if (fc?.streamingCard) {
                   const card = imManager.createProgressCard(channel);
                   if (card) {
-                    registerProgressSession(chatJid, card, folder);
+                    registerProgressSession(channel, card, folder);
                   }
                 }
               }

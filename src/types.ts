@@ -56,6 +56,7 @@ export interface RegisteredGroup {
   selected_mcps?: string[] | null; // 自定义模式下选中的 MCP 列表（null = 使用全局全部）
   llm_provider?: 'claude' | 'openai'; // LLM 提供商（默认 'claude'）
   model?: string; // 模型标识符覆盖（如 'opus', 'sonnet', 'haiku'），空=使用全局配置
+  context_compression?: 'off' | 'auto' | 'manual'; // 上下文压缩模式（默认 'off'）
 }
 
 export interface GroupMember {

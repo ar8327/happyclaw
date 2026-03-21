@@ -20,6 +20,7 @@ export interface GroupInfo {
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
   llm_provider?: 'claude' | 'openai';
   model?: string;
+  context_compression?: 'off' | 'auto' | 'manual';
 }
 
 export interface AgentInfo {

@@ -56,7 +56,9 @@ import {
   getMessageIdsWithTrace,
   searchMessages,
   countSearchResults,
+  getContextSummary,
 } from '../db.js';
+import { compressContext } from '../context-compressor.js';
 import { logger } from '../logger.js';
 import {
   getContainerEnvConfig,
@@ -183,6 +185,7 @@ interface GroupPayloadItem {
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
   llm_provider?: 'claude' | 'openai';
   model?: string;
+  context_compression?: 'off' | 'auto' | 'manual';
 }
 
 function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
@@ -294,6 +297,7 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       activation_mode: group.activation_mode ?? 'auto',
       llm_provider: group.llm_provider ?? 'claude',
       model: group.model ?? undefined,
+      context_compression: group.context_compression ?? 'off',
     };
   }
 
@@ -725,6 +729,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     activation_mode,
     llm_provider,
     model,
+    context_compression,
   } = validation.data;
   const name = rawName ? normalizeGroupName(rawName) : undefined;
 
@@ -735,7 +740,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     is_pinned === undefined &&
     activation_mode === undefined &&
     llm_provider === undefined &&
-    model === undefined
+    model === undefined &&
+    context_compression === undefined
   ) {
     return c.json({ error: 'No fields to update' }, 400);
   }
@@ -747,7 +753,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     selected_skills === undefined &&
     activation_mode === undefined &&
     llm_provider === undefined &&
-    model === undefined;
+    model === undefined &&
+    context_compression === undefined;
   if (isPinOnly) {
     if (
       !canAccessGroup(
@@ -790,7 +797,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
   }
 
   // Update registered group if name, skills, activation_mode, llm_provider, or model changed
-  if (name || selected_skills !== undefined || activation_mode !== undefined || llm_provider !== undefined || model !== undefined) {
+  if (name || selected_skills !== undefined || activation_mode !== undefined || llm_provider !== undefined || model !== undefined || context_compression !== undefined) {
     const updated: RegisteredGroup = {
       name: name || existing.name,
       folder: existing.folder,
@@ -822,6 +829,10 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
         model !== undefined
           ? (model || undefined)
           : existing.model,
+      context_compression:
+        context_compression !== undefined
+          ? context_compression
+          : existing.context_compression,
     };
 
     setRegisteredGroup(jid, updated);
@@ -830,6 +841,61 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
   }
 
   return c.json({ success: true, pinned_at });
+});
+
+// POST /api/groups/:jid/compress - 压缩对话上下文
+groupRoutes.post('/:jid/compress', authMiddleware, async (c) => {
+  const deps = getWebDeps();
+  if (!deps) return c.json({ error: 'Server not initialized' }, 500);
+
+  const jid = c.req.param('jid');
+  const existing = getRegisteredGroup(jid);
+  if (!existing) return c.json({ error: 'Group not found' }, 404);
+
+  const authUser = c.get('user') as AuthUser;
+  if (
+    !canModifyGroup(
+      { id: authUser.id, role: authUser.role },
+      { ...existing, jid },
+    )
+  ) {
+    return c.json({ error: 'Group not found' }, 404);
+  }
+
+  const result = await compressContext(existing.folder, jid);
+  if (!result.success) {
+    return c.json({ error: result.error }, 400);
+  }
+
+  // Clear in-memory session cache so next agent invocation starts fresh
+  const sessions = deps.getSessions();
+  delete sessions[existing.folder];
+
+  return c.json({
+    success: true,
+    summary: result.summary,
+    messageCount: result.messageCount,
+  });
+});
+
+// GET /api/groups/:jid/summary - 获取压缩摘要
+groupRoutes.get('/:jid/summary', authMiddleware, (c) => {
+  const jid = c.req.param('jid');
+  const existing = getRegisteredGroup(jid);
+  if (!existing) return c.json({ error: 'Group not found' }, 404);
+
+  const authUser = c.get('user') as AuthUser;
+  if (
+    !canAccessGroup(
+      { id: authUser.id, role: authUser.role },
+      { ...existing, jid },
+    )
+  ) {
+    return c.json({ error: 'Group not found' }, 404);
+  }
+
+  const summary = getContextSummary(existing.folder, jid);
+  return c.json({ summary: summary ?? null });
 });
 
 // DELETE /api/groups/:jid - 删除群组
