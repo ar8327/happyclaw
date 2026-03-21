@@ -74,6 +74,9 @@ interface SSEEvent {
 async function* parseSSE(reader: ReadableStreamDefaultReader<Uint8Array>): AsyncGenerator<SSEEvent> {
   const decoder = new TextDecoder();
   let buffer = '';
+  // Persist across chunks so split event/data lines aren't lost
+  let currentEvent = '';
+  let currentData = '';
 
   while (true) {
     const { done, value } = await reader.read();
@@ -82,9 +85,6 @@ async function* parseSSE(reader: ReadableStreamDefaultReader<Uint8Array>): Async
 
     const lines = buffer.split('\n');
     buffer = lines.pop() || ''; // Keep incomplete line in buffer
-
-    let currentEvent = '';
-    let currentData = '';
 
     for (const line of lines) {
       if (line.startsWith('event: ')) {
@@ -97,6 +97,11 @@ async function* parseSSE(reader: ReadableStreamDefaultReader<Uint8Array>): Async
         currentData = '';
       }
     }
+  }
+
+  // Flush any remaining event when the stream ends (e.g. response.completed)
+  if (currentEvent && currentData) {
+    yield { event: currentEvent, data: currentData };
   }
 }
 
