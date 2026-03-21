@@ -531,6 +531,7 @@ export function initDatabase(): void {
   ensureColumn('registered_groups', 'llm_provider', "TEXT DEFAULT 'claude'");
   ensureColumn('registered_groups', 'model', 'TEXT');
   ensureColumn('registered_groups', 'context_compression', "TEXT DEFAULT 'off'");
+  ensureColumn('registered_groups', 'knowledge_extraction', 'INTEGER DEFAULT 0');
   ensureColumn('scheduled_tasks', 'model', 'TEXT');
 
   // Context summaries table for conversation compression
@@ -2141,6 +2142,22 @@ export function deleteContextSummary(
   ).run(groupFolder, chatJid);
 }
 
+/**
+ * Count messages in a chat since a given timestamp.
+ * Used to check if enough new messages accumulated since last compression.
+ */
+export function countMessagesSince(
+  chatJid: string,
+  sinceTimestamp: string,
+): number {
+  const row = db
+    .prepare(
+      'SELECT COUNT(*) as cnt FROM messages WHERE chat_jid = ? AND timestamp > ?',
+    )
+    .get(chatJid, sinceTimestamp) as { cnt: number } | undefined;
+  return row?.cnt ?? 0;
+}
+
 export function cleanupOldBillingAuditLog(retentionDays = 365): number {
   const cutoff = new Date(
     Date.now() - retentionDays * 24 * 60 * 60 * 1000,
@@ -2259,6 +2276,7 @@ type RegisteredGroupRow = {
   llm_provider: string | null;
   model: string | null;
   context_compression: string | null;
+  knowledge_extraction: number | null;
 };
 
 /** Convert a raw DB row into a RegisteredGroup domain object. */
@@ -2292,6 +2310,7 @@ function parseGroupRow(
     llm_provider: row.llm_provider === 'openai' ? 'openai' : 'claude',
     model: row.model ?? undefined,
     context_compression: parseCompressionMode(row.context_compression),
+    knowledge_extraction: row.knowledge_extraction === 1,
   };
 }
 
@@ -2330,8 +2349,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps, llm_provider, model, context_compression)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps, llm_provider, model, context_compression, knowledge_extraction)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -2355,6 +2374,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.llm_provider ?? 'claude',
     group.model ?? null,
     group.context_compression ?? 'off',
+    group.knowledge_extraction ? 1 : 0,
   );
 }
 

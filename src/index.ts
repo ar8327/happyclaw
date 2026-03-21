@@ -163,6 +163,11 @@ import {
   shutdownWebServer,
 } from './web.js';
 import { streamingBlocksManager } from './streaming-blocks.js';
+import {
+  compressContext,
+  shouldAutoCompress,
+  type CompressOptions,
+} from './context-compressor.js';
 import { turnObservabilityManager } from './turn-observability.js';
 import { verifyPairingCode } from './telegram-pairing.js';
 import {
@@ -1665,6 +1670,26 @@ function broadcastInterruptedTurn(
 }
 
 /**
+ * Build CompressOptions for a group, wiring up knowledge extraction
+ * to the Memory Agent if enabled.
+ */
+function buildCompressOptions(group: RegisteredGroup): CompressOptions | undefined {
+  if (!group.knowledge_extraction || !group.created_by) return undefined;
+  const userId = group.created_by;
+  return {
+    extractKnowledge: true,
+    onKnowledgeEntry: async (content: string, importance: string) => {
+      if (!memoryAgentManagerRef) return;
+      await memoryAgentManagerRef.send(userId, {
+        type: 'remember',
+        content,
+        importance,
+      });
+    },
+  };
+}
+
+/**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
  *
@@ -2504,6 +2529,54 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // Final fallback for silent-success paths (no visible reply).
   commitCursor();
+
+  // Auto-compression: fire-and-forget after successful completion.
+  // Capture the current session ID so we can detect if a new agent run started
+  // during compression (which would make deleting the session unsafe).
+  if (
+    group.context_compression === 'auto' &&
+    shouldAutoCompress(effectiveGroup.folder, chatJid)
+  ) {
+    const folder = effectiveGroup.folder;
+    const sessionIdBeforeCompress = sessions[folder];
+    // Snapshot the current time as the message boundary — only compress messages
+    // that existed before this point, preventing new messages from being included
+    // in the summary while also remaining in the active session.
+    const compressBoundary = new Date().toISOString();
+    const compressOpts = buildCompressOptions(group);
+    if (compressOpts) {
+      compressOpts.beforeTimestamp = compressBoundary;
+    }
+    compressContext(folder, chatJid, compressOpts ?? { beforeTimestamp: compressBoundary })
+      .then((result) => {
+        if (result.success) {
+          // Only clear session if no new agent run has started during compression
+          if (sessions[folder] === sessionIdBeforeCompress) {
+            delete sessions[folder];
+          } else {
+            logger.info(
+              { folder, chatJid },
+              'Session changed during auto-compression, skipping session clear (new agent run likely started)',
+            );
+          }
+          logger.info(
+            { folder, chatJid, messageCount: result.messageCount },
+            'Auto-compressed context after successful agent run',
+          );
+          const extractedMsg = result.extractedKnowledge
+            ? `，萃取了 ${result.extractedKnowledge} 条知识到记忆系统`
+            : '';
+          sendSystemMessage(
+            chatJid,
+            'context_compressed',
+            `历史对话已自动压缩为摘要（${result.messageCount} 条消息${extractedMsg}），后续对话基于摘要继续。`,
+          );
+        }
+      })
+      .catch((err) => {
+        logger.error({ folder, chatJid, err }, 'Auto-compression failed');
+      });
+  }
 
   triggerMessagesByFolder.delete(effectiveGroup.folder);
   return true;
@@ -5280,6 +5353,7 @@ async function main(): Promise<void> {
     getActiveTurnRuntime: (folder: string) => turnManager.getActiveTurn(folder),
     getPendingTurnCounts: (folder: string) => turnManager.getPendingCounts(folder),
     getTurnObservability: (folder: string) => turnObservabilityManager.get(folder),
+    buildCompressOptions,
   });
 
   // Clean expired sessions every hour

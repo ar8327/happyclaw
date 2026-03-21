@@ -8,7 +8,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { api } from '@/api/client';
+import { api, type ApiError } from '@/api/client';
 
 const MODEL_OPTIONS = [
   { value: '__default__', label: '默认（跟随全局配置）' },
@@ -20,7 +20,7 @@ const MODEL_OPTIONS = [
 const COMPRESSION_OPTIONS = [
   { value: 'off', label: '关闭' },
   { value: 'manual', label: '手动压缩' },
-  // { value: 'auto', label: '自动压缩' }, // TODO: auto mode
+  { value: 'auto', label: '自动压缩' },
 ];
 
 interface ContextSummary {
@@ -40,15 +40,26 @@ export function GroupDetail({ group }: GroupDetailProps) {
   const { updateGroup } = useGroupsStore();
   const [model, setModel] = useState(group.model || '__default__');
   const [compression, setCompression] = useState<string>(group.context_compression || 'off');
+  const [knowledgeExtraction, setKnowledgeExtraction] = useState(group.knowledge_extraction ?? false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [compressing, setCompressing] = useState(false);
   const [compressResult, setCompressResult] = useState<string | null>(null);
   const [summaryInfo, setSummaryInfo] = useState<ContextSummary | null>(null);
 
+  // Sync local state when group prop changes (e.g. switching workspaces)
+  useEffect(() => {
+    setModel(group.model || '__default__');
+    setCompression(group.context_compression || 'off');
+    setKnowledgeExtraction(group.knowledge_extraction ?? false);
+    setCompressResult(null);
+    setSummaryInfo(null);
+  }, [group.jid, group.model, group.context_compression, group.knowledge_extraction]);
+
   const modelDirty = model !== (group.model || '__default__');
   const compressionDirty = compression !== (group.context_compression || 'off');
-  const dirty = modelDirty || compressionDirty;
+  const knowledgeDirty = knowledgeExtraction !== (group.knowledge_extraction ?? false);
+  const dirty = modelDirty || compressionDirty || knowledgeDirty;
 
   const formatDate = (timestamp: string | number) => {
     return new Date(timestamp).toLocaleString('zh-CN', {
@@ -86,6 +97,14 @@ export function GroupDetail({ group }: GroupDetailProps) {
       }
       if (compressionDirty) {
         updates.context_compression = compression;
+        // Clear knowledge extraction when compression is turned off
+        if (compression === 'off' && knowledgeExtraction) {
+          setKnowledgeExtraction(false);
+          updates.knowledge_extraction = false;
+        }
+      }
+      if (knowledgeDirty && !('knowledge_extraction' in updates)) {
+        updates.knowledge_extraction = knowledgeExtraction;
       }
       await updateGroup(group.jid, updates);
       setSaved(true);
@@ -104,17 +123,27 @@ export function GroupDetail({ group }: GroupDetailProps) {
     setCompressing(true);
     setCompressResult(null);
     try {
-      const res = await api.post<{ success: boolean; messageCount?: number; error?: string }>(
+      const res = await api.post<{
+        success: boolean;
+        messageCount?: number;
+        extractedKnowledge?: number;
+        error?: string;
+      }>(
         `/api/groups/${encodeURIComponent(group.jid)}/compress`,
+        undefined,
+        60000, // Compression can take 10-30s, use 60s timeout
       );
       if (res.success) {
-        setCompressResult(`压缩完成，处理了 ${res.messageCount ?? '?'} 条消息`);
+        const knowledgeMsg =
+          res.extractedKnowledge ? `，萃取了 ${res.extractedKnowledge} 条知识` : '';
+        setCompressResult(`压缩完成，处理了 ${res.messageCount ?? '?'} 条消息${knowledgeMsg}`);
         loadSummary();
       } else {
         setCompressResult(`压缩失败：${res.error || '未知错误'}`);
       }
     } catch (err) {
-      setCompressResult(`压缩失败：${err instanceof Error ? err.message : String(err)}`);
+      const msg = (err as ApiError)?.message || String(err);
+      setCompressResult(`压缩失败：${msg}`);
     } finally {
       setCompressing(false);
     }
@@ -187,11 +216,28 @@ export function GroupDetail({ group }: GroupDetailProps) {
             </Select>
           </div>
           <p className="mt-1 text-xs text-slate-400">
-            使用 Sonnet 压缩历史对话，减少 token 消耗。压缩后会话将重置，摘要注入系统提示。
+            {compression === 'auto'
+              ? '每轮对话结束后自动检查，消息数超过阈值时自动压缩。也可手动触发。'
+              : '使用 Sonnet 压缩历史对话，减少 token 消耗。压缩后会话将重置，摘要注入系统提示。'}
           </p>
 
+          {/* Knowledge extraction toggle */}
+          {(compression === 'manual' || compression === 'auto') && (
+            <label className="mt-2 flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={knowledgeExtraction}
+                onChange={(e) => setKnowledgeExtraction(e.target.checked)}
+                className="w-3.5 h-3.5 rounded border-slate-300"
+              />
+              <span className="text-xs text-slate-500">
+                知识萃取（压缩时提取关键知识写入记忆系统）
+              </span>
+            </label>
+          )}
+
           {/* Compress button + status */}
-          {(group.context_compression === 'manual' || compression === 'manual') && (
+          {(compression === 'manual' || compression === 'auto') && (
             <div className="mt-2 space-y-2">
               <button
                 onClick={handleCompress}

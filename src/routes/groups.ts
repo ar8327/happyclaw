@@ -58,7 +58,7 @@ import {
   countSearchResults,
   getContextSummary,
 } from '../db.js';
-import { compressContext } from '../context-compressor.js';
+import { compressContext, isCompressing } from '../context-compressor.js';
 import { logger } from '../logger.js';
 import {
   getContainerEnvConfig,
@@ -186,6 +186,7 @@ interface GroupPayloadItem {
   llm_provider?: 'claude' | 'openai';
   model?: string;
   context_compression?: 'off' | 'auto' | 'manual';
+  knowledge_extraction?: boolean;
 }
 
 function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
@@ -298,6 +299,7 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       llm_provider: group.llm_provider ?? 'claude',
       model: group.model ?? undefined,
       context_compression: group.context_compression ?? 'off',
+      knowledge_extraction: group.knowledge_extraction ?? false,
     };
   }
 
@@ -730,6 +732,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     llm_provider,
     model,
     context_compression,
+    knowledge_extraction,
   } = validation.data;
   const name = rawName ? normalizeGroupName(rawName) : undefined;
 
@@ -741,7 +744,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     activation_mode === undefined &&
     llm_provider === undefined &&
     model === undefined &&
-    context_compression === undefined
+    context_compression === undefined &&
+    knowledge_extraction === undefined
   ) {
     return c.json({ error: 'No fields to update' }, 400);
   }
@@ -754,7 +758,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     activation_mode === undefined &&
     llm_provider === undefined &&
     model === undefined &&
-    context_compression === undefined;
+    context_compression === undefined &&
+    knowledge_extraction === undefined;
   if (isPinOnly) {
     if (
       !canAccessGroup(
@@ -797,7 +802,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
   }
 
   // Update registered group if name, skills, activation_mode, llm_provider, or model changed
-  if (name || selected_skills !== undefined || activation_mode !== undefined || llm_provider !== undefined || model !== undefined || context_compression !== undefined) {
+  if (name || selected_skills !== undefined || activation_mode !== undefined || llm_provider !== undefined || model !== undefined || context_compression !== undefined || knowledge_extraction !== undefined) {
     const updated: RegisteredGroup = {
       name: name || existing.name,
       folder: existing.folder,
@@ -833,6 +838,10 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
         context_compression !== undefined
           ? context_compression
           : existing.context_compression,
+      knowledge_extraction:
+        knowledge_extraction !== undefined
+          ? knowledge_extraction
+          : existing.knowledge_extraction,
     };
 
     setRegisteredGroup(jid, updated);
@@ -862,19 +871,42 @@ groupRoutes.post('/:jid/compress', authMiddleware, async (c) => {
     return c.json({ error: 'Group not found' }, 404);
   }
 
-  const result = await compressContext(existing.folder, jid);
+  // Reject if agent is currently running or compression already in progress
+  if (deps.queue.hasDirectActiveRunner(jid)) {
+    return c.json(
+      { error: 'Agent 正在运行中，请等待完成后再压缩' },
+      409,
+    );
+  }
+  if (isCompressing(existing.folder)) {
+    return c.json(
+      { error: '压缩正在进行中，请稍后再试' },
+      409,
+    );
+  }
+
+  // Capture session ID before compression to detect concurrent agent starts
+  const sessions = deps.getSessions();
+  const sessionIdBefore = sessions[existing.folder];
+
+  const compressOpts = deps.buildCompressOptions?.(existing) ?? {};
+  // Snapshot boundary — only compress messages that exist right now
+  compressOpts.beforeTimestamp = new Date().toISOString();
+  const result = await compressContext(existing.folder, jid, compressOpts);
   if (!result.success) {
     return c.json({ error: result.error }, 400);
   }
 
-  // Clear in-memory session cache so next agent invocation starts fresh
-  const sessions = deps.getSessions();
-  delete sessions[existing.folder];
+  // Only clear session if no new agent run started during compression
+  if (sessions[existing.folder] === sessionIdBefore) {
+    delete sessions[existing.folder];
+  }
 
   return c.json({
     success: true,
     summary: result.summary,
     messageCount: result.messageCount,
+    extractedKnowledge: result.extractedKnowledge,
   });
 });
 

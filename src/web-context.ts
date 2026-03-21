@@ -6,6 +6,7 @@ import { GroupQueue } from './group-queue.js';
 import type { AuthUser, NewMessage, MessageCursor } from './types.js';
 import type { ActiveTurn } from './turn-manager.js';
 import type { TurnObservabilitySnapshot } from './turn-observability.js';
+import type { CompressOptions } from './context-compressor.js';
 import {
   getJidsByFolder,
   getRegisteredGroup,
@@ -65,6 +66,7 @@ export interface WebDeps {
   getActiveTurnRuntime?: (folder: string) => ActiveTurn | null;
   getPendingTurnCounts?: (folder: string) => Map<string, number>;
   getTurnObservability?: (folder: string) => TurnObservabilitySnapshot | null;
+  buildCompressOptions?: (group: RegisteredGroup) => CompressOptions | undefined;
 }
 
 export type Variables = {

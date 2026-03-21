@@ -200,6 +200,7 @@ export const GroupPatchSchema = z.object({
   llm_provider: z.enum(['claude', 'openai']).optional(),
   model: z.string().max(128).nullable().optional(),
   context_compression: z.enum(['off', 'auto', 'manual']).optional(),
+  knowledge_extraction: z.boolean().optional(),
 });
 
 export const LoginSchema = z.object({

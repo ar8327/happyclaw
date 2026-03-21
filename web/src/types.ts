@@ -21,6 +21,7 @@ export interface GroupInfo {
   llm_provider?: 'claude' | 'openai';
   model?: string;
   context_compression?: 'off' | 'auto' | 'manual';
+  knowledge_extraction?: boolean;
 }
 
 export interface AgentInfo {
