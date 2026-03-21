@@ -65,6 +65,8 @@ export { MemoryPlugin } from './plugins/memory.js';
 export type { MemoryPluginOptions } from './plugins/memory.js';
 export { FeishuDocsPlugin } from './plugins/feishu-docs.js';
 export type { FeishuDocsPluginOptions } from './plugins/feishu-docs.js';
+export { CrossModelPlugin } from './plugins/cross-model.js';
+export type { CrossModelPluginOptions } from './plugins/cross-model.js';
 
 // Utilities
 export {

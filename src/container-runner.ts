@@ -1083,6 +1083,20 @@ export async function runHostAgent(
     }
   }
 
+  // Cross-model plugin: inject OpenAI credentials for ask_model tool (all runners)
+  {
+    const crossModelConfig = getOpenAIProviderConfig();
+    if (crossModelConfig.apiKey) {
+      hostEnv['CROSSMODEL_OPENAI_API_KEY'] = crossModelConfig.apiKey;
+      if (crossModelConfig.baseUrl) {
+        hostEnv['CROSSMODEL_OPENAI_BASE_URL'] = crossModelConfig.baseUrl;
+      }
+      if (crossModelConfig.model) {
+        hostEnv['CROSSMODEL_OPENAI_MODEL'] = crossModelConfig.model;
+      }
+    }
+  }
+
   logger.info(
     {
       group: group.name,

@@ -35,6 +35,7 @@ import {
   GroupsPlugin,
   MemoryPlugin,
   FeishuDocsPlugin,
+  CrossModelPlugin,
   // Tool adapters
   toOpenAITools,
   toCodexTools,
@@ -124,7 +125,8 @@ function buildContextManager(ctx: PluginContext): ContextManager {
       apiUrl: API_URL,
       apiToken: API_TOKEN,
     }))
-    .register(new LocalToolsPlugin());  // OpenAI-specific: file ops & command execution
+    .register(new LocalToolsPlugin())  // OpenAI-specific: file ops & command execution
+    .register(new CrossModelPlugin());
   return mgr;
 }
 
