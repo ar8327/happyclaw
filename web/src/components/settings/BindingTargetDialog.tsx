@@ -118,7 +118,7 @@ export function BindingTargetDialog({
                       <span className="flex-1 text-sm truncate">
                         {target.type === 'agent'
                           ? target.agentName || 'Agent'
-                          : '主对话'}
+                          : '主会话'}
                       </span>
                       {isSelecting && <Loader2 className="w-3.5 h-3.5 animate-spin text-teal-500" />}
                     </button>

@@ -36,7 +36,7 @@ const systemItems: NavItem[] = [
 
 const accountItems: NavItem[] = [
   { key: 'profile', label: '个人资料', icon: <User className="w-4 h-4" />, group: 'account' },
-  { key: 'my-channels', label: '消息通道', icon: <MessageSquare className="w-4 h-4" />, group: 'account' },
+  { key: 'my-channels', label: '消息渠道', icon: <MessageSquare className="w-4 h-4" />, group: 'account' },
   { key: 'security', label: '安全与设备', icon: <Shield className="w-4 h-4" />, group: 'account' },
 ];
 

@@ -328,16 +328,10 @@ function log(message: string): void {
 }
 
 /**
- * Normalize isMain/isHome/isAdminHome flags for backward compatibility.
- * If the host sends the old `isMain` field, treat it as isHome=true + isAdminHome=true.
+ * Normalize isHome/isAdminHome flags from container input.
  */
 function normalizeHomeFlags(input: ContainerInput): { isHome: boolean; isAdminHome: boolean } {
-  if (input.isHome !== undefined) {
-    return { isHome: !!input.isHome, isAdminHome: !!input.isAdminHome };
-  }
-  // Legacy: isMain was the only flag
-  const legacy = !!input.isMain;
-  return { isHome: legacy, isAdminHome: legacy };
+  return { isHome: !!input.isHome, isAdminHome: !!input.isAdminHome };
 }
 
 /**

@@ -15,7 +15,7 @@ export interface MountAllowlist {
   allowedRoots: AllowedRoot[];
   // Glob patterns for paths that should never be mounted (e.g., ".ssh", ".gnupg")
   blockedPatterns: string[];
-  // If true, non-main groups can only mount read-only regardless of config
+  // If true, non-admin-home groups can only mount read-only regardless of config
   nonMainReadOnly: boolean;
 }
 
@@ -48,7 +48,7 @@ export interface RegisteredGroup {
   is_home?: boolean; // 用户主容器标记
   selected_skills?: string[] | null; // null = 全部启用
   target_agent_id?: string; // IM 消息路由到指定 conversation agent
-  target_main_jid?: string; // IM 消息路由到指定工作区的主对话（web:{folder}）
+  target_main_jid?: string; // IM 消息路由到指定工作区的主会话（web:{folder}）
   reply_policy?: 'source_only' | 'mirror'; // IM 绑定的回复策略
   require_mention?: boolean; // 群聊是否需要 @机器人 才响应（默认 false）
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled'; // 消息门控模式（默认 'auto'，兼容 require_mention）

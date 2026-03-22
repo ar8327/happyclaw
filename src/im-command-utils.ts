@@ -74,7 +74,7 @@ export function formatWorkspaceList(
     lines.push(`${marker} ${ws.name} (${ws.folder})`);
 
     const mainMarker = isCurrent && !currentAgentId ? ' ← 当前' : '';
-    lines.push(`  · 主对话${mainMarker}`);
+    lines.push(`  · 主会话${mainMarker}`);
 
     for (const agent of ws.agents) {
       const agentMarker =
@@ -132,11 +132,11 @@ export function resolveLocationInfo(
     folder = parent?.folder || group.folder;
   } else if (group.target_main_jid) {
     const target = getRegisteredGroup(group.target_main_jid);
-    locationLine = `${target?.name || group.target_main_jid} / 主对话`;
+    locationLine = `${target?.name || group.target_main_jid} / 主会话`;
     folder = target?.folder || group.folder;
   } else {
     const folderName = findGroupNameByFolder(group.folder);
-    locationLine = `${folderName} / 主对话`;
+    locationLine = `${folderName} / 主会话`;
     folder = group.folder;
   }
 

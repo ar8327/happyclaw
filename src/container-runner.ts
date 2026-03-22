@@ -97,10 +97,8 @@ export interface ContainerInput {
   sessionId?: string;
   groupFolder: string;
   chatJid: string;
-  /** @deprecated Use isHome + isAdminHome instead */
-  isMain: boolean;
-  isHome?: boolean;
-  isAdminHome?: boolean;
+  isHome: boolean;
+  isAdminHome: boolean;
   images?: Array<{ data: string; mimeType?: string }>;
   agentId?: string;
   agentName?: string;
@@ -484,7 +482,7 @@ export async function runContainerAgent(
       group: group.name,
       containerName,
       mountCount: mounts.length,
-      isMain: input.isMain,
+      isAdminHome: input.isAdminHome,
     },
     'Spawning container agent',
   );
@@ -1105,7 +1103,7 @@ export async function runHostAgent(
     {
       group: group.name,
       workingDir: groupDir,
-      isMain: input.isMain,
+      isAdminHome: input.isAdminHome,
     },
     'Spawning host agent',
   );

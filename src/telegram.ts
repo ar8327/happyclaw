@@ -38,7 +38,7 @@ export interface TelegramConnectOpts {
   onCommand?: (chatJid: string, command: string) => Promise<string | null>;
   /** 根据 jid 解析群组 folder，用于下载文件/图片到工作区 */
   resolveGroupFolder?: (jid: string) => string | undefined;
-  /** 将 IM chatJid 解析为绑定目标 JID（conversation agent 或工作区主对话） */
+  /** 将 IM chatJid 解析为绑定目标 JID（conversation agent 或工作区主会话） */
   resolveEffectiveChatJid?: (
     chatJid: string,
   ) => { effectiveJid: string; agentId: string | null } | null;

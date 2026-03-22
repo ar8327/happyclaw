@@ -376,7 +376,7 @@ export default function PlanFormDialog({
                 onChange={(e) => set('max_groups', e.target.value)}
               />
             </Field>
-            <Field label="IM 通道上限">
+            <Field label="IM 渠道上限">
               <Input
                 type="number"
                 value={form.max_im_channels}

@@ -69,8 +69,6 @@ export interface ContainerInput {
   sessionId?: string;
   groupFolder: string;
   chatJid: string;
-  /** @deprecated Use isHome + isAdminHome instead. */
-  isMain?: boolean;
   isHome?: boolean;
   isAdminHome?: boolean;
   images?: Array<{ data: string; mimeType?: string }>;

@@ -31,7 +31,7 @@ export function ImBindingRow({ group, isActioning, onRebind, onUnbind }: ImBindi
         : group.bound_target_name;
     }
     if (group.bound_main_jid && group.bound_target_name) {
-      return `${group.bound_target_name} / 主对话`;
+      return `${group.bound_target_name} / 主会话`;
     }
     return '默认（主工作区）';
   };

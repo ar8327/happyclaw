@@ -66,7 +66,7 @@ export function SettingsPage() {
   const mobileTabs = useMemo(() => {
     const tabs: { key: SettingsTab; label: string }[] = [];
     tabs.push({ key: 'profile', label: '个人资料' });
-    tabs.push({ key: 'my-channels', label: '消息通道' });
+    tabs.push({ key: 'my-channels', label: '消息渠道' });
     tabs.push({ key: 'security', label: '安全' });
     if (canManageSystemConfig) {
       tabs.push({ key: 'claude', label: 'Claude' });
@@ -106,7 +106,7 @@ export function SettingsPage() {
     appearance: '外观设置（全局默认）',
     system: '系统参数',
     profile: '个人资料',
-    'my-channels': '消息通道',
+    'my-channels': '消息渠道',
     security: '安全与设备',
     groups: '会话管理',
     memory: '记忆管理',

@@ -10,7 +10,7 @@ function PlanCard({ plan, isCurrent, fmt }: { plan: BillingPlan; isCurrent: bool
   const resources: { label: string; value: string }[] = [];
   if (plan.max_groups != null) resources.push({ label: '工作区', value: `${plan.max_groups}` });
   if (plan.max_im_channels != null)
-    resources.push({ label: 'IM 通道', value: `${plan.max_im_channels}` });
+    resources.push({ label: 'IM 渠道', value: `${plan.max_im_channels}` });
   if (plan.max_mcp_servers != null)
     resources.push({ label: 'MCP Server', value: `${plan.max_mcp_servers}` });
   if (plan.max_concurrent_containers != null)

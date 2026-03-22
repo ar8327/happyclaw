@@ -113,7 +113,7 @@ export default function SubscriptionCard() {
             )}
             {plan.max_im_channels != null && (
               <div>
-                <span className="text-zinc-500">IM 通道上限</span>
+                <span className="text-zinc-500">IM 渠道上限</span>
                 <div className="font-medium">{plan.max_im_channels}</div>
               </div>
             )}

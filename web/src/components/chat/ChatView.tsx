@@ -726,10 +726,10 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                 const activeSdkTask = activeAgentTab ? sdkTasks[activeAgentTab] : null;
                 if (isSdkTask && activeSdkTask?.isTeammate && activeSdkTask?.status === 'running') {
                   return (
-                    /* Teammate 标签页：通过主对话中转发送消息给 Team Lead */
+                    /* Teammate 标签页：通过主会话中转发送消息给 Team Lead */
                     <div className="border-t">
                       <div className="px-4 pt-1.5 pb-0.5 text-[10px] text-amber-600 bg-amber-50/50 text-center">
-                        消息将发送到主对话，由 Team Lead 转发
+                        消息将发送到主会话，由 Team Lead 转发
                       </div>
                       <MessageInput
                         onSend={async (content) => {
@@ -747,9 +747,9 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                   <div className="px-4 py-2 text-center text-xs text-slate-400 border-t">
                     {isSdkTask
                       ? (activeSdkTask?.status === 'running'
-                        ? '子 Agent 独立运行中 — 仅主对话可发送消息'
-                        : '子 Agent 已结束 — 仅主对话可发送消息')
-                      : '子 Agent 独立运行中 — 仅主对话可发送消息'}
+                        ? '子 Agent 独立运行中 — 仅主会话可发送消息'
+                        : '子 Agent 已结束 — 仅主会话可发送消息')
+                      : '子 Agent 独立运行中 — 仅主会话可发送消息'}
                   </div>
                 );
               })()}
@@ -1016,7 +1016,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         onConfirm={handleResetSession}
         title="清除上下文"
         message={resetAgentId
-          ? '将清除该子对话的 Claude 会话上下文，下次发送消息时将开始全新会话。聊天记录不受影响。'
+          ? '将清除该子会话的 Claude 会话上下文，下次发送消息时将开始全新会话。聊天记录不受影响。'
           : '将清除 Claude 会话上下文并停止运行中的工作区进程，下次发送消息时将开始全新会话。聊天记录不受影响。'
         }
         confirmText="清除"

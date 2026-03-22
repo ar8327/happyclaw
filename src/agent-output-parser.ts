@@ -210,7 +210,7 @@ export interface CloseHandlerContext {
   input: {
     prompt: string;
     sessionId?: string;
-    isMain: boolean;
+    isAdminHome: boolean;
     agentId?: string;
     agentName?: string;
   };
@@ -299,7 +299,7 @@ export function writeRunLog(
     `=== ${ctx.label} Run Log ===`,
     `Timestamp: ${new Date().toISOString()}`,
     `Group: ${ctx.groupName}`,
-    `IsMain: ${ctx.input.isMain}`,
+    `IsAdminHome: ${ctx.input.isAdminHome}`,
     `Duration: ${duration}ms`,
     `Exit Code: ${code}`,
     `Stdout Truncated: ${ctx.stdoutState.stdoutTruncated}`,

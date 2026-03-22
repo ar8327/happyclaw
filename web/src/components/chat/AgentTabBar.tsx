@@ -39,7 +39,7 @@ export function AgentTabBar({ agents, activeTab, onSelectTab, onDeleteAgent, onC
         className={`${tabClass(activeTab === null)} flex items-center gap-1.5 group`}
         onClick={() => onSelectTab(null)}
       >
-        <span>主对话</span>
+        <span>主会话</span>
         {onBindMainIm && (
           <button
             onClick={(e) => { e.stopPropagation(); onBindMainIm(); }}

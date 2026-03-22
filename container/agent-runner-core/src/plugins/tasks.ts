@@ -192,7 +192,7 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
             type: 'pause_task',
             taskId: args.task_id,
             groupFolder: ctx.groupFolder,
-            isMain: hasCrossGroupAccess,
+            isAdminHome: hasCrossGroupAccess,
             timestamp: new Date().toISOString(),
           });
           return { content: `Task ${args.task_id} pause requested.` };
@@ -215,7 +215,7 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
             type: 'resume_task',
             taskId: args.task_id,
             groupFolder: ctx.groupFolder,
-            isMain: hasCrossGroupAccess,
+            isAdminHome: hasCrossGroupAccess,
             timestamp: new Date().toISOString(),
           });
           return { content: `Task ${args.task_id} resume requested.` };
@@ -238,7 +238,7 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
             type: 'cancel_task',
             taskId: args.task_id,
             groupFolder: ctx.groupFolder,
-            isMain: hasCrossGroupAccess,
+            isAdminHome: hasCrossGroupAccess,
             timestamp: new Date().toISOString(),
           });
           return { content: `Task ${args.task_id} cancellation requested.` };

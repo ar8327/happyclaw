@@ -1479,7 +1479,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         event.taskDescription || event.toolInputSummary,
         event.isTeammate,
       );
-      // 不 return — 让 task_start 同时落入主对话 streaming（显示 Task 工具卡片）
+      // 不 return — 让 task_start 同时落入主会话 streaming（显示 Task 工具卡片）
     }
 
     // ③ task_notification → 标记完成/失败并自动关闭标签页
@@ -1504,7 +1504,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         notifyIfHidden(`HappyClaw: ${desc} ${status}`, event.taskSummary);
       }
 
-      // 不落入主对话 streaming
+      // 不落入主会话 streaming
       return;
     }
 
@@ -1535,7 +1535,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     // ④.5 兜底路由：无 parentToolUseId 时，如果只有 1 个运行中的 **非 Teammate** SDK Task，
-    // 将事件同时应用到该 Task 的 agentStreaming（不 return，仍落入主对话）。
+    // 将事件同时应用到该 Task 的 agentStreaming（不 return，仍落入主会话）。
     // 限制条件：仅单 Task 运行时生效，避免多 Task 并发时误路由；
     // 排除 Teammate Task（Teammate 的事件由 agent-runner 子 Agent 消息转换提供，无需兜底）。
     if (!event.parentToolUseId && event.eventType !== 'task_start' && event.eventType !== 'task_notification') {
@@ -1554,7 +1554,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             applyStreamEvent(event, prev, next, 8000);
             return { agentStreaming: { ...s.agentStreaming, [tid]: next } };
           });
-          // 不 return — 事件同时在主对话中显示
+          // 不 return — 事件同时在主会话中显示
         }
       }
     }
@@ -1566,7 +1566,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (task && task.status === 'running') {
         finalizeSdkTask(resolvedToolUseId, 'completed', task.summary, SDK_TASK_TOOL_END_FALLBACK_CLOSE_MS);
       }
-      // fall-through 到主对话处理，移除 activeTools 中的 Task 条目
+      // fall-through 到主会话处理，移除 activeTools 中的 Task 条目
     }
 
     // 中断事件需要在所有客户端显式收尾，避免 waiting 残留。
@@ -1614,10 +1614,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         updated[targetIdx] = { ...updated[targetIdx], token_usage: tokenUsageJson };
         return { messages: { ...s.messages, [chatJid]: updated } };
       });
-      // 不 return — usage 事件同时落入主对话 streaming（如需 recentEvents 展示）
+      // 不 return — usage 事件同时落入主会话 streaming（如需 recentEvents 展示）
     }
 
-    // ⑥ 主对话 streaming — 使用 applyStreamEvent 共享函数
+    // ⑥ 主会话 streaming — 使用 applyStreamEvent 共享函数
     set((s) => {
       const MAX_STREAMING_TEXT = 8000;
       const prev = s.streaming[chatJid] || { ...DEFAULT_STREAMING_STATE };

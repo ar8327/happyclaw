@@ -782,12 +782,12 @@ function resolveBindingTarget(
   );
   if (!workspace) return null;
 
-  if (!agentSpec || agentSpec === 'main' || agentSpec === '主对话') {
+  if (!agentSpec || agentSpec === 'main' || agentSpec === '主会话' || agentSpec === '主对话') {
     const mainJid = findWebJidForFolder(workspace.folder);
     if (!mainJid) return null;
     return {
       target_main_jid: mainJid,
-      display: `${workspace.name} / 主对话`,
+      display: `${workspace.name} / 主会话`,
     };
   }
 
@@ -1098,11 +1098,11 @@ async function handleRecallCommand(chatJid: string): Promise<string> {
     const target =
       registeredGroups[group.target_main_jid] ??
       getRegisteredGroup(group.target_main_jid);
-    headerName = `${target?.name || group.target_main_jid} / 主对话`;
+    headerName = `${target?.name || group.target_main_jid} / 主会话`;
     targetFolder = target?.folder || group.folder;
     targetJid = group.target_main_jid;
   } else {
-    headerName = `${findGroupNameByFolder(group.folder)} / 主对话`;
+    headerName = `${findGroupNameByFolder(group.folder)} / 主会话`;
     targetFolder = group.folder;
     targetJid = findWebJidForFolder(group.folder) ?? undefined;
   }
@@ -2705,7 +2705,6 @@ async function runAgent(
   error?: string;
 }> {
   const isHome = !!group.is_home;
-  // For the agent-runner: isMain means this is an admin home container (full privileges)
   const isAdminHome = isHome && group.folder === MAIN_GROUP_FOLDER;
   const sessionId = sessions[group.folder];
 
@@ -2784,7 +2783,6 @@ async function runAgent(
           sessionId,
           groupFolder: group.folder,
           chatJid,
-          isMain: isAdminHome,
           isHome,
           isAdminHome,
           images,
@@ -2804,7 +2802,6 @@ async function runAgent(
           sessionId,
           groupFolder: group.folder,
           chatJid,
-          isMain: isAdminHome,
           isHome,
           isAdminHome,
           images,
@@ -3842,7 +3839,6 @@ async function processAgentConversation(
       sessionId,
       groupFolder: effectiveGroup.folder,
       chatJid,
-      isMain: isAdminHome,
       isHome,
       isAdminHome,
       agentId,
