@@ -108,14 +108,21 @@ export function initDatabase(): void {
   db.pragma('journal_mode = WAL');
   db.pragma('busy_timeout = 5000');
 
-  // Custom function: word-boundary prefix match.
-  // Returns 1 if `term` appears at a word boundary in `content` (not mid-word).
-  // e.g. "kill" matches "kill 2035" and "被 kill" but NOT "skill" or "skills".
-  //      "e33" matches "e33ecs" and "成e33ecs" (CJK→Latin is a word boundary).
+  // Custom function: word-boundary match with digit↔letter transition support.
+  // Returns 1 if `term` appears at a "semantic boundary" in `content`:
+  //   - standard word boundary (\b): whitespace, punctuation, CJK↔Latin, start/end
+  //   - digit↔letter transition: "e33ecs" has a boundary between '3' and 'e'
+  // e.g. "kill" matches "kill process" but NOT "skill" (letter→letter, no boundary).
+  //      "ecs" matches "e33ecs" (digit→letter transition).
+  //      "e33" matches "e33ecs" (\b at start) and "成e33" (CJK→Latin \b).
   db.function('word_match', (content: unknown, term: unknown) => {
     if (typeof content !== 'string' || typeof term !== 'string') return 0;
     const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const regex = new RegExp(`\\b${escaped}`, 'i');
+    // Match at: word boundary OR digit↔letter transition
+    const regex = new RegExp(
+      `(?:\\b|(?<=[0-9])(?=[a-zA-Z])|(?<=[a-zA-Z])(?=[0-9]))${escaped}`,
+      'i',
+    );
     return regex.test(content) ? 1 : 0;
   });
   db.exec(`
