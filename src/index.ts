@@ -5104,6 +5104,38 @@ async function ensureDockerRunning(): Promise<void> {
     throw new Error('Docker is required but not running');
   }
 
+  // Kill orphaned host agent-runner processes from previous runs
+  try {
+    const { stdout: psOut } = await execFileAsync('pgrep', [
+      '-f',
+      'node.*container/agent-runner/dist/index\\.js',
+    ], { timeout: 5000 });
+    const pids = (typeof psOut === 'string' ? psOut : String(psOut))
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map(Number)
+      .filter((pid) => pid !== process.pid && !isNaN(pid));
+    for (const pid of pids) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        /* already dead */
+      }
+    }
+    if (pids.length > 0) {
+      logger.info(
+        { count: pids.length, pids },
+        'Killed orphaned host agent-runner processes',
+      );
+    }
+  } catch (err: any) {
+    // pgrep exits 1 when no matches — that's fine
+    if (err?.code !== 1) {
+      logger.warn({ err }, 'Failed to clean up orphaned host processes');
+    }
+  }
+
   // Kill and clean up orphaned happyclaw containers from previous runs
   try {
     const { stdout } = await execFileAsync(
