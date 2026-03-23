@@ -19,6 +19,7 @@ import path from 'path';
 import { query, HookCallback, PreCompactHookInput, createSdkMcpServer, PermissionMode } from '@anthropic-ai/claude-agent-sdk';
 import { detectImageMimeTypeFromBase64Strict } from './image-detector.js';
 import { createPostToolUseReviewHook, createStopReviewHook } from './review-hooks.js';
+import type { ReviewContextConfig } from './review-context/index.js';
 import { createGatekeeperHook, createLoopRecoveryHook } from './safety-hooks.js';
 
 import type {
@@ -841,6 +842,16 @@ async function runQuery(
   // QUERY_ACTIVITY_TIMEOUT_MS, the API call is likely hung.  Force an interrupt
   // so the session loop can retry with the same prompt.
   const QUERY_ACTIVITY_TIMEOUT_MS = 300_000;
+  // Hard timeout for a single tool call — if a tool (e.g. Bash running npx)
+  // blocks for longer than this, force interrupt regardless.  This prevents
+  // hung subprocesses (npx download stalls, unresponsive APIs) from freezing
+  // the entire agent indefinitely.
+  // Default 20 minutes: generous enough for long-running tools (GPT delegate_task,
+  // complex builds) but catches truly stuck processes (npx download stalls).
+  const TOOL_CALL_HARD_TIMEOUT_MS = parseInt(
+    process.env.TOOL_CALL_HARD_TIMEOUT_MS || '1200000', 10,
+  );
+  let toolCallStartedAt: number | null = null;
   let lastEventAt = Date.now();
   let queryActivityTimer: ReturnType<typeof setTimeout> | null = null;
   const resetQueryActivityTimer = () => {
@@ -855,14 +866,19 @@ async function runQuery(
         resetQueryActivityTimer();
         return;
       }
-      // Don't interrupt while a tool call (e.g. MCP memory_query) is executing —
-      // it blocks the SDK iterator but is doing real work.
+      // Allow active tool calls to continue, but enforce a hard timeout to
+      // prevent indefinite hangs (e.g. npx stuck downloading packages).
       if (processor.hasActiveToolCall) {
-        log(`Activity timeout skipped: tool call in progress, extending timer`);
-        resetQueryActivityTimer();
-        return;
+        const elapsed = toolCallStartedAt ? Date.now() - toolCallStartedAt : 0;
+        if (elapsed < TOOL_CALL_HARD_TIMEOUT_MS) {
+          log(`Activity timeout skipped: tool call in progress (${Math.round(elapsed / 1000)}s), extending timer`);
+          resetQueryActivityTimer();
+          return;
+        }
+        log(`Tool call hard timeout: tool has been running for ${Math.round(elapsed / 1000)}s (limit ${TOOL_CALL_HARD_TIMEOUT_MS / 1000}s), forcing interrupt`);
+      } else {
+        log(`Query activity timeout: no SDK events for ${QUERY_ACTIVITY_TIMEOUT_MS}ms, forcing interrupt`);
       }
-      log(`Query activity timeout: no SDK events for ${QUERY_ACTIVITY_TIMEOUT_MS}ms, forcing interrupt`);
       interruptedDuringQuery = true;
       waitingForBackgroundTasks = false;
       queryRef?.interrupt().catch((err: unknown) => log(`Activity timeout interrupt failed: ${err}`));
@@ -1070,6 +1086,12 @@ async function runQuery(
   // Non-home containers discover it via filesystem (readonly mount) without systemPrompt injection.
   const extraDirs = [WORKSPACE_GLOBAL, WORKSPACE_MEMORY];
 
+  // Service context config for GPT review hooks (env-driven, disabled by default)
+  const reviewContextRoot = process.env.REVIEW_CONTEXT_ROOT;
+  const reviewContextConfig: ReviewContextConfig | undefined = reviewContextRoot
+    ? { provider: 'pack-file', options: { root: reviewContextRoot } }
+    : undefined;
+
   try {
     const q = query({
     prompt: stream,
@@ -1094,12 +1116,13 @@ async function runQuery(
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(isHome, isAdminHome, containerInput.groupFolder, containerInput.userId)] }],
         PreToolUse: [{ hooks: [createGatekeeperHook(log)] }],
-        PostToolUse: [{ hooks: [createPostToolUseReviewHook(WORKSPACE_IPC, path.join(WORKSPACE_IPC, 'messages'), containerInput.chatJid, log), createLoopRecoveryHook(log)] }],
+        PostToolUse: [{ hooks: [createPostToolUseReviewHook(WORKSPACE_IPC, path.join(WORKSPACE_IPC, 'messages'), containerInput.chatJid, log, reviewContextConfig), createLoopRecoveryHook(log)] }],
         Stop: [{ hooks: [createStopReviewHook(
           WORKSPACE_IPC,
           path.join(WORKSPACE_IPC, 'messages'),
           containerInput.chatJid,
           log,
+          reviewContextConfig,
         )] }],
       },
       agents: PREDEFINED_AGENTS,
@@ -1109,6 +1132,13 @@ async function runQuery(
     for await (const message of q) {
     // Reset activity watchdog on every SDK event
     resetQueryActivityTimer();
+    // Track tool call start time for hard timeout enforcement:
+    // update timestamp when a tool call becomes active, clear when it ends.
+    if (processor.hasActiveToolCall && toolCallStartedAt === null) {
+      toolCallStartedAt = Date.now();
+    } else if (!processor.hasActiveToolCall) {
+      toolCallStartedAt = null;
+    }
     // 流式事件处理
     if (message.type === 'stream_event') {
       processor.processStreamEvent(message as any);
@@ -1212,13 +1242,22 @@ async function runQuery(
       if (channels.length > 0) {
         log(`Context compacted, injecting routing reminder for channels: ${channels.join(', ')}`);
         stream.push(
-          `[系统提示] 上下文已压缩。重要提醒：你的文字输出（stdout）仅在 Web 界面可见。` +
+          `[系统提示] 上下文已压缩。重要提醒：\n` +
+          `1. 你的文字输出（stdout）仅在 Web 界面可见。` +
           `你近期与以下 IM 渠道有活跃对话：${channels.join('、')}。` +
           `回复这些渠道的用户时，必须使用 send_message(channel="渠道值") 工具，否则他们收不到你的消息。` +
-          `请检查消息的 source 属性确定 channel 值。`,
+          `请检查消息的 source 属性确定 channel 值。\n` +
+          `2. 压缩摘要中包含的用户消息是压缩前已经处理过的历史消息，你已经回复过了。` +
+          `不要重复回复这些消息。只有压缩后通过 IPC 新到达的消息才需要回复。` +
+          `如果压缩后没有新消息到达，保持安静等待即可。`,
         );
       } else {
         log('Context compacted, no IM channels tracked');
+        stream.push(
+          `[系统提示] 上下文已压缩。注意：压缩摘要中包含的用户消息是压缩前已经处理过的历史消息，` +
+          `你已经回复过了。不要重复回复这些消息。只有压缩后新到达的消息才需要回复。` +
+          `如果压缩后没有新消息到达，保持安静等待即可。`,
+        );
       }
     }
 

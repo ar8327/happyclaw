@@ -32,6 +32,8 @@ import {
   bashCommandWritesFiles,
   extractBashAffectedPaths,
 } from './risk-rules.js';
+import { createProvider, assembleContext } from './review-context/index.js';
+import type { ReviewContextConfig } from './review-context/index.js';
 
 // ─── Types ─────────────────────────────────────────────────
 
@@ -341,6 +343,7 @@ async function callGptReview(
   creds: LlmCredentials,
   classification: ChangeClassification,
   mutations: MutationRecord[],
+  serviceContext?: string,
 ): Promise<string> {
   const riskInfo = classification.riskSignals.length > 0
     ? `\n风险信号：\n${classification.riskSignals.map(s => `  - ${s}`).join('\n')}`
@@ -348,7 +351,10 @@ async function callGptReview(
 
   const diffContent = buildDiffSection(mutations);
 
-  const prompt = `请评审以下代码变更：
+  // Inject service context before the review prompt if available
+  const contextPrefix = serviceContext ? `${serviceContext}\n\n` : '';
+
+  const prompt = `${contextPrefix}请评审以下代码变更：
 
 变更统计：
 - 文件数：${classification.totalFiles}
@@ -389,6 +395,78 @@ ${diffContent}
   });
 }
 
+// ─── Service Context Resolution ──────────────────────────
+
+/**
+ * Try to resolve service context for the changed files.
+ * Returns assembled context block string, or empty string if unavailable.
+ * Never throws — fails silently with logging.
+ */
+async function resolveServiceContext(
+  mutations: MutationRecord[],
+  contextConfig: ReviewContextConfig | undefined,
+  log: (msg: string) => void,
+): Promise<string> {
+  if (!contextConfig || contextConfig.provider === 'null') return '';
+
+  try {
+    const provider = createProvider(contextConfig);
+    const changedFiles = mutations.map(m => m.filePath).filter(Boolean);
+    if (changedFiles.length === 0) return '';
+
+    // Infer repoPath from common prefix of changed files
+    const firstFile = changedFiles[0];
+    const repoPath = findRepoRoot(firstFile);
+    if (!repoPath) return '';
+
+    // Make changedFiles relative to repoPath
+    const relativeFiles = changedFiles
+      .map(f => f.startsWith(repoPath) ? f.substring(repoPath.length + 1) : f)
+      .map(f => f.replace(/\\/g, '/'));
+
+    const timeout = contextConfig.options?.timeout ?? 5000;
+    const output = await Promise.race([
+      provider.provide({ repoPath, changedFiles: relativeFiles }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('timeout')), timeout)
+      ),
+    ]);
+
+    // Log diagnostics
+    for (const d of output.provider_diagnostics) {
+      if (d.level !== 'info') {
+        log(`[review-context] ${d.level}: ${d.code} — ${d.message}`);
+      }
+    }
+
+    if (output.status === 'matched') {
+      log(`[review-context] status=matched service=${output.matched_service} injectable=${output.injectable} gen=${output.generation_id} freshness=${output.provenance?.freshness}`);
+    } else if (output.status !== 'not_configured' && output.status !== 'not_applicable') {
+      log(`[review-context] status=${output.status} reason=${output.reason_code ?? 'n/a'}`);
+    }
+
+    const maxTokens = contextConfig.options?.maxTokens ?? 600;
+    return assembleContext(output, maxTokens);
+  } catch (err) {
+    log(`[review-context] error: ${err instanceof Error ? err.message : String(err)}`);
+    return '';
+  }
+}
+
+/** Walk up from a file path to find a directory containing go.mod or pom.xml. */
+function findRepoRoot(filePath: string): string | null {
+  let dir = path.dirname(filePath);
+  for (let i = 0; i < 20; i++) {
+    if (fs.existsSync(path.join(dir, 'go.mod')) || fs.existsSync(path.join(dir, 'pom.xml'))) {
+      return dir;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
 // ─── Incremental Review ───────────────────────────────────
 
 /**
@@ -401,6 +479,7 @@ async function tryIncrementalReview(
   ipcOutputDir: string,
   chatJid: string,
   log: (msg: string) => void,
+  contextConfig?: ReviewContextConfig,
 ): Promise<boolean> {
   const mutations = loadMutations(sessionDir);
   if (mutations.length === 0) return false;
@@ -413,7 +492,8 @@ async function tryIncrementalReview(
   log(`[review-incremental] Triggered: ${classification.totalFiles} files, +${classification.totalLinesAdded}/-${classification.totalLinesRemoved}`);
 
   try {
-    const reviewText = await callGptReview(creds, classification, mutations);
+    const serviceContext = await resolveServiceContext(mutations, contextConfig, log);
+    const reviewText = await callGptReview(creds, classification, mutations, serviceContext || undefined);
     const text = `🔴 **GPT 增量评审** (重大变更: ${classification.totalFiles}文件, +${classification.totalLinesAdded}/-${classification.totalLinesRemoved})\n\n${reviewText}`;
     writeIpcMessage(ipcOutputDir, chatJid, text);
     log(`[review-incremental] Review completed`);
@@ -438,6 +518,7 @@ export function createPostToolUseReviewHook(
   ipcOutputDir?: string,
   chatJid?: string,
   log?: (msg: string) => void,
+  contextConfig?: ReviewContextConfig,
 ): HookCallback {
   const creds = getLlmCredentials();
   let incrementalReviewPending = false;
@@ -484,7 +565,7 @@ export function createPostToolUseReviewHook(
       // Check every 5 mutations if we should trigger incremental review
       const allMutations = loadMutations(sessionDir);
       if (allMutations.length >= 5 && hasLlmCredentials(creds)) {
-        const triggered = await tryIncrementalReview(creds, sessionDir, ipcOutputDir, chatJid, log);
+        const triggered = await tryIncrementalReview(creds, sessionDir, ipcOutputDir, chatJid, log, contextConfig);
         if (triggered) {
           incrementalReviewPending = false;
           return {};
@@ -506,6 +587,7 @@ export function createStopReviewHook(
   ipcOutputDir: string,
   chatJid: string,
   log: (msg: string) => void,
+  contextConfig?: ReviewContextConfig,
 ): HookCallback {
   const creds = getLlmCredentials();
 
@@ -531,7 +613,8 @@ export function createStopReviewHook(
     }
 
     try {
-      const reviewText = await callGptReview(creds, classification, mutations);
+      const serviceContext = await resolveServiceContext(mutations, contextConfig, log);
+      const reviewText = await callGptReview(creds, classification, mutations, serviceContext || undefined);
 
       const levelEmoji = classification.level === 'major' ? '🔴' : '🟡';
       const levelLabel = classification.level === 'major' ? '重大' : '中等';
