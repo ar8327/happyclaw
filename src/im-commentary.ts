@@ -40,9 +40,10 @@ export async function sendToolCommentary(opts: {
   toolName: string;
   toolInputSummary?: string;
   isNested: boolean;
+  useGpt: boolean;
   sendMessage: (text: string) => Promise<void>;
 }): Promise<void> {
-  const { folder, toolName, toolInputSummary, isNested, sendMessage } = opts;
+  const { folder, toolName, toolInputSummary, isNested, useGpt, sendMessage } = opts;
 
   // Only comment on top-level tool calls
   if (isNested) return;
@@ -57,7 +58,7 @@ export async function sendToolCommentary(opts: {
   lastCommentaryTime.set(folder, now);
 
   try {
-    const explanation = await generateExplanation(toolName, toolInputSummary);
+    const explanation = await generateExplanation(toolName, toolInputSummary, useGpt);
     if (explanation) {
       await sendMessage(`🔧 ${explanation}`);
     }
@@ -69,18 +70,21 @@ export async function sendToolCommentary(opts: {
 const PROMPT_TEMPLATE = (input: string) =>
   `用中文一句话（不超过20字）解释正在做什么：\n${input}\n\n只输出解释文字，不要任何多余内容。`;
 
-/** Generate explanation: try GPT → Haiku → heuristic fallback. */
+/** Generate explanation: GPT (if useGpt) → Haiku → heuristic fallback. */
 async function generateExplanation(
   toolName: string,
   inputSummary?: string,
+  useGpt = false,
 ): Promise<string | null> {
   const input = inputSummary
     ? `工具: ${toolName}\n输入: ${inputSummary.slice(0, 300)}`
     : `工具: ${toolName}`;
 
-  // 1. Try GPT via Codex API (ChatGPT subscription, free)
-  const gptResult = await tryGpt(PROMPT_TEMPLATE(input));
-  if (gptResult) return gptResult;
+  if (useGpt) {
+    // 1. Try GPT via Codex API (ChatGPT subscription, free)
+    const gptResult = await tryGpt(PROMPT_TEMPLATE(input));
+    if (gptResult) return gptResult;
+  }
 
   // 2. Try Haiku (Anthropic API key)
   const haikuResult = await tryHaiku(PROMPT_TEMPLATE(input));

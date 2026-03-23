@@ -1379,6 +1379,8 @@ configRoutes.get('/user-im/feishu', authMiddleware, (c) => {
   try {
     const config = getUserFeishuConfig(user.id);
     const connected = deps?.isUserFeishuConnected?.(user.id) ?? false;
+    const openAiConfig = getOpenAIProviderConfig();
+    const hasGptProvider = !!(openAiConfig?.oauthTokens?.accessToken || openAiConfig?.apiKey);
     if (!config) {
       return c.json({
         appId: '',
@@ -1390,6 +1392,8 @@ configRoutes.get('/user-im/feishu', authMiddleware, (c) => {
         replyThreadingMode: 'auto',
         streamingCard: false,
         imCommentary: false,
+        imCommentaryUseGpt: false,
+        hasGptProvider,
       });
     }
     return c.json({
@@ -1398,6 +1402,8 @@ configRoutes.get('/user-im/feishu', authMiddleware, (c) => {
       replyThreadingMode: config.replyThreadingMode ?? 'auto',
       streamingCard: config.streamingCard ?? false,
       imCommentary: config.imCommentary ?? false,
+      imCommentaryUseGpt: config.imCommentaryUseGpt ?? false,
+      hasGptProvider,
     });
   } catch (err) {
     logger.error({ err }, 'Failed to load user Feishu config');
@@ -1432,7 +1438,7 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
   }
 
   const current = getUserFeishuConfig(user.id);
-  const next: { appId: string; appSecret: string; enabled: boolean; updatedAt: string | null; replyThreadingMode?: 'auto' | 'agent'; streamingCard?: boolean; imCommentary?: boolean } = {
+  const next: { appId: string; appSecret: string; enabled: boolean; updatedAt: string | null; replyThreadingMode?: 'auto' | 'agent'; streamingCard?: boolean; imCommentary?: boolean; imCommentaryUseGpt?: boolean } = {
     appId: current?.appId || '',
     appSecret: current?.appSecret || '',
     enabled: current?.enabled ?? true,
@@ -1440,6 +1446,7 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
     replyThreadingMode: current?.replyThreadingMode ?? 'auto',
     streamingCard: current?.streamingCard ?? false,
     imCommentary: current?.imCommentary ?? false,
+    imCommentaryUseGpt: current?.imCommentaryUseGpt ?? false,
   };
   if (typeof validation.data.appId === 'string') {
     const appId = validation.data.appId.trim();
@@ -1466,6 +1473,9 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
   if (typeof validation.data.imCommentary === 'boolean') {
     next.imCommentary = validation.data.imCommentary;
   }
+  if (typeof validation.data.imCommentaryUseGpt === 'boolean') {
+    next.imCommentaryUseGpt = validation.data.imCommentaryUseGpt;
+  }
 
   try {
     const saved = saveUserFeishuConfig(user.id, {
@@ -1475,6 +1485,7 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
       replyThreadingMode: next.replyThreadingMode,
       streamingCard: next.streamingCard,
       imCommentary: next.imCommentary,
+      imCommentaryUseGpt: next.imCommentaryUseGpt,
     });
 
     // Hot-reload: reconnect user's Feishu channel
@@ -1496,6 +1507,7 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
       replyThreadingMode: saved.replyThreadingMode ?? 'auto',
       streamingCard: saved.streamingCard ?? false,
       imCommentary: saved.imCommentary ?? false,
+      imCommentaryUseGpt: saved.imCommentaryUseGpt ?? false,
     });
   } catch (err) {
     const message =

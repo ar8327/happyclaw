@@ -387,6 +387,7 @@ export const FeishuConfigSchema = z
     replyThreadingMode: z.enum(['auto', 'agent']).optional(),
     streamingCard: z.boolean().optional(),
     imCommentary: z.boolean().optional(),
+    imCommentaryUseGpt: z.boolean().optional(),
   })
   .refine(
     (data) =>
@@ -396,7 +397,8 @@ export const FeishuConfigSchema = z
       typeof data.enabled === 'boolean' ||
       typeof data.replyThreadingMode === 'string' ||
       typeof data.streamingCard === 'boolean' ||
-      typeof data.imCommentary === 'boolean',
+      typeof data.imCommentary === 'boolean' ||
+      typeof data.imCommentaryUseGpt === 'boolean',
     { message: 'At least one config field must be provided' },
   );
 

@@ -18,6 +18,8 @@ interface UserFeishuConfig {
   replyThreadingMode?: 'auto' | 'agent';
   streamingCard?: boolean;
   imCommentary?: boolean;
+  imCommentaryUseGpt?: boolean;
+  hasGptProvider?: boolean;
 }
 
 interface OAuthStatus {
@@ -96,6 +98,7 @@ export function FeishuChannelCard({ setNotice, setError }: FeishuChannelCardProp
   const [savingThreadingMode, setSavingThreadingMode] = useState(false);
   const [savingStreamingCard, setSavingStreamingCard] = useState(false);
   const [savingImCommentary, setSavingImCommentary] = useState(false);
+  const [savingImCommentaryUseGpt, setSavingImCommentaryUseGpt] = useState(false);
 
   const enabled = config?.enabled ?? false;
 
@@ -405,7 +408,7 @@ export function FeishuChannelCard({ setNotice, setError }: FeishuChannelCardProp
                 <div className="flex-1">
                   <h4 className="text-xs font-semibold text-slate-700">IM 实时解说</h4>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    开启后在 Agent 执行每个工具调用时，自动向飞书发送一条自然语言说明（由 Haiku 生成，8 秒节流）。
+                    开启后在 Agent 执行每个工具调用时，自动向飞书发送一条自然语言说明（8 秒节流）。
                   </p>
                 </div>
                 <ToggleSwitch
@@ -430,6 +433,37 @@ export function FeishuChannelCard({ setNotice, setError }: FeishuChannelCardProp
                   aria-label="IM 实时解说"
                 />
               </div>
+              {config?.imCommentary && config?.hasGptProvider && (
+                <div className="flex items-center justify-between gap-4 mt-2 pl-3 border-l-2 border-slate-200">
+                  <div className="flex-1">
+                    <h4 className="text-xs font-medium text-slate-600">使用 GPT 生成解说</h4>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      关闭时使用 Haiku（省 Claude 额度），开启时使用 GPT（省 ChatGPT 额度）。
+                    </p>
+                  </div>
+                  <ToggleSwitch
+                    checked={config?.imCommentaryUseGpt ?? false}
+                    disabled={savingImCommentaryUseGpt}
+                    onChange={async (v) => {
+                      setSavingImCommentaryUseGpt(true);
+                      setNotice(null);
+                      setError(null);
+                      try {
+                        const data = await api.put<UserFeishuConfig>('/api/config/user-im/feishu', {
+                          imCommentaryUseGpt: v,
+                        });
+                        setConfig(data);
+                        setNotice(`解说模型已切换为 ${v ? 'GPT' : 'Haiku'}`);
+                      } catch (err) {
+                        setError(getErrorMessage(err, '切换解说模型失败'));
+                      } finally {
+                        setSavingImCommentaryUseGpt(false);
+                      }
+                    }}
+                    aria-label="使用 GPT 生成解说"
+                  />
+                </div>
+              )}
             </div>
           </>
         )}

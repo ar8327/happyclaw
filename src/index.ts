@@ -2015,6 +2015,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               toolName: _se.toolName ?? '',
               toolInputSummary: _se.toolInputSummary,
               isNested: _se.isNested ?? false,
+              useGpt: feishuConfig?.imCommentaryUseGpt ?? false,
               sendMessage: (text) => imManager.sendMessage(sourceChannel, text).then(() => undefined),
             }).catch(() => {});
           }
