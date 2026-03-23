@@ -1,13 +1,21 @@
 /**
  * IM Commentary — sends human-readable tool-call explanations to IM channels
- * during long-running agent tasks. Uses Claude Haiku as a sidecar to translate
- * raw tool calls into natural language.
+ * during long-running agent tasks.
+ *
+ * Model priority:
+ *   1. GPT via Codex API (ChatGPT subscription, no marginal cost) — preferred
+ *   2. Claude Haiku (Anthropic API key fallback)
+ *   3. Heuristic formatting (no model, always available)
  *
  * Fire-and-forget: all public functions are async but callers should NOT await.
  * Rate-limited to prevent IM spam.
  */
 
 import { logger } from './logger.js';
+import { getOpenAIProviderConfig } from './runtime-config.js';
+
+const CODEX_API_URL = 'https://chatgpt.com/backend-api/codex/responses';
+const COMMENTARY_MODEL = 'gpt-5.4-mini';
 
 /** Minimum seconds between commentary messages per workspace folder. */
 const RATE_LIMIT_SECONDS = 8;
@@ -58,54 +66,113 @@ export async function sendToolCommentary(opts: {
   }
 }
 
-/** Call Claude Haiku to generate a human-readable explanation. */
+const PROMPT_TEMPLATE = (input: string) =>
+  `用中文一句话（不超过20字）解释正在做什么：\n${input}\n\n只输出解释文字，不要任何多余内容。`;
+
+/** Generate explanation: try GPT → Haiku → heuristic fallback. */
 async function generateExplanation(
   toolName: string,
   inputSummary?: string,
 ): Promise<string | null> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return formatFallback(toolName, inputSummary);
-
   const input = inputSummary
-    ? `工具: ${toolName}\n输入摘要: ${inputSummary.slice(0, 300)}`
+    ? `工具: ${toolName}\n输入: ${inputSummary.slice(0, 300)}`
     : `工具: ${toolName}`;
 
-  const body = {
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: 60,
-    messages: [
-      {
-        role: 'user',
-        content: `用中文一句话（不超过20字）解释正在做什么：\n${input}\n\n只输出解释文字，不要标点以外的任何内容。`,
-      },
-    ],
-  };
+  // 1. Try GPT via Codex API (ChatGPT subscription, free)
+  const gptResult = await tryGpt(PROMPT_TEMPLATE(input));
+  if (gptResult) return gptResult;
 
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(5000), // 5s timeout
-  });
+  // 2. Try Haiku (Anthropic API key)
+  const haikuResult = await tryHaiku(PROMPT_TEMPLATE(input));
+  if (haikuResult) return haikuResult;
 
-  if (!response.ok) {
-    logger.debug({ status: response.status }, 'im-commentary: API error, using fallback');
-    return formatFallback(toolName, inputSummary);
-  }
-
-  const data = (await response.json()) as {
-    content: Array<{ type: string; text: string }>;
-  };
-
-  const text = data.content?.find((c) => c.type === 'text')?.text?.trim();
-  return text || formatFallback(toolName, inputSummary);
+  // 3. Heuristic fallback
+  return formatFallback(toolName, inputSummary);
 }
 
-/** Simple heuristic fallback when API is unavailable. */
+/** Call GPT via Codex API (ChatGPT subscription). */
+async function tryGpt(prompt: string): Promise<string | null> {
+  try {
+    const config = getOpenAIProviderConfig();
+    const accessToken = config.oauthTokens?.accessToken;
+    if (!accessToken) return null;
+
+    const body = {
+      model: COMMENTARY_MODEL,
+      instructions: '你是一个简洁的技术解说员，只输出一句中文说明。',
+      input: [{ type: 'message', role: 'user', content: prompt }],
+      tools: [],
+      stream: false,
+      store: false,
+      reasoning: { effort: 'none' },
+    };
+
+    const response = await fetch(CODEX_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(8000),
+    });
+
+    if (!response.ok) {
+      logger.debug({ status: response.status }, 'im-commentary: GPT API error');
+      return null;
+    }
+
+    const data = (await response.json()) as {
+      output?: Array<{ type: string; content?: Array<{ type: string; text: string }> }>;
+    };
+
+    const text = data.output
+      ?.find((o) => o.type === 'message')
+      ?.content?.find((c) => c.type === 'output_text')
+      ?.text?.trim();
+
+    return text || null;
+  } catch (err) {
+    logger.debug({ err }, 'im-commentary: GPT call failed');
+    return null;
+  }
+}
+
+/** Call Claude Haiku (Anthropic API key fallback). */
+async function tryHaiku(prompt: string): Promise<string | null> {
+  try {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return null;
+
+    const body = {
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 60,
+      messages: [{ role: 'user', content: prompt }],
+    };
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!response.ok) return null;
+
+    const data = (await response.json()) as {
+      content: Array<{ type: string; text: string }>;
+    };
+    return data.content?.find((c) => c.type === 'text')?.text?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Simple heuristic fallback when no model is available. */
 function formatFallback(toolName: string, inputSummary?: string): string {
   const short = inputSummary ? inputSummary.slice(0, 60) : '';
   if (toolName === 'Bash') return short ? `执行命令: ${short}` : '执行 Shell 命令';
