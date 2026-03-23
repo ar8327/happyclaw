@@ -3603,7 +3603,10 @@ async function processTaskIpc(
         try {
           let resolvedPath: string;
           if (path.isAbsolute(data.filePath)) {
-            // Absolute paths are allowed (agent already verified the file exists)
+            // Absolute paths are allowed intentionally: agents need to send files
+            // from outside the workspace (e.g. shared expression images in user-global/).
+            // No additional path restriction is enforced here because agents already
+            // have full filesystem read access via Bash/Read tools.
             resolvedPath = path.resolve(data.filePath);
           } else {
             // Relative paths resolved against source group directory
