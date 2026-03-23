@@ -106,6 +106,14 @@ async function* parseSSE(reader: ReadableStreamDefaultReader<Uint8Array>): Async
   }
 }
 
+// ─── Timeouts ───────────────────────────────────────────────
+
+/** Max time to wait for the initial HTTP response (connection + first byte). */
+const FETCH_TIMEOUT_MS = 60_000; // 60 seconds
+
+/** Max time between SSE data chunks before we consider the stream stalled. */
+const SSE_STALL_TIMEOUT_MS = 5 * 60_000; // 5 minutes
+
 // ─── Client ─────────────────────────────────────────────────
 
 const CODEX_API_URL = 'https://chatgpt.com/backend-api/codex/responses';
@@ -151,14 +159,29 @@ export async function codexStreamRequest(
     }
   }
 
-  const response = await fetch(CODEX_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify(body),
-  });
+  // AbortController with timeout for the initial fetch
+  const fetchController = new AbortController();
+  const fetchTimer = setTimeout(() => fetchController.abort(), FETCH_TIMEOUT_MS);
+
+  let response: Response;
+  try {
+    response = await fetch(CODEX_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(body),
+      signal: fetchController.signal,
+    });
+  } catch (err: unknown) {
+    clearTimeout(fetchTimer);
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error(`Codex API fetch timeout after ${FETCH_TIMEOUT_MS / 1000}s`);
+    }
+    throw err;
+  }
+  clearTimeout(fetchTimer);
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => '');
@@ -178,7 +201,22 @@ export async function codexStreamRequest(
   // Track in-progress function calls by index/id
   const pendingCalls = new Map<string, { id: string; callId: string; name: string; args: string }>();
 
+  // SSE stall detection: abort if no data received for SSE_STALL_TIMEOUT_MS
+  let sseStallTimer: ReturnType<typeof setTimeout> | null = null;
+  const sseController = new AbortController();
+
+  const resetStallTimer = () => {
+    if (sseStallTimer) clearTimeout(sseStallTimer);
+    sseStallTimer = setTimeout(() => {
+      log(`SSE stall timeout: no data for ${SSE_STALL_TIMEOUT_MS / 1000}s, aborting stream`);
+      sseController.abort();
+      reader.cancel().catch(() => {});
+    }, SSE_STALL_TIMEOUT_MS);
+  };
+  resetStallTimer();
+
   for await (const sse of parseSSE(reader)) {
+    resetStallTimer();
     try {
       const data = JSON.parse(sse.data);
 
@@ -296,6 +334,14 @@ export async function codexStreamRequest(
     } catch {
       // Skip unparseable SSE data lines
     }
+  }
+
+  if (sseStallTimer) clearTimeout(sseStallTimer);
+
+  // If we exited the loop due to stall abort (not a normal stream end),
+  // check if we got any useful output; otherwise throw
+  if (sseController.signal.aborted && !textBuffer && functionCalls.length === 0) {
+    throw new Error(`Codex SSE stream stalled (no data for ${SSE_STALL_TIMEOUT_MS / 1000}s) with no output`);
   }
 
   return { text: textBuffer, functionCalls, outputItems, usage: usageData };

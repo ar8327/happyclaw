@@ -447,7 +447,10 @@ async function runChatCompletionsMode(
     process.exit(1);
   }
 
-  const clientOptions: ConstructorParameters<typeof OpenAI>[0] = { apiKey };
+  const clientOptions: ConstructorParameters<typeof OpenAI>[0] = {
+    apiKey,
+    timeout: 5 * 60_000,  // 5 min request timeout (prevents indefinite hangs)
+  };
   if (process.env.OPENAI_BASE_URL) {
     clientOptions.baseURL = process.env.OPENAI_BASE_URL;
   }
