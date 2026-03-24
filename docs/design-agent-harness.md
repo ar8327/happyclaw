@@ -1,18 +1,18 @@
 # HappyClaw Agent Harness 设计稿
 
-> 状态：草案 v2（SDK 方案）
+> 状态：草案 v4（Codex SDK 方案，评审修订版）
 > 日期：2026-03-24
 
 ## 1. 目标
 
 六件事：
 
-1. **Tool 梳理**：飞书文档等平台 tool → 可插拔 skill；ask_model/delegate_task → 合并为可指定 agent 的通用 skill；核心 tool → MCP server
-2. **Agent Harness**：agent-runner + agent-runner-openai 统一为 agent-harness，底层通过 SDK Adapter 调用 Claude Agent SDK / OpenAI Agents SDK
+1. **Tool 梳理**：飞书文档等平台 tool → 可插拔 skill；ask_model/delegate_task → 合并为 cross-model MCP tool（可指定 agent/model）；核心 tool → MCP server
+2. **Agent Harness**：agent-runner + agent-runner-openai 统一为 agent-harness，底层通过 SDK Adapter 调用 Claude Agent SDK / Codex SDK
 3. **凭据管理**：OAuth 校验/刷新/存储从各模块抽出，统一为独立的 Credential Manager
-4. **Context Engine**：上下文注入、compact 策略、token 消耗优化——从 agent runner 独立出来，解决现有 token 消耗过大问题
-5. **Hook 管理**：统一为 SDK 原生 hook 回调，执行记录 → StreamEvent（可视化）
-6. **Memory Agent**：底层改为依赖 agent harness，底层 SDK 可配置
+4. **Context Engine**：拆为两层——harness 侧（上下文注入管道 + token 预算追踪）+ 宿主机侧（压缩触发 + 历史归档）
+5. **Hook 管理**：Claude 侧用 SDK HookCallback（完整能力）；Codex 侧无 Hook 支持（可接受降级），Memory wrapup 通过 token 用量追踪在 Protocol Bridge 侧触发
+6. **Memory Agent**：共享 SdkAdapter 层，保持独立入口和 JSONL 协议
 
 ### 不变的
 
@@ -25,13 +25,14 @@
 
 ### 要变的
 
-- agent-runner（Claude SDK 直调）、agent-runner-openai（OpenAI API 直调）→ agent-harness（统一入口，SDK Adapter 抽象）
-- memory-agent（Claude SDK 直调）→ agent-harness `--mode memory` 复用
-- FeishuDocsPlugin、CrossModelPlugin、DelegatePlugin → skill
+- agent-runner（Claude SDK 直调）、agent-runner-openai（Chat Completions / Codex Responses 直调）→ agent-harness（统一入口，SDK Adapter 抽象）
+- memory-agent（Claude SDK 直调）→ 独立入口，但复用 agent-harness 的 SdkAdapter 层
+- FeishuDocsPlugin → skill（CLI 工具 + SKILL.md）
+- CrossModelPlugin + DelegatePlugin → cross-model MCP tool（保持 in-process，需要凭据访问）
 - HappyClaw tools（messaging/tasks/memory/groups）→ MCP server
-- Hooks → SDK 原生回调（Claude: HookCallback / OpenAI: guardrails + needsApproval）
-- OAuth/API Key 管理 → Credential Manager（独立模块）
-- 上下文管理 → Context Engine（独立模块）
+- Hooks → Claude: SDK HookCallback（完整）/ Codex: 无（降级接受，见 §3.5）
+- OAuth/API Key 管理 → Credential Manager（独立模块，宿主机侧 HTTP 端点供 harness 调用）
+- 上下文管理 → Context Engine（harness 侧注入 + 宿主机侧压缩）
 
 ---
 
@@ -53,57 +54,70 @@
 │  │ stdin→SDK    │  │ 动态生成    │  │ SDK events → │ │
 │  │ SDK→stdout   │  │ system      │  │ StreamEvent  │ │
 │  │ IPC 多轮     │  │ prompt      │  │              │ │
+│  │ 职责清单↓    │  │ token 预算  │  │ EventNorm-   │ │
+│  │              │  │             │  │ alizer 适配  │ │
 │  └─────────────┘  └─────────────┘  └──────────────┘ │
 │                                                       │
 │  ┌─────────────────────────────────────────────────┐ │
 │  │              SDK Adapter                         │ │
 │  │                                                   │ │
 │  │  ┌──────────────┐  ┌───────────────────────┐    │ │
-│  │  │ claude        │  │ openai                 │    │ │
+│  │  │ claude        │  │ codex                  │    │ │
 │  │  │               │  │                        │    │ │
-│  │  │ query({       │  │ run(agent, input, {    │    │ │
-│  │  │   prompt,     │  │   stream: true,        │    │ │
-│  │  │   options     │  │   context,             │    │ │
-│  │  │ })            │  │ })                     │    │ │
-│  │  │               │  │                        │    │ │
-│  │  │ Claude Agent  │  │ OpenAI Agents          │    │ │
-│  │  │ SDK           │  │ SDK                    │    │ │
+│  │  │ query({       │  │ thread.runStreamed(     │    │ │
+│  │  │   prompt,     │  │   prompt               │    │ │
+│  │  │   options     │  │ )                      │    │ │
+│  │  │ })            │  │                        │    │ │
+│  │  │               │  │ Codex SDK              │    │ │
+│  │  │ Claude Agent  │  │ (@openai/codex-sdk)    │    │ │
+│  │  │ SDK           │  │                        │    │ │
+│  │  │               │  │ 内置工具:              │    │ │
+│  │  │ 内置工具:      │  │ Shell execution        │    │ │
+│  │  │ Read/Write/   │  │ File patch             │    │ │
+│  │  │ Edit/Glob/    │  │ Web search             │    │ │
+│  │  │ Grep/Bash     │  │ OS 级沙箱              │    │ │
 │  │  └──────────────┘  └───────────────────────┘    │ │
 │  └─────────────────────────────────────────────────┘ │
 │                                                       │
 │  ┌─────────────────────────────────────────────────┐ │
 │  │          MCP Server（内置，随 harness 启动）      │ │
-│  │                                                   │ │
+│  │                                                   │
 │  │  send_message  │ memory_query   │ schedule_task  │ │
 │  │  send_image    │ memory_remember│ list_tasks     │ │
 │  │  send_file     │                │ pause/resume/  │ │
-│  │                │                │ cancel_task    │ │
+│  │  cross_model   │                │ cancel_task    │ │
 │  │                │                │ register_group │ │
 │  └─────────────────────────────────────────────────┘ │
 │                                                       │
 │  ┌─────────────────────────────────────────────────┐ │
-│  │          Hook Manager                            │ │
+│  │          Hook / Memory Wrapup                    │ │
 │  │                                                   │
-│  │  - Claude: SDK HookCallback 回调（in-process）   │ │
-│  │  - OpenAI: guardrails + needsApproval           │ │
-│  │  - 统一写 StreamEvent 到 IPC（可视化）           │ │
+│  │  Claude:                                         │ │
+│  │    SDK HookCallback（PreToolUse/PostToolUse/     │ │
+│  │    PreCompact/Stop）— 完整能力                   │ │
+│  │                                                   │
+│  │  Codex:                                          │ │
+│  │    无 Hook（可接受降级）                          │ │
+│  │    OS 级沙箱替代 gatekeeper                      │ │
+│  │    Memory wrapup: turn.completed usage 追踪      │ │
+│  │    → 阈值触发归档 + session_wrapup IPC           │ │
 │  └─────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────┘
-         │                              │
-         │ SDK in-process               │ SDK hooks (callbacks)
-         ▼                              ▼
-┌─────────────────┐           ┌──────────────────┐
-│  SDK Runtime     │           │  Hook Callbacks   │
-│  (claude-agent-  │           │  (safety gate,    │
-│   sdk / @openai/ │◄─────────│   loop detect,    │
-│   agents)        │  callback │   code review)    │
-│                  │           └──────────────────┘
-│  Skills:         │
-│  - cross-model   │
-│  - feishu-docs   │
-│  - agent-browser │
-│  - ...           │
-└─────────────────┘
+```
+
+### Memory Agent 架构（共享 SdkAdapter，独立入口）
+
+```
+MemoryAgentManager（宿主机，不变）
+  │ stdin/stdout JSONL（不变）
+  ▼
+memory-agent（独立入口）
+  │
+  ├── JSONL Bridge（读请求、写响应）
+  ├── 调用 SdkAdapter（复用 agent-harness 的 adapter 层）
+  │     Claude: query({ prompt, options })
+  │     Codex:  thread.run(prompt)
+  └── 无 MCP / 无 Hook / 无 Stream 转换
 ```
 
 ---
@@ -114,101 +128,109 @@
 
 **职责**：宿主机 ContainerInput/Output 协议 ↔ SDK Adapter 的输入/输出。
 
-```
-宿主机 stdin → harness 解析 ContainerInput
-  → 首条消息: 调用 SDK（prompt + context）
-  → 后续消息: IPC 轮询 → 通过 MessageStream 追加给 SDK
+#### 完整职责清单
 
-SDK 输出事件 → harness 转换 → OUTPUT_MARKER 包裹写回 stdout
-SDK 完成 → harness 写 ContainerOutput{ status: 'success'|'error' }
+Protocol Bridge 不只是 stdin→SDK→stdout 的管道，它承担了当前 agent-runner 的全部编排职责：
+
+| 职责集群 | 具体内容 | SDK 相关性 |
+|---------|---------|-----------|
+| **I/O 协议** | stdin 解析 ContainerInput、OUTPUT_MARKER 包裹写回 stdout | 无关 |
+| **IPC 管理** | 轮询 input/ 文件夹、处理哨兵文件（_close/_drain/_interrupt）、消息合并 | 无关 |
+| **图片预处理** | 维度检测（PNG/JPEG/GIF/BMP/WebP 头解析）、MIME 校验、超尺寸过滤 | 无关 |
+| **IM 频道追踪** | 从消息提取 source channel、持久化到 .recent-im-channels.json、compact 后注入路由提醒 | 无关 |
+| **活动看门狗** | 5 分钟查询空闲超时、20 分钟工具执行硬超时、卡死检测 | 部分（interrupt 机制不同）|
+| **权限模式切换** | 检测 ExitPlanMode/EnterPlanMode 工具调用，切换 SDK 权限模式 | Claude 特定（Codex 用 sandboxMode）|
+| **会话恢复** | 跟踪 lastResumeUuid（Claude）/ threadId（Codex），防止 fan-out 分支 | SDK 特定 |
+| **错误恢复** | 上下文溢出重试（3 次）、不可恢复 transcript 检测、EPIPE 优雅降级 | SDK 特定 |
+| **Memory Wrapup** | 追踪累计 token 用量，阈值触发归档 + session_wrapup IPC（两侧统一） | 部分（触发源不同）|
+| **MCP 生命周期** | 查询间重建 MCP server（防止 transport 断开）| SDK 特定 |
+| **信号处理** | SIGTERM/SIGINT 优雅关闭、uncaughtException/unhandledRejection 兜底 | 无关 |
+
+**SDK 无关**的部分是 Protocol Bridge 的核心——两个 adapter 共享。**SDK 特定**的部分由各 adapter 内部处理。
+
+#### 多轮对话：两种模式
+
+两个 SDK 的多轮对话模型根本不同，Protocol Bridge 需要分别处理：
+
+**Claude Agent SDK — push 模型**：
+```
+1. harness 创建 MessageStream，push 首条消息
+2. 调用 query({ prompt: stream, ... })，进入 for-await 循环
+3. IPC 消息到达 → stream.push()，注入正在运行的 query（不中断）
+4. _drain → 等 query 当前轮完成后 stream.end()
+5. _interrupt → queryRef.interrupt()
+6. 一个 query() 调用处理整个会话生命周期
 ```
 
-**IPC 多轮流程**：
-
+**Codex SDK — thread-per-turn 模型**：
 ```
-1. harness 读取 ContainerInput，调用 SDK Adapter
-2. SDK 执行首轮，harness 捕获流式事件，逐条写 ContainerOutput
-3. harness 开始轮询 IPC input/
-4. 收到新消息 → 通过 MessageStream.push() 喂给 SDK（无需重启进程）
-5. 收到 _close → 终止 SDK 执行（AbortController）
-6. 收到 _drain → 等 SDK 当前轮完成后终止
-7. 收到 _interrupt → 发送 abort signal 给 SDK
+1. 创建 thread = codex.startThread({ workingDirectory, ... })
+2. 调用 thread.runStreamed(prompt)，for-await 消费事件
+3. run 完成后，阻塞等待下一条 IPC 消息
+4. IPC 消息到达 → 同一 thread 发起新的 thread.runStreamed()
+5. _drain → 等 run 完成后退出
+6. _interrupt → 无直接等价，需等 run 自然完成或 kill 子进程
+7. 每条用户消息触发一次 runStreamed() 调用
 ```
 
-**Claude Agent SDK 适配**：
+**Protocol Bridge 的抽象策略**：Bridge 不试图统一这两种模式，而是对 adapter 暴露两个入口：
+
 ```typescript
-import { query } from '@anthropic-ai/claude-agent-sdk';
+// 方式 A：Claude 适配器使用——一次启动，持续推送
+interface PushAdapter {
+  start(opts: AdapterOptions): AsyncIterable<AdapterEvent>;
+  pushMessage(message: string, images?: Image[]): void;
+  interrupt(): void;
+  end(): void;
+}
 
-const stream = new MessageStream(); // push-based AsyncIterable
-stream.push({ role: 'user', content: prompt });
-
-const q = query({
-  prompt: stream,
-  options: {
-    model,
-    cwd: workspaceDir,
-    resume: sessionId,
-    systemPrompt: { type: 'preset', preset: 'claude_code', append: systemPromptAppend },
-    permissionMode: 'bypassPermissions',
-    allowedTools: [...],
-    mcpServers: { happyclaw: sdkMcpServer },
-    hooks: hooksConfig,
-    includePartialMessages: true,
-  }
-});
-
-for await (const message of q) {
-  // 直接处理 SDK 事件
+// 方式 B：Codex 适配器使用——每轮独立运行
+interface TurnAdapter {
+  runTurn(input: TurnInput, opts: AdapterOptions): AsyncIterable<AdapterEvent>;
+  dispose(): Promise<void>;
 }
 ```
 
-**OpenAI Agents SDK 适配**：
-```typescript
-import { Agent, run, tool, MCPServerStdio } from '@openai/agents';
-
-const agent = new Agent({
-  name: 'happyclaw',
-  model: modelName,
-  instructions: systemPrompt,
-  tools: [...harnessTools],
-  mcpServers: [mcpServer],
-});
-
-const result = await run(agent, prompt, {
-  stream: true,
-  context: runtimeContext,
-  maxTurns,
-});
-
-for await (const event of result.toStream()) {
-  // 转换为 StreamEvent
-}
-```
+Protocol Bridge 通过检查 adapter 类型决定使用哪种消费模式。这比强行统一为一个接口更诚实。
 
 ### 3.2 Context Builder
 
-**职责**：将 HappyClaw 特有的上下文注入到 SDK agent。
+**职责**：动态生成注入到 SDK agent 的上下文。**必须在 harness 内**——需要实时读取本地文件和追踪 token 消耗。
 
 不同 SDK 有不同的注入方式：
 
-| 上下文内容 | Claude Agent SDK | OpenAI Agents SDK |
-|-----------|-----------------|-------------------|
-| 通信规则（IM routing） | `systemPrompt.append` | `agent.instructions` |
-| 工作区 CLAUDE.md | SDK 自动读取 cwd 下的 CLAUDE.md | 拼接到 `instructions` |
-| Memory recall | `systemPrompt.append` | 拼接到 `instructions` |
-| Channel routing | `systemPrompt.append` | 拼接到 `instructions` |
-| 可用 skill 列表 | SDK 自动发现 skills/ | 写入 `instructions` 或注册为 tool |
+| 上下文内容 | Claude Agent SDK | Codex SDK |
+|-----------|-----------------|-----------|
+| 通信规则（IM routing） | `systemPrompt.append` | `.codex/instructions.md` 或 config |
+| 工作区 CLAUDE.md | SDK 自动读取 cwd 下的 CLAUDE.md | 拼接写入 instructions 文件 |
+| Memory recall | `systemPrompt.append` | 拼接写入 instructions 文件 |
+| Channel routing | `systemPrompt.append` | 拼接写入 instructions 文件 |
+| 可用 skill 列表 | SDK 自动发现 skills/ | 写入 instructions 或通过 MCP 注册 |
 
 **动态内容**（每轮可能变化）：
 - IM channel 列表（从 IPC 消息的 source 字段提取）
 - Memory index（从 data/memory/{userId}/index.md 读取）
 - 上一轮的 context summary（compact 后）
 
+**Codex 的 instructions 注入**：Codex SDK 没有直接的 `systemPrompt` 参数。Context Builder 在每轮 `runStreamed()` 前将动态上下文写入 `{cwd}/.codex/instructions.md`，Codex CLI 启动时自动读取。
+
 ### 3.3 Stream Converter
 
 **职责**：SDK 的事件流 → HappyClaw StreamEvent。
 
-**Claude Agent SDK 事件映射**：
+#### EventNormalizer 策略
+
+现有 `stream-processor.ts`（913 行）与 Claude SDK 消息格式深度耦合（61% 代码）。直接改写成本高。
+
+**策略**：在 stream-processor 前加一层 EventNormalizer（~30 行），把各 SDK 的原始事件转换为 Claude SDK 消息的 shape，stream-processor 本体改动控制在 15%。
+
+```
+Claude SDK messages ──→ stream-processor（基本不动）──→ StreamEvent
+                          ↑
+Codex SDK events ──→ EventNormalizer（新增，~30 行）──┘
+```
+
+**Claude Agent SDK 事件映射**（不变）：
 
 | SDK message.type | StreamEvent |
 |-----------------|-------------|
@@ -218,17 +240,16 @@ for await (const event of result.toStream()) {
 | `tool_progress` | `tool_progress` |
 | `result` | `usage`（提取 token 信息）|
 
-现有 `agent-runner/src/stream-processor.ts` 已经实现了这些映射，可以直接复用。
+**Codex SDK 事件映射**：
 
-**OpenAI Agents SDK 事件映射**：
+| Codex ThreadEvent | 经 EventNormalizer → | StreamEvent |
+|-------------------|---------------------|-------------|
+| `item.updated` (agent_message, text content) | 合成 text_delta | `text_delta` |
+| `item.started` (command_execution / file_change) | 合成 tool_use_start | `tool_use_start` |
+| `item.completed` (command_execution / file_change) | 合成 tool_use_summary | `tool_use_end` |
+| `turn.completed` (含 usage) | 合成 result | `usage` |
 
-| SDK event | StreamEvent |
-|-----------|-------------|
-| `raw_model_stream_event` (output_text_delta) | `text_delta` |
-| `raw_model_stream_event` (reasoning_delta) | `thinking_delta` |
-| `run_item_stream_event` (tool_called) | `tool_use_start` |
-| `run_item_stream_event` (tool_output) | `tool_use_end` |
-| run 完成后 `result.usage` | `usage` |
+**注意**：Codex SDK 的事件粒度是 item 级别（非逐 token），前端打字机效果会比 Claude 侧粗糙。这是可接受的降级。
 
 ### 3.4 MCP Server（内置）
 
@@ -237,7 +258,6 @@ for await (const event of result.toStream()) {
 当前的 ContextPlugin 接口已经定义好了 ToolDefinition，只需要包一层 MCP server：
 
 ```typescript
-// 伪代码
 const mcpServer = new McpServer('happyclaw');
 
 for (const tool of contextManager.getActiveTools()) {
@@ -255,183 +275,121 @@ for (const tool of contextManager.getActiveTools()) {
 
 **SDK 侧配置**：
 
-Claude Agent SDK（直接传 MCP server 对象）：
+Claude Agent SDK（in-process MCP server）：
 ```typescript
 import { createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 
-// 方式 A：用 SDK 内置的 MCP 适配（现有 agent-runner 的做法）
 const sdkMcpServer = createSdkMcpServer(mcpServer);
-
 query({
   prompt: stream,
-  options: {
-    mcpServers: { happyclaw: sdkMcpServer }
-  }
+  options: { mcpServers: { happyclaw: sdkMcpServer } }
 });
 ```
 
-OpenAI Agents SDK（通过 MCPServerStdio 连接）：
+Codex SDK（config 注入 MCP）：
+
+Codex CLI 原生支持 MCP server。harness 启动 MCP server 为 stdio 子进程，通过 Codex config 注入：
+
 ```typescript
-import { MCPServerStdio } from '@openai/agents';
+// 方式 1：写 .codex/config.toml
+// [mcp_servers.happyclaw]
+// type = "stdio"
+// command = "node"
+// args = ["mcp-server.js"]
 
-// OpenAI SDK 需要 stdio transport，harness 启动 MCP server 进程
-const mcpServer = new MCPServerStdio({
-  name: 'happyclaw',
-  command: 'node',
-  args: ['mcp-server.js'],
-  env: { HAPPYCLAW_WORKSPACE_IPC: '...' },
-});
-await mcpServer.connect();
-
-const agent = new Agent({
-  mcpServers: [mcpServer],
-  // ...
+// 方式 2：Codex SDK config 选项（如果 SDK 支持）
+const thread = codex.startThread({
+  workingDirectory: cwd,
+  // MCP config 待 SDK API 确认
 });
 ```
 
-**注意**：Claude Agent SDK 支持 in-process MCP server（`createSdkMcpServer`），OpenAI Agents SDK 需要通过 stdio/HTTP transport。两者的 MCP server 逻辑共享，只是传递方式不同。
+**备选方案**：如果 Codex SDK 的 MCP 配置不够灵活，MCP tools 可以作为 prompt 中的 "可用工具说明" 注入 instructions，模型通过 shell 命令调用 MCP client CLI。
 
-### 3.5 Hook Manager
+**cross_model 保持为 MCP tool**（不是 CLI skill）：需要通过 HTTP 端点访问 Credential Manager 获取实时凭据。
 
-**职责**：管理 hook 的注册、执行和可视化。
+### 3.5 Hook / Memory Wrapup
 
-#### SDK 原生 Hook 能力对比
-
-| 现有 hook | 功能 | Claude Agent SDK | OpenAI Agents SDK |
-|-----------|------|-----------------|-------------------|
-| PreToolUse (gatekeeper) | 高风险操作拦截 | `hooks.PreToolUse` HookCallback | `tool.needsApproval` + `inputGuardrails` |
-| PostToolUse (loop detect) | 循环卡住检测 | `hooks.PostToolUse` HookCallback | `outputGuardrails` + 自定义 middleware |
-| PostToolUse (code review) | 变更收集 + GPT review | `hooks.PostToolUse` HookCallback | `outputGuardrails` |
-| Stop (final review) | 最终代码评审 | `hooks.Stop` HookCallback | run 完成后处理 |
-| PreCompact (archive) | 对话归档 + memory wrapup | `hooks.PreCompact` HookCallback | 手动 token 管理触发 |
+**职责**：Claude 侧管理 hook 的注册、执行和可视化；Codex 侧实现 memory wrapup 的等价逻辑。
 
 #### Claude Agent SDK Hook 实现
 
-```typescript
-import { HookCallback } from '@anthropic-ai/claude-agent-sdk';
-
-const gatekeeper: HookCallback = async (input, toolUseID, { signal }) => {
-  // input 包含 tool_name, tool_input 等
-  const preInput = input as PreToolUseHookInput;
-
-  // 写 StreamEvent 到 IPC（可视化）
-  writeStreamEvent({
-    eventType: 'hook_started',
-    hookName: 'gatekeeper',
-    hookEvent: 'PreToolUse',
-    toolName: preInput.tool_name,
-  });
-
-  // 安全检查逻辑（复用现有 safety-hooks.ts 核心代码）
-  const decision = await checkSafety(preInput);
-
-  writeStreamEvent({
-    eventType: 'hook_response',
-    hookName: 'gatekeeper',
-    hookOutcome: decision.allowed ? 'allowed' : 'blocked',
-  });
-
-  return {
-    hookSpecificOutput: {
-      hookEventName: 'PreToolUse',
-      permissionDecision: decision.allowed ? 'allow' : 'deny',
-      permissionDecisionReason: decision.reason,
-    }
-  };
-};
-
-// 注册
-query({
-  prompt: stream,
-  options: {
-    hooks: {
-      PreToolUse: [
-        { matcher: 'Bash|Edit|Write', hooks: [gatekeeper] },
-      ],
-      PostToolUse: [
-        { matcher: 'Bash|Edit|Write', hooks: [loopDetect, codeReview] },
-      ],
-      Stop: [
-        { hooks: [finalReview] },
-      ],
-      PreCompact: [
-        { hooks: [archiveTranscript] },
-      ],
-    }
-  }
-});
-```
-
-**优势**：hook 回调是 in-process 的，没有 shell spawn 开销，可以直接访问 harness 内部状态。
-
-#### OpenAI Agents SDK Hook 实现
-
-OpenAI SDK 没有完全对等的 hook 系统，但可以通过以下机制覆盖：
+不变——复用现有 safety-hooks.ts / review-hooks.ts 核心逻辑：
 
 ```typescript
-import { Agent, tool } from '@openai/agents';
-
-// 方式 1：tool.needsApproval —— 等价 PreToolUse gatekeeper
-const bashTool = tool({
-  name: 'bash',
-  // ...
-  needsApproval: async (runContext, toolCall) => {
-    // 返回 true 时 run() 暂停，产生 interruption
-    return isDangerous(toolCall);
-  },
-});
-
-// 方式 2：inputGuardrails / outputGuardrails
-const agent = new Agent({
-  inputGuardrails: [{
-    name: 'safety_check',
-    run: async ({ input }) => ({
-      behavior: isSafe(input) ? { type: 'allow' } : { type: 'block', message: '...' },
-    }),
-  }],
-  outputGuardrails: [{
-    name: 'review_check',
-    run: async ({ output }) => ({
-      behavior: { type: 'allow' },  // 或 block
-    }),
-  }],
-});
-
-// 方式 3：stream 事件中间件 —— PostToolUse 等价
-for await (const event of result.toStream()) {
-  if (event.type === 'run_item_stream_event') {
-    if (event.name === 'tool_output') {
-      // 在此检测循环、收集变更
-      await loopDetect(event.item);
-      await codeReview(event.item);
-    }
-  }
-  // 转换并输出
+hooks: {
+  PreToolUse: [{ hooks: [gatekeeper] }],   // → additionalContext 或 deny
+  PostToolUse: [{ hooks: [loopDetect, codeReview] }],  // → additionalContext
+  Stop: [{ hooks: [finalReview] }],
+  PreCompact: [{ hooks: [archiveTranscript, memoryWrapup] }],
 }
 ```
+
+**关键能力**：hook 返回 `hookSpecificOutput.additionalContext` 会被 SDK 注入到 agent 的下一轮上下文，实现 coaching。
+
+#### Codex SDK：无 Hook（可接受降级）
+
+Codex SDK 没有等价的 HookCallback 系统。降级评估：
+
+| 现有 hook | Claude 功能 | Codex 替代 | 降级影响 |
+|-----------|-----------|-----------|---------|
+| PreToolUse (gatekeeper) | 拦截危险操作 | **Codex OS 级沙箱**（Seatbelt/Landlock），`sandboxMode: "workspace-write"` | 沙箱更强；但失去细粒度 GPT 风险评估 |
+| PostToolUse (loop detect) | 循环检测 + coaching | 无 | 模型自行判断，当前 OpenAI runner 本来也没有 |
+| PostToolUse (code review) | 变更收集 + GPT review | run 完成后从 `result.items` 提取 `file_change` 做事后审查 | 从实时变为事后 |
+| Stop (final review) | 最终代码评审 | 同上，run 完成后处理 | 等价 |
+| PreCompact (archive + memory) | 归档 + memory wrapup | **Protocol Bridge token 追踪**（见下） | 等价 |
+
+**为什么可接受**：当前 `agent-runner-openai` 本来就没有任何 hooks。Codex 侧的 OS 级沙箱实际上比现有的 `assertWithinWorkspace()` 路径校验更安全。降级只是"维持现状"。
+
+#### Memory Wrapup：token 追踪方案
+
+PreCompact hook 做两件事：归档对话 + 写 session_wrapup IPC。hook 返回 `{}`，不注入任何内容回对话——纯旁路操作。
+
+因此不需要拦截 compact 事件，只需要在"差不多该 compact 的时候"触发即可。
+
+**Codex 侧实现**：
+
+```typescript
+let cumulativeInputTokens = 0;
+let wrapupTriggered = false;
+const WRAPUP_THRESHOLD = 120_000; // 上下文窗口 60%
+
+for await (const event of thread.runStreamed(prompt)) {
+  // 追踪 token 用量
+  if (event.type === 'turn.completed' && event.usage) {
+    cumulativeInputTokens += event.usage.input_tokens;
+
+    if (cumulativeInputTokens > WRAPUP_THRESHOLD && !wrapupTriggered) {
+      // 跟 PreCompact 做完全一样的事
+      archiveConversation(thread, groupFolder);
+      writeSessionWrapupIpc(groupFolder, userId);
+      wrapupTriggered = true;
+    }
+  }
+
+  writeStreamEvent(convertToStreamEvent(event));
+}
+```
+
+**为什么这样就够了**：
+- session_wrapup 从 DB 读消息（不是内存 transcript），用游标去重——触发早一点晚一点都不丢数据
+- 归档内容从 `result.items` 的 `file_change` / `command_execution` / `agent_message` 提取
+- Claude 侧也继续用 PreCompact hook，行为不变
+
+**Claude 侧 memory wrapup 同时保留两种触发**：
+1. PreCompact hook（SDK 自动触发）
+2. Protocol Bridge token 追踪（作为补充，统一两侧逻辑）
 
 #### Hook 可视化
 
-不变——每次 hook 执行时，写一条 StreamEvent 到 IPC：
+Claude 侧不变——每次 hook 执行时写 StreamEvent：
 
 ```typescript
-{
-  eventType: 'hook_started',
-  hookName: 'gatekeeper',
-  hookEvent: 'PreToolUse',
-  toolName: 'Bash',
-  toolInputSummary: 'rm -rf /tmp/...',
-}
-
-// 执行完成后
-{
-  eventType: 'hook_response',
-  hookName: 'gatekeeper',
-  hookEvent: 'PreToolUse',
-  hookOutcome: 'blocked',  // 或 'allowed', 'advisory'
-  text: '安全检查结果...',
-}
+{ eventType: 'hook_started', hookName: 'gatekeeper', toolName: 'Bash', ... }
+{ eventType: 'hook_response', hookName: 'gatekeeper', hookOutcome: 'blocked', ... }
 ```
+
+Codex 侧无 hook 事件。
 
 ### 3.6 Credential Manager
 
@@ -477,8 +435,8 @@ type Credentials =
 
 | Provider | 凭据类型 | 作用域 | 刷新机制 |
 |----------|---------|--------|---------|
-| `claude` | API key / OAuth profile | 系统级 | SDK 自管 OAuth profile |
-| `openai` | API key / OAuth token | 系统级 | 定时刷新 + 动态端点 |
+| `claude` | API key / OAuth profile | 系统级 | SDK 自管 OAuth profile（共享 .claude/ 目录） |
+| `openai` | API key / Codex OAuth | 系统级 | API key 静态；Codex OAuth 走 `codex login`（token 存 ~/.codex/） |
 | `feishu` | OAuth token | per-user | refresh_token 自动刷新 |
 
 #### 存储
@@ -488,20 +446,25 @@ type Credentials =
 - `data/config/credentials/openai.json`
 - `data/config/credentials/feishu-{userId}.json`
 
-#### 消费方
+#### Harness ↔ Credential Manager 通信
 
+Credential Manager 运行在宿主机侧。Harness（容器/子进程内）通过 HTTP 端点获取凭据：
+
+```typescript
+// 已有模式：cross-model.ts 的 getCredentials() 已经在用
+const res = await fetch(`${HAPPYCLAW_API_URL}/api/internal/credentials/${provider}`, {
+  headers: { Authorization: `Bearer ${HAPPYCLAW_INTERNAL_TOKEN}` },
+});
+const creds = await res.json();
 ```
-Credential Manager
-  ├── container-runner.ts → toEnvVars() 注入到容器环境
-  ├── context-compressor.ts → getCredentials('claude') 调 Messages API
-  ├── cross-model skill → getCredentials('openai') 调 OpenAI API
-  ├── feishu-docs skill → getCredentials('feishu', userId)
-  └── memory-agent → 通过 harness 环境变量间接获取
-```
+
+这沿用现有的 `GET /api/internal/memory/openai-credentials` 模式，扩展为通用端点。
+
+**静态凭据**（启动时不变的）仍通过环境变量注入，避免运行时 HTTP 开销。**动态凭据**（可能过期刷新的）走 HTTP 端点。
 
 ### 3.7 Context Engine
 
-**职责**：从 agent runner 独立出来的上下文管理模块——控制注入什么上下文、何时 compact、怎么压缩。解决当前 token 消耗过大的问题。
+**职责**：上下文管理。拆为两层，解决现有 token 消耗过大问题。
 
 #### 现状问题
 
@@ -510,99 +473,41 @@ Credential Manager
 3. **上下文膨胀**：memory index、channel routing、system prompt append 等每轮都注入，吃上下文
 4. **没有 token 预算管理**：不知道当前 session 用了多少 token，也不知道离 compact 还有多远
 
-#### 架构
-
-Context Engine 是 harness 和宿主机之间的独立层：
+#### 架构：两层分离
 
 ```
 ┌──────────────────────────────────────────┐
-│             Context Engine                │
+│  harness 侧：Context Builder             │  ← 在 agent-harness 进程内
 │                                           │
 │  ┌───────────┐  ┌──────────────────────┐ │
 │  │ Budget     │  │ Injection Pipeline   │ │
 │  │ Tracker    │  │                      │ │
 │  │            │  │ system prompt        │ │
-│  │ 估算当前   │  │ → memory index       │ │
-│  │ token 消耗 │  │ → channel routing    │ │
-│  │ 判断是否   │  │ → context summary    │ │
-│  │ 需要压缩   │  │ → CLAUDE.md          │ │
+│  │ 从 SDK     │  │ → memory index       │ │
+│  │ usage 事件 │  │ → channel routing    │ │
+│  │ 实时追踪   │  │ → context summary    │ │
+│  │            │  │ → CLAUDE.md          │ │
 │  └───────────┘  └──────────────────────┘ │
+└──────────────────────────────────────────┘
+
+┌──────────────────────────────────────────┐
+│  宿主机侧：Compression Manager           │  ← 在宿主机进程内
 │                                           │
 │  ┌───────────┐  ┌──────────────────────┐ │
-│  │ Compact    │  │ Summary Generator    │ │
+│  │ Trigger    │  │ Summary Generator    │ │
 │  │ Strategy   │  │                      │ │
 │  │            │  │ 用 Haiku 压缩对话   │ │
-│  │ 决定何时   │  │ 提取知识写 memory    │ │
-│  │ 怎么压缩   │  │ 归档到 conversations │ │
+│  │ 80 条消息  │  │ 提取知识写 memory    │ │
+│  │ 或手动触发 │  │ 归档到 conversations │ │
 │  └───────────┘  └──────────────────────┘ │
 └──────────────────────────────────────────┘
 ```
 
-#### 接口
-
-```typescript
-interface ContextEngine {
-  /** 构建本轮注入的上下文（根据预算裁剪） */
-  buildContext(opts: ContextBuildOptions): Promise<ContextOutput>;
-
-  /** compact 发生前的回调（Claude SDK PreCompact hook） */
-  onBeforeCompact(context: CompactContext): Promise<CompactAction>;
-
-  /** compact 发生后的回调 */
-  onAfterCompact(newSessionId: string): Promise<void>;
-
-  /** 主动触发压缩（宿主机侧调用，如消息数超阈值） */
-  triggerCompression(groupFolder: string): Promise<CompressResult>;
-
-  /** 获取当前 token 预算状态 */
-  getBudgetStatus(groupFolder: string): BudgetStatus;
-}
-
-interface ContextBuildOptions {
-  groupFolder: string;
-  userId?: string;
-  chatJid: string;
-  isHome: boolean;
-  /** 可用 token 预算（估算） */
-  tokenBudget?: number;
-}
-
-interface ContextOutput {
-  /** 注入到 system prompt 的内容 */
-  systemPromptAppend: string;
-  /** 预估消耗的 token 数 */
-  estimatedTokens: number;
-  /** 哪些内容被裁剪了（用于诊断） */
-  truncated: string[];
-}
-
-interface BudgetStatus {
-  estimatedUsed: number;      // 当前 session 估算已用 token
-  estimatedLimit: number;     // 模型上下文窗口
-  utilizationPct: number;     // 使用率
-  shouldCompress: boolean;    // 是否建议压缩
-  messageCount: number;       // 消息数
-  lastCompressedAt?: string;  // 上次压缩时间
-}
-
-interface CompactContext {
-  transcriptPath: string;
-  sessionId: string;
-  turnCount: number;
-  groupFolder: string;
-  userId?: string;
-}
-
-type CompactAction = {
-  archive?: boolean;           // 归档到 conversations/
-  triggerWrapup?: boolean;     // 触发 memory session_wrapup
-  contextSummary?: string;     // 注入下一轮的 context summary
-  knowledgeEntries?: Array<{   // 提取的知识条目
-    content: string;
-    importance: string;
-  }>;
-};
-```
+**为什么必须拆开**：
+- Budget Tracker 需要实时消费 SDK 的 usage 事件——只有 harness 进程内有这个信息
+- Injection Pipeline 需要读本地文件（memory index、CLAUDE.md）——容器内执行
+- 而 Compression Manager 需要访问 messages.db、调 Haiku API、管理 session——宿主机侧
+- 两者通过 ContainerInput（contextSummary 字段）和 IPC 通信
 
 #### Token 预算管理策略
 
@@ -612,155 +517,125 @@ type CompactAction = {
 │   ├── system prompt 基础部分
 │   ├── tool 定义（MCP tools + SDK 内置 tools）
 │   └── skill 元数据
-├── 动态注入（Context Engine 管理，按预算裁剪）
+├── 动态注入（Context Builder 管理，按预算裁剪）
 │   ├── memory index（按重要性排序，超预算截断）
 │   ├── channel routing（固定，很短）
 │   ├── context summary（上次 compact 的摘要）
 │   └── CLAUDE.md 内容
 └── 对话历史（SDK 自行管理）
     ├── Claude: SDK 自动 compact，通过 PreCompact hook 参与
-    └── OpenAI: 手动管理，通过 Context Engine 触发压缩
+    └── Codex: Codex CLI 内部管理，harness 通过 token 追踪触发 memory wrapup
 ```
 
-**裁剪策略**：当 token 预算紧张时，Context Engine 按优先级裁剪注入内容：
+**裁剪策略**：当 token 预算紧张时，Context Builder 按优先级裁剪注入内容：
 1. 最先裁剪：context summary 的细节部分
 2. 其次裁剪：memory index 的低优先级条目
 3. 最后裁剪：CLAUDE.md 的非关键部分
 4. 不裁剪：channel routing、tool 定义
 
-**OpenAI 侧的 compact 策略**：
-
-OpenAI Agents SDK 没有内置 compact，需要 harness 主动管理：
-
-```typescript
-// 方式 1：previousResponseId（Responses API 服务端记忆）
-// 让 OpenAI 服务端处理上下文管理，自动截断
-const result = await run(agent, newMessage, {
-  previousResponseId: lastResponseId,
-});
-
-// 方式 2：手动 history 传递 + Context Engine 裁剪
-// 当 token 接近上限时，用 Haiku 压缩历史再传入
-const compressedHistory = await contextEngine.compressHistory(history);
-const result = await run(agent, [
-  ...compressedHistory,
-  { role: 'user', content: newMessage },
-]);
-```
-
 #### 与现有 context-compressor.ts 的关系
 
-现有的 `context-compressor.ts` 的核心逻辑（Haiku 总结、知识提取）迁移到 Context Engine 的 Summary Generator 中。宿主机侧的主动压缩触发（AUTO_COMPRESS_THRESHOLD = 80 条消息）保留，通过 Context Engine 接口调用。
+现有的 `context-compressor.ts` 的核心逻辑（Haiku 总结、知识提取）迁移到宿主机侧的 Compression Manager 中。宿主机侧的主动压缩触发（AUTO_COMPRESS_THRESHOLD = 80 条消息）保留。
 
 ---
 
-## 4. Memory Agent Harness 化
+## 4. Memory Agent
 
 ### 4.1 现状
 
 Memory agent 是 per-user 长驻子进程，直接调 Claude SDK `query()`：
-- 模型：Sonnet 4.6（默认）
+- 模型：Opus 4.6（默认，可配 Sonnet）
 - 协议：stdin/stdout JSONL（requestId 匹配请求响应）
 - 工具：Read/Write/Edit/Grep/Glob/Bash（SDK 内置工具）
 - 生命周期：MemoryAgentManager 管理（最多 3 并发，20 请求后重启，10 分钟闲置清理）
 - 上下文：一个 280 行的 system prompt（行为规范）
 
-### 4.2 Harness 化方案
+### 4.2 方案：共享 SdkAdapter，保持独立入口
 
-Memory agent 比主 agent 简单——不需要 MCP server、hooks、skills。只需要：
+Memory agent 和主 agent 的共同点只有 SDK 调用。差异太大——通信协议、工具集、Hook、生命周期全部不同。用 `--mode memory` 塞进同一个二进制会引入不必要的条件分支。
+
+**正确做法**：提取 SdkAdapter 为共享包，两个入口各自引用。
 
 ```
-MemoryAgentManager（宿主机，不变）
-  │ stdin/stdout JSONL（不变）
-  ▼
-agent-harness --mode memory
-  │
-  ├── 读取 JSONL 请求
-  ├── 构建 prompt（请求类型 → 指令文本）
-  ├── 调用 SDK Adapter
-  │     Claude: query({ prompt, options: { systemPrompt, cwd, allowedTools } })
-  │     OpenAI: run(memoryAgent, prompt, { context })
-  ├── 消费 SDK 输出
-  └── 写 JSONL 响应
+container/
+  sdk-adapter/              ← 共享包（新建）
+    src/
+      types.ts              ← AdapterEvent、AdapterOptions
+      claude-adapter.ts     ← Claude Agent SDK 封装
+      codex-adapter.ts      ← Codex SDK 封装
+      index.ts              ← 工厂函数 createAdapter(provider)
+    package.json
+
+  agent-harness/            ← 主 agent 入口
+    src/
+      index.ts              ← Protocol Bridge
+      context-builder.ts
+      stream-converter.ts
+      hook-manager.ts
+      mcp-server.ts
+    package.json            ← 依赖 sdk-adapter
+
+  memory-agent/             ← Memory agent 入口（保留）
+    src/
+      index.ts              ← JSONL Bridge + SDK 调用
+    package.json            ← 依赖 sdk-adapter
 ```
 
-**关键差异**：
+### 4.3 迁移工作量评估
 
-| | 主 agent harness | Memory agent harness |
-|---|---|---|
-| 通信协议 | ContainerInput/Output + IPC 多轮 | JSONL 单次请求响应 |
-| MCP server | 需要（messaging/tasks/memory/groups）| 不需要（只用内置 file tools）|
-| Hooks | 需要（safety/review）| 不需要 |
-| Skills | 需要（feishu-docs/cross-model）| 不需要 |
-| 会话模式 | 长会话 + resume | 长会话 + resume（20 请求后重启）|
-| System prompt | 动态（每轮可变）| 固定（280 行行为规范）|
-| Stream events | 需要转换 | 不需要（不产生 UI 事件）|
+Memory agent 切换 SDK 的实际工作量：
 
-**实现方式**：harness 接受 `--mode main|memory` 参数，memory 模式跳过 MCP/hooks/skills/stream 相关逻辑，只做 JSONL ↔ SDK 的桥接。
+| 组件 | 范围 | 工作量 |
+|------|------|-------|
+| **System prompt 重写** | 280 行中 ~160 行引用 Claude 工具名（Grep/Read/Write/Edit） | 高 |
+| **query() 调用替换** | import + 调用签名 + options 对象 | 中 |
+| **SDKUserMessage 类型** | 接口定义 + MessageStream 类 | 中 |
+| **consumeQuery 循环** | 消息类型判断逻辑 | 中 |
+| **架构模式** | 持久化 session、async iterator、JSONL 桥接——SDK 无关，不变 | 无 |
 
-### 4.3 System Prompt 注入
+**总体**：~40-50% 的文件需要改动（545 行中 ~220-270 行），预计 2-3 天。
 
-Memory agent 的 system prompt 是它的"宪法"——定义了四种操作（query/remember/session_wrapup/global_sleep）的完整算法。
+**System prompt 改动示例**：
+```
+# 之前（Claude 工具名）
+处理流程：
+1. Grep index.md 快速查找
+2. 没命中 → Grep impressions/ 语义索引文件
+3. 命中 → Read knowledge/ 获取细节
 
-注入方式：
-- Claude Agent SDK：`systemPrompt` 选项（替换或 append）
-- OpenAI Agents SDK：`agent.instructions`
+# 之后（Codex shell 命令）
+处理流程：
+1. 使用 grep 命令快速查找：grep "关键词" index.md
+2. 没命中 → 递归搜索：grep -r "关键词" impressions/ --exclude-dir=archived
+3. 命中 → 读取文件：cat knowledge/xxx.md
+```
 
-System prompt 由 harness 在启动时从模板生成（可能需要填入 userId、目录路径等动态值）。
+### 4.4 Codex 侧的 Memory Agent
 
-### 4.4 OpenAI Agents SDK 的 Memory Agent 实现
+Codex CLI 内置 shell execution + file patch 工具，覆盖 Memory Agent 需要的文件操作能力：
 
 ```typescript
-import { Agent, run, tool } from '@openai/agents';
-import { z } from 'zod';
+import { Codex } from '@openai/codex-sdk';
 
-// 为 OpenAI SDK 手动实现文件操作工具（Claude SDK 内置，OpenAI 没有）
-const readFile = tool({
-  name: 'read_file',
-  description: 'Read a file',
-  parameters: z.object({ path: z.string() }),
-  execute: async ({ path }) => fs.readFile(path, 'utf-8'),
+const codex = new Codex({ apiKey: process.env.OPENAI_API_KEY });
+const thread = codex.startThread({
+  model: 'gpt-5.4',
+  workingDirectory: MEMORY_DIR,
+  sandboxMode: 'workspace-write',  // 限制在工作目录内写入
+  approvalPolicy: 'never',         // 全自动
 });
 
-const writeFile = tool({
-  name: 'write_file',
-  description: 'Write a file',
-  parameters: z.object({ path: z.string(), content: z.string() }),
-  execute: async ({ path, content }) => { await fs.writeFile(path, content); return 'ok'; },
-});
-
-// ... glob, grep, edit, bash 同理
-
-const memoryAgent = new Agent({
-  name: 'memory-agent',
-  model: 'gpt-4.1',
-  instructions: memorySystemPrompt,  // 280 行规范
-  tools: [readFile, writeFile, editFile, globFiles, grepFiles, bash],
-});
-
-// 处理 JSONL 请求
-for await (const request of readJsonlStdin()) {
-  const result = await run(memoryAgent, request.prompt, {
-    previousResponseId: lastResponseId,  // 保持会话连续
-  });
-  lastResponseId = result.lastResponseId;
-
-  writeJsonlStdout({
-    requestId: request.requestId,
-    success: true,
-    response: result.finalOutput,
-  });
-}
+const result = await thread.run(memoryPrompt);
+// result.items 包含 command_execution、file_change 等
 ```
 
 ### 4.5 宿主机侧变更
 
-`src/memory-agent.ts` 的 `MemoryAgentManager` 基本不变——它负责进程生命周期和 JSONL 路由。只是 spawn 的目标变了：
+`src/memory-agent.ts` 的 `MemoryAgentManager` 基本不变——它负责进程生命周期和 JSONL 路由。只是 spawn 的目标不变（仍然是 `node memory-agent/dist/index.js`），但 memory-agent 内部改为通过 SdkAdapter 调用 SDK。
 
-```diff
-- spawn('node', [memoryAgentDist], { ... })
-+ spawn('node', [harnessDistPath, '--mode', 'memory'], { ... })
-```
+环境变量新增 `HAPPYCLAW_SDK_PROVIDER`（默认 `claude`），决定 memory-agent 用哪个 SDK。
+
+Codex 侧的 OAuth 凭据：挂载 `~/.codex/` 配置目录到容器/子进程（类似 Claude 的 `.claude/.credentials.json` 共享机制）。
 
 ---
 
@@ -792,52 +667,28 @@ feishu-docs search <query> [--count N] [--types docx,wiki]
 - 前置：用户需在 Web 设置页完成飞书 OAuth 授权
 - 输出：Markdown 格式文档内容 / 搜索结果列表
 
-**依赖**：`HAPPYCLAW_API_URL` + `HAPPYCLAW_INTERNAL_TOKEN`（环境变量，容器内已有）
+**凭据获取**：CLI skill 通过 `HAPPYCLAW_API_URL` + `HAPPYCLAW_INTERNAL_TOKEN` 调用宿主机 HTTP 端点获取飞书 OAuth token（与 cross-model 相同模式），不需要在 CLI 进程内持有 token。
 
-### 5.2 cross-model skill（合并 ask_model + delegate_task，agent-agnostic）
+### 5.2 cross-model（保持为 MCP tool）
 
+**变化**：合并 ask_model + delegate_task 为一个 MCP tool `cross_model`，支持指定 agent/model：
+
+```typescript
+mcpServer.tool('cross_model', {
+  description: '调用其他 AI agent 获取第二意见或执行子任务',
+  parameters: {
+    prompt: { type: 'string', description: '任务描述' },
+    agent: { type: 'string', enum: ['claude', 'codex'], optional: true },
+    model: { type: 'string', optional: true },
+    workspace: { type: 'boolean', optional: true },  // 是否创建 worktree
+  },
+  execute: async (args) => {
+    const creds = await fetchCredentials(args.agent || 'codex');
+    const adapter = createAdapter(args.agent || 'codex');
+    // ...
+  },
+});
 ```
-container/
-  agent-runner-core/src/
-    services/
-      cross-model.ts        ← 合并：agent 调用 + worktree + patch
-    cli/
-      cross-model.ts        ← CLI 入口
-
-  skills/
-    cross-model/
-      SKILL.md              ← agent 使用指南
-```
-
-**CLI 接口**：
-```bash
-cross-model <prompt>                         # 纯文本，用默认 agent
-cross-model <prompt> --workspace             # 创建 git worktree，跑完出 patch
-cross-model <prompt> --agent openai          # 指定用 OpenAI Agents SDK
-cross-model <prompt> --agent claude          # 指定用 Claude Agent SDK
-cross-model <prompt> --model gpt-4.1        # 指定模型（SDK 内部路由）
-```
-
-**核心变化**：不再绑死 OpenAI。`--agent` 参数决定用哪个 SDK adapter 执行。底层复用 harness 的 SDK Adapter。
-
-**service 内部结构**：
-```
-CrossModelService
-├── resolveAdapter(opts)      ← 根据 --agent 参数选择 SDK Adapter
-├── credentialManager.get()   ← 从 Credential Manager 获取凭据
-├── callAgent(prompt, opts)   ← 调用 SDK adapter，收集文本输出
-└── delegateInWorkspace(opts) ← worktree 生命周期 + SDK 调用 + patch
-    ├── provision()           ← git worktree add --detach
-    ├── runAgent()            ← 跑选定的 SDK adapter（Claude / OpenAI）
-    ├── computePatch()        ← 安全 git diff（父进程计算，不信任子进程）
-    └── cleanup()             ← worktree remove
-```
-
-**SKILL.md 要点**：
-- 无 `--workspace`：方案评审、翻译、第二意见。快速，无文件操作
-- 有 `--workspace`：编码子任务、重构、bug 修复。返回 patch，agent 审核后 apply
-- 可用 agent 和模型列表（从 Credential Manager 动态获取）
-- 选 agent 的指引：需要不同视角时选另一家的 agent
 
 ---
 
@@ -853,12 +704,14 @@ harness 启动
   ├── Claude Agent SDK: query({ options: { resume: sessionId } })
   │   SDK 自行管理 .claude/ 下的会话文件
   │
-  ├── OpenAI Agents SDK: run(agent, input, { previousResponseId })
-  │   使用 Responses API 的服务端会话延续
-  │   或手动传递 history
+  ├── Codex SDK: codex.resumeThread(threadId) 或 startThread()
+  │   会话持久化在 ~/.codex/sessions/
   │
   ├── Claude SDK compact 后可能产生新 session ID
   │   harness 从 result message 中捕获，写回 ContainerOutput.newSessionId
+  │
+  ├── Codex SDK: thread.id 在 startThread 时确定
+  │   harness 写回 ContainerOutput.newSessionId
   │
   └── 宿主机侧更新 DB（已有逻辑，不变）
 ```
@@ -869,21 +722,23 @@ harness 启动
 
 不变：`data/sessions/{folder}/.claude/`
 
-harness 设置 `CLAUDE_CONFIG_DIR` 环境变量指向此目录（当前已有）。SDK 会自动使用它存储会话状态。
+**Codex SDK**：
 
-**OpenAI Agents SDK**：
+Codex CLI 管理自己的会话持久化（`~/.codex/sessions/`）。harness 需要：
 
-两种策略：
+1. 将 `~/.codex/sessions/` 映射到 `data/sessions/{folder}/.codex/`（通过环境变量或 symlink）
+2. 从 ContainerInput 恢复 threadId
+3. 在 ContainerOutput 中返回 threadId 作为 newSessionId
 
-1. **Responses API `previousResponseId`**（推荐）：会话状态存储在 OpenAI 服务端，harness 只需要保存最后的 `responseId`。
-   - 持久化：`data/sessions/{folder}/openai-state.json` → `{ lastResponseId: string }`
-   - 优势：无本地状态管理，OpenAI 服务端自动处理上下文窗口
-   - 劣势：依赖 OpenAI 服务可用性
+```typescript
+// 恢复会话
+const thread = input.sessionId
+  ? codex.resumeThread(input.sessionId)
+  : codex.startThread({ workingDirectory: cwd, ... });
 
-2. **手动 history**：harness 保存完整对话历史到本地。
-   - 持久化：`data/sessions/{folder}/openai-history.json`
-   - 配合 Context Engine 做压缩
-   - 适用于需要离线访问历史的场景
+// 返回 session ID
+writeOutput({ newSessionId: thread.id });
+```
 
 ---
 
@@ -893,31 +748,39 @@ harness 设置 `CLAUDE_CONFIG_DIR` 环境变量指向此目录（当前已有）
 
 ```
 container/
-  agent-runner/                 ← 删除（Claude SDK 直调，逻辑迁移到 harness）
-  agent-runner-openai/          ← 删除（OpenAI API 直调，逻辑迁移到 harness）
-  memory-agent/                 ← 删除（Claude SDK 直调，harness --mode memory 替代）
+  agent-runner/                 ← 删除（逻辑迁移到 agent-harness）
+  agent-runner-openai/          ← 删除（逻辑迁移到 agent-harness）
 ```
 
 ### 新增
 
 ```
 container/
-  agent-harness/                ← 新增
+  sdk-adapter/                  ← 新增：共享 SDK 适配层
     src/
-      index.ts                  ← 主入口：Protocol Bridge
-      context-builder.ts        ← 动态上下文生成
-      stream-converter.ts       ← SDK 事件 → StreamEvent
-      hook-manager.ts           ← Hook 注册 + StreamEvent 可视化
+      types.ts                  ← AdapterEvent、AdapterOptions 接口
+      claude-adapter.ts         ← Claude Agent SDK 封装
+      codex-adapter.ts          ← Codex SDK 封装
+      index.ts                  ← createAdapter() 工厂
+    package.json
+
+  agent-harness/                ← 新增：主 agent 入口
+    src/
+      index.ts                  ← Protocol Bridge
+      context-builder.ts        ← 动态上下文生成（harness 侧）
+      stream-converter.ts       ← EventNormalizer + SDK 事件 → StreamEvent
+      hook-manager.ts           ← Hook 注册（Claude）+ memory wrapup（两侧）
       mcp-server.ts             ← 内置 MCP server
-      adapters/
-        types.ts                ← SDK Adapter 接口
-        claude-sdk.ts           ← Claude Agent SDK 适配
-        openai-sdk.ts           ← OpenAI Agents SDK 适配
       hooks/
-        gatekeeper.ts           ← 安全网关逻辑（从 safety-hooks.ts 迁移）
-        loop-detect.ts          ← 循环检测逻辑（从 safety-hooks.ts 迁移）
-        code-review.ts          ← 代码评审逻辑（从 review-hooks.ts 迁移）
-    package.json                ← 依赖：@anthropic-ai/claude-agent-sdk + @openai/agents
+        gatekeeper.ts           ← 安全网关逻辑（从 safety-hooks.ts 迁移，仅 Claude）
+        loop-detect.ts          ← 循环检测逻辑（从 safety-hooks.ts 迁移，仅 Claude）
+        code-review.ts          ← 代码评审逻辑（从 review-hooks.ts 迁移，仅 Claude）
+    package.json                ← 依赖 sdk-adapter + agent-runner-core
+
+  memory-agent/                 ← 保留，修改内部 SDK 调用
+    src/
+      index.ts                  ← 改为通过 sdk-adapter 调用
+    package.json                ← 新增依赖 sdk-adapter
 
   agent-runner-core/            ← 保留，调整
     src/
@@ -926,24 +789,20 @@ container/
         tasks.ts                ← 保留
         groups.ts               ← 保留
         memory.ts               ← 保留
+        cross-model.ts          ← 保留，合并 delegate 逻辑，改为 agent-agnostic
         feishu-docs.ts          ← 删除（→ services/）
-        cross-model.ts          ← 删除（→ services/）
-        delegate.ts             ← 删除（→ services/）
+        delegate.ts             ← 删除（→ 合并到 cross-model）
       services/                 ← 新增
         feishu-docs.ts          ← 从 plugin 提取
-        cross-model.ts          ← 合并 cross-model + delegate，agent-agnostic
       cli/                      ← 新增
         feishu-docs.ts          ← CLI 入口
-        cross-model.ts          ← CLI 入口
 
   skills/
     feishu-docs/SKILL.md        ← 新增
-    cross-model/SKILL.md        ← 新增
 
 src/                            ← 宿主机侧调整
-  credential-manager.ts         ← 新增（统一凭据管理）
-  context-engine.ts             ← 新增（上下文管理引擎）
-  context-compressor.ts         ← 迁移核心逻辑到 context-engine.ts
+  credential-manager.ts         ← 新增（统一凭据管理 + HTTP 端点）
+  context-compressor.ts         ← 重命名/重构为 compression-manager.ts
 ```
 
 ---
@@ -951,35 +810,6 @@ src/                            ← 宿主机侧调整
 ## 8. SDK Adapter 接口
 
 ```typescript
-interface SdkAdapter {
-  /** 适配器名称 */
-  readonly name: 'claude' | 'openai';
-
-  /** 启动 agent 执行（流式） */
-  run(opts: RunOptions): AsyncIterable<AdapterEvent>;
-
-  /** 向运行中的 agent 发送后续消息（多轮） */
-  sendMessage(message: string): void;
-
-  /** 请求 agent 优雅停止 */
-  requestStop(): void;
-
-  /** 强制中止 */
-  abort(): void;
-}
-
-interface RunOptions {
-  prompt: string;
-  sessionId?: string;
-  cwd: string;
-  systemPromptAppend: string;
-  env: Record<string, string>;
-  mcpServer: McpServerInstance;       // 内置 MCP server 实例
-  hooks: HooksConfig;
-  maxTurns?: number;
-  model?: string;
-}
-
 /** 统一的适配器事件（屏蔽两个 SDK 的差异） */
 type AdapterEvent =
   | { type: 'text_delta'; text: string }
@@ -989,136 +819,242 @@ type AdapterEvent =
   | { type: 'tool_progress'; toolName: string; text: string }
   | { type: 'usage'; inputTokens: number; outputTokens: number; cacheRead?: number; cacheCreation?: number }
   | { type: 'session_id'; sessionId: string }
-  | { type: 'error'; message: string }
+  | { type: 'compact'; newSessionId: string }
+  | { type: 'error'; message: string; recoverable: boolean }
   | { type: 'done'; status: 'success' | 'error' };
 
-interface HooksConfig {
-  /** Claude SDK: 直接作为 HookCallback 传递 */
-  /** OpenAI SDK: 转换为 guardrails + needsApproval */
-  gatekeeper?: GatekeeperFn;
-  loopDetect?: LoopDetectFn;
-  codeReview?: CodeReviewFn;
-  finalReview?: FinalReviewFn;
-  preCompact?: PreCompactFn;
+/** Claude 适配器：push 模型 */
+interface PushModelAdapter {
+  readonly kind: 'push';
+  readonly provider: 'claude';
+
+  /** 启动长活 query，返回事件流 */
+  start(opts: AdapterOptions): AsyncIterable<AdapterEvent>;
+
+  /** 向正在运行的 query 推送消息（IPC 消息注入） */
+  pushMessage(text: string, images?: ImageData[]): void;
+
+  /** 请求 query 优雅停止（stream.end()） */
+  requestStop(): void;
+
+  /** 中断当前查询（queryRef.interrupt()） */
+  interrupt(): void;
+
+  /** 强制中止（AbortController） */
+  abort(): void;
+}
+
+/** Codex 适配器：turn 模型 */
+interface TurnModelAdapter {
+  readonly kind: 'turn';
+  readonly provider: 'codex';
+
+  /** 执行单轮对话，返回事件流 */
+  runTurn(input: TurnInput, opts: AdapterOptions): AsyncIterable<AdapterEvent>;
+
+  /** 清理资源 */
+  dispose(): Promise<void>;
+}
+
+type SdkAdapter = PushModelAdapter | TurnModelAdapter;
+
+interface AdapterOptions {
+  cwd: string;
+  systemPrompt: string;           // Context Builder 生成的完整 system prompt
+  sessionId?: string;             // Claude: resume UUID / Codex: threadId
+  env: Record<string, string>;
+  mcpServers: McpServerConfig[];
+  hooks: HooksConfig;             // 仅 Claude 使用
+  model?: string;
+  maxThinkingTokens?: number;
+  sandboxMode?: string;           // 仅 Codex 使用
+}
+
+interface TurnInput {
+  text: string;
+  images?: ImageData[];
+}
+
+/** 工厂函数 */
+function createAdapter(provider: 'claude' | 'codex'): SdkAdapter;
+```
+
+### Protocol Bridge 消费逻辑
+
+```typescript
+const adapter = createAdapter(sdkProvider);
+
+if (adapter.kind === 'push') {
+  // Claude: 一次启动，持续推送
+  const events = adapter.start(options);
+  startIpcPolling((msg) => adapter.pushMessage(msg.text, msg.images));
+
+  for await (const event of events) {
+    trackUsageForMemoryWrapup(event);  // 两侧统一的 token 追踪
+    writeStreamEvent(convertToStreamEvent(event));
+  }
+
+} else {
+  // Codex: 逐轮运行
+  // 首轮
+  for await (const event of adapter.runTurn({ text: prompt, images }, options)) {
+    trackUsageForMemoryWrapup(event);
+    writeStreamEvent(convertToStreamEvent(event));
+  }
+
+  // 后续轮：阻塞等待 IPC 消息
+  while (true) {
+    const msg = await waitForIpcMessage();
+    if (!msg) break;  // _close 或 _drain
+
+    for await (const event of adapter.runTurn({ text: msg.text, images: msg.images }, options)) {
+      trackUsageForMemoryWrapup(event);
+      writeStreamEvent(convertToStreamEvent(event));
+    }
+  }
+
+  await adapter.dispose();
 }
 ```
 
-### Claude SDK Adapter 实现要点
+### Claude Adapter 实现要点
 
 ```typescript
-class ClaudeSdkAdapter implements SdkAdapter {
-  readonly name = 'claude';
+class ClaudeAdapter implements PushModelAdapter {
+  readonly kind = 'push';
+  readonly provider = 'claude';
   private stream = new MessageStream();
-  private abortController = new AbortController();
+  private queryRef: QueryRef | null = null;
 
-  async *run(opts: RunOptions): AsyncIterable<AdapterEvent> {
-    this.stream.push({ role: 'user', content: opts.prompt });
+  async *start(opts: AdapterOptions): AsyncIterable<AdapterEvent> {
+    this.stream.push({ role: 'user', content: opts.systemPrompt ? ... });
 
     const q = query({
       prompt: this.stream,
       options: {
-        model: opts.model || 'sonnet',
+        model: opts.model || 'opus',
         cwd: opts.cwd,
         resume: opts.sessionId,
-        systemPrompt: {
-          type: 'preset',
-          preset: 'claude_code',
-          append: opts.systemPromptAppend,
-        },
+        systemPrompt: { type: 'preset', preset: 'claude_code', append: opts.systemPrompt },
         permissionMode: 'bypassPermissions',
         allowedTools: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep'],
-        mcpServers: { happyclaw: opts.mcpServer },
-        hooks: this.buildHooks(opts.hooks),
+        mcpServers: opts.mcpServers,
+        hooks: buildClaudeHooks(opts.hooks),
         includePartialMessages: true,
-        maxThinkingTokens: 16384,
-        signal: this.abortController.signal,
+        maxThinkingTokens: opts.maxThinkingTokens || 16384,
       },
     });
+    this.queryRef = q;
 
     for await (const message of q) {
-      // 复用现有 stream-processor.ts 的映射逻辑
-      yield* this.convertMessage(message);
+      yield* convertClaudeMessage(message);  // 复用现有 stream-processor 映射
     }
   }
 
-  sendMessage(message: string) {
-    this.stream.push({ role: 'user', content: message });
+  pushMessage(text: string, images?: ImageData[]) {
+    this.stream.push({ role: 'user', content: text }, images);
   }
 
-  requestStop() {
-    this.stream.end();
-  }
-
-  abort() {
-    this.abortController.abort();
-  }
+  requestStop() { this.stream.end(); }
+  interrupt() { this.queryRef?.interrupt(); }
+  abort() { this.queryRef?.abort(); }
 }
 ```
 
-### OpenAI SDK Adapter 实现要点
+### Codex Adapter 实现要点
 
 ```typescript
-class OpenAiSdkAdapter implements SdkAdapter {
-  readonly name = 'openai';
-  private agent: Agent;
-  private abortController = new AbortController();
-  private lastResponseId?: string;
+class CodexAdapter implements TurnModelAdapter {
+  readonly kind = 'turn';
+  readonly provider = 'codex';
+  private codex: Codex;
+  private thread: Thread | null = null;
 
-  async *run(opts: RunOptions): AsyncIterable<AdapterEvent> {
-    // 构建文件操作工具（OpenAI SDK 没有内置的 Read/Write/Edit 等）
-    const fileTools = buildFileTools(opts.cwd);
-
-    // 连接 MCP server
-    const mcpServer = new MCPServerStdio({
-      name: 'happyclaw',
-      command: 'node',
-      args: [opts.mcpServer.scriptPath],
-      env: opts.env,
+  constructor() {
+    this.codex = new Codex({
+      apiKey: process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY,
     });
-    await mcpServer.connect();
+  }
 
-    this.agent = new Agent({
-      name: 'happyclaw',
-      model: opts.model || 'gpt-4.1',
-      instructions: opts.systemPromptAppend,
-      tools: [
-        ...fileTools,
-        ...this.buildGuardrailTools(opts.hooks),
-      ],
-      mcpServers: [mcpServer],
-      modelSettings: {
-        maxTokens: 16384,
-        reasoning: { effort: 'high', summary: 'concise' },
-      },
-    });
-
-    const result = await run(this.agent, opts.prompt, {
-      stream: true,
-      previousResponseId: this.lastResponseId,
-      maxTurns: opts.maxTurns,
-      signal: this.abortController.signal,
-    });
-
-    for await (const event of result.toStream()) {
-      yield* this.convertEvent(event);
+  async *runTurn(input: TurnInput, opts: AdapterOptions): AsyncIterable<AdapterEvent> {
+    if (!this.thread) {
+      // 首轮：创建或恢复 thread
+      if (opts.sessionId) {
+        this.thread = this.codex.resumeThread(opts.sessionId);
+      } else {
+        this.thread = this.codex.startThread({
+          model: opts.model || 'gpt-5.4',
+          workingDirectory: opts.cwd,
+          sandboxMode: opts.sandboxMode || 'workspace-write',
+          approvalPolicy: 'never',  // 全自动
+          // instructions 通过 .codex/instructions.md 文件注入
+        });
+      }
+      yield { type: 'session_id', sessionId: this.thread.id };
     }
 
-    this.lastResponseId = result.lastResponseId;
-    await mcpServer.close();
+    // 写入动态 instructions（每轮更新）
+    writeInstructionsFile(opts.cwd, opts.systemPrompt);
+
+    const { events } = await this.thread.runStreamed(input.text);
+
+    for await (const event of events) {
+      yield* convertCodexEvent(event);
+    }
   }
 
-  // OpenAI SDK 的多轮需要重新 run()，不像 Claude 的 MessageStream push
-  sendMessage(message: string) {
-    // 触发新一轮 run()，带 previousResponseId 保持上下文
-    // 由 Protocol Bridge 管理
+  async dispose() {
+    // Codex SDK 自行清理子进程
   }
+}
 
-  requestStop() {
-    // OpenAI run 是 promise-based，等当前 run 完成即可
-  }
+/** Codex 事件 → AdapterEvent（EventNormalizer 的一部分） */
+function* convertCodexEvent(event: ThreadEvent): Generator<AdapterEvent> {
+  switch (event.type) {
+    case 'item.updated':
+      if (event.item.type === 'agent_message') {
+        yield { type: 'text_delta', text: event.item.content };
+      }
+      break;
 
-  abort() {
-    this.abortController.abort();
+    case 'item.started':
+      if (event.item.type === 'command_execution' || event.item.type === 'file_change') {
+        yield {
+          type: 'tool_use_start',
+          toolName: event.item.type,
+          toolId: event.item.id,
+          input: event.item,
+        };
+      }
+      break;
+
+    case 'item.completed':
+      if (event.item.type === 'command_execution' || event.item.type === 'file_change') {
+        yield {
+          type: 'tool_use_end',
+          toolId: event.item.id,
+          output: JSON.stringify(event.item),
+          isError: event.item.exitCode !== 0,
+        };
+      }
+      break;
+
+    case 'turn.completed':
+      if (event.usage) {
+        yield {
+          type: 'usage',
+          inputTokens: event.usage.input_tokens,
+          outputTokens: event.usage.output_tokens,
+          cacheRead: event.usage.cached_input_tokens,
+        };
+      }
+      yield { type: 'done', status: 'success' };
+      break;
+
+    case 'turn.failed':
+      yield { type: 'error', message: event.error?.message || 'unknown', recoverable: true };
+      yield { type: 'done', status: 'error' };
+      break;
   }
 }
 ```
@@ -1135,8 +1071,12 @@ class OpenAiSdkAdapter implements SdkAdapter {
 + const runnerSubdir = 'agent-harness';
 +
 + // SDK provider 作为环境变量传入 harness
-+ hostEnv['HAPPYCLAW_SDK_PROVIDER'] = llmProvider === 'openai' ? 'openai' : 'claude';
++ hostEnv['HAPPYCLAW_SDK_PROVIDER'] = llmProvider === 'openai' ? 'codex' : 'claude';
 ```
+
+Codex 模式需要额外挂载：
+- `~/.codex/` → `data/sessions/{folder}/.codex/`（会话持久化 + OAuth token）
+- Codex CLI 二进制需要在容器镜像内或通过 volume 挂载
 
 其余逻辑（进程 spawn、超时管理、IPC 目录创建、环境变量注入）基本不变。harness 从 stdin 读 ContainerInput、往 stdout 写 ContainerOutput，协议层完全兼容。
 
@@ -1144,205 +1084,104 @@ class OpenAiSdkAdapter implements SdkAdapter {
 
 ## 10. SDK 能力对比与差异处理
 
-| 能力 | Claude Agent SDK | OpenAI Agents SDK | 差异处理 |
-|------|-----------------|-------------------|---------|
-| **Tool calling 循环** | SDK 内置 | SDK 内置 (`run()`) | 统一 ✓ |
-| **内置文件工具** | Read/Write/Edit/Glob/Grep/Bash | 无 | OpenAI 侧需手动实现 |
-| **MCP 支持** | `createSdkMcpServer` (in-process) | `MCPServerStdio` (subprocess) | 共享 MCP server 逻辑 |
-| **流式输出** | `includePartialMessages: true` | `stream: true` + `toStream()` | AdapterEvent 统一 |
-| **多轮对话** | `MessageStream.push()` (同进程) | 重新 `run()` + `previousResponseId` | Adapter 内部处理 |
-| **会话 resume** | `resume: sessionId` | `previousResponseId` | 语义等价 |
-| **Hooks (PreToolUse)** | `HookCallback` (in-process) | `needsApproval` + guardrails | Hook Manager 适配 |
-| **Hooks (PostToolUse)** | `HookCallback` | stream 事件中间件 | Hook Manager 适配 |
-| **Hooks (PreCompact)** | `HookCallback` | 无等价物 | Context Engine 手动管理 |
-| **扩展思考** | `maxThinkingTokens` | `reasoning: { effort, summary }` | 分别配置 |
-| **Sub-agent** | `agents` 选项 (predefined agents) | `handoffs` (agent 间委托) | 分别实现 |
-| **权限模式** | `permissionMode` | `needsApproval` per-tool | Adapter 内部处理 |
-| **System prompt** | `systemPrompt.append` / preset | `agent.instructions` | Context Builder 统一 |
-| **Working directory** | `cwd` 选项 | 无直接支持 | tool 实现中限制路径 |
-| **Token budget** | `maxBudgetUSD` | `maxTurns` | 分别配置 |
+| 能力 | Claude Agent SDK | Codex SDK (@openai/codex-sdk) | 差异处理 |
+|------|-----------------|-------------------------------|---------|
+| **底层实现** | spawn Claude CLI 子进程 | spawn Codex CLI (Rust) 子进程 | 架构对称 |
+| **Tool calling 循环** | SDK 内置 | Codex CLI 内置 | 统一 ✓ |
+| **内置开发工具** | Read/Write/Edit/Glob/Grep/Bash | Shell execution + File patch + Web search | Codex 的 shell 覆盖多个 Claude 工具 |
+| **沙箱安全** | `permissionMode` + `allowedTools` | OS 级沙箱（Seatbelt/Landlock）+ `sandboxMode` | Codex 更强 |
+| **MCP 支持** | `createSdkMcpServer` (in-process) | config.toml MCP 配置 | 共享 MCP server 逻辑 |
+| **流式输出** | `includePartialMessages: true`（逐 token） | `runStreamed()`（item 级别） | Codex 粒度更粗，前端体验略降 |
+| **多轮对话** | `MessageStream.push()` (push 模型) | 同一 thread 多次 `.run()` (turn 模型) | 两种 adapter 接口 |
+| **会话 resume** | `resume: sessionId` (本地 SQLite) | `resumeThread(threadId)` (本地 sessions/) | 语义等价 |
+| **Hook 系统** | PreToolUse/PostToolUse/PreCompact/Stop（完整） | **无** | Codex 降级接受 |
+| **Memory Wrapup** | PreCompact hook 触发 | Protocol Bridge token 追踪触发 | 行为等价（§3.5） |
+| **上下文压缩** | SDK auto-compact + PreCompact hook | Codex CLI 内部管理 | 各自处理 |
+| **扩展思考** | `maxThinkingTokens` | Codex CLI 配置 | 分别配置 |
+| **Sub-agent** | `agents` 选项 (predefined agents) | Codex 内置 subagents | 分别实现 |
+| **System prompt** | `systemPrompt.append` / preset | `.codex/instructions.md` 文件 | Context Builder 统一写入 |
+| **Working directory** | `cwd` 选项 | `workingDirectory` 选项 | Adapter 内部处理 |
+| **结构化输出** | 无直接支持 | `outputSchema` JSON Schema | Codex 优势 |
+| **图片输入** | 支持 | 支持（local_image） | 统一 ✓ |
 
-### OpenAI 侧需要手动实现的文件工具
+### Codex CLI 内置工具说明
 
-Claude Agent SDK 内置了开发工具（Read/Write/Edit/Glob/Grep/Bash），OpenAI Agents SDK 没有。需要为 OpenAI adapter 实现等价工具：
+Codex CLI 自带的工具（不需要手写，替代现有 `local-tools.ts`）：
 
-```typescript
-// container/agent-harness/src/adapters/openai-file-tools.ts
-
-import { tool } from '@openai/agents';
-import { z } from 'zod';
-import fs from 'fs/promises';
-import { glob } from 'glob';
-import { execSync } from 'child_process';
-
-export function buildFileTools(cwd: string) {
-  const resolvePath = (p: string) => path.resolve(cwd, p);
-
-  return [
-    tool({
-      name: 'read_file',
-      description: 'Read a file. Returns content with line numbers.',
-      parameters: z.object({
-        file_path: z.string(),
-        offset: z.number().optional(),
-        limit: z.number().optional(),
-      }),
-      execute: async ({ file_path, offset, limit }) => {
-        const content = await fs.readFile(resolvePath(file_path), 'utf-8');
-        const lines = content.split('\n');
-        const start = offset || 0;
-        const end = limit ? start + limit : lines.length;
-        return lines.slice(start, end)
-          .map((line, i) => `${start + i + 1}\t${line}`)
-          .join('\n');
-      },
-    }),
-
-    tool({
-      name: 'write_file',
-      description: 'Write content to a file.',
-      parameters: z.object({
-        file_path: z.string(),
-        content: z.string(),
-      }),
-      execute: async ({ file_path, content }) => {
-        await fs.writeFile(resolvePath(file_path), content);
-        return `Written to ${file_path}`;
-      },
-    }),
-
-    tool({
-      name: 'edit_file',
-      description: 'Replace a string in a file.',
-      parameters: z.object({
-        file_path: z.string(),
-        old_string: z.string(),
-        new_string: z.string(),
-      }),
-      execute: async ({ file_path, old_string, new_string }) => {
-        const fullPath = resolvePath(file_path);
-        const content = await fs.readFile(fullPath, 'utf-8');
-        if (!content.includes(old_string)) {
-          return 'Error: old_string not found in file';
-        }
-        await fs.writeFile(fullPath, content.replace(old_string, new_string));
-        return `Edited ${file_path}`;
-      },
-    }),
-
-    tool({
-      name: 'glob_files',
-      description: 'Find files matching a glob pattern.',
-      parameters: z.object({ pattern: z.string() }),
-      execute: async ({ pattern }) => {
-        const matches = await glob(pattern, { cwd });
-        return matches.join('\n') || 'No matches found';
-      },
-    }),
-
-    tool({
-      name: 'grep',
-      description: 'Search file contents with regex.',
-      parameters: z.object({
-        pattern: z.string(),
-        path: z.string().optional(),
-        glob: z.string().optional(),
-      }),
-      execute: async ({ pattern, path: searchPath, glob: globPattern }) => {
-        const target = searchPath ? resolvePath(searchPath) : cwd;
-        let cmd = `rg --no-heading -n "${pattern}" "${target}"`;
-        if (globPattern) cmd += ` --glob "${globPattern}"`;
-        try {
-          return execSync(cmd, { encoding: 'utf-8', maxBuffer: 1024 * 1024 });
-        } catch {
-          return 'No matches found';
-        }
-      },
-    }),
-
-    tool({
-      name: 'bash',
-      description: 'Execute a bash command.',
-      parameters: z.object({ command: z.string() }),
-      execute: async ({ command }) => {
-        try {
-          return execSync(command, { cwd, encoding: 'utf-8', timeout: 120000 });
-        } catch (e: any) {
-          return `Error (exit ${e.status}): ${e.stderr || e.message}`;
-        }
-      },
-    }),
-  ];
-}
-```
+- **Shell execution**：等价 Bash/Read/Grep/Glob。OS 级沙箱限制（比 `assertWithinWorkspace()` 更强）
+- **File patch**：等价 Edit/Write。基于 patch 格式的文件修改
+- **Web search**：内置 web 搜索
+- **Subagents**：并行子任务执行
+- **Todo list**：任务规划追踪
 
 ---
 
 ## 11. 实施计划
 
-### Phase 0: 基础设施抽取（其他工作的前置）
+**原则**：每个 Phase 独立可交付、独立可验证。不要求前一个 Phase 完成才能开始下一个（除非有显式依赖）。
 
-1. **Credential Manager**
-   - 实现 `src/credential-manager.ts`
-   - 整合现有的 `getClaudeProviderConfig()`、`getOpenAIProviderConfig()`、飞书 OAuth
-   - 统一凭据读取/刷新/存储接口
-   - 迁移 `container-runner.ts` 中的环境变量注入逻辑
+### Phase 1: Credential Manager（独立模块，无依赖）
 
-2. **Context Engine 骨架**
-   - 实现 `src/context-engine.ts`
-   - 从 `agent-runner/src/index.ts` 提取上下文构建逻辑（systemPromptAppend）
-   - 从 `context-compressor.ts` 迁移压缩/摘要逻辑
-   - Token 预算跟踪（先用简单估算，后续可精确化）
+1. 实现 `src/credential-manager.ts`
+2. 整合现有的 `getClaudeProviderConfig()`、`getOpenAIProviderConfig()`、飞书 OAuth
+3. 统一凭据读取/刷新/存储接口
+4. 新增通用 HTTP 端点 `GET /api/internal/credentials/:provider`（扩展现有 `/api/internal/memory/openai-credentials` 模式）
+5. 迁移 `container-runner.ts` 中的环境变量注入逻辑
+6. **验证**：所有现有凭据消费方切换到 Credential Manager，行为不变
 
-### Phase 1: Agent Harness 骨架 + Claude SDK Adapter
+### Phase 2: SDK Adapter 抽取 + Claude Adapter（核心重构）
 
-1. 创建 `agent-harness/` 项目结构
-2. 定义 `SdkAdapter` 接口（`adapters/types.ts`）
-3. 实现 Claude SDK Adapter（从现有 `agent-runner/src/index.ts` 迁移）
-   - 这一步本质上是把现有 agent-runner 的代码重构到新的 Adapter 接口下
-   - stream-processor.ts 逻辑迁移到 stream-converter.ts
-4. 实现 Protocol Bridge（stdin/stdout + IPC 多轮）
-5. 验证 Claude SDK Adapter 端到端可用（替代现有 agent-runner）
+1. 创建 `container/sdk-adapter/` 共享包
+2. 定义 `PushModelAdapter` / `TurnModelAdapter` / `AdapterEvent` 接口
+3. 实现 Claude Adapter（从现有 `agent-runner/src/index.ts` 提取 SDK 调用逻辑）
+4. 实现 EventNormalizer 层（~30 行适配层，让 stream-processor 基本不动）
+5. stream-processor.ts → 适配为 `convertClaudeMessage()` 纯函数
+6. **验证**：agent-harness + Claude Adapter 替代现有 agent-runner，端到端可用
 
-### Phase 2: MCP Server + Skill 迁移
+### Phase 3: Agent Harness Protocol Bridge
 
-1. 把 messaging/tasks/memory/groups plugin 包装成 MCP server
-2. 集成 Context Engine（上下文注入通过 harness 调 Context Engine）
-3. 实现 `services/feishu-docs.ts` + `cli/feishu-docs.ts` + `skills/feishu-docs/SKILL.md`
-4. 实现 `services/cross-model.ts` + `cli/cross-model.ts` + `skills/cross-model/SKILL.md`
-5. 从 agent-runner-core 移除三个旧 plugin
+1. 创建 `container/agent-harness/` 项目结构
+2. 实现 Protocol Bridge（stdin/stdout + IPC + 活动看门狗 + 错误恢复 + memory wrapup token 追踪）
+3. Context Builder（从 agent-runner 提取上下文构建逻辑）
+4. Stream Converter（含 EventNormalizer）
+5. MCP Server（从 agent-runner-core plugins 包装）
+6. **验证**：agent-harness 替代 agent-runner，宿主机侧 container-runner.ts 只改 spawn 路径
 
-### Phase 3: Hook 迁移 + 可视化
+### Phase 4: Hook 迁移（仅 Claude 侧）
 
-1. 实现 Hook Manager（统一 Claude/OpenAI 两侧的 hook 注册）
-2. 迁移 gatekeeper / loop-detect / code-review 逻辑为 SDK 回调
+1. 实现 Hook Manager（Claude 侧包装 HookCallback）
+2. 迁移 gatekeeper / loop-detect / code-review 核心逻辑
 3. Hook 执行记录写入 StreamEvent（Web UI 可视化）
+4. **验证**：safety hooks 在 Claude Adapter 下行为与迁移前一致
 
-### Phase 4: OpenAI Agents SDK Adapter
+### Phase 5: Codex SDK Adapter
 
-1. 安装 `@openai/agents`（需 Node.js 22+、zod 4+）
-2. 实现 OpenAI SDK Adapter（`adapters/openai-sdk.ts`）
-3. 实现 OpenAI 文件工具（`openai-file-tools.ts`）
-4. 实现 OpenAI 侧的 hook 适配（guardrails / needsApproval）
-5. 实现 OpenAI 侧的会话管理（previousResponseId）
-6. 验证双 SDK 可切换
-7. cross-model skill 的 `--agent openai` 验证
+依赖：Phase 2（adapter 接口）
 
-### Phase 5: Memory Agent Harness 化
+1. 安装 `@openai/codex-sdk`，验证 Codex CLI 二进制在容器内可运行
+2. 实现 Codex Adapter（`codex-adapter.ts`）
+3. 实现 `convertCodexEvent()` 事件转换
+4. Context Builder 适配（`.codex/instructions.md` 写入）
+5. MCP 配置注入（config.toml 或 Codex SDK config）
+6. 会话管理（thread.id 持久化 + resumeThread）
+7. Memory wrapup token 追踪集成
+8. **验证**：双 SDK 可切换，同一会话文件夹可以在 Claude/Codex 间切换 provider（新会话）
 
-1. 在 harness 加入 `--mode memory` 分支（跳过 MCP/hooks/skills/stream）
-2. 实现 JSONL ↔ SDK 桥接
-3. Memory system prompt 模板化（填入动态路径）
-4. OpenAI 侧的 memory agent 实现（手动文件工具 + run()）
-5. 修改 `src/memory-agent.ts` 的 spawn 目标
-6. 验证四种操作（query/remember/session_wrapup/global_sleep）
+### Phase 6: Memory Agent 适配
 
-### Phase 6: 清理
+依赖：Phase 2（sdk-adapter 包）
 
-1. 删除 agent-runner/（Claude SDK 直调版）
-2. 删除 agent-runner-openai/（OpenAI API 直调版）
-3. 删除 memory-agent/（Claude SDK 直调版）
-4. 删除 context-compressor.ts（已迁移到 Context Engine）
+1. memory-agent 内部改为通过 sdk-adapter 调用 SDK
+2. Codex 侧 system prompt 重写（Claude 工具名 → shell 命令，~160 行）
+3. 验证 Codex 侧的文件操作行为（sandboxMode 限制、路径处理）
+4. **验证**：四种操作（query/remember/session_wrapup/global_sleep）在两个 SDK 下行为一致
+
+### Phase 7: Skill 迁移 + 清理
+
+1. feishu-docs skill（services/ + cli/ + SKILL.md + 凭据走 HTTP 端点）
+2. cross-model MCP tool 重构（合并 ask_model + delegate_task，支持 --agent 参数）
+3. 删除 agent-runner/、agent-runner-openai/
+4. 删除 context-compressor.ts（迁移到 compression-manager.ts）
 5. 更新 CLAUDE.md、CLAUDE-full.md、Makefile
 6. agent-runner-core 清理无用 export
 
@@ -1352,29 +1191,54 @@ export function buildFileTools(cwd: string) {
 
 | 风险 | 影响 | 缓解 |
 |------|------|------|
-| OpenAI Agents SDK 成熟度 | v0.8.0，API 可能变 | 通过 Adapter 接口隔离，SDK 变动只影响 openai-sdk.ts |
-| OpenAI SDK 需要 Node 22+ / zod 4+ | 容器基础镜像需升级 | 当前 Dockerfile 已用 node:22-slim，zod 4 需确认兼容性 |
-| OpenAI SDK 无内置文件工具 | 需要手动实现 Read/Write/Edit/Glob/Grep/Bash | 实现量不大，但需要保证与 Claude 内置工具行为一致 |
-| OpenAI SDK 无 PreCompact 等价物 | 长对话上下文管理更复杂 | Context Engine 主动管理 + previousResponseId 服务端截断 |
-| OpenAI SDK 多轮需要重新 run() | 不如 Claude MessageStream push 优雅 | Protocol Bridge 层面处理，对上层透明 |
-| 两个 SDK 的 tool calling 行为差异 | 同一 tool 在两个 SDK 下可能表现不同 | 统一 tool 接口 + 充分测试 |
-| Memory agent 换底层后行为偏差 | system prompt 是 280 行精细规范，不同模型遵循度不同 | 先用 Claude SDK（Claude 遵循度高），OpenAI 适配时逐步验证 |
-| 会话状态跨 SDK 不兼容 | 换 provider 后历史会话丢失 | 接受——换 provider 本身就是新会话 |
-| Claude SDK includePartialMessages + maxThinkingTokens 冲突 | 启用扩展思考时可能不产生 stream event | 确认最新版 SDK 是否已修复，否则分开处理 |
+| Codex SDK 成熟度（v0.116.0） | API 可能变 | 通过 SdkAdapter 接口隔离，SDK 变动只影响 codex-adapter.ts |
+| Codex CLI 二进制在容器内运行 | Rust 二进制可能有 glibc 兼容问题 | 提前验证：在 node:22-slim 容器内测试 Codex CLI |
+| Codex CLI OS 沙箱在 Docker 内的行为 | Seatbelt (macOS) 不适用于 Linux 容器；Landlock 需要内核 5.13+ | 确认 Docker 宿主机内核版本；必要时用 `sandboxMode: "danger-full-access"` + 容器级隔离 |
+| Codex OAuth token 在容器内的刷新 | `~/.codex/` 需要可写挂载 | 挂载 `data/sessions/{folder}/.codex/` 为 rw |
+| Codex 事件粒度粗（item 级别） | 前端打字机效果变粗糙 | 接受降级；或在 item.updated 事件内做文本 diff 模拟逐字输出 |
+| Codex MCP 配置灵活度 | config.toml 可能不支持动态 MCP server | 备选：MCP tools 注入 instructions，通过 shell 调用 MCP client |
+| sdk-adapter 作为共享包的构建复杂度 | monorepo 内多包依赖管理 | 用 npm workspaces，构建顺序：sdk-adapter → agent-harness / memory-agent |
+| Memory agent 换 SDK 后行为偏差 | system prompt 280 行精细规范，不同模型遵循度不同 | 先用 Claude SDK 验证 adapter 正确性，再切 Codex 逐步验证 |
+| 会话状态跨 SDK 不兼容 | 换 provider 后历史会话丢失 | 接受——换 provider 就是新会话 |
+| Protocol Bridge 复杂度 | 从 1727 行 index.ts 迁移，容易遗漏边界情况 | 完整职责清单（§3.1）逐项核对 + 端到端测试 |
+
+### 待验证事项（PoC）
+
+在正式开发前需要验证：
+
+1. **Codex CLI 在 Docker 容器内能否正常运行**：安装 `@openai/codex`，在 node:22-slim 容器内执行简单任务
+2. **Codex SDK MCP 配置**：验证 config.toml 的 MCP server 配置是否能在 SDK 调用中生效
+3. **Codex OAuth 在容器内**：预配置 `~/.codex/` 目录后，Codex CLI 能否正常认证
+4. **事件流完整性**：`thread.runStreamed()` 的事件是否足够重建 StreamEvent（特别是 tool 的 start/end 时机）
 
 ---
 
-## 附录：为什么用 SDK 而不是 CLI 套壳
+## 附录 A：为什么两侧用不同的 SDK 策略
 
-| | CLI 套壳 | SDK 直调 |
+| | Claude 侧 | Codex 侧 |
 |---|---|---|
-| **性能** | 每轮 spawn CLI 进程，启动开销大 | in-process，无额外进程开销 |
-| **Hook** | shell command，需要序列化/反序列化，进程间通信 | in-process callback，直接访问内存 |
-| **MCP** | 需要生成 .mcp.json / config.toml | 直接传 MCP server 对象（Claude）或实例（OpenAI） |
-| **类型安全** | 解析 CLI stdout 文本 | TypeScript 类型完整 |
-| **调试** | CLI 是黑盒，需要解析日志 | 可设断点、单步调试 |
-| **多轮** | 需要 --resume 或重启进程 | MessageStream push（Claude）/ previousResponseId（OpenAI） |
-| **依赖** | 需要全局安装 CLI | npm 包依赖，版本锁定 |
-| **兼容性** | CLI 版本升级可能破坏输出格式 | SDK API 有语义版本保证 |
+| **SDK 选择** | Claude Agent SDK（直调 SDK） | Codex SDK（包装 CLI 二进制） |
+| **原因** | Claude Agent SDK 提供 in-process 调用、完整 Hook 系统、精细事件流 | Codex SDK 是唯一能用 ChatGPT OAuth 的编程接口；Codex CLI 自带 OS 级沙箱 |
+| **Hook** | 完整：PreToolUse/PostToolUse/PreCompact/Stop | 无：可接受降级（沙箱替代 gatekeeper，token 追踪替代 PreCompact） |
+| **性能** | in-process，无额外进程开销 | spawn Rust 子进程，有启动开销 |
+| **MCP** | in-process MCP server | config 注入 MCP server |
+| **事件粒度** | 逐 token（text_delta） | item 级别（粗糙） |
 
-当前 agent-runner 已经在用 Claude Agent SDK，效果良好。设计方向应该是统一到 SDK 层面，而不是退回 CLI。
+两侧策略不对称是有意为之——Claude Agent SDK 能力更强，应该充分利用；Codex 侧用 SDK 包装 CLI 虽然粒度粗，但获得了 OAuth 支持和 OS 沙箱，tradeoff 合理。
+
+## 附录 B：Codex SDK 关键能力参考
+
+| 能力 | API | 备注 |
+|------|-----|------|
+| 创建会话 | `codex.startThread(opts)` | workingDirectory, model, sandboxMode, approvalPolicy |
+| 恢复会话 | `codex.resumeThread(id)` | 从 ~/.codex/sessions/ 恢复 |
+| 阻塞执行 | `thread.run(prompt)` | 返回 `{ items, finalResponse, usage }` |
+| 流式执行 | `thread.runStreamed(prompt)` | 返回 `{ events: AsyncGenerator<ThreadEvent> }` |
+| 事件类型 | `ThreadEvent.type` | thread.started, turn.started/completed/failed, item.started/updated/completed, error |
+| 结果项类型 | `ThreadItem.type` | agent_message, command_execution, file_change, mcp_tool_call, web_search, todo_list |
+| 沙箱模式 | `sandboxMode` | read-only, workspace-write, danger-full-access |
+| 审批策略 | `approvalPolicy` | never, on-request, on-failure, untrusted |
+| 认证 | `apiKey` 或 `codex login` OAuth | API Key 直传；OAuth 存 ~/.codex/ |
+| MCP 支持 | config.toml `[mcp_servers]` | stdio 和 streamable-http transport |
+| 图片输入 | `local_image` item | 支持本地文件路径 |
+| 结构化输出 | `outputSchema` | JSON Schema 约束输出 |
