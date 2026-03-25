@@ -130,11 +130,19 @@ export class ClaudeSession {
    * @param config  Session-level configuration (model, cwd, permissions, etc.)
    * @param mcpServers  Fully assembled MCP server configs (user + built-in)
    */
-  async *run(
+  /**
+   * Start a query against the Claude Agent SDK.
+   *
+   * IMPORTANT: Stream creation is eager (runs before the returned generator
+   * is iterated), so callers can safely call pushMessage() between run()
+   * and the first iteration of the returned generator.
+   */
+  run(
     config: ClaudeSessionConfig,
     mcpServers: Record<string, McpServerConfig>,
   ): AsyncGenerator<any> {
-    // Fresh stream for each query
+    // Fresh stream for each query — created eagerly (not inside the async
+    // generator body) so that pushMessage() works before iteration starts.
     this.stream = new MessageStream();
     this.queryRef = null;
 
@@ -157,36 +165,43 @@ export class ClaudeSession {
       hooks.PreToolUse = [{ hooks: [createSafetyLiteHook()] }];
     }
 
-    const q = query({
-      prompt: this.stream,
-      options: {
-        model: config.model || 'opus',
-        cwd: config.cwd,
-        additionalDirectories: config.additionalDirectories,
-        resume: config.sessionId,
-        resumeSessionAt: config.resumeAt,
-        systemPrompt: {
-          type: 'preset' as const,
-          preset: 'claude_code' as const,
-          append: config.systemPromptAppend,
-        },
-        allowedTools: config.allowedTools,
-        ...(config.disallowedTools && { disallowedTools: config.disallowedTools }),
-        maxThinkingTokens: 16384,
-        permissionMode: config.permissionMode ?? 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
-        settingSources: ['project', 'user'],
-        includePartialMessages: true,
-        mcpServers,
-        hooks,
-        agents: PREDEFINED_AGENTS,
-      },
-    });
-    this.queryRef = q;
+    const stream = this.stream;
+    const self = this;
 
-    for await (const message of q) {
-      yield message;
+    async function* iterate() {
+      const q = query({
+        prompt: stream,
+        options: {
+          model: config.model || 'opus',
+          cwd: config.cwd,
+          additionalDirectories: config.additionalDirectories,
+          resume: config.sessionId,
+          resumeSessionAt: config.resumeAt,
+          systemPrompt: {
+            type: 'preset' as const,
+            preset: 'claude_code' as const,
+            append: config.systemPromptAppend,
+          },
+          allowedTools: config.allowedTools,
+          ...(config.disallowedTools && { disallowedTools: config.disallowedTools }),
+          maxThinkingTokens: 16384,
+          permissionMode: config.permissionMode ?? 'bypassPermissions',
+          allowDangerouslySkipPermissions: true,
+          settingSources: ['project', 'user'],
+          includePartialMessages: true,
+          mcpServers,
+          hooks,
+          agents: PREDEFINED_AGENTS,
+        },
+      });
+      self.queryRef = q;
+
+      for await (const message of q) {
+        yield message;
+      }
     }
+
+    return iterate();
   }
 
   /**

@@ -525,15 +525,9 @@ export async function runQuery(
 ): Promise<QueryResult> {
   // Track IM channels from initial prompt
   state.extractSourceChannels(prompt, imChannelsFile);
-  const initialRejected = session.pushMessage(prompt, images);
   const emit = (output: ContainerOutput): void => {
     if (emitOutput) writeOutput(output);
   };
-
-  // 如果有图片被拒绝，立即通知用户
-  for (const reason of initialRejected) {
-    emit({ status: 'success', result: `\u26a0\ufe0f ${reason}`, newSessionId: undefined });
-  }
 
   // Create the StreamEventProcessor with mode change callback
   const processor = new StreamEventProcessor(emit, log, (newMode) => {
@@ -543,9 +537,6 @@ export async function runQuery(
       log(`setPermissionMode failed: ${err}`),
     );
   });
-
-  // Set up IPC polling
-  const pollerState = createIpcPoller(state, session, processor, ipcPaths, log, emit, imChannelsFile);
 
   // Build system prompt from context-builder
   const { isHome, isAdminHome } = normalizeHomeFlags(containerInput);
@@ -559,6 +550,15 @@ export async function runQuery(
 
   // All containers can access global and memory directories via additionalDirectories.
   const extraDirs = [globalDir, memoryDir];
+
+  // Default poller state for error paths where createIpcPoller hasn't run yet
+  let pollerState: IpcPollerState = {
+    ipcPolling: false,
+    closedDuringQuery: false,
+    interruptedDuringQuery: false,
+    drainDetectedDuringQuery: false,
+    waitingForBackgroundTasks: false,
+  };
 
   try {
     // Assemble session config
@@ -583,8 +583,21 @@ export async function runQuery(
       happyclaw: mcpServerConfig,
     };
 
+    // Start session — creates MessageStream eagerly so pushMessage() works
+    // before the generator is iterated by processMessages().
+    const messageGen = session.run(sessionConfig, mcpServers);
+
+    // Push initial prompt into the freshly created stream
+    const initialRejected = session.pushMessage(prompt, images);
+    for (const reason of initialRejected) {
+      emit({ status: 'success', result: `\u26a0\ufe0f ${reason}`, newSessionId: undefined });
+    }
+
+    // Set up IPC polling — safe because stream already exists
+    pollerState = createIpcPoller(state, session, processor, ipcPaths, log, emit, imChannelsFile);
+
     const result = await processMessages(
-      session.run(sessionConfig, mcpServers),
+      messageGen,
       processor,
       state,
       session,
