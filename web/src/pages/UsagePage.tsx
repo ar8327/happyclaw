@@ -116,6 +116,9 @@ function SubscriptionUsageCard() {
     loadSubscription();
   }, [loadSubscription]);
 
+  // All hooks must be called before any conditional return (Rules of Hooks)
+  const handleRefresh = useCallback(() => loadSubscription(), [loadSubscription]);
+
   // Hide entirely if user is not on OAuth (no credentials = not using Anthropic subscription)
   if (subscriptionErrorCode === 'no_credentials') {
     return null;
@@ -123,7 +126,6 @@ function SubscriptionUsageCard() {
 
   // If API works, show data with refresh; otherwise show link to claude.ai
   const apiUnavailable = subscriptionError && !subscription;
-  const handleRefresh = useCallback(() => loadSubscription(), [loadSubscription]);
 
   return (
     <div className="bg-card rounded-xl border border-border p-4 lg:p-6">
@@ -263,13 +265,15 @@ function OpenAISubscriptionUsageCard() {
     loadOpenAIAccount();
   }, [loadOpenAIAccount]);
 
+  // All hooks must be called before any conditional return (Rules of Hooks)
+  const handleRefresh = useCallback(() => loadOpenAIAccount(), [loadOpenAIAccount]);
+
   // Hide if no OpenAI OAuth configured
   if (openaiAccountErrorCode === 'no_credentials') {
     return null;
   }
 
   const apiUnavailable = openaiAccountError && !openaiAccount;
-  const handleRefresh = useCallback(() => loadOpenAIAccount(), [loadOpenAIAccount]);
 
   return (
     <div className="bg-card rounded-xl border border-border p-4 lg:p-6">
