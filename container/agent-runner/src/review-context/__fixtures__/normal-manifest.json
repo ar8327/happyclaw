@@ -9,7 +9,7 @@
       "pack_size": 0,
       "pack_sha256": "",
       "identifiers": {
-        "go_module": "code.byted.org/ea-expense/travel-bff"
+        "go_module": "github.com/example-org/service-bff"
       }
     },
     "travel-flight-biz": {
@@ -17,7 +17,7 @@
       "pack_size": 0,
       "pack_sha256": "",
       "identifiers": {
-        "go_module": "code.byted.org/ea-expense/travel-flight-biz"
+        "go_module": "github.com/example-org/service-flight-biz"
       }
     }
   }
