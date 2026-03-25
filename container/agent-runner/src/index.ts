@@ -24,6 +24,7 @@ import {
 } from './ipc-handler.js';
 import { runQueryLoop } from './query-loop.js';
 import { ClaudeRunner } from './providers/claude/claude-runner.js';
+import { CodexRunner } from './providers/codex/codex-runner.js';
 
 // ---------------------------------------------------------------------------
 // Environment
@@ -178,14 +179,33 @@ async function main(): Promise<void> {
       log,
       writeOutput,
     });
-  } else {
-    // Codex provider — will be implemented in Phase 1
-    writeOutput({
-      status: 'error',
-      result: null,
-      error: 'Codex provider not yet implemented',
+  } else if (provider === 'codex') {
+    const codexModel = process.env.HAPPYCLAW_CODEX_MODEL || process.env.OPENAI_MODEL || 'o3-pro';
+    const runner = new CodexRunner({
+      containerInput,
+      state,
+      ipcPaths,
+      log,
+      writeOutput,
+      imChannelsFile: IM_CHANNELS_FILE,
+      groupDir: WORKSPACE_GROUP,
+      globalDir: WORKSPACE_GLOBAL,
+      memoryDir: WORKSPACE_MEMORY,
+      model: codexModel,
     });
-    process.exit(1);
+    await runner.initialize();
+
+    await runQueryLoop({
+      runner,
+      initialPrompt: prompt,
+      initialImages: promptImages,
+      sessionId: containerInput.sessionId,
+      state,
+      ipcPaths,
+      imChannelsFile: IM_CHANNELS_FILE,
+      log,
+      writeOutput,
+    });
   }
 }
 
