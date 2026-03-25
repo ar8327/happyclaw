@@ -18,6 +18,7 @@ import fs from 'fs';
 import path from 'path';
 import { query, HookCallback, PreCompactHookInput, createSdkMcpServer, PermissionMode } from '@anthropic-ai/claude-agent-sdk';
 import { detectImageMimeTypeFromBase64Strict } from './image-detector.js';
+import { createSafetyLiteHook } from './safety-lite.js';
 
 import type {
   ContainerInput,
@@ -1019,6 +1020,7 @@ async function runQuery(
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(isHome, isAdminHome, containerInput.groupFolder, containerInput.userId)] }],
+        ...(process.env.HAPPYCLAW_HOST_MODE === '1' ? { PreToolUse: [{ hooks: [createSafetyLiteHook()] }] } : {}),
       },
       agents: PREDEFINED_AGENTS,
     }
