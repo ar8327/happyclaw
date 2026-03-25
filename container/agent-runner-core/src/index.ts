@@ -5,7 +5,6 @@
  * - Protocol types (ContainerInput/Output, StreamEvent)
  * - IPC utilities (read/write/poll)
  * - Plugin system (ContextPlugin, ToolDefinition, ContextManager)
- * - Tool format adapters (OpenAI, Codex, Claude SDK)
  * - System prompt builder
  * - Built-in plugins (Messaging, Tasks, Groups, Memory, FeishuDocs)
  * - Utility functions
@@ -50,10 +49,6 @@ export type {
 } from './plugin.js';
 export { ContextManager } from './context.js';
 
-// Tool adapters
-export type { OpenAIFunctionTool, CodexToolDef } from './tool-adapters.js';
-export { toOpenAITools, toCodexTools } from './tool-adapters.js';
-
 // Prompt builder
 export { buildBaseSystemPrompt } from './prompt-builder.js';
 
@@ -65,11 +60,6 @@ export { MemoryPlugin } from './plugins/memory.js';
 export type { MemoryPluginOptions } from './plugins/memory.js';
 export { FeishuDocsPlugin } from './plugins/feishu-docs.js';
 export type { FeishuDocsPluginOptions } from './plugins/feishu-docs.js';
-export { CrossModelPlugin } from './plugins/cross-model.js';
-export type { CrossModelPluginOptions } from './plugins/cross-model.js';
-export { DelegatePlugin } from './plugins/delegate.js';
-export type { DelegatePluginOptions, DelegateJobSpec, DelegateResult } from './plugins/delegate.js';
-
 // Utilities
 export {
   shorten,
