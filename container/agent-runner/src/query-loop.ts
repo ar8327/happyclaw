@@ -1,0 +1,400 @@
+/**
+ * Generic query loop — provider-agnostic orchestration.
+ *
+ * Consumes AgentRunner.runQuery() AsyncGenerator, handles:
+ * - NormalizedMessage dispatch (stream_event → writeOutput)
+ * - Unified IPC poller (sentinels + message handling)
+ * - Activity watchdog (5 min no-event timeout + 20 min tool hard timeout)
+ * - Overflow retries, interrupt recovery, drain/close exit
+ * - Between-query cleanup and IPC wait
+ */
+
+import fs from 'fs';
+import type {
+  AgentRunner,
+  QueryConfig,
+  QueryResult,
+  NormalizedMessage,
+} from './runner-interface.js';
+import type { ContainerOutput } from './types.js';
+import type { SessionState } from './session-state.js';
+import {
+  IPC_POLL_MS,
+  shouldClose,
+  shouldDrain,
+  shouldInterrupt,
+  drainIpcInput,
+  waitForIpcMessage,
+  type IpcPaths,
+  type LogFn,
+  type WriteOutputFn,
+} from './ipc-handler.js';
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface QueryLoopConfig {
+  runner: AgentRunner;
+  initialPrompt: string;
+  initialImages?: Array<{ data: string; mimeType?: string }>;
+  sessionId?: string;
+  state: SessionState;
+  ipcPaths: IpcPaths;
+  imChannelsFile: string;
+  log: LogFn;
+  writeOutput: WriteOutputFn;
+  maxOverflowRetries?: number; // default 3
+}
+
+interface IpcMessage {
+  text: string;
+  images?: Array<{ data: string; mimeType?: string }>;
+}
+
+// ---------------------------------------------------------------------------
+// Unified IPC Poller
+// ---------------------------------------------------------------------------
+
+interface IpcPollerState {
+  isActive: boolean;
+  closedDuringQuery: boolean;
+  interruptedDuringQuery: boolean;
+  drainDetectedDuringQuery: boolean;
+  stop(): void;
+}
+
+interface IpcPollerOptions {
+  runner: AgentRunner;
+  state: SessionState;
+  ipcPaths: IpcPaths;
+  log: LogFn;
+  writeOutput: WriteOutputFn;
+  imChannelsFile: string;
+  onMessage: (msg: IpcMessage) => void;
+  onModeChange?: (mode: string) => void;
+}
+
+function createUnifiedIpcPoller(opts: IpcPollerOptions): IpcPollerState {
+  const pollerState: IpcPollerState = {
+    isActive: true,
+    closedDuringQuery: false,
+    interruptedDuringQuery: false,
+    drainDetectedDuringQuery: false,
+    stop() { this.isActive = false; },
+  };
+
+  const poll = () => {
+    if (!pollerState.isActive) return;
+
+    // 1. Close sentinel
+    if (shouldClose(opts.ipcPaths)) {
+      opts.log('Close sentinel detected during query');
+      pollerState.closedDuringQuery = true;
+      opts.runner.interrupt().catch(() => {});
+      pollerState.stop();
+      return;
+    }
+
+    // 2. Drain sentinel (detect but don't stop query)
+    if (!pollerState.drainDetectedDuringQuery && shouldDrain(opts.ipcPaths)) {
+      opts.log('Drain sentinel detected during query');
+      pollerState.drainDetectedDuringQuery = true;
+    }
+
+    // 3. Interrupt sentinel
+    if (shouldInterrupt(opts.ipcPaths)) {
+      opts.log('Interrupt sentinel detected');
+      pollerState.interruptedDuringQuery = true;
+      opts.state.markInterruptRequested();
+      opts.runner.interrupt().catch(() => {});
+      pollerState.stop();
+      return;
+    }
+
+    // 4. Messages and mode changes
+    const { messages, modeChange } = drainIpcInput(opts.ipcPaths, opts.log);
+    if (modeChange && opts.onModeChange) {
+      opts.state.currentPermissionMode = modeChange;
+      opts.log(`Mode change via IPC: ${modeChange}`);
+      opts.onModeChange(modeChange);
+    }
+    for (const msg of messages) {
+      opts.log(`IPC message (${msg.text.length} chars, ${msg.images?.length || 0} images)`);
+      opts.state.extractSourceChannels(msg.text, opts.imChannelsFile);
+      opts.writeOutput({
+        status: 'stream', result: null,
+        streamEvent: { eventType: 'status', statusText: 'ipc_message_received' },
+      });
+      opts.onMessage(msg);
+    }
+
+    setTimeout(poll, IPC_POLL_MS);
+  };
+  setTimeout(poll, IPC_POLL_MS);
+
+  return pollerState;
+}
+
+// ---------------------------------------------------------------------------
+// Stream consumer (with activity watchdog)
+// ---------------------------------------------------------------------------
+
+async function consumeQueryStream(
+  runner: AgentRunner,
+  config: QueryConfig,
+  poller: IpcPollerState,
+  log: LogFn,
+  writeOutput: WriteOutputFn,
+): Promise<QueryResult> {
+  const ACTIVITY_TIMEOUT_MS = 300_000; // 5 minutes
+  const TOOL_HARD_TIMEOUT_MS = parseInt(
+    process.env.TOOL_CALL_HARD_TIMEOUT_MS || '1200000', 10,
+  ); // 20 minutes
+
+  const gen = runner.runQuery(config);
+  let activityTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const resetActivityTimer = () => {
+    if (activityTimer) clearTimeout(activityTimer);
+    activityTimer = setTimeout(async () => {
+      if (!poller.isActive) return; // query already ended
+
+      const report = runner.getActivityReport?.() ?? {
+        hasActiveToolCall: false,
+        activeToolDurationMs: 0,
+        hasPendingBackgroundTasks: false,
+      };
+
+      if (report.hasPendingBackgroundTasks) {
+        log('Activity timeout skipped: background tasks pending, extending');
+        resetActivityTimer();
+        return;
+      }
+
+      if (report.hasActiveToolCall) {
+        if (report.activeToolDurationMs < TOOL_HARD_TIMEOUT_MS) {
+          log(`Activity timeout skipped: tool call in progress (${Math.round(report.activeToolDurationMs / 1000)}s)`);
+          resetActivityTimer();
+          return;
+        }
+        log(`Tool call hard timeout: ${Math.round(report.activeToolDurationMs / 1000)}s exceeds ${TOOL_HARD_TIMEOUT_MS / 1000}s`);
+      } else {
+        log(`Activity timeout: no events for ${ACTIVITY_TIMEOUT_MS}ms`);
+      }
+
+      await runner.interrupt();
+      poller.stop();
+    }, ACTIVITY_TIMEOUT_MS);
+  };
+  resetActivityTimer();
+
+  // Manual iteration to get generator return value
+  let newSessionId: string | undefined;
+  let resumeAnchor: string | undefined;
+
+  let iterResult: IteratorResult<NormalizedMessage, QueryResult>;
+  while (!(iterResult = await gen.next()).done) {
+    resetActivityTimer();
+    const msg = iterResult.value;
+
+    switch (msg.kind) {
+      case 'stream_event':
+        writeOutput({ status: 'stream', result: null, streamEvent: msg.event });
+        break;
+
+      case 'session_init':
+        newSessionId = msg.sessionId;
+        log(`Session initialized: ${newSessionId}`);
+        break;
+
+      case 'resume_anchor':
+        resumeAnchor = msg.anchor;
+        break;
+
+      case 'result':
+        writeOutput({ status: 'success', result: msg.text, newSessionId });
+        if (msg.usage) {
+          writeOutput({
+            status: 'stream', result: null,
+            streamEvent: { eventType: 'usage', usage: msg.usage },
+          });
+        }
+        break;
+
+      case 'error':
+        log(`Query error: ${msg.message} (${msg.errorType || 'generic'})`);
+        break;
+    }
+  }
+
+  if (activityTimer) clearTimeout(activityTimer);
+
+  const queryResult = iterResult.value;
+  if (newSessionId && !queryResult.newSessionId) {
+    queryResult.newSessionId = newSessionId;
+  }
+  if (resumeAnchor && !queryResult.resumeAnchor) {
+    queryResult.resumeAnchor = resumeAnchor;
+  }
+  return queryResult;
+}
+
+// ---------------------------------------------------------------------------
+// Main query loop
+// ---------------------------------------------------------------------------
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+function mergeMessages(messages: IpcMessage[]): string {
+  return messages.map(m => m.text).join('\n');
+}
+
+function mergeImages(messages: IpcMessage[]): Array<{ data: string; mimeType?: string }> | undefined {
+  const all = messages.flatMap(m => m.images || []);
+  return all.length > 0 ? all : undefined;
+}
+
+export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
+  const { runner, state, ipcPaths, log, writeOutput } = config;
+  const MAX_RETRIES = config.maxOverflowRetries ?? 3;
+
+  let prompt = config.initialPrompt;
+  let images = config.initialImages;
+  let sessionId = config.sessionId;
+  let resumeAnchor: string | undefined;
+  let overflowRetryCount = 0;
+  let pendingMessages: IpcMessage[] = [];
+
+  while (true) {
+    // Clear stale interrupt sentinel
+    try { fs.unlinkSync(ipcPaths.interruptSentinel); } catch { /* ignore */ }
+    state.clearInterruptRequested();
+    log(`Starting query (session: ${sessionId || 'new'})...`);
+
+    // Start IPC poller
+    const poller = createUnifiedIpcPoller({
+      runner,
+      state,
+      ipcPaths,
+      log,
+      writeOutput,
+      imChannelsFile: config.imChannelsFile,
+      onMessage: runner.ipcCapabilities.supportsMidQueryPush
+        ? (msg) => {
+            const rejected = runner.pushMessage(msg.text, msg.images);
+            for (const reason of rejected) {
+              writeOutput({ status: 'success', result: `⚠️ ${reason}`, newSessionId: undefined });
+            }
+          }
+        : (msg) => pendingMessages.push(msg),
+      onModeChange: runner.ipcCapabilities.supportsRuntimeModeSwitch
+        ? (mode) => runner.setPermissionMode?.(mode)
+        : undefined,
+    });
+
+    // Execute query
+    const queryConfig: QueryConfig = {
+      prompt,
+      sessionId,
+      resumeAt: resumeAnchor,
+      images,
+      permissionMode: state.currentPermissionMode,
+    };
+
+    let result: QueryResult;
+    try {
+      result = await consumeQueryStream(runner, queryConfig, poller, log, writeOutput);
+    } catch (err) {
+      poller.stop();
+      throw err;
+    }
+    poller.stop();
+
+    // Merge poller state into result
+    if (poller.closedDuringQuery) result.closedDuringQuery = true;
+    if (poller.interruptedDuringQuery) result.interruptedDuringQuery = true;
+    if (poller.drainDetectedDuringQuery) result.drainDetectedDuringQuery = true;
+
+    // Update session state
+    if (result.newSessionId) sessionId = result.newSessionId;
+    if (result.resumeAnchor) resumeAnchor = result.resumeAnchor;
+    await runner.betweenQueries?.();
+
+    // Error recovery
+    if (result.sessionResumeFailed) {
+      log('Session resume failed, retrying with fresh session');
+      sessionId = undefined;
+      resumeAnchor = undefined;
+      continue;
+    }
+    if (result.unrecoverableTranscriptError) {
+      writeOutput({
+        status: 'error', result: null,
+        error: 'unrecoverable_transcript: 会话历史包含无法处理的数据，需要重置',
+        newSessionId: sessionId,
+      });
+      process.exit(1);
+    }
+    if (result.contextOverflow) {
+      if (++overflowRetryCount >= MAX_RETRIES) {
+        writeOutput({
+          status: 'error', result: null,
+          error: `context_overflow: 已重试 ${MAX_RETRIES} 次仍失败`,
+        });
+        process.exit(1);
+      }
+      log(`Context overflow, retry ${overflowRetryCount}/${MAX_RETRIES}`);
+      await sleep(3000);
+      continue;
+    }
+    overflowRetryCount = 0;
+
+    // Control signals
+    if (result.closedDuringQuery) {
+      writeOutput({ status: 'closed', result: null });
+      break;
+    }
+    if (result.interruptedDuringQuery) {
+      writeOutput({
+        status: 'stream', result: null,
+        streamEvent: { eventType: 'status', statusText: 'interrupted' },
+      });
+      try { fs.unlinkSync(ipcPaths.interruptSentinel); } catch { /* ignore */ }
+      const next = await waitForIpcMessage(ipcPaths, log, writeOutput, state, config.imChannelsFile);
+      if (!next) break;
+      state.clearInterruptRequested();
+      prompt = next.text;
+      images = next.images;
+      pendingMessages = [];
+      continue;
+    }
+    if (result.drainDetectedDuringQuery || shouldDrain(ipcPaths)) {
+      await runner.cleanup?.();
+      writeOutput({ status: 'drained', result: null, newSessionId: sessionId });
+      process.exit(0);
+    }
+
+    // Wait for next message
+    writeOutput({ status: 'success', result: null, newSessionId: sessionId });
+    log('Query ended, waiting for next IPC message...');
+
+    const nextMsg = await waitForIpcMessage(ipcPaths, log, writeOutput, state, config.imChannelsFile);
+    if (!nextMsg) {
+      await runner.cleanup?.();
+      break;
+    }
+
+    // Merge pending messages (accumulated during Codex turns)
+    if (pendingMessages.length > 0) {
+      prompt = mergeMessages([...pendingMessages, nextMsg]);
+      images = mergeImages([...pendingMessages, nextMsg]);
+      pendingMessages = [];
+    } else {
+      prompt = nextMsg.text;
+      images = nextMsg.images;
+    }
+  }
+}
