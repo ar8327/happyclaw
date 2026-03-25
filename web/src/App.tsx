@@ -12,6 +12,7 @@ import { McpServersPage } from './pages/McpServersPage';
 import { UsersPage } from './pages/UsersPage';
 import { AuthGuard } from './components/auth/AuthGuard';
 import { AppLayout } from './components/layout/AppLayout';
+import { ErrorBoundary } from './components/common/ErrorBoundary';
 import { APP_BASE, shouldUseHashRouter } from './utils/url';
 
 const ChatPage = lazy(() => import('./pages/ChatPage').then(m => ({ default: m.ChatPage })));
@@ -68,18 +69,18 @@ export function App() {
             </AuthGuard>
           }
         >
-          <Route path="/chat/:groupFolder?" element={<Suspense fallback={null}><ChatPage /></Suspense>} />
-          <Route path="/search" element={<Suspense fallback={null}><SearchPage /></Suspense>} />
+          <Route path="/chat/:groupFolder?" element={<ErrorBoundary label="ChatPage"><Suspense fallback={null}><ChatPage /></Suspense></ErrorBoundary>} />
+          <Route path="/search" element={<ErrorBoundary label="SearchPage"><Suspense fallback={null}><SearchPage /></Suspense></ErrorBoundary>} />
           <Route path="/groups" element={<Navigate to="/settings?tab=groups" replace />} />
-          <Route path="/tasks" element={<Suspense fallback={null}><TasksPage /></Suspense>} />
-          <Route path="/monitor" element={<Suspense fallback={null}><MonitorPage /></Suspense>} />
-          <Route path="/usage" element={<Suspense fallback={null}><UsagePage /></Suspense>} />
-          <Route path="/billing" element={<Suspense fallback={null}><BillingPage /></Suspense>} />
+          <Route path="/tasks" element={<ErrorBoundary label="TasksPage"><Suspense fallback={null}><TasksPage /></Suspense></ErrorBoundary>} />
+          <Route path="/monitor" element={<ErrorBoundary label="MonitorPage"><Suspense fallback={null}><MonitorPage /></Suspense></ErrorBoundary>} />
+          <Route path="/usage" element={<ErrorBoundary label="UsagePage"><Suspense fallback={null}><UsagePage /></Suspense></ErrorBoundary>} />
+          <Route path="/billing" element={<ErrorBoundary label="BillingPage"><Suspense fallback={null}><BillingPage /></Suspense></ErrorBoundary>} />
           <Route path="/memory" element={<MemoryPage />} />
           <Route path="/skills" element={<SkillsPage />} />
           <Route path="/mcp-servers" element={<McpServersPage />} />
-          <Route path="/logs" element={<Suspense fallback={null}><LogsPage /></Suspense>} />
-          <Route path="/settings" element={<Suspense fallback={null}><SettingsPage /></Suspense>} />
+          <Route path="/logs" element={<ErrorBoundary label="LogsPage"><Suspense fallback={null}><LogsPage /></Suspense></ErrorBoundary>} />
+          <Route path="/settings" element={<ErrorBoundary label="SettingsPage"><Suspense fallback={null}><SettingsPage /></Suspense></ErrorBoundary>} />
           <Route
             path="/users"
             element={
