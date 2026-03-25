@@ -33,6 +33,7 @@ import { StreamEventProcessor } from './stream-processor.js';
 import { PREDEFINED_AGENTS } from './agent-definitions.js';
 import { createContextManager, coreToolsToSdkTools } from './mcp-adapter.js';
 import { writeIpcFile } from 'happyclaw-agent-runner-core';
+import { SessionState } from './session-state.js';
 
 // 路径解析：优先读取环境变量，降级到容器内默认路径（保持向后兼容）
 const WORKSPACE_GROUP = process.env.HAPPYCLAW_WORKSPACE_GROUP || '/workspace/group';
@@ -50,80 +51,13 @@ const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_INPUT_DRAIN_SENTINEL = path.join(IPC_INPUT_DIR, '_drain');
 const IPC_POLL_MS = 500;
 
-// Track recently seen IM channels from IPC messages (non-web sources)
-// Used to inject a routing reminder after context compaction and session continuation.
-// Persisted to disk with TTL so channels survive across sessions but expire when stale.
-const recentImChannels = new Set<string>();
-const imChannelLastSeen = new Map<string, number>(); // channel → epoch ms
+// IM channels file path — stays in index.ts because it depends on WORKSPACE_IPC
 const IM_CHANNELS_FILE = path.join(WORKSPACE_IPC, '.recent-im-channels.json');
-/** Channels not seen for 24 hours are considered stale */
-const IM_CHANNEL_TTL_MS = 24 * 60 * 60 * 1000;
 
-function loadPersistedImChannels(): void {
-  try {
-    if (!fs.existsSync(IM_CHANNELS_FILE)) return;
-    const data = JSON.parse(fs.readFileSync(IM_CHANNELS_FILE, 'utf-8'));
-    const now = Date.now();
-    let pruned = false;
-    if (Array.isArray(data)) {
-      for (const entry of data) {
-        // Support both old format (plain string) and new format ({ channel, lastSeen })
-        const channel = typeof entry === 'string' ? entry : entry?.channel;
-        const lastSeen = typeof entry === 'string' ? now : (entry?.lastSeen ?? now);
-        if (typeof channel !== 'string') continue;
-        if (now - lastSeen > IM_CHANNEL_TTL_MS) {
-          pruned = true;
-          continue; // expired, skip
-        }
-        recentImChannels.add(channel);
-        imChannelLastSeen.set(channel, lastSeen);
-      }
-    }
-    if (pruned) persistImChannels();
-  } catch {
-    // Ignore corrupt file
-  }
-}
-
-function persistImChannels(): void {
-  try {
-    const entries = [...recentImChannels].map((ch) => ({
-      channel: ch,
-      lastSeen: imChannelLastSeen.get(ch) ?? Date.now(),
-    }));
-    fs.writeFileSync(IM_CHANNELS_FILE, JSON.stringify(entries));
-  } catch {
-    // Best effort
-  }
-}
-
-let imPersistTimer: ReturnType<typeof setTimeout> | null = null;
-
-/** Debounced persist: coalesces rapid updates into one write per 5s window */
-function schedulePersistImChannels(): void {
-  if (imPersistTimer) return;
-  imPersistTimer = setTimeout(() => {
-    imPersistTimer = null;
-    persistImChannels();
-  }, 5000);
-}
-
-function extractSourceChannels(text: string): void {
-  const matches = text.matchAll(/source="([^"]+)"/g);
-  let anyUpdate = false;
-  for (const m of matches) {
-    const source = m[1];
-    if (!source.startsWith('web:')) {
-      recentImChannels.add(source);
-      imChannelLastSeen.set(source, Date.now());
-      anyUpdate = true;
-    }
-  }
-  // Persist on every update (new or existing channel) to keep lastSeen fresh on disk
-  if (anyUpdate) schedulePersistImChannels();
-}
-
-let currentPermissionMode: PermissionMode = 'bypassPermissions';
+// Session state: replaces scattered module-level variables with explicit state object.
+// Module-level because process event handlers (uncaughtException, unhandledRejection)
+// need access to interrupt grace window state.
+const state = new SessionState();
 
 const DEFAULT_ALLOWED_TOOLS = [
   'Bash',
@@ -533,20 +467,6 @@ function shouldDrain(): boolean {
 }
 
 const IPC_INPUT_INTERRUPT_SENTINEL = path.join(IPC_INPUT_DIR, '_interrupt');
-const INTERRUPT_GRACE_WINDOW_MS = 10_000;
-let lastInterruptRequestedAt = 0;
-
-function markInterruptRequested(): void {
-  lastInterruptRequestedAt = Date.now();
-}
-
-function clearInterruptRequested(): void {
-  lastInterruptRequestedAt = 0;
-}
-
-function isWithinInterruptGraceWindow(): boolean {
-  return lastInterruptRequestedAt > 0 && Date.now() - lastInterruptRequestedAt <= INTERRUPT_GRACE_WINDOW_MS;
-}
 
 function isInterruptRelatedError(err: unknown): boolean {
   const errno = err as NodeJS.ErrnoException;
@@ -561,7 +481,6 @@ function isInterruptRelatedError(err: unknown): boolean {
 function shouldInterrupt(): boolean {
   if (fs.existsSync(IPC_INPUT_INTERRUPT_SENTINEL)) {
     try { fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL); } catch { /* ignore */ }
-    markInterruptRequested();
     return true;
   }
   return false;
@@ -630,7 +549,7 @@ function waitForIpcMessage(): Promise<{ text: string; images?: Array<{ data: str
       }
       if (shouldInterrupt()) {
         log('Interrupt sentinel received while idle, ignoring');
-        clearInterruptRequested();
+        state.clearInterruptRequested();
       }
       // Periodic heartbeat to detect stuck polling
       if (pollCount % HEARTBEAT_INTERVAL === 0) {
@@ -643,7 +562,7 @@ function waitForIpcMessage(): Promise<{ text: string; images?: Array<{ data: str
       }
       const { messages, modeChange } = drainIpcInput();
       if (modeChange) {
-        currentPermissionMode = modeChange as PermissionMode;
+        state.currentPermissionMode = modeChange as PermissionMode;
         log(`Mode change during idle: ${modeChange}`);
       }
       if (messages.length > 0) {
@@ -651,7 +570,7 @@ function waitForIpcMessage(): Promise<{ text: string; images?: Array<{ data: str
         const combinedText = messages.map((m) => m.text).join('\n');
         const allImages = messages.flatMap((m) => m.images || []);
         // Track IM channels for post-compaction routing reminder
-        extractSourceChannels(combinedText);
+        state.extractSourceChannels(combinedText, IM_CHANNELS_FILE);
         log(`Idle IPC pickup: ${messages.length} message(s), ${combinedText.length} chars`);
         // Emit acknowledgement so host can track IPC delivery (mirrors pollIpcDuringQuery)
         writeOutput({ status: 'stream', result: null, streamEvent: { eventType: 'status', statusText: 'ipc_message_received' } });
@@ -809,7 +728,7 @@ async function runQuery(
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; lastResumeUuid?: string; closedDuringQuery: boolean; contextOverflow?: boolean; unrecoverableTranscriptError?: boolean; interruptedDuringQuery: boolean; sessionResumeFailed?: boolean; drainDetectedDuringQuery?: boolean }> {
   const stream = new MessageStream();
   // Track IM channels from initial prompt
-  extractSourceChannels(prompt);
+  state.extractSourceChannels(prompt, IM_CHANNELS_FILE);
   const initialRejected = stream.push(prompt, images);
   const emit = (output: ContainerOutput): void => {
     if (emitOutput) writeOutput(output);
@@ -905,7 +824,7 @@ async function runQuery(
     if (shouldInterrupt()) {
       log('Interrupt sentinel detected, interrupting current query');
       interruptedDuringQuery = true;
-      lastInterruptRequestedAt = Date.now();
+      state.markInterruptRequested();
       queryRef?.interrupt().catch((err: unknown) => log(`Interrupt call failed: ${err}`));
       stream.end();
       ipcPolling = false;
@@ -913,7 +832,7 @@ async function runQuery(
     }
     const { messages, modeChange } = drainIpcInput();
     if (modeChange) {
-      currentPermissionMode = modeChange as PermissionMode;
+      state.currentPermissionMode = modeChange as PermissionMode;
       log(`Mode change via IPC: ${modeChange}`);
       queryRef?.setPermissionMode(modeChange as PermissionMode).catch((err: unknown) =>
         log(`setPermissionMode failed: ${err}`),
@@ -922,7 +841,7 @@ async function runQuery(
     for (const msg of messages) {
       log(`Piping IPC message into active query (${msg.text.length} chars, ${msg.images?.length || 0} images)`);
       // Track IM channels for post-compaction routing reminder
-      extractSourceChannels(msg.text);
+      state.extractSourceChannels(msg.text, IM_CHANNELS_FILE);
       // Emit acknowledgement so host can track IPC delivery
       emit({ status: 'stream', result: null, streamEvent: { eventType: 'status', statusText: 'ipc_message_received' } });
       const rejected = stream.push(msg.text, msg.images);
@@ -936,7 +855,7 @@ async function runQuery(
 
   // Create the StreamEventProcessor with mode change callback
   const processor = new StreamEventProcessor(emit, log, (newMode) => {
-    currentPermissionMode = newMode as PermissionMode;
+    state.currentPermissionMode = newMode as PermissionMode;
     log(`Auto mode switch on ${newMode === 'plan' ? 'EnterPlanMode' : 'ExitPlanMode'} detection`);
     queryRef?.setPermissionMode(newMode as PermissionMode).catch((err: unknown) =>
       log(`setPermissionMode failed: ${err}`),
@@ -1037,10 +956,10 @@ async function runQuery(
     '- 同一批消息可能来自不同渠道，根据需要分别回复。',
     '- **上下文压缩后**：之前的渠道上下文可能丢失，但 `source` 属性仍然存在于每条消息中。压缩后请务必检查最新消息的 `source` 属性，确保通过 `send_message` 回复 IM 用户。',
     // Inject persisted IM channels reminder so continued sessions don't forget
-    ...(recentImChannels.size > 0
+    ...(state.recentImChannels.size > 0
       ? [
           '',
-          `**活跃 IM 渠道**：你近期与以下渠道有活跃对话：${[...recentImChannels].join('、')}。`,
+          `**活跃 IM 渠道**：你近期与以下渠道有活跃对话：${[...state.recentImChannels].join('、')}。`,
           '完成任务后，务必通过 `send_message(channel="渠道值")` 主动向这些渠道的用户汇报结果。',
         ]
       : []),
@@ -1090,7 +1009,7 @@ async function runQuery(
       allowedTools,
       ...(disallowedTools && { disallowedTools }),
       maxThinkingTokens: 16384,
-      permissionMode: currentPermissionMode,
+      permissionMode: state.currentPermissionMode,
       allowDangerouslySkipPermissions: true,
       settingSources: ['project', 'user'],
       includePartialMessages: true,
@@ -1214,7 +1133,7 @@ async function runQuery(
     // doesn't forget to use send_message for IM channels.
     // The reminder arrives as a user message in the NEXT turn.
     if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
-      const channels = [...recentImChannels];
+      const channels = [...state.recentImChannels];
       if (channels.length > 0) {
         log(`Context compacted, injecting routing reminder for channels: ${channels.join(', ')}`);
         stream.push(
@@ -1423,7 +1342,7 @@ async function main(): Promise<void> {
   const { isHome, isAdminHome } = normalizeHomeFlags(containerInput);
 
   // Restore persisted IM channels from previous sessions
-  loadPersistedImChannels();
+  state.loadImChannels(IM_CHANNELS_FILE);
 
   // Create ContextManager with all plugins, then convert to SDK tools
   const pluginCtx = {
@@ -1457,7 +1376,7 @@ async function main(): Promise<void> {
   let promptImages = containerInput.images;
   const pendingDrain = drainIpcInput();
   if (pendingDrain.modeChange) {
-    currentPermissionMode = pendingDrain.modeChange as PermissionMode;
+    state.currentPermissionMode = pendingDrain.modeChange as PermissionMode;
     log(`Initial mode change via IPC: ${pendingDrain.modeChange}`);
   }
   if (pendingDrain.messages.length > 0) {
@@ -1477,7 +1396,7 @@ async function main(): Promise<void> {
     while (true) {
       // 清理残留的 _interrupt sentinel，防止空闲期间写入的中断信号影响下一次 query
       try { fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL); } catch { /* ignore */ }
-      clearInterruptRequested();
+      state.clearInterruptRequested();
 
       log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
 
@@ -1591,7 +1510,7 @@ async function main(): Promise<void> {
           log('Close sentinel received after interrupt, exiting');
           break;
         }
-        clearInterruptRequested();
+        state.clearInterruptRequested();
         prompt = nextMessage.text;
         promptImages = nextMessage.images;
         continue;
@@ -1677,7 +1596,7 @@ process.on('uncaughtException', (err: unknown) => {
   if (errno?.code === 'EPIPE') {
     process.exit(0);
   }
-  if (isWithinInterruptGraceWindow() && isInterruptRelatedError(err)) {
+  if (state.isWithinInterruptGraceWindow() && isInterruptRelatedError(err)) {
     console.error('Suppressing interrupt-related uncaught exception:', err);
     process.exit(0);
   }
@@ -1699,7 +1618,7 @@ process.on('unhandledRejection', (reason: unknown) => {
     console.error('[agent-runner] ProcessTransport not ready (non-fatal, query ended):', reason.message);
     return;
   }
-  if (isWithinInterruptGraceWindow()) {
+  if (state.isWithinInterruptGraceWindow()) {
     console.error('Unhandled rejection during interrupt (non-fatal):', reason);
     return;
   }
