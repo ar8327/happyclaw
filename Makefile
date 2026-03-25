@@ -24,7 +24,6 @@ build: sync-types ## 编译前后端及 agent-runner
 	npm run build:all
 	npm --prefix container/agent-runner-core run build
 	npm --prefix container/agent-runner run build
-	npm --prefix container/agent-runner-openai run build
 	npm --prefix container/memory-agent run build
 
 build-backend: ## 仅编译后端
@@ -89,19 +88,16 @@ install: ## 安装全部依赖并编译 agent-runner
 	npm --prefix container/agent-runner-core run build
 	npm --prefix container/agent-runner install
 	npm --prefix container/agent-runner run build
-	npm --prefix container/agent-runner-openai install
-	npm --prefix container/agent-runner-openai run build
 	npm --prefix container/memory-agent install
 	npm --prefix container/memory-agent run build
 	cd web && npm install
-	@touch node_modules web/node_modules container/agent-runner-core/node_modules container/agent-runner/node_modules container/agent-runner-openai/node_modules container/memory-agent/node_modules
+	@touch node_modules web/node_modules container/agent-runner-core/node_modules container/agent-runner/node_modules container/memory-agent/node_modules
 
 clean: ## 清理构建产物
 	rm -rf dist
 	rm -rf web/dist
 	rm -rf container/agent-runner-core/dist
 	rm -rf container/agent-runner/dist
-	rm -rf container/agent-runner-openai/dist
 	rm -rf container/memory-agent/dist
 
 reset-init: ## 完全重置为首装状态（清空所有运行时数据）
