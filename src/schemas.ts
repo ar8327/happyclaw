@@ -251,7 +251,6 @@ export const SystemSettingsSchema = z.object({
   feishuApiDomain: z.string().min(1).max(100).optional(),
   feishuDocDomain: z.string().min(1).max(100).optional(),
   webPublicUrl: z.string().max(200).optional(),
-  autoSwitchToOpenAIOnRateLimit: z.boolean().optional(),
   defaultClaudeModel: z.string().max(100).optional(),
   defaultOpenAIModel: z.string().max(100).optional(),
 });
@@ -392,7 +391,6 @@ export const FeishuConfigSchema = z
     replyThreadingMode: z.enum(['auto', 'agent']).optional(),
     streamingCard: z.boolean().optional(),
     imCommentary: z.boolean().optional(),
-    imCommentaryUseGpt: z.boolean().optional(),
   })
   .refine(
     (data) =>
@@ -402,8 +400,7 @@ export const FeishuConfigSchema = z
       typeof data.enabled === 'boolean' ||
       typeof data.replyThreadingMode === 'string' ||
       typeof data.streamingCard === 'boolean' ||
-      typeof data.imCommentary === 'boolean' ||
-      typeof data.imCommentaryUseGpt === 'boolean',
+      typeof data.imCommentary === 'boolean',
     { message: 'At least one config field must be provided' },
   );
 

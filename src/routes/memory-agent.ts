@@ -14,8 +14,6 @@ import { getChatNamesByJids } from '../db.js';
 import { logger } from '../logger.js';
 import type { MemoryAgentManager } from '../memory-agent.js';
 import { resolveChannelLabel } from '../memory-agent.js';
-import { getOpenAIProviderConfig } from '../runtime-config.js';
-
 let manager: MemoryAgentManager | null = null;
 let internalToken: string | null = null;
 
@@ -185,20 +183,6 @@ memoryAgentRoutes.post('/session-wrapup', async (c) => {
     logger.error({ err, userId: body.userId }, 'Memory session-wrapup error');
     return c.json({ error: message }, 500);
   }
-});
-
-// GET /api/internal/memory/openai-credentials
-// Returns decrypted OpenAI credentials for agent-runner processes to refresh tokens dynamically.
-memoryAgentRoutes.get('/openai-credentials', async (c) => {
-  if (!checkInternalAuth(c)) return c.json({ error: 'Unauthorized' }, 401);
-  const config = getOpenAIProviderConfig();
-  return c.json({
-    authMode: config.authMode,
-    accessToken: config.oauthTokens?.accessToken || null,
-    apiKey: config.apiKey || null,
-    model: config.model || null,
-    baseUrl: config.baseUrl || null,
-  });
 });
 
 export default memoryAgentRoutes;

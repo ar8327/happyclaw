@@ -22,7 +22,6 @@ import {
   buildContainerEnvLines,
   getClaudeProviderConfig,
   getContainerEnvConfig,
-  getOpenAIProviderConfig,
   getSystemSettings,
   mergeClaudeEnvConfig,
   shellQuoteEnvLines,
@@ -992,17 +991,18 @@ export async function runHostAgent(
     hostEnv['IS_SANDBOX'] = '1';
   }
 
-  // 6. 编译检查 — 根据 llmProvider 选择对应的 agent-runner
+  // 6. 编译检查
   const projectRoot = process.cwd();
-  const llmProvider = group.llm_provider || 'claude';
-  const isOpenAI = llmProvider === 'openai';
+  if (group.llm_provider === 'openai') {
+    logger.warn({ group: group.name }, 'llm_provider=openai but OpenAI runner removed; falling back to Claude');
+  }
 
-  const runnerSubdir = isOpenAI ? 'agent-runner-openai' : 'agent-runner';
+  const runnerSubdir = 'agent-runner';
   const agentRunnerRoot = path.join(projectRoot, 'container', runnerSubdir);
   const agentRunnerNodeModules = path.join(agentRunnerRoot, 'node_modules');
   const agentRunnerDist = path.join(agentRunnerRoot, 'dist', 'index.js');
 
-  const requiredDeps = isOpenAI ? ['openai'] : ['@anthropic-ai/claude-agent-sdk'];
+  const requiredDeps = ['@anthropic-ai/claude-agent-sdk'];
   const installHint = `npm --prefix container/${runnerSubdir} install`;
   const buildHint = `npm --prefix container/${runnerSubdir} run build`;
 
@@ -1017,7 +1017,7 @@ export async function runHostAgent(
   if (missingDeps.length > 0) {
     const missing = missingDeps.join(', ');
     logger.error(
-      { group: group.name, missingDeps, llmProvider },
+      { group: group.name, missingDeps },
       'Host agent preflight failed: dependencies missing',
     );
     return hostModeSetupError(
@@ -1026,7 +1026,7 @@ export async function runHostAgent(
   }
   if (!fs.existsSync(agentRunnerDist)) {
     logger.error(
-      { group: group.name, agentRunnerDist, llmProvider },
+      { group: group.name, agentRunnerDist },
       'Host agent preflight failed: dist not found',
     );
     return hostModeSetupError(
@@ -1050,54 +1050,6 @@ export async function runHostAgent(
     }
   } catch {
     // Best effort, don't block execution
-  }
-
-  // OpenAI runner: inject auth credentials based on authMode
-  if (isOpenAI) {
-    const openaiConfig = getOpenAIProviderConfig();
-
-    if (openaiConfig.authMode === 'chatgpt_oauth' && openaiConfig.oauthTokens?.accessToken) {
-      // OAuth mode — Codex Responses API
-      hostEnv['OPENAI_AUTH_MODE'] = 'chatgpt_oauth';
-      hostEnv['OPENAI_ACCESS_TOKEN'] = openaiConfig.oauthTokens.accessToken;
-      if (openaiConfig.oauthTokens.refreshToken) {
-        hostEnv['OPENAI_REFRESH_TOKEN'] = openaiConfig.oauthTokens.refreshToken;
-      }
-    } else if (openaiConfig.apiKey) {
-      // API Key mode — standard Chat Completions
-      hostEnv['OPENAI_AUTH_MODE'] = 'api_key';
-      hostEnv['OPENAI_API_KEY'] = openaiConfig.apiKey;
-    } else {
-      return hostModeSetupError(
-        'OpenAI 未配置认证信息。请在设置页面配置 API Key 或通过 ChatGPT OAuth 登录。',
-      );
-    }
-
-    if (openaiConfig.baseUrl) {
-      hostEnv['OPENAI_BASE_URL'] = openaiConfig.baseUrl;
-    }
-    const effectiveOpenAIModel = openaiConfig.model || getSystemSettings().defaultOpenAIModel;
-    if (effectiveOpenAIModel) {
-      hostEnv['OPENAI_MODEL'] = effectiveOpenAIModel;
-    }
-  }
-
-  // Cross-model plugin: inject OpenAI credentials for ask_model tool (all runners)
-  // Prefer OAuth (Codex, subscription-covered) over API key (paid per token)
-  {
-    const crossModelConfig = getOpenAIProviderConfig();
-    if (crossModelConfig.authMode === 'chatgpt_oauth' && crossModelConfig.oauthTokens?.accessToken) {
-      hostEnv['CROSSMODEL_OPENAI_ACCESS_TOKEN'] = crossModelConfig.oauthTokens.accessToken;
-    }
-    if (crossModelConfig.apiKey) {
-      hostEnv['CROSSMODEL_OPENAI_API_KEY'] = crossModelConfig.apiKey;
-      if (crossModelConfig.baseUrl) {
-        hostEnv['CROSSMODEL_OPENAI_BASE_URL'] = crossModelConfig.baseUrl;
-      }
-    }
-    if (crossModelConfig.model) {
-      hostEnv['CROSSMODEL_OPENAI_MODEL'] = crossModelConfig.model;
-    }
   }
 
   logger.info(

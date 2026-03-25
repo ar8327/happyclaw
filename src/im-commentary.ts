@@ -3,19 +3,14 @@
  * during long-running agent tasks.
  *
  * Model priority:
- *   1. GPT via Codex API (ChatGPT subscription, no marginal cost) — preferred
- *   2. Claude Haiku (Anthropic API key fallback)
- *   3. Heuristic formatting (no model, always available)
+ *   1. Claude Haiku (Anthropic API key)
+ *   2. Heuristic formatting (no model, always available)
  *
  * Fire-and-forget: all public functions are async but callers should NOT await.
  * Rate-limited to prevent IM spam.
  */
 
 import { logger } from './logger.js';
-import { getOpenAIProviderConfig } from './runtime-config.js';
-
-const CODEX_API_URL = 'https://chatgpt.com/backend-api/codex/responses';
-const COMMENTARY_MODEL = 'gpt-5.4-mini';
 
 /** Minimum seconds between commentary messages per workspace folder. */
 const RATE_LIMIT_SECONDS = 8;
@@ -56,11 +51,10 @@ export async function sendToolCommentary(opts: {
   toolName: string;
   toolInputSummary?: string;
   isNested: boolean;
-  useGpt: boolean;
   /** Called with the generated commentary text. Update the progress card or send a message. */
   onCommentary: (text: string) => void;
 }): Promise<void> {
-  const { folder, toolName, toolInputSummary, isNested, useGpt, onCommentary } = opts;
+  const { folder, toolName, toolInputSummary, isNested, onCommentary } = opts;
 
   // Only comment on top-level tool calls
   if (isNested) return;
@@ -86,7 +80,7 @@ export async function sendToolCommentary(opts: {
   lastCommentaryTime.set(folder, now);
 
   try {
-    const explanation = await generateExplanation(toolName, toolInputSummary, useGpt);
+    const explanation = await generateExplanation(toolName, toolInputSummary);
     if (explanation) {
       onCommentary(explanation);
     }
@@ -98,76 +92,21 @@ export async function sendToolCommentary(opts: {
 const PROMPT_TEMPLATE = (input: string) =>
   `用中文一句话（不超过20字）解释正在做什么：\n${input}\n\n只输出解释文字，不要任何多余内容。`;
 
-/** Generate explanation: GPT (if useGpt) → Haiku → heuristic fallback. */
+/** Generate explanation: Haiku → heuristic fallback. */
 async function generateExplanation(
   toolName: string,
   inputSummary?: string,
-  useGpt = false,
 ): Promise<string | null> {
   const input = inputSummary
     ? `工具: ${toolName}\n输入: ${inputSummary.slice(0, 300)}`
     : `工具: ${toolName}`;
 
-  if (useGpt) {
-    // 1. Try GPT via Codex API (ChatGPT subscription, free)
-    const gptResult = await tryGpt(PROMPT_TEMPLATE(input));
-    if (gptResult) return gptResult;
-  }
-
-  // 2. Try Haiku (Anthropic API key)
+  // 1. Try Haiku (Anthropic API key)
   const haikuResult = await tryHaiku(PROMPT_TEMPLATE(input));
   if (haikuResult) return haikuResult;
 
-  // 3. Heuristic fallback
+  // 2. Heuristic fallback
   return formatFallback(toolName, inputSummary);
-}
-
-/** Call GPT via Codex API (ChatGPT subscription). */
-async function tryGpt(prompt: string): Promise<string | null> {
-  try {
-    const config = getOpenAIProviderConfig();
-    const accessToken = config.oauthTokens?.accessToken;
-    if (!accessToken) return null;
-
-    const body = {
-      model: COMMENTARY_MODEL,
-      instructions: '你是一个简洁的技术解说员，只输出一句中文说明。',
-      input: [{ type: 'message', role: 'user', content: prompt }],
-      tools: [],
-      stream: false,
-      store: false,
-      reasoning: { effort: 'none' },
-    };
-
-    const response = await fetch(CODEX_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${accessToken}`,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(8000),
-    });
-
-    if (!response.ok) {
-      logger.debug({ status: response.status }, 'im-commentary: GPT API error');
-      return null;
-    }
-
-    const data = (await response.json()) as {
-      output?: Array<{ type: string; content?: Array<{ type: string; text: string }> }>;
-    };
-
-    const text = data.output
-      ?.find((o) => o.type === 'message')
-      ?.content?.find((c) => c.type === 'output_text')
-      ?.text?.trim();
-
-    return text || null;
-  } catch (err) {
-    logger.debug({ err }, 'im-commentary: GPT call failed');
-    return null;
-  }
 }
 
 /** Call Claude Haiku (Anthropic API key fallback). */

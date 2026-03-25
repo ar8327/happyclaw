@@ -80,13 +80,6 @@ import {
   importLocalClaudeCredentials,
   getUserIMPreferences,
   saveUserIMPreferences,
-  getOpenAIProviderConfig,
-  saveOpenAIProviderConfig,
-  initiateDeviceCodeAuth,
-  pollDeviceCodeAuth,
-  disconnectOpenAIOAuth,
-  initiatePkceAuth,
-  completePkceAuth,
 } from '../runtime-config.js';
 import type { ClaudeOAuthCredentials } from '../runtime-config.js';
 import type { AuthUser, RegisteredGroup } from '../types.js';
@@ -1386,8 +1379,6 @@ configRoutes.get('/user-im/feishu', authMiddleware, (c) => {
   try {
     const config = getUserFeishuConfig(user.id);
     const connected = deps?.isUserFeishuConnected?.(user.id) ?? false;
-    const openAiConfig = getOpenAIProviderConfig();
-    const hasGptProvider = !!(openAiConfig?.oauthTokens?.accessToken || openAiConfig?.apiKey);
     if (!config) {
       return c.json({
         appId: '',
@@ -1399,8 +1390,6 @@ configRoutes.get('/user-im/feishu', authMiddleware, (c) => {
         replyThreadingMode: 'auto',
         streamingCard: false,
         imCommentary: false,
-        imCommentaryUseGpt: false,
-        hasGptProvider,
       });
     }
     return c.json({
@@ -1409,8 +1398,6 @@ configRoutes.get('/user-im/feishu', authMiddleware, (c) => {
       replyThreadingMode: config.replyThreadingMode ?? 'auto',
       streamingCard: config.streamingCard ?? false,
       imCommentary: config.imCommentary ?? false,
-      imCommentaryUseGpt: config.imCommentaryUseGpt ?? false,
-      hasGptProvider,
     });
   } catch (err) {
     logger.error({ err }, 'Failed to load user Feishu config');
@@ -1445,7 +1432,7 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
   }
 
   const current = getUserFeishuConfig(user.id);
-  const next: { appId: string; appSecret: string; enabled: boolean; updatedAt: string | null; replyThreadingMode?: 'auto' | 'agent'; streamingCard?: boolean; imCommentary?: boolean; imCommentaryUseGpt?: boolean } = {
+  const next: { appId: string; appSecret: string; enabled: boolean; updatedAt: string | null; replyThreadingMode?: 'auto' | 'agent'; streamingCard?: boolean; imCommentary?: boolean } = {
     appId: current?.appId || '',
     appSecret: current?.appSecret || '',
     enabled: current?.enabled ?? true,
@@ -1453,7 +1440,6 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
     replyThreadingMode: current?.replyThreadingMode ?? 'auto',
     streamingCard: current?.streamingCard ?? false,
     imCommentary: current?.imCommentary ?? false,
-    imCommentaryUseGpt: current?.imCommentaryUseGpt ?? false,
   };
   if (typeof validation.data.appId === 'string') {
     const appId = validation.data.appId.trim();
@@ -1480,9 +1466,6 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
   if (typeof validation.data.imCommentary === 'boolean') {
     next.imCommentary = validation.data.imCommentary;
   }
-  if (typeof validation.data.imCommentaryUseGpt === 'boolean') {
-    next.imCommentaryUseGpt = validation.data.imCommentaryUseGpt;
-  }
 
   try {
     const saved = saveUserFeishuConfig(user.id, {
@@ -1492,7 +1475,6 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
       replyThreadingMode: next.replyThreadingMode,
       streamingCard: next.streamingCard,
       imCommentary: next.imCommentary,
-      imCommentaryUseGpt: next.imCommentaryUseGpt,
     });
 
     // Hot-reload: reconnect user's Feishu channel
@@ -1514,7 +1496,6 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
       replyThreadingMode: saved.replyThreadingMode ?? 'auto',
       streamingCard: saved.streamingCard ?? false,
       imCommentary: saved.imCommentary ?? false,
-      imCommentaryUseGpt: saved.imCommentaryUseGpt ?? false,
     });
   } catch (err) {
     const message =
@@ -2670,310 +2651,6 @@ configRoutes.post(
           ? err.message
           : 'Failed to import local credentials';
       logger.warn({ err }, 'Failed to import local Claude Code credentials');
-      return c.json({ error: message }, 500);
-    }
-  },
-);
-
-// ─── OpenAI Provider Config ──────────────────────────────────
-
-configRoutes.get('/openai', authMiddleware, systemConfigMiddleware, async (c) => {
-  const config = getOpenAIProviderConfig();
-  // Mask API key for display: show first 3 and last 4 chars
-  let apiKeyMasked: string | null = null;
-  if (config.apiKey && config.apiKey.length > 8) {
-    apiKeyMasked = `${config.apiKey.slice(0, 3)}...${config.apiKey.slice(-4)}`;
-  } else if (config.apiKey) {
-    apiKeyMasked = '***';
-  }
-
-  const hasOAuth = !!(config.oauthTokens?.accessToken);
-  let oauthExpired = config.oauthTokens?.expiresAt
-    ? config.oauthTokens.expiresAt < Date.now()
-    : false;
-  let oauthProbeError: string | null = null;
-
-  // Auto-probe: verify token against Codex API (not /me, which returns 403 for Codex tokens)
-  if (hasOAuth && !oauthExpired) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 10_000);
-      const res = await fetch('https://chatgpt.com/backend-api/codex/responses', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${config.oauthTokens!.accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'gpt-5.4-mini',
-          instructions: '',
-          input: [{ type: 'message', role: 'user', content: 'hi' }],
-          tools: [],
-          stream: false,
-          store: false,
-        }),
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
-      if (res.status === 401 || res.status === 403) {
-        oauthExpired = true;
-        oauthProbeError = `Token 无效 (${res.status})`;
-      }
-    } catch (err: unknown) {
-      // Probe failed (network/timeout) — don't mark as expired, just report
-      oauthProbeError = err instanceof Error
-        ? (err.name === 'AbortError' ? '探活超时' : err.message)
-        : String(err);
-    }
-  }
-
-  return c.json({
-    authMode: config.authMode,
-    hasApiKey: !!config.apiKey,
-    apiKeyMasked,
-    hasOAuth,
-    oauthExpired,
-    oauthProbeError,
-    baseUrl: config.baseUrl || '',
-    model: config.model || '',
-    proxyUrl: config.proxyUrl || '',
-    updatedAt: config.updatedAt || null,
-  });
-});
-
-/** Save API Key mode config */
-configRoutes.put('/openai', authMiddleware, systemConfigMiddleware, async (c) => {
-  try {
-    const body = await c.req.json();
-    const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
-    const baseUrl = typeof body.baseUrl === 'string' ? body.baseUrl.trim() : '';
-    const model = typeof body.model === 'string' ? body.model.trim() : '';
-    const proxyUrl = typeof body.proxyUrl === 'string' ? body.proxyUrl.trim() : '';
-
-    if (!apiKey) {
-      return c.json({ error: 'API Key 不能为空' }, 400);
-    }
-
-    const existing = getOpenAIProviderConfig();
-    const saved = saveOpenAIProviderConfig({
-      authMode: 'api_key',
-      apiKey,
-      baseUrl,
-      model,
-      proxyUrl: proxyUrl || existing.proxyUrl,
-      oauthTokens: existing.oauthTokens, // preserve OAuth tokens
-    });
-    const actor = (c.get('user') as AuthUser).username;
-    logger.info({ actor }, 'OpenAI API Key config updated');
-
-    return c.json({
-      authMode: saved.authMode,
-      hasApiKey: true,
-      hasOAuth: !!(saved.oauthTokens?.accessToken),
-      baseUrl: saved.baseUrl || '',
-      model: saved.model || '',
-      proxyUrl: saved.proxyUrl || '',
-      updatedAt: saved.updatedAt || null,
-    });
-  } catch (err) {
-    const message =
-      err instanceof Error ? err.message : 'Failed to save OpenAI config';
-    return c.json({ error: message }, 500);
-  }
-});
-
-/** Initiate Codex Device Code OAuth flow */
-configRoutes.post(
-  '/openai/oauth/login',
-  authMiddleware,
-  systemConfigMiddleware,
-  async (c) => {
-    try {
-      const result = await initiateDeviceCodeAuth();
-      const actor = (c.get('user') as AuthUser).username;
-      logger.info({ actor }, 'OpenAI device code OAuth initiated');
-      return c.json(result);
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Failed to initiate OAuth';
-      logger.warn({ err }, 'OpenAI device code OAuth initiation failed');
-      return c.json({ error: message }, 500);
-    }
-  },
-);
-
-/** Poll for device code completion */
-configRoutes.post(
-  '/openai/oauth/poll',
-  authMiddleware,
-  systemConfigMiddleware,
-  async (c) => {
-    try {
-      const body = await c.req.json();
-      const deviceAuthId =
-        typeof body.deviceAuthId === 'string' ? body.deviceAuthId : '';
-      const model =
-        typeof body.model === 'string' ? body.model.trim() : undefined;
-
-      if (!deviceAuthId) {
-        return c.json({ error: 'deviceAuthId is required' }, 400);
-      }
-
-      const result = await pollDeviceCodeAuth(deviceAuthId, model);
-
-      if (result.status === 'complete') {
-        const actor = (c.get('user') as AuthUser).username;
-        logger.info({ actor }, 'OpenAI OAuth login completed');
-      }
-
-      return c.json(result);
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Failed to poll OAuth';
-      return c.json({ error: message }, 500);
-    }
-  },
-);
-
-/** Disconnect OAuth, revert to API Key mode */
-configRoutes.post(
-  '/openai/oauth/disconnect',
-  authMiddleware,
-  systemConfigMiddleware,
-  (c) => {
-    disconnectOpenAIOAuth();
-    const actor = (c.get('user') as AuthUser).username;
-    logger.info({ actor }, 'OpenAI OAuth disconnected');
-    return c.json({ success: true });
-  },
-);
-
-/** Probe OAuth token validity by making a lightweight API call */
-configRoutes.post(
-  '/openai/oauth/probe',
-  authMiddleware,
-  systemConfigMiddleware,
-  async (c) => {
-    const config = getOpenAIProviderConfig();
-    const accessToken = config.oauthTokens?.accessToken;
-    if (!accessToken) {
-      return c.json({ valid: false, error: '未配置 OAuth Token' });
-    }
-
-    // Check timestamp first
-    if (config.oauthTokens?.expiresAt && config.oauthTokens.expiresAt < Date.now()) {
-      return c.json({ valid: false, error: 'Token 已过期（时间戳判断）' });
-    }
-
-    // Actually probe the API with a minimal request
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 15_000); // 15s timeout
-      const res = await fetch('https://chatgpt.com/backend-api/me', {
-        headers: { 'Authorization': `Bearer ${accessToken}` },
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
-
-      if (res.ok) {
-        return c.json({ valid: true });
-      }
-
-      const body = await res.text().catch(() => '');
-      if (res.status === 401 || res.status === 403) {
-        return c.json({ valid: false, error: `Token 无效 (${res.status})` });
-      }
-      return c.json({ valid: false, error: `API 返回 ${res.status}: ${body.slice(0, 200)}` });
-    } catch (err: unknown) {
-      const msg = err instanceof Error
-        ? (err.name === 'AbortError' ? '探活超时 (15s)' : err.message)
-        : String(err);
-      return c.json({ valid: false, error: msg });
-    }
-  },
-);
-
-/** PKCE flow: generate authorize URL for user to open in browser */
-configRoutes.post(
-  '/openai/oauth/pkce-init',
-  authMiddleware,
-  systemConfigMiddleware,
-  (c) => {
-    const result = initiatePkceAuth();
-    const actor = (c.get('user') as AuthUser).username;
-    logger.info({ actor }, 'OpenAI PKCE OAuth initiated');
-    return c.json(result);
-  },
-);
-
-/** PKCE flow: complete auth with callback URL pasted by user */
-configRoutes.post(
-  '/openai/oauth/pkce-callback',
-  authMiddleware,
-  systemConfigMiddleware,
-  async (c) => {
-    try {
-      const body = await c.req.json();
-      const callbackUrl = typeof body.callbackUrl === 'string' ? body.callbackUrl.trim() : '';
-      const model = typeof body.model === 'string' ? body.model.trim() : undefined;
-
-      if (!callbackUrl) {
-        return c.json({ error: '请粘贴回调 URL' }, 400);
-      }
-
-      const result = await completePkceAuth(callbackUrl, model);
-      if (result.success) {
-        const actor = (c.get('user') as AuthUser).username;
-        logger.info({ actor }, 'OpenAI PKCE OAuth completed');
-        return c.json({ success: true });
-      }
-      return c.json({ error: result.error }, 400);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'PKCE callback failed';
-      return c.json({ error: message }, 500);
-    }
-  },
-);
-
-/** Update model/baseUrl without changing auth */
-configRoutes.patch(
-  '/openai',
-  authMiddleware,
-  systemConfigMiddleware,
-  async (c) => {
-    try {
-      const body = await c.req.json();
-      const existing = getOpenAIProviderConfig();
-      const model =
-        typeof body.model === 'string' ? body.model.trim() : existing.model;
-      const baseUrl =
-        typeof body.baseUrl === 'string'
-          ? body.baseUrl.trim()
-          : existing.baseUrl;
-      const proxyUrl =
-        typeof body.proxyUrl === 'string'
-          ? body.proxyUrl.trim()
-          : existing.proxyUrl;
-
-      const saved = saveOpenAIProviderConfig({
-        ...existing,
-        model,
-        baseUrl,
-        proxyUrl,
-      });
-
-      return c.json({
-        authMode: saved.authMode,
-        hasApiKey: !!saved.apiKey,
-        hasOAuth: !!(saved.oauthTokens?.accessToken),
-        baseUrl: saved.baseUrl || '',
-        model: saved.model || '',
-        proxyUrl: saved.proxyUrl || '',
-        updatedAt: saved.updatedAt || null,
-      });
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Failed to update config';
       return c.json({ error: message }, 500);
     }
   },
