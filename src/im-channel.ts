@@ -564,6 +564,23 @@ export function createDingTalkChannel(
       // DingTalk Stream SDK does not support typing indicators
     },
 
+    async sendImage(
+      chatId: string,
+      imageBuffer: Buffer,
+      mimeType: string,
+      caption?: string,
+      fileName?: string,
+    ): Promise<void> {
+      if (!inner) {
+        logger.warn(
+          { chatId },
+          'DingTalk channel not connected, skip sending image',
+        );
+        return;
+      }
+      await inner.sendImage(chatId, imageBuffer, mimeType, caption, fileName);
+    },
+
     async sendFile(
       chatId: string,
       filePath: string,

@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 
+import { toast } from 'sonner';
+
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { ToggleSwitch } from '@/components/ui/toggle-switch';
 import { api } from '../../api/client';
-import type { SettingsNotification } from './types';
 import { getErrorMessage } from './types';
 
 interface UserDingTalkConfig {
@@ -17,12 +18,7 @@ interface UserDingTalkConfig {
   updatedAt: string | null;
 }
 
-interface DingTalkChannelCardProps extends SettingsNotification {}
-
-export function DingTalkChannelCard({
-  setNotice,
-  setError,
-}: DingTalkChannelCardProps) {
+export function DingTalkChannelCard() {
   const [config, setConfig] = useState<UserDingTalkConfig | null>(null);
   const [clientId, setClientId] = useState('');
   const [clientSecret, setClientSecret] = useState('');
@@ -55,17 +51,15 @@ export function DingTalkChannelCard({
 
   const handleToggle = async (newEnabled: boolean) => {
     setToggling(true);
-    setNotice(null);
-    setError(null);
     try {
       const data = await api.put<UserDingTalkConfig>(
         '/api/config/user-im/dingtalk',
         { enabled: newEnabled },
       );
       setConfig(data);
-      setNotice(`钉钉渠道已${newEnabled ? '启用' : '停用'}`);
+      toast.success(`钉钉渠道已${newEnabled ? '启用' : '停用'}`);
     } catch (err) {
-      setError(getErrorMessage(err, '切换钉钉渠道状态失败'));
+      toast.error(getErrorMessage(err, '切换钉钉渠道状态失败'));
     } finally {
       setToggling(false);
     }
@@ -73,23 +67,21 @@ export function DingTalkChannelCard({
 
   const handleSave = async () => {
     setSaving(true);
-    setError(null);
-    setNotice(null);
     try {
       const id = clientId.trim();
       const secret = clientSecret.trim();
 
       if (id && !secret && !config?.hasClientSecret) {
-        setError('首次配置钉钉需要同时提供 AppKey 和 AppSecret');
+        toast.error('首次配置钉钉需要同时提供 AppKey 和 AppSecret');
         setSaving(false);
         return;
       }
 
       if (!id && !secret) {
         if (config?.clientId || config?.hasClientSecret) {
-          setNotice('钉钉配置未变更');
+          toast.info('钉钉配置未变更');
         } else {
-          setError('请填写钉钉机器人 AppKey 和 AppSecret');
+          toast.error('请填写钉钉机器人 AppKey 和 AppSecret');
         }
         setSaving(false);
         return;
@@ -104,9 +96,9 @@ export function DingTalkChannelCard({
       );
       setConfig(data);
       setClientSecret('');
-      setNotice('钉钉配置已保存');
+      toast.success('钉钉配置已保存');
     } catch (err) {
-      setError(getErrorMessage(err, '保存钉钉配置失败'));
+      toast.error(getErrorMessage(err, '保存钉钉配置失败'));
     } finally {
       setSaving(false);
     }
@@ -114,13 +106,11 @@ export function DingTalkChannelCard({
 
   const handleTest = async () => {
     setTesting(true);
-    setError(null);
-    setNotice(null);
     try {
       await api.post('/api/config/user-im/dingtalk/test');
-      setNotice('钉钉连接测试成功');
+      toast.success('钉钉连接测试成功');
     } catch (err) {
-      setError(getErrorMessage(err, '钉钉连接测试失败'));
+      toast.error(getErrorMessage(err, '钉钉连接测试失败'));
     } finally {
       setTesting(false);
     }

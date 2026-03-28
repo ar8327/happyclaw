@@ -94,6 +94,13 @@ interface DingTalkAccessToken {
 
 // Extended RobotMessage that includes image type (SDK only declares text)
 // Define our own base to avoid msgtype literal conflict
+interface RichTextEntry {
+  text?: string;
+  type?: string;
+  downloadCode?: string;
+  pictureDownloadCode?: string;
+}
+
 interface DingTalkRobotMessage {
   conversationId: string;
   chatbotCorpId?: string;
@@ -112,6 +119,9 @@ interface DingTalkRobotMessage {
   msgtype: string;
   text?: { content: string };
   image?: { contentUrl: string };
+  content?: {
+    richText?: RichTextEntry[];
+  };
 }
 
 type RobotMessage = DTRobotMessage | DingTalkRobotMessage;
@@ -1009,14 +1019,17 @@ export function createDingTalkConnection(
     robotCode: string,
     mediaId: string,
     fileName: string,
+    fileType: string,
   ): Promise<void> {
     try {
       const token = await getAccessToken();
 
       // msgParam must be a JSON string with file info
+      // fileType is required by sampleFile (extension like "pdf", "png")
       const msgParam = JSON.stringify({
         mediaId,
         fileName,
+        fileType,
       });
 
       const body = JSON.stringify({
@@ -1078,6 +1091,86 @@ export function createDingTalkConnection(
       logger.error(
         { err, userId, mediaId, fileName },
         'Failed to send DingTalk file message',
+      );
+      throw err;
+    }
+  }
+
+  /**
+   * Send an image message to a DingTalk user using batchSend API.
+   * Uses sampleImageMsg with photoURL pointing to the uploaded mediaId.
+   */
+  async function sendDingTalkImageMessage(
+    userId: string,
+    robotCode: string,
+    mediaId: string,
+    fileName: string,
+  ): Promise<void> {
+    try {
+      const token = await getAccessToken();
+
+      // sampleImageMsg uses photoURL field (not mediaId) - DingTalk API quirk
+      const msgParam = JSON.stringify({ photoURL: mediaId });
+
+      const body = JSON.stringify({
+        robotCode,
+        userIds: [userId],
+        msgKey: 'sampleImageMsg',
+        msgParam,
+      });
+
+      await new Promise<void>((resolve, reject) => {
+        const req = https.request(
+          {
+            hostname: 'api.dingtalk.com',
+            path: '/v1.0/robot/oToMessages/batchSend',
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-acs-dingtalk-access-token': token,
+            },
+          },
+          (res) => {
+            const chunks: Buffer[] = [];
+            res.on('data', (chunk: Buffer) => chunks.push(chunk));
+            res.on('end', () => {
+              const respBody = Buffer.concat(chunks).toString('utf8');
+              if (res.statusCode && res.statusCode >= 400) {
+                reject(
+                  new Error(
+                    `DingTalk image HTTP failed (${res.statusCode}): ${respBody}`,
+                  ),
+                );
+                return;
+              }
+              try {
+                const data = JSON.parse(respBody);
+                if (data.errcode && data.errcode !== 0) {
+                  reject(
+                    new Error(
+                      `DingTalk API error: ${data.errcode} ${data.errmsg}`,
+                    ),
+                  );
+                  return;
+                }
+              } catch {
+                // Not JSON, ignore
+              }
+              resolve();
+            });
+            res.on('error', reject);
+          },
+        );
+        req.on('error', reject);
+        req.write(body);
+        req.end();
+      });
+
+      logger.info({ userId, mediaId, fileName }, 'DingTalk image message sent');
+    } catch (err) {
+      logger.error(
+        { err, userId, mediaId, fileName },
+        'Failed to send DingTalk image message',
       );
       throw err;
     }
@@ -1156,7 +1249,16 @@ export function createDingTalkConnection(
       const data = JSON.parse(downstream.data) as RobotMessage;
 
       const msgId = data.msgId;
+      logger.info(
+        {
+          msgId,
+          conversationType: data.conversationType,
+          msgtype: data.msgtype,
+        },
+        'DingTalk handleRobotMessage start',
+      );
       if (!msgId || isDuplicate(msgId)) {
+        logger.info({ msgId }, 'DingTalk dropped: duplicate or no msgId');
         return;
       }
       markSeen(msgId);
@@ -1165,6 +1267,10 @@ export function createDingTalkConnection(
       if (opts.ignoreMessagesBefore && data.createAt) {
         const msgTime = data.createAt;
         if (msgTime < opts.ignoreMessagesBefore) {
+          logger.info(
+            { msgId, msgTime, ignoreBefore: opts.ignoreMessagesBefore },
+            'DingTalk dropped: stale message',
+          );
           return;
         }
       }
@@ -1215,6 +1321,92 @@ export function createDingTalkConnection(
 
       if (data.msgtype === 'text' && 'text' in data) {
         content = data.text?.content?.trim() || '';
+      } else if (data.msgtype === 'richText' && data.content) {
+        // richText: mixed content array with text segments and picture objects
+        // e.g. [{text:"hi"},{type:"picture",downloadCode:"...",pictureDownloadCode:"..."}]
+        const richText: Array<{
+          text?: string;
+          type?: string;
+          downloadCode?: string;
+          pictureDownloadCode?: string;
+        }> = data.content.richText ?? [];
+        const textParts: string[] = [];
+        const imageEntries: {
+          downloadCode: string;
+          pictureDownloadCode: string;
+        }[] = [];
+
+        for (const entry of richText) {
+          if (entry.text) {
+            textParts.push(entry.text);
+          } else if (
+            entry.type === 'picture' &&
+            (entry.downloadCode || entry.pictureDownloadCode)
+          ) {
+            imageEntries.push({
+              downloadCode:
+                entry.downloadCode || entry.pictureDownloadCode || '',
+              pictureDownloadCode: entry.pictureDownloadCode || '',
+            });
+          }
+        }
+
+        logger.info(
+          { msgId, textParts, imageEntriesCount: imageEntries.length },
+          'DingTalk richText parsed',
+        );
+        content = textParts.join('').trim();
+        if (imageEntries.length > 0) {
+          // Download each image; first one's base64 goes to Vision, all saved to disk
+          const allAttachments: Array<{
+            type: 'image';
+            data: string;
+            mimeType: string;
+          }> = [];
+          for (let i = 0; i < imageEntries.length; i++) {
+            const entry = imageEntries[i];
+            logger.info(
+              { msgId, downloadCode: entry.downloadCode, index: i },
+              'DingTalk richText downloading image',
+            );
+            const normalized = await normalizeDingTalkImage(jid, opts, () =>
+              downloadDingTalkImageByDownloadCode(
+                entry.downloadCode || entry.pictureDownloadCode || '',
+                data.robotCode ?? '',
+              ),
+            );
+            logger.info(
+              { msgId, index: i, hasResult: !!normalized },
+              'DingTalk richText image download complete',
+            );
+            if (normalized?.attachmentsJson) {
+              const parsed = JSON.parse(normalized.attachmentsJson) as Array<{
+                type: 'image';
+                data: string;
+                mimeType: string;
+              }>;
+              allAttachments.push(...parsed);
+            }
+          }
+          if (allAttachments.length > 0) {
+            attachmentsJson = JSON.stringify(allAttachments);
+            // Prepend first image content if available
+            const firstImgContent = allAttachments[0] ? `[图片: base64]` : '';
+            content = (firstImgContent + (content ? ' ' + content : '')).trim();
+          }
+        }
+        logger.info(
+          {
+            msgId,
+            contentLen: content?.length,
+            hasAttachments: !!attachmentsJson,
+          },
+          'DingTalk richText processing complete',
+        );
+        if (!content && !attachmentsJson) {
+          // All richText entries were pictures with no text
+          content = attachmentsJson ? '[图片]' : '';
+        }
       } else if (data.msgtype === 'picture' && 'content' in data) {
         // Picture message: download via downloadCode API (short or long form)
         interface PictureContent {
@@ -1466,7 +1658,8 @@ export function createDingTalkConnection(
             // Debug: log all events
             logger.info(
               {
-                data: downstream.data?.substring?.(0, 200),
+                dataLen: downstream.data?.length,
+                data: downstream.data,
               },
               'DingTalk robot message received',
             );
@@ -1611,17 +1804,44 @@ export function createDingTalkConnection(
       imageBuffer: Buffer,
       mimeType: string,
       caption?: string,
-      _fileName?: string,
+      fileName?: string,
     ): Promise<void> {
-      // DingTalk Stream SDK doesn't support sending images directly
-      // Send caption as text instead
-      if (caption) {
-        await connection.sendMessage(chatId, `📷 ${caption}`);
-      } else {
-        logger.warn(
-          { chatId },
-          'DingTalk image sending not supported, skipping',
+      // Look up sender info from the chat jid
+      const parsed = parseDingTalkChatId(chatId);
+      const jidKey = parsed
+        ? parsed.type === 'c2c'
+          ? `dingtalk:c2c:${parsed.conversationId}`
+          : `dingtalk:group:${parsed.conversationId}`
+        : chatId;
+      const senderId = lastSenderIds.get(jidKey);
+      const senderStaffId = lastSenderStaffIds.get(jidKey);
+      if (!senderId) {
+        logger.error(
+          { chatId, jidKey },
+          'DingTalk sendImage: no senderId found',
         );
+        throw new Error(`DingTalk sendImage: unknown chat ${chatId}`);
+      }
+
+      const targetUserId = senderStaffId || senderId;
+      const robotCode = config.clientId;
+      const fname = fileName || `image.${mimeType.split('/')[1] || 'png'}`;
+
+      // Upload image to DingTalk media API
+      const mediaId = await uploadDingTalkMedia(imageBuffer, fname, 'image');
+      if (!mediaId) {
+        throw new Error('DingTalk sendImage: media upload failed');
+      }
+
+      try {
+        await sendDingTalkImageMessage(targetUserId, robotCode, mediaId, fname);
+        logger.info(
+          { chatId, mediaId, fileName: fname },
+          'DingTalk image sent',
+        );
+      } catch (err) {
+        logger.error({ err, chatId }, 'DingTalk sendImage: failed');
+        throw err;
       }
     },
 
@@ -1703,12 +1923,23 @@ export function createDingTalkConnection(
 
       try {
         // Send file message via batchSend API
-        await sendDingTalkFileMessage(
-          targetUserId,
-          robotCode,
-          mediaId,
-          fileName,
-        );
+        // Use sampleImageMsg for images, sampleFile for others
+        if (mediaType === 'image') {
+          await sendDingTalkImageMessage(
+            targetUserId,
+            robotCode,
+            mediaId,
+            fileName,
+          );
+        } else {
+          await sendDingTalkFileMessage(
+            targetUserId,
+            robotCode,
+            mediaId,
+            fileName,
+            ext,
+          );
+        }
         logger.info(
           { chatId, fileName, mediaId, senderStaffId: !!senderStaffId },
           'DingTalk file sent successfully',

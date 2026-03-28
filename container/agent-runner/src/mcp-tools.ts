@@ -193,18 +193,10 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
           .describe('Optional caption text to send with the image'),
       },
       async (args) => {
-        // Web channels don't support direct image sending
-        if (ctx.chatJid.startsWith('web:')) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: 'Error: send_image is not supported for Web channels. Images can only be sent to IM channels (Feishu/Telegram/DingTalk).',
-              },
-            ],
-            isError: true,
-          };
-        }
+        // NOTE: Web-prefixed JIDs (e.g. web:main) are no longer rejected here.
+        // The main process routes the image to the correct IM channel via
+        // activeImReplyRoutes, so the agent-runner should let the IPC
+        // request through regardless of JID prefix.
 
         // Resolve path relative to workspace
         const absPath = path.isAbsolute(args.file_path)
@@ -324,18 +316,10 @@ Supports: PDF, DOC, XLS, PPT, MP4, ZIP, SO, etc. Max file size: 30MB.`,
           .describe('File name to display (e.g., "report.pdf")'),
       },
       async (args) => {
-        // Web channels don't support direct file sending
-        if (ctx.chatJid.startsWith('web:')) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: 'Error: send_file is not supported for Web channels. Files can only be sent to IM channels (Feishu/Telegram/DingTalk).',
-              },
-            ],
-            isError: true,
-          };
-        }
+        // NOTE: Web-prefixed JIDs (e.g. web:main) are no longer rejected here.
+        // The main process routes the file to the correct IM channel via
+        // activeImReplyRoutes, so the agent-runner should let the IPC
+        // request through regardless of JID prefix.
 
         // Handle both absolute and relative paths
         let resolvedPath: string;

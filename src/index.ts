@@ -576,6 +576,29 @@ function resolveEffectiveGroup(group: RegisteredGroup): {
   return { effectiveGroup: group, isHome: false };
 }
 
+/** Recursively search for a file by name in subdirectories (max 3 levels). */
+function findFileInSubdirs(
+  dir: string,
+  fileName: string,
+  depth = 0,
+): string | null {
+  if (depth > 3) return null;
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isFile() && entry.name === fileName) return fullPath;
+      if (entry.isDirectory()) {
+        const found = findFileInSubdirs(fullPath, fileName, depth + 1);
+        if (found) return found;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
 /** Resolve the owner's home folder for memory mounting. Non-home groups read owner's home memory. */
 function resolveOwnerHomeFolder(group: RegisteredGroup): string {
   if (group.created_by) {
@@ -3990,22 +4013,39 @@ function startIpcWatcher(): void {
                   const caption = data.caption || undefined;
                   const fileName = data.fileName || undefined;
 
-                  // Conversation agents: skip IM forwarding (handled in wrappedOnOutput).
-                  // Non-agent: route to IM via activeImReplyRoutes.
+                  // For conversation agents, use activeImReplyRoutes (the IM
+                  // channel this conversation agent is bound to — e.g. DingTalk JID).
                   const imgImRoute = ipcAgentId
-                    ? null
+                    ? (activeImReplyRoutes.get(sourceGroup) ?? null)
                     : getChannelType(data.chatJid) !== null
                       ? data.chatJid
                       : (activeImReplyRoutes.get(sourceGroup) ?? null);
                   if (imgImRoute) {
-                    await retryImOperation('send_image', imgImRoute, () =>
-                      imManager.sendImage(
-                        imgImRoute,
-                        imageBuffer,
-                        mimeType,
-                        caption,
-                        fileName,
-                      ),
+                    const sent = await retryImOperation(
+                      'send_image',
+                      imgImRoute,
+                      () =>
+                        imManager.sendImage(
+                          imgImRoute,
+                          imageBuffer,
+                          mimeType,
+                          caption,
+                          fileName,
+                        ),
+                    );
+                    if (!sent) {
+                      const failMsg = `⚠️ 图片 "${fileName || caption || 'image'}" 发送失败（IM 通道发送失败），请稍后重试。`;
+                      broadcastToWebClients(sourceGroup, failMsg);
+                    }
+                  } else {
+                    logger.debug(
+                      { chatJid: data.chatJid, sourceGroup },
+                      'No IM route for send_image, skipped IM delivery',
+                    );
+                    const skipImgMsg = `⚠️ 图片 "${fileName || 'image'}" 未发送到 IM 通道（当前会话无 IM 路由绑定）。`;
+                    broadcastToWebClients(
+                      data.chatJid ?? sourceGroup,
+                      skipImgMsg,
                     );
                   }
 
@@ -4762,7 +4802,7 @@ async function processTaskIpc(
           const fullPath = path.join(GROUPS_DIR, sourceGroup, data.filePath);
 
           // Path traversal protection: ensure resolved path stays within workspace
-          const resolvedPath = path.resolve(fullPath);
+          let resolvedPath = path.resolve(fullPath);
           const safeRoot = path.resolve(GROUPS_DIR, sourceGroup) + path.sep;
           if (!resolvedPath.startsWith(safeRoot)) {
             logger.warn(
@@ -4772,9 +4812,47 @@ async function processTaskIpc(
             break;
           }
 
-          // Route to IM: skip for conversation agents (they handle their own IM).
+          if (!fs.existsSync(resolvedPath)) {
+            // Fallback: search in downloads subdirs (DingTalk/Telegram files land here)
+            const downloadsDir = path.join(
+              GROUPS_DIR,
+              sourceGroup,
+              'downloads',
+            );
+            const fileName = data.fileName || path.basename(data.filePath);
+            const foundPath = fs.existsSync(downloadsDir)
+              ? findFileInSubdirs(downloadsDir, fileName)
+              : null;
+            if (foundPath) {
+              logger.info(
+                { originalPath: resolvedPath, foundPath },
+                'send_file: fell back to downloads subdirectory',
+              );
+              resolvedPath = foundPath;
+            } else {
+              const warnMsg = `⚠️ 文件 "${data.fileName}" 未找到（路径 "${data.filePath}" 不存在）。请引导用户确认正确的文件路径，或使用 'send_file' 时提供正确的相对路径。`;
+              broadcastToWebClients(sourceGroup, warnMsg);
+              // Also notify via DingTalk for conversation agents bound to IM
+              const imRoute = activeImReplyRoutes.get(sourceGroup);
+              if (imRoute) {
+                try {
+                  await imManager.sendMessage(imRoute, warnMsg);
+                } catch {
+                  // ignore
+                }
+              }
+              logger.warn(
+                { filePath: data.filePath, resolvedPath },
+                'send_file: file not found',
+              );
+              break;
+            }
+          }
+
+          // Route to IM: for conversation agents, use activeImReplyRoutes (the IM
+          // channel this conversation agent is bound to — e.g. DingTalk group JID).
           const fileImRoute = ipcAgentId
-            ? null
+            ? (activeImReplyRoutes.get(sourceGroup) ?? null)
             : getChannelType(data.chatJid) !== null
               ? data.chatJid
               : (activeImReplyRoutes.get(sourceGroup) ?? null);
@@ -4789,14 +4867,27 @@ async function processTaskIpc(
           );
           if (fileImRoute) {
             const imFileName = data.fileName || path.basename(resolvedPath);
-            await retryImOperation('send_file', fileImRoute, () =>
+            const sent = await retryImOperation('send_file', fileImRoute, () =>
               imManager.sendFile(fileImRoute, resolvedPath, imFileName),
             );
+            if (!sent) {
+              const failMsg = `⚠️ 文件 "${data.fileName}" 发送失败，请稍后重试。`;
+              broadcastToWebClients(sourceGroup, failMsg);
+              // Also notify via DingTalk directly so the user sees it there
+              try {
+                await imManager.sendMessage(fileImRoute, failMsg);
+              } catch {
+                // ignore — failure notification itself failing should not crash
+              }
+            }
           } else {
             logger.debug(
               { chatJid: data.chatJid, sourceGroup },
               'No IM route for send_file, skipped IM delivery',
             );
+            // Notify the user that file delivery to IM was skipped
+            const skipMsg = `⚠️ 文件 "${data.fileName}" 未发送到 IM 通道（当前会话无 IM 路由绑定，文件仅保存在工作区）。`;
+            broadcastToWebClients(data.chatJid ?? sourceGroup, skipMsg);
           }
           logger.info(
             {
@@ -4925,6 +5016,8 @@ async function processAgentConversation(
   // Persist the IM routing target so it survives service restarts.
   if (replySourceImJid) {
     updateAgentLastImJid(agentId, replySourceImJid);
+    // Also publish to activeImReplyRoutes so send_file/send_image IPC can route to IM.
+    activeImReplyRoutes.set(effectiveGroup.folder, replySourceImJid);
   }
 
   // ── Feishu Streaming Card (conversation agent) ──
