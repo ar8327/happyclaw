@@ -98,6 +98,7 @@ import {
   appendCodexConfigAudit,
 } from '../runtime-config.js';
 import type { ClaudeOAuthCredentials } from '../runtime-config.js';
+import { queryCodexRateLimits } from '../codex-app-server.js';
 import type { AuthUser, RegisteredGroup } from '../types.js';
 import { hasPermission } from '../permissions.js';
 import { logger } from '../logger.js';
@@ -472,6 +473,31 @@ configRoutes.post(
     } catch (err) {
       logger.error({ err }, 'Failed to apply Codex config');
       return c.json({ error: 'Failed to apply Codex config' }, 500);
+    }
+  },
+);
+
+configRoutes.get(
+  '/codex/rate-limits',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    try {
+      const mode = getCodexMode();
+      if (mode !== 'cli') {
+        return c.json({ available: false, reason: 'not_cli_mode' });
+      }
+      const cli = detectLocalCodexCli();
+      if (!cli.hasAuth) {
+        return c.json({ available: false, reason: 'not_logged_in' });
+      }
+      const refresh = c.req.query('refresh') === '1';
+      const data = await queryCodexRateLimits(refresh);
+      return c.json({ available: true, rateLimits: data.rateLimits });
+    } catch (err) {
+      logger.error({ err }, 'Failed to query Codex rate limits');
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      return c.json({ error: msg }, 500);
     }
   },
 );

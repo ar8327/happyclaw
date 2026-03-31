@@ -14,6 +14,7 @@ import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { api } from '../../api/client';
 import { useCodexModels } from '../../hooks/useCodexModels';
+import { apiFetch } from '../../api/client';
 import type {
   CodexConfigPublic,
   CodexProfileItem,
@@ -22,6 +23,8 @@ import type {
   LocalCodexCliStatus,
   EnvRow,
   SettingsNotification,
+  CodexRateLimitsResponse,
+  CodexRateLimitWindow,
 } from './types';
 import { getErrorMessage } from './types';
 
@@ -60,6 +63,108 @@ function buildCustomEnv(rows: EnvRow[]): { customEnv: Record<string, string>; er
   return { customEnv, error: null };
 }
 
+// ─── Rate Limit Helpers ─────────────────────────────────────
+
+function windowLabel(mins: number): string {
+  if (mins === 300) return '5小时窗口';
+  if (mins === 10080) return '每周窗口';
+  if (mins >= 1440) return `${Math.round(mins / 1440)}天窗口`;
+  return `${Math.round(mins / 60)}小时窗口`;
+}
+
+function formatResetTime(resetsAt: number): string {
+  const d = new Date(resetsAt * 1000);
+  const now = new Date();
+  const sameDay = d.getFullYear() === now.getFullYear()
+    && d.getMonth() === now.getMonth()
+    && d.getDate() === now.getDate();
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  if (sameDay) return hh + ':' + mm;
+  return `${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm}`;
+}
+
+function barColor(remaining: number): string {
+  if (remaining > 50) return 'bg-emerald-500';
+  if (remaining >= 20) return 'bg-amber-500';
+  return 'bg-red-500';
+}
+
+function planBadgeClass(plan: string | null): string {
+  switch (plan) {
+    case 'plus': return 'bg-purple-100 text-purple-700';
+    case 'pro': return 'bg-amber-100 text-amber-700';
+    case 'team': case 'business': case 'enterprise': return 'bg-blue-100 text-blue-700';
+    default: return 'bg-slate-100 text-slate-700';
+  }
+}
+
+function RateLimitBar({ window: w }: { window: CodexRateLimitWindow }) {
+  const remaining = 100 - w.usedPercent;
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between text-xs text-slate-600">
+        <span>{windowLabel(w.windowDurationMins)}</span>
+        <span>{remaining}% 剩余 · 重置于 {formatResetTime(w.resetsAt)}</span>
+      </div>
+      <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all ${barColor(remaining)}`}
+          style={{ width: `${remaining}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function CodexRateLimitCard({
+  data,
+  loading,
+  onRefresh,
+}: {
+  data: { limitId: string | null; planType: string | null; primary: CodexRateLimitWindow | null; secondary: CodexRateLimitWindow | null; credits: { hasCredits: boolean; unlimited: boolean; balance: string } | null };
+  loading: boolean;
+  onRefresh: () => void;
+}) {
+  const hasCredits = data.credits && (data.credits.hasCredits || parseFloat(data.credits.balance) > 0);
+  return (
+    <div className="rounded-lg border border-blue-200 bg-blue-50/50 p-4 space-y-3">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="inline-block w-2 h-2 rounded-full bg-blue-500" />
+          <span className="text-sm font-medium text-blue-800">订阅用量</span>
+          {data.planType && (
+            <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${planBadgeClass(data.planType)}`}>
+              {data.planType.charAt(0).toUpperCase() + data.planType.slice(1)}
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={loading}
+          className="text-blue-600 hover:text-blue-800 disabled:opacity-50 p-1"
+          title="刷新用量"
+        >
+          <RefreshCw className={`size-3.5 ${loading ? 'animate-spin' : ''}`} />
+        </button>
+      </div>
+
+      {/* Progress bars */}
+      {data.primary && <RateLimitBar window={data.primary} />}
+      {data.secondary && <RateLimitBar window={data.secondary} />}
+
+      {/* Credits */}
+      {hasCredits && data.credits && (
+        <p className="text-xs text-slate-500">
+          额度余额：{data.credits.unlimited ? '无限' : `$${data.credits.balance}`}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function CodexProviderSection({ setNotice, setError }: SettingsNotification) {
   // Config & mode
   const [config, setConfig] = useState<CodexConfigPublic | null>(null);
@@ -90,6 +195,10 @@ export function CodexProviderSection({ setNotice, setError }: SettingsNotificati
   const [deletingProfileId, setDeletingProfileId] = useState<string | null>(null);
   const [showApplyConfirm, setShowApplyConfirm] = useState(false);
   const [pendingDeleteProfile, setPendingDeleteProfile] = useState<CodexProfileItem | null>(null);
+
+  // Rate limits (CLI mode only)
+  const [rateLimits, setRateLimits] = useState<CodexRateLimitsResponse | null>(null);
+  const [rateLimitsLoading, setRateLimitsLoading] = useState(false);
 
   // Models
   const { models: codexModels, loading: modelsLoading } = useCodexModels(mode === 'api_key');
@@ -129,6 +238,27 @@ export function CodexProviderSection({ setNotice, setError }: SettingsNotificati
   }, []);
 
   useEffect(() => { detectCli(); }, [detectCli]);
+
+  const loadRateLimits = useCallback(async (refresh = false) => {
+    setRateLimitsLoading(true);
+    try {
+      const path = refresh ? '/api/config/codex/rate-limits?refresh=1' : '/api/config/codex/rate-limits';
+      const data = await apiFetch<CodexRateLimitsResponse>(path, { timeoutMs: 20_000 });
+      setRateLimits(data);
+    } catch {
+      // Supplementary info — silently ignore errors
+    } finally {
+      setRateLimitsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (mode === 'cli' && cliStatus?.hasAuth) {
+      loadRateLimits();
+    } else {
+      setRateLimits(null);
+    }
+  }, [mode, cliStatus?.hasAuth, loadRateLimits]);
 
   // ─── Mode switch ──────────────────────────────────────────────
 
@@ -381,6 +511,23 @@ export function CodexProviderSection({ setNotice, setError }: SettingsNotificati
               <p className="text-xs text-slate-500">
                 请在宿主机终端运行 <code className="bg-slate-100 px-1.5 py-0.5 rounded text-slate-700">codex login</code> 登录，系统将自动使用。
               </p>
+            </div>
+          )}
+
+          {/* Rate limits card (CLI mode + authenticated) */}
+          {rateLimits && rateLimits.available && (
+            <CodexRateLimitCard
+              data={rateLimits.rateLimits}
+              loading={rateLimitsLoading}
+              onRefresh={() => loadRateLimits(true)}
+            />
+          )}
+          {rateLimitsLoading && !rateLimits && (
+            <div className="rounded-lg border border-blue-200 bg-blue-50/50 p-4">
+              <div className="flex items-center gap-2 text-sm text-blue-700">
+                <Loader2 className="size-4 animate-spin" />
+                <span>加载用量信息...</span>
+              </div>
             </div>
           )}
 

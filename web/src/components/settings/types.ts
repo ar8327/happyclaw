@@ -137,6 +137,32 @@ export interface LocalCodexCliStatus {
   lastRefresh: string | null;
 }
 
+// ─── Codex Rate Limits ─────────────────────────────────────
+
+export interface CodexRateLimitWindow {
+  usedPercent: number;
+  windowDurationMins: number;
+  resetsAt: number;
+}
+
+export interface CodexRateLimitCredits {
+  hasCredits: boolean;
+  unlimited: boolean;
+  balance: string;
+}
+
+export interface CodexRateLimitData {
+  limitId: string | null;
+  planType: string | null;
+  primary: CodexRateLimitWindow | null;
+  secondary: CodexRateLimitWindow | null;
+  credits: CodexRateLimitCredits | null;
+}
+
+export type CodexRateLimitsResponse =
+  | { available: true; rateLimits: CodexRateLimitData }
+  | { available: false; reason: string };
+
 export function getErrorMessage(err: unknown, fallback: string): string {
   if (typeof err === 'object' && err !== null && 'message' in err) {
     const msg = (err as { message?: unknown }).message;
