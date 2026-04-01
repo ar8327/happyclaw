@@ -28,6 +28,9 @@ dist/
 *.db-shm
 *.sqlite
 
+# Project-level skills (may contain internal API scripts / credentials)
+container/skills/
+
 # Local tooling metadata
 .claude/
 .mcp.json
