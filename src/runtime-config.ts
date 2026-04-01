@@ -2932,7 +2932,7 @@ export interface SystemSettings {
 
 const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   containerTimeout: 1800000,
-  idleTimeout: 1800000,
+  idleTimeout: 1500000,
   containerMaxOutputSize: 10485760,
   maxConcurrentContainers: 20,
   maxConcurrentHostProcesses: 5,
