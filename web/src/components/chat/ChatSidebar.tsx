@@ -191,6 +191,8 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
             memberCount={showCollabBadge ? g.member_count : undefined}
             isActive={currentGroup === g.jid}
             isHome={false}
+            llmProvider={g.llm_provider}
+            model={g.model}
             editable={g.editable}
             deletable={g.deletable}
             onSelect={handleGroupSelect}
@@ -265,6 +267,8 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
                   executionMode={mainGroup.execution_mode}
                   isActive={currentGroup === mainGroup.jid}
                   isHome
+                  llmProvider={mainGroup.llm_provider}
+                  model={mainGroup.model}
                   editable
                   onSelect={handleGroupSelect}
                   onRename={(jid, name) => setRenameState({ open: true, jid, name })}
@@ -295,6 +299,8 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
                     isActive={currentGroup === g.jid}
                     isHome={false}
                     isPinned
+                    llmProvider={g.llm_provider}
+                    model={g.model}
                     editable={g.editable}
                     deletable={g.deletable}
                     onSelect={handleGroupSelect}

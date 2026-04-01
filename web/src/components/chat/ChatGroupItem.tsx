@@ -20,6 +20,8 @@ export interface ChatGroupItemProps {
   isActive: boolean;
   isHome: boolean;
   isPinned?: boolean;
+  llmProvider?: 'claude' | 'openai';
+  model?: string;
   editable?: boolean;
   deletable?: boolean;
   onSelect: (jid: string, folder: string) => void;
@@ -41,6 +43,8 @@ export function ChatGroupItem({
   isActive,
   isHome,
   isPinned,
+  llmProvider,
+  model,
   editable,
   deletable,
   onSelect,
@@ -104,6 +108,16 @@ export function ChatGroupItem({
           {isShared && memberRole !== 'owner' && (memberCount ?? 0) >= 2 && (
             <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-100 text-violet-700">
               {memberCount}人协作
+            </span>
+          )}
+          {(model || llmProvider === 'openai') && (
+            <span className={cn(
+              'inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium',
+              llmProvider === 'openai'
+                ? 'bg-green-100 text-green-700'
+                : 'bg-orange-100 text-orange-700',
+            )}>
+              {model || 'GPT'}
             </span>
           )}
         </div>
