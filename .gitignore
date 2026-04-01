@@ -37,6 +37,9 @@ bun.lockb
 .docker-build-sentinel
 *.tsbuildinfo
 
+# Project-level skills (may contain internal API scripts / credentials)
+container/skills/
+
 # Local tooling metadata
 .claude/
 .mcp.json
