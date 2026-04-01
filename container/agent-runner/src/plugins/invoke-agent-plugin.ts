@@ -138,8 +138,9 @@ async function invokeCodex(
   cwd: string,
   effort?: string,
 ): Promise<string> {
+  const apiKey = process.env.OPENAI_API_KEY;
   const codex = new Codex({
-    apiKey: process.env.OPENAI_API_KEY,
+    ...(apiKey ? { apiKey } : {}),
     env: {
       ...process.env as Record<string, string>,
       HAPPYCLAW_INVOKE_DEPTH: '1',

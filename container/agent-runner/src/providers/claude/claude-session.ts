@@ -10,9 +10,7 @@
 import { query, type PermissionMode, type Query, type McpServerConfig, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { createPreCompactHook, createSafetyLiteHook } from './claude-hooks.js';
 import { PREDEFINED_AGENTS } from './claude-agent-defs.js';
-import { resolveImageMimeType, filterOversizedImages } from '../../image-utils.js';
-
-type ClaudeImageMediaType = 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
+import { resolveImageMimeType, filterOversizedImages, type ClaudeImageMimeType } from '../../image-utils.js';
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -50,7 +48,7 @@ class MessageStream {
           type: 'image' as const,
           source: {
             type: 'base64' as const,
-            media_type: resolveImageMimeType(img, logFn) as ClaudeImageMediaType,
+            media_type: resolveImageMimeType(img, logFn) as ClaudeImageMimeType,
             data: img.data,
           },
         })),

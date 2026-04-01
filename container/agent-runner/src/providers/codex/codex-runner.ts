@@ -138,9 +138,15 @@ export class CodexRunner implements AgentRunner {
       userMcpServers,
     };
 
-    this.session = new CodexSession(sessionConfig, {
-      apiKey: process.env.OPENAI_API_KEY,
-    });
+    const apiKey = process.env.OPENAI_API_KEY;
+    this.session = new CodexSession(
+      sessionConfig,
+      apiKey
+        ? {
+            apiKey,
+          }
+        : undefined,
+    );
   }
 
   async *runQuery(config: QueryConfig): AsyncGenerator<NormalizedMessage, QueryResult> {

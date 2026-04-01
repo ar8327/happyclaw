@@ -1,6 +1,7 @@
 import { detectImageMimeTypeFromBase64Strict } from './image-detector.js';
 
 export const IMAGE_MAX_DIMENSION = 8000; // Anthropic API 限制
+export type ClaudeImageMimeType = 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
 
 /**
  * 规范化图片 MIME：
@@ -11,7 +12,7 @@ export const IMAGE_MAX_DIMENSION = 8000; // Anthropic API 限制
 export function resolveImageMimeType(
   img: { data: string; mimeType?: string },
   log: (message: string) => void,
-): string {
+): ClaudeImageMimeType {
   const declared =
     typeof img.mimeType === 'string' && img.mimeType.startsWith('image/')
       ? img.mimeType.toLowerCase()
@@ -20,10 +21,10 @@ export function resolveImageMimeType(
 
   if (declared && detected && declared !== detected) {
     log(`Image MIME mismatch: declared=${declared}, detected=${detected}, using detected`);
-    return detected;
+    return detected as ClaudeImageMimeType;
   }
 
-  return declared || detected || 'image/jpeg';
+  return (declared || detected || 'image/jpeg') as ClaudeImageMimeType;
 }
 
 /**

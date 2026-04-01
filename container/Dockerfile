@@ -97,6 +97,13 @@ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 ENV PATH="/home/node/.local/bin:${PATH}"
 
+# Build local shared package first so file:../agent-runner-core resolves inside the image.
+WORKDIR /agent-runner-core
+COPY agent-runner-core/package.json ./
+RUN npm install
+COPY agent-runner-core/ ./
+RUN npm run build
+
 # Create app directory
 WORKDIR /app
 

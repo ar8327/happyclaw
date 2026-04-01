@@ -49,10 +49,6 @@ import {
   writeRunLog,
   type CloseHandlerContext,
 } from './agent-output-parser.js';
-import {
-  getProviderDefaultModel,
-  resolveProviderId,
-} from './provider-adapters/registry.js';
 
 /**
  * Required env flags for settings.json — 每次容器/进程启动时强制写入，不可被用户覆盖。
@@ -364,17 +360,20 @@ function buildVolumeMounts(
   }
 
   // LLM provider selection (default: claude)
-  const llmProvider = resolveProviderId(group.llm_provider);
+  const llmProvider = group.llm_provider === 'openai' ? 'codex' : 'claude';
   envLines.push(`HAPPYCLAW_LLM_PROVIDER=${llmProvider}`);
 
-  // Codex provider config: read from persistent config, fallback to env var
+  // Codex provider config:
+  // - `api_key` mode injects OPENAI_* into the agent runtime
+  // - `cli` mode relies on CODEX_HOME/auth.json and must not inherit a stale API key
   const codexConfig = getCodexProviderConfig();
   const codexProfile =
     codexConfig.mode === 'api_key' ? codexConfig.activeProfile : null;
-  const openaiKey =
-    codexProfile?.openaiApiKey || process.env.OPENAI_API_KEY || '';
-  if (openaiKey) envLines.push(`OPENAI_API_KEY=${openaiKey}`);
-  if (codexProfile?.baseUrl) envLines.push(`OPENAI_BASE_URL=${codexProfile.baseUrl}`);
+  if (codexConfig.mode === 'api_key') {
+    const openaiKey = codexProfile?.openaiApiKey || process.env.OPENAI_API_KEY || '';
+    if (openaiKey) envLines.push(`OPENAI_API_KEY=${openaiKey}`);
+    if (codexProfile?.baseUrl) envLines.push(`OPENAI_BASE_URL=${codexProfile.baseUrl}`);
+  }
 
   if (llmProvider === 'codex') {
     // Pass workspace model as Codex model (separate from HAPPYCLAW_MODEL used by Claude)
@@ -382,11 +381,6 @@ function buildVolumeMounts(
       envLines.push(`HAPPYCLAW_CODEX_MODEL=${group.model}`);
     } else if (codexProfile?.defaultModel) {
       envLines.push(`HAPPYCLAW_CODEX_MODEL=${codexProfile.defaultModel}`);
-    } else {
-      const defaultCodexModel = getProviderDefaultModel('codex');
-      if (defaultCodexModel) {
-        envLines.push(`HAPPYCLAW_CODEX_MODEL=${defaultCodexModel}`);
-      }
     }
     // Persist Codex session data (rollout JSONL + SQLite) so threads survive restarts
     const codexHomeDir = path.join(DATA_DIR, 'sessions', group.folder, 'codex-home');
@@ -1094,7 +1088,8 @@ export async function runHostAgent(
       hostEnv['HAPPYCLAW_MODEL'] = group.model;
     }
 
-    const hostLlmProvider = resolveProviderId(group.llm_provider);
+    const hostLlmProvider =
+      group.llm_provider === 'openai' ? 'codex' : 'claude';
     hostEnv['HAPPYCLAW_LLM_PROVIDER'] = hostLlmProvider;
 
     const hostCodexConfig = getCodexProviderConfig();
@@ -1104,11 +1099,17 @@ export async function runHostAgent(
         : null;
     const hostOpenaiKey =
       hostCodexProfile?.openaiApiKey || process.env.OPENAI_API_KEY || '';
-    if (hostOpenaiKey) {
-      hostEnv['OPENAI_API_KEY'] = hostOpenaiKey;
-    }
-    if (hostCodexProfile?.baseUrl) {
-      hostEnv['OPENAI_BASE_URL'] = hostCodexProfile.baseUrl;
+    if (hostCodexConfig.mode === 'api_key') {
+      if (hostOpenaiKey) {
+        hostEnv['OPENAI_API_KEY'] = hostOpenaiKey;
+      }
+      if (hostCodexProfile?.baseUrl) {
+        hostEnv['OPENAI_BASE_URL'] = hostCodexProfile.baseUrl;
+      }
+    } else {
+      // CLI mode must use local Codex auth.json rather than any inherited API key.
+      delete hostEnv['OPENAI_API_KEY'];
+      delete hostEnv['OPENAI_BASE_URL'];
     }
 
     if (hostLlmProvider === 'codex') {
@@ -1116,11 +1117,6 @@ export async function runHostAgent(
         hostEnv['HAPPYCLAW_CODEX_MODEL'] = group.model;
       } else if (hostCodexProfile?.defaultModel) {
         hostEnv['HAPPYCLAW_CODEX_MODEL'] = hostCodexProfile.defaultModel;
-      } else {
-        const defaultCodexModel = getProviderDefaultModel('codex');
-        if (defaultCodexModel) {
-          hostEnv['HAPPYCLAW_CODEX_MODEL'] = defaultCodexModel;
-        }
       }
     }
 
