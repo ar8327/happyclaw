@@ -12,7 +12,7 @@ export function ProvidersSection() {
       <div className="rounded-lg border border-border bg-muted/30 p-4">
         <div className="text-sm font-medium text-foreground">Provider 管理</div>
         <p className="mt-1 text-xs text-muted-foreground">
-          这里管理系统级模型接入能力。Anthropic Provider 负责 Claude 体系，OpenAI / Codex Provider 负责 Codex CLI 与 API Key 模式。
+          这里管理系统级模型接入能力。Anthropic Provider 用于 Anthropic 生态接入，OpenAI / Codex Provider 用于 OpenAI API 与 Codex CLI 模式。
         </p>
       </div>
 
@@ -31,7 +31,7 @@ export function ProvidersSection() {
         <div>
           <h2 className="text-base font-semibold text-foreground">Anthropic Provider</h2>
           <p className="text-xs text-muted-foreground mt-1">
-            管理 Claude OAuth、API Key、第三方 Anthropic 兼容网关与负载均衡。
+            管理 Anthropic 登录态、API Key、第三方 Anthropic 兼容网关与负载均衡。
           </p>
         </div>
         <ClaudeProviderSection setNotice={setNotice} setError={setError} />
@@ -41,7 +41,7 @@ export function ProvidersSection() {
         <div>
           <h2 className="text-base font-semibold text-foreground">OpenAI / Codex Provider</h2>
           <p className="text-xs text-muted-foreground mt-1">
-            管理 Codex CLI 登录态、OpenAI API Key Profiles，以及默认模型与自定义环境变量。
+            管理 Codex CLI 登录态、OpenAI API Key profiles，以及默认模型与自定义环境变量。
           </p>
         </div>
         <CodexProviderSection setNotice={setNotice} setError={setError} />

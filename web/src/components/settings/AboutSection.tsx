@@ -70,7 +70,7 @@ export function AboutSection() {
               <ExternalLink className="w-3 h-3" />
             </a>
             <p className="mt-1 leading-relaxed">
-              我接触到的第一个类似项目。它是 Claude Code 的网页 Web 版，让你可以在任何地方通过浏览器使用 Claude Code，不再受限于本地终端。这个理念深深吸引了我，但遗憾的是项目维护更新不够及时，许多问题长期得不到修复。
+              我接触到的第一个类似项目。它尝试把终端里的 Agent 能力搬到浏览器里，让你在任何设备上都能继续会话、查看流式输出和管理工作区。这个方向非常吸引我，也成为这个 fork 持续演化的起点。
             </p>
           </div>
           <div>
@@ -84,7 +84,7 @@ export function AboutSection() {
               <ExternalLink className="w-3 h-3" />
             </a>
             <p className="mt-1 leading-relaxed">
-              当下最火爆、最流行的个人 Agent 项目。但我认为它的架构存在根本性的缺陷——它自己从头实现了一个 Agent。而 Claude Code 已经是世界上最好的 Agent 了，为什么不站在巨人的肩膀上去构建呢？
+              一个把个人 Agent 体验推向大众视野的重要项目。它证明了“多入口 + 长时运行 + 会话恢复”这条路是成立的，也让这个 fork 更明确地去探索 provider 抽象、记忆系统和更高自主性的组合方式。
             </p>
           </div>
         </div>
@@ -99,7 +99,7 @@ export function AboutSection() {
           <h3 className="text-sm font-medium text-foreground">设计哲学</h3>
         </div>
         <p className="text-sm text-muted-foreground leading-relaxed">
-          站在巨人的肩膀上，基于 Claude Code（全世界最好的 Agent）构建。
+          站在成熟 Agent 运行时之上构建，而不是重复发明执行引擎；把精力放在多 Provider 接入、记忆能力、消息路由和长期可维护的系统抽象上。
         </p>
       </div>
 
