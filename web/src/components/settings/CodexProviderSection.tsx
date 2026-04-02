@@ -217,7 +217,7 @@ export function CodexProviderSection({ setNotice, setError }: SettingsNotificati
       setMode(configData.mode);
       setProfilesState(profilesData);
     } catch (err) {
-      setError(getErrorMessage(err, '加载 Codex 配置失败'));
+      setError(getErrorMessage(err, '加载 OpenAI 配置失败'));
     } finally {
       setLoading(false);
     }
@@ -330,7 +330,7 @@ export function CodexProviderSection({ setNotice, setError }: SettingsNotificati
           defaultModel: defaultModel === '__default__' ? '' : defaultModel,
           customEnv: envResult.customEnv,
         });
-        setNotice('Codex 配置已创建');
+        setNotice('OpenAI 配置已创建');
       } else {
         await api.patch<CodexProfileItem>(`/api/config/codex/profiles/${editingProfileId}`, {
           name: trimmedName,
@@ -348,7 +348,7 @@ export function CodexProviderSection({ setNotice, setError }: SettingsNotificati
             openaiApiKey: apiKey.trim(),
           });
         }
-        setNotice('Codex 配置已保存');
+        setNotice('OpenAI 配置已保存');
       }
       setIsEditorOpen(false);
       await loadConfig();
@@ -642,7 +642,7 @@ export function CodexProviderSection({ setNotice, setError }: SettingsNotificati
             <div className="rounded-xl border border-slate-200 p-4 space-y-4">
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-medium text-slate-700">
-                  {editorMode === 'create' ? '新建 Codex 配置' : '编辑 Codex 配置'}
+                  {editorMode === 'create' ? '新建 OpenAI 配置' : '编辑 OpenAI 配置'}
                 </h3>
                 <button
                   onClick={() => setIsEditorOpen(false)}
@@ -827,7 +827,7 @@ export function CodexProviderSection({ setNotice, setError }: SettingsNotificati
         open={showApplyConfirm}
         onClose={() => setShowApplyConfirm(false)}
         onConfirm={doApply}
-        title="应用 Codex 配置到所有工作区"
+        title="应用 OpenAI 配置到所有工作区"
         message="这会停止所有活动工作区并清空其待处理队列，是否继续？"
         confirmText="确认应用"
         confirmVariant="danger"
@@ -837,7 +837,7 @@ export function CodexProviderSection({ setNotice, setError }: SettingsNotificati
         open={!!pendingDeleteProfile}
         onClose={() => setPendingDeleteProfile(null)}
         onConfirm={() => pendingDeleteProfile && handleDeleteProfile(pendingDeleteProfile)}
-        title="删除 Codex 配置"
+        title="删除 OpenAI 配置"
         message={`确定要删除配置「${pendingDeleteProfile?.name}」吗？`}
         confirmText="确认删除"
         confirmVariant="danger"

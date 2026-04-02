@@ -431,7 +431,7 @@ export function ProviderEditor({
               value={name}
               onChange={(e) => setName(e.target.value)}
               disabled={saving}
-              placeholder={providerType === 'official' ? '如：Claude 官方' : '如：OpenRouter-主账号'}
+              placeholder={providerType === 'official' ? '如：Anthropic 官方' : '如：OpenRouter-主账号'}
             />
           </div>
 
@@ -460,7 +460,7 @@ export function ProviderEditor({
 
               {authTab === 'oauth' && (
                 <div className="rounded-lg border border-teal-200 bg-teal-50/50 p-4 space-y-3">
-                  <div className="text-sm font-medium text-foreground">一键登录 Claude（推荐）</div>
+                  <div className="text-sm font-medium text-foreground">一键登录 Anthropic（推荐）</div>
                   <div className="text-xs text-muted-foreground">
                     点击按钮后会打开 claude.ai 授权页面，完成授权后将页面上显示的授权码粘贴回来。
                   </div>
@@ -490,7 +490,7 @@ export function ProviderEditor({
                   {!oauthState ? (
                     <Button onClick={handleOAuthStart} disabled={saving || oauthLoading}>
                       {oauthLoading ? <Loader2 className="size-4 animate-spin" /> : <ExternalLink className="size-4" />}
-                      {!isCreate && provider?.hasClaudeOAuthCredentials ? '重新登录 Claude' : '一键登录 Claude'}
+                      {!isCreate && provider?.hasClaudeOAuthCredentials ? '重新登录 Anthropic' : '一键登录 Anthropic'}
                     </Button>
                   ) : (
                     <div className="space-y-2">
