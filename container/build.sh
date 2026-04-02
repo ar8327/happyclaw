@@ -12,9 +12,15 @@ TAG="${1:-latest}"
 echo "Building HappyClaw agent container image..."
 echo "Image: ${IMAGE_NAME}:${TAG}"
 
-# Build with Docker (CACHEBUST ensures claude-code is always latest)
-# --progress=plain ensures clean line-based output for piped log capture (WebSocket streaming)
-docker build --progress=plain --build-arg CACHEBUST="$(date +%s)" -t "${IMAGE_NAME}:${TAG}" .
+# Build with Docker (CACHEBUST ensures claude-code is always latest).
+# Older legacy docker builders do not support --progress, so fall back automatically.
+BUILD_ARGS=(--build-arg "CACHEBUST=$(date +%s)" -t "${IMAGE_NAME}:${TAG}" .)
+if docker build --help 2>/dev/null | grep -q -- '--progress'; then
+  # BuildKit-compatible path keeps line-based output for log capture.
+  docker build --progress=plain "${BUILD_ARGS[@]}"
+else
+  docker build "${BUILD_ARGS[@]}"
+fi
 
 echo ""
 echo "Build complete!"

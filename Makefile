@@ -24,8 +24,8 @@ endif
 dev: ## 启动前后端（首次自动安装依赖和构建容器镜像）
 	@if [ ! -d node_modules ] || [ package.json -nt node_modules ] || [ web/package.json -nt web/node_modules ] || [ container/agent-runner/package.json -nt container/agent-runner/node_modules ]; then echo "📦 依赖有更新，安装依赖..."; $(MAKE) install; fi
 	@$(MAKE) _ensure-docker-image
-	@$(PKG) --prefix container/agent-runner run build --silent 2>/dev/null || $(PKG) --prefix container/agent-runner run build
-	@npm --prefix container/memory-agent run build --silent 2>/dev/null || npm --prefix container/memory-agent run build
+	@(cd container/agent-runner && $(PKG) run build >/dev/null 2>&1) || (cd container/agent-runner && $(PKG) run build)
+	@(cd container/memory-agent && npm run build >/dev/null 2>&1) || (cd container/memory-agent && npm run build)
 	@echo "🚀 使用 $(PKG) 启动..."
 	$(PKG) run dev:all
 
@@ -39,8 +39,8 @@ dev-web: ## 仅启动前端
 
 build: sync-types ## 编译前后端及 agent-runner
 	$(PKG) run build:all
-	@$(PKG) --prefix container/agent-runner run build --silent 2>/dev/null || $(PKG) --prefix container/agent-runner run build
-	@npm --prefix container/memory-agent run build --silent 2>/dev/null || npm --prefix container/memory-agent run build
+	@(cd container/agent-runner && $(PKG) run build >/dev/null 2>&1) || (cd container/agent-runner && $(PKG) run build)
+	@(cd container/memory-agent && npm run build >/dev/null 2>&1) || (cd container/memory-agent && npm run build)
 	@touch .build-sentinel
 
 build-backend: ## 仅编译后端

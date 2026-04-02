@@ -102,7 +102,11 @@ WORKDIR /agent-runner-core
 COPY agent-runner-core/package.json ./
 RUN npm install
 COPY agent-runner-core/ ./
-RUN npm run build
+RUN if [ -f tsconfig.json ]; then \
+      npm run build; \
+    else \
+      echo "Using prebuilt happyclaw-agent-runner-core dist/"; \
+    fi
 
 # Create app directory
 WORKDIR /app
