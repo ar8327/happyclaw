@@ -4267,7 +4267,7 @@ export function createCodexProfile(input: {
   const state = ensureCodexState();
 
   if (state.profiles.length >= MAX_CODEX_PROFILES) {
-    throw new Error(`最多只能创建 ${MAX_CODEX_PROFILES} 个 Codex 配置`);
+    throw new Error(`最多只能创建 ${MAX_CODEX_PROFILES} 个 OpenAI 配置`);
   }
 
   const now = new Date().toISOString();
@@ -4303,11 +4303,11 @@ export function updateCodexProfile(
   },
 ): CodexProviderProfile {
   const state = readCodexStoredState();
-  if (!state) throw new Error('Codex 配置不存在');
+  if (!state) throw new Error('OpenAI 配置不存在');
 
   const id = normalizeProfileId(profileId);
   const current = state.profiles.find((p) => p.id === id);
-  if (!current) throw new Error('未找到指定 Codex 配置');
+  if (!current) throw new Error('未找到指定 OpenAI 配置');
 
   const decoded = fromStoredCodexProfile(current);
   const next: CodexProviderProfile = {
@@ -4339,11 +4339,11 @@ export function updateCodexProfileSecret(
   },
 ): CodexProviderProfile {
   const state = readCodexStoredState();
-  if (!state) throw new Error('Codex 配置不存在');
+  if (!state) throw new Error('OpenAI 配置不存在');
 
   const id = normalizeProfileId(profileId);
   const current = state.profiles.find((p) => p.id === id);
-  if (!current) throw new Error('未找到指定 Codex 配置');
+  if (!current) throw new Error('未找到指定 OpenAI 配置');
 
   const decoded = fromStoredCodexProfile(current);
   const nextKey =
@@ -4371,11 +4371,11 @@ export function updateCodexProfileSecret(
 
 export function activateCodexProfile(profileId: string): CodexProviderProfile {
   const state = readCodexStoredState();
-  if (!state) throw new Error('Codex 配置不存在');
+  if (!state) throw new Error('OpenAI 配置不存在');
 
   const id = normalizeProfileId(profileId);
   const target = state.profiles.find((p) => p.id === id);
-  if (!target) throw new Error('未找到指定 Codex 配置');
+  if (!target) throw new Error('未找到指定 OpenAI 配置');
 
   writeCodexStoredState({ ...state, activeProfileId: id });
   return fromStoredCodexProfile(target);
@@ -4386,14 +4386,14 @@ export function deleteCodexProfile(profileId: string): {
   deletedProfileId: string;
 } {
   const state = readCodexStoredState();
-  if (!state) throw new Error('Codex 配置不存在');
+  if (!state) throw new Error('OpenAI 配置不存在');
 
   const id = normalizeProfileId(profileId);
   if (!state.profiles.some((p) => p.id === id)) {
-    throw new Error('未找到指定 Codex 配置');
+    throw new Error('未找到指定 OpenAI 配置');
   }
   if (state.profiles.length <= 1) {
-    throw new Error('至少需要保留一个 Codex 配置');
+    throw new Error('至少需要保留一个 OpenAI 配置');
   }
 
   const profiles = state.profiles.filter((p) => p.id !== id);
