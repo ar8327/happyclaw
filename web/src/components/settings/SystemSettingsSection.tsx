@@ -489,7 +489,7 @@ export function SystemSettingsSection() {
             <option value="haiku" />
           </datalist>
           <p className="text-xs text-muted-foreground mt-1">
-            留空则使用 Anthropic Provider 配置中的模型，最终默认为 opus。
+            留空则使用 Anthropic 通道配置中的模型，最终默认为 opus。
           </p>
         </div>
         <div>

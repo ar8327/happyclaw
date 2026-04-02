@@ -264,7 +264,7 @@ export function SetupProvidersPage() {
       await checkAuth();
       const { setupStatus: latestStatus } = useAuthStore.getState();
       if (latestStatus?.needsSetup) {
-        setError('当前还没有可用的默认 Provider，请先完成 Anthropic 或 OpenAI / Codex 之一的配置');
+        setError('当前还没有可用的默认 Provider，请先完成 Anthropic 或 OpenAI 之一的配置');
         return;
       }
       navigate('/settings?tab=system', { replace: true });
@@ -320,10 +320,10 @@ export function SetupProvidersPage() {
         <section className="bg-card rounded-xl border border-border shadow-sm p-5">
           <div className="flex items-center gap-2 mb-3">
             <KeyRound className="w-4 h-4 text-primary" />
-            <h2 className="text-base font-semibold text-foreground">Anthropic Provider 初始化</h2>
+            <h2 className="text-base font-semibold text-foreground">Anthropic 通道初始化</h2>
           </div>
           <p className="text-xs text-muted-foreground mb-4">
-            这里用于快速初始化系统默认的 Anthropic 通道。如果你默认使用 OpenAI / Codex 体系，可以跳过这一段，直接在下方配置对应 Provider。
+            这里用于快速初始化系统默认的 Anthropic 通道。如果你默认使用 OpenAI 体系，可以跳过这一段，直接在下方配置对应 Provider。
           </p>
 
           <div className="inline-flex rounded-lg border border-border p-1 bg-muted mb-4">
@@ -597,7 +597,7 @@ export function SetupProvidersPage() {
             <h2 className="text-base font-semibold text-foreground">OpenAI Provider 初始化</h2>
           </div>
           <p className="text-xs text-muted-foreground mb-4">
-            如果默认运行时使用 OpenAI / Codex 体系，请直接在这里完成 CLI 或 API Key 配置。保存成功后，点击页面底部的“刷新接入状态”即可进入后台。
+            如果默认运行时使用 OpenAI 体系，请直接在这里完成 CLI 或 API Key 配置。保存成功后，点击页面底部的“刷新接入状态”即可进入后台。
           </p>
           <CodexProviderSection setNotice={setNotice} setError={setError} />
         </section>

@@ -12,7 +12,7 @@ export function ProvidersSection() {
       <div className="rounded-lg border border-border bg-muted/30 p-4">
         <div className="text-sm font-medium text-foreground">Provider 管理</div>
         <p className="mt-1 text-xs text-muted-foreground">
-          这里管理系统级模型接入能力。Anthropic 通道用于 Anthropic 生态接入，OpenAI 通道用于 OpenAI API 与 Codex CLI 模式。
+          这里管理系统级模型接入能力。Anthropic 通道用于 Anthropic 生态接入，OpenAI 通道用于 OpenAI API 与 CLI 模式。
         </p>
       </div>
 
@@ -41,7 +41,7 @@ export function ProvidersSection() {
         <div>
           <h2 className="text-base font-semibold text-foreground">OpenAI 通道</h2>
           <p className="text-xs text-muted-foreground mt-1">
-            管理 Codex CLI 登录态、OpenAI API Key profiles，以及默认模型与自定义环境变量。
+            管理 CLI 登录态、OpenAI API Key profiles，以及默认模型与自定义环境变量。
           </p>
         </div>
         <CodexProviderSection setNotice={setNotice} setError={setError} />
