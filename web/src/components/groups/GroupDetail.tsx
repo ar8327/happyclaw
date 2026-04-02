@@ -24,58 +24,64 @@ interface GroupDetailProps {
 export function GroupDetail({ group }: GroupDetailProps) {
   const navigate = useNavigate();
   const updateFlowSettings = useChatStore((s) => s.updateFlowSettings);
+  const liveGroup = useChatStore((s) => s.groups[group.jid]);
+  const effectiveGroup = liveGroup ? { ...group, ...liveGroup, jid: group.jid } : group;
   const [saving, setSaving] = useState(false);
   const [llmProvider, setLlmProvider] = useState<'claude' | 'openai'>(
-    group.llm_provider ?? 'claude',
+    effectiveGroup.llm_provider ?? 'claude',
   );
-  const [model, setModel] = useState(group.model ?? '');
+  const [model, setModel] = useState(effectiveGroup.model ?? '');
   const [thinkingEffort, setThinkingEffort] = useState<
     'default' | 'low' | 'medium' | 'high'
-  >(group.thinking_effort ?? 'default');
+  >(effectiveGroup.thinking_effort ?? 'default');
   const [contextCompression, setContextCompression] = useState(
-    group.context_compression === 'off' ? '' : group.context_compression ?? '',
+    effectiveGroup.context_compression === 'off'
+      ? ''
+      : effectiveGroup.context_compression ?? '',
   );
   const [knowledgeExtraction, setKnowledgeExtraction] = useState(
-    group.knowledge_extraction ?? false,
+    effectiveGroup.knowledge_extraction ?? false,
   );
   const { models: codexModels, loading: codexModelsLoading } = useCodexModels(
     llmProvider === 'openai',
   );
 
   useEffect(() => {
-    setLlmProvider(group.llm_provider ?? 'claude');
-    setModel(group.model ?? '');
-    setThinkingEffort(group.thinking_effort ?? 'default');
+    setLlmProvider(effectiveGroup.llm_provider ?? 'claude');
+    setModel(effectiveGroup.model ?? '');
+    setThinkingEffort(effectiveGroup.thinking_effort ?? 'default');
     setContextCompression(
-      group.context_compression === 'off' ? '' : group.context_compression ?? '',
+      effectiveGroup.context_compression === 'off'
+        ? ''
+        : effectiveGroup.context_compression ?? '',
     );
-    setKnowledgeExtraction(group.knowledge_extraction ?? false);
+    setKnowledgeExtraction(effectiveGroup.knowledge_extraction ?? false);
   }, [
-    group.context_compression,
-    group.knowledge_extraction,
-    group.llm_provider,
-    group.model,
-    group.thinking_effort,
+    effectiveGroup.context_compression,
+    effectiveGroup.knowledge_extraction,
+    effectiveGroup.llm_provider,
+    effectiveGroup.model,
+    effectiveGroup.thinking_effort,
   ]);
 
   const hasRuntimeChanges = useMemo(() => {
     return (
-      llmProvider !== (group.llm_provider ?? 'claude') ||
-      model !== (group.model ?? '') ||
-      thinkingEffort !== (group.thinking_effort ?? 'default') ||
+      llmProvider !== (effectiveGroup.llm_provider ?? 'claude') ||
+      model !== (effectiveGroup.model ?? '') ||
+      thinkingEffort !== (effectiveGroup.thinking_effort ?? 'default') ||
       contextCompression !==
-        (group.context_compression === 'off'
+        (effectiveGroup.context_compression === 'off'
           ? ''
-          : group.context_compression ?? '') ||
-      knowledgeExtraction !== (group.knowledge_extraction ?? false)
+          : effectiveGroup.context_compression ?? '') ||
+      knowledgeExtraction !== (effectiveGroup.knowledge_extraction ?? false)
     );
   }, [
     contextCompression,
-    group.context_compression,
-    group.knowledge_extraction,
-    group.llm_provider,
-    group.model,
-    group.thinking_effort,
+    effectiveGroup.context_compression,
+    effectiveGroup.knowledge_extraction,
+    effectiveGroup.llm_provider,
+    effectiveGroup.model,
+    effectiveGroup.thinking_effort,
     knowledgeExtraction,
     llmProvider,
     model,
@@ -138,15 +144,15 @@ export function GroupDetail({ group }: GroupDetailProps) {
       </div>
 
       {/* Last Message */}
-      {group.lastMessage && (
+      {effectiveGroup.lastMessage && (
         <div>
           <div className="text-xs text-muted-foreground mb-1">最后消息</div>
           <div className="text-sm text-foreground bg-card px-3 py-2 rounded border border-border line-clamp-3 break-words">
-            {group.lastMessage}
+            {effectiveGroup.lastMessage}
           </div>
-          {group.lastMessageTime && (
+          {effectiveGroup.lastMessageTime && (
             <div className="text-xs text-muted-foreground mt-1">
-              {formatDate(group.lastMessageTime)}
+              {formatDate(effectiveGroup.lastMessageTime)}
             </div>
           )}
         </div>
@@ -154,7 +160,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
 
       {/* Quick Actions */}
       <div className="pt-2 border-t border-border">
-        {group.editable && (
+        {effectiveGroup.editable && (
           <div className="mb-4 space-y-3 rounded-lg border border-border bg-card p-3">
             <div>
               <div className="text-sm font-medium">运行模型</div>
