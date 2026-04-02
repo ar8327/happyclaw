@@ -594,7 +594,7 @@ export function SetupProvidersPage() {
         <section className="bg-card rounded-xl border border-border shadow-sm p-5">
           <div className="flex items-center gap-2 mb-3">
             <ShieldCheck className="w-4 h-4 text-primary" />
-            <h2 className="text-base font-semibold text-foreground">OpenAI Provider 初始化</h2>
+            <h2 className="text-base font-semibold text-foreground">OpenAI 通道初始化</h2>
           </div>
           <p className="text-xs text-muted-foreground mb-4">
             如果默认运行时使用 OpenAI 体系，请直接在这里完成 CLI 或 API Key 配置。保存成功后，点击页面底部的“刷新接入状态”即可进入后台。
