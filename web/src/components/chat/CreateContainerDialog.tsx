@@ -356,7 +356,7 @@ export function CreateContainerDialog({
                           </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="claude">Anthropic</SelectItem>
-                            <SelectItem value="openai">OpenAI / Codex</SelectItem>
+                            <SelectItem value="openai">OpenAI</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
@@ -381,7 +381,7 @@ export function CreateContainerDialog({
                           </datalist>
                         )}
                         {llmProvider === 'openai' && codexModelsLoading && (
-                          <p className="mt-1 text-xs text-muted-foreground">正在加载 OpenAI / Codex 模型列表…</p>
+                          <p className="mt-1 text-xs text-muted-foreground">正在加载 OpenAI 模型列表…</p>
                         )}
                       </div>
 

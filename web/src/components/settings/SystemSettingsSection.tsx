@@ -468,7 +468,7 @@ export function SystemSettingsSection() {
             className="max-w-md w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
           >
             <option value="claude">Anthropic</option>
-            <option value="openai">OpenAI / Codex</option>
+            <option value="openai">OpenAI</option>
           </select>
         </div>
         <div>
@@ -494,7 +494,7 @@ export function SystemSettingsSection() {
         </div>
         <div>
           <label className="block text-sm font-medium text-foreground mb-1">
-            OpenAI / Codex 默认模型
+            OpenAI 默认模型
           </label>
           <Input
             type="text"
@@ -509,14 +509,14 @@ export function SystemSettingsSection() {
       <div className="border-t border-border pt-6 space-y-5">
         <h3 className="text-sm font-semibold text-foreground">Provider 扩展接口</h3>
         <p className="text-xs text-muted-foreground -mt-3">
-          用于后续接入更多 SDK 与用量接口，Anthropic 与 OpenAI / Codex 分开配置。
+          用于后续接入更多 SDK 与用量接口，Anthropic 与 OpenAI 分开配置。
         </p>
         <div>
           <label className="block text-sm font-medium text-foreground mb-1">Anthropic 用量 API</label>
           <Input value={anthropicUsageApiUrl} onChange={(e) => setAnthropicUsageApiUrl(e.target.value)} placeholder="https://..." className="max-w-2xl font-mono" />
         </div>
         <div>
-          <label className="block text-sm font-medium text-foreground mb-1">OpenAI / Codex 用量 API</label>
+          <label className="block text-sm font-medium text-foreground mb-1">OpenAI 用量 API</label>
           <Input value={openaiUsageApiUrl} onChange={(e) => setOpenaiUsageApiUrl(e.target.value)} placeholder="https://..." className="max-w-2xl font-mono" />
         </div>
         <div>
@@ -524,7 +524,7 @@ export function SystemSettingsSection() {
           <Input value={anthropicSdkBaseUrl} onChange={(e) => setAnthropicSdkBaseUrl(e.target.value)} placeholder="https://..." className="max-w-2xl font-mono" />
         </div>
         <div>
-          <label className="block text-sm font-medium text-foreground mb-1">OpenAI / Codex SDK Base URL</label>
+          <label className="block text-sm font-medium text-foreground mb-1">OpenAI SDK Base URL</label>
           <Input value={openaiSdkBaseUrl} onChange={(e) => setOpenaiSdkBaseUrl(e.target.value)} placeholder="https://..." className="max-w-2xl font-mono" />
         </div>
       </div>
