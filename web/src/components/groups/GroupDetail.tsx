@@ -174,8 +174,8 @@ export function GroupDetail({ group }: GroupDetailProps) {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="claude">Claude</SelectItem>
-                    <SelectItem value="openai">Codex</SelectItem>
+                    <SelectItem value="claude">Anthropic</SelectItem>
+                    <SelectItem value="openai">OpenAI / Codex</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

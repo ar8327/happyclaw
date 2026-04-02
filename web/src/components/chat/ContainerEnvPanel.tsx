@@ -152,10 +152,10 @@ export function ContainerEnvPanel({ groupJid, onClose }: ContainerEnvPanelProps)
       {/* Content */}
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-4">
         <p className="text-[11px] text-muted-foreground leading-relaxed">
-          覆盖全局 Claude 配置，仅对当前工作区生效。留空则使用全局配置。保存后工作区将自动重建。
+          覆盖当前工作区的 Anthropic 环境变量，仅对当前工作区生效。留空则使用系统全局默认值。保存后工作区将自动重建。
         </p>
 
-        {/* Claude Provider Fields */}
+        {/* Anthropic Provider Fields */}
         <div className="space-y-3">
           <div>
             <label className="block text-xs font-medium text-muted-foreground mb-1">

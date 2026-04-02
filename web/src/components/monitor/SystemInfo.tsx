@@ -6,7 +6,7 @@ interface SystemInfoProps {
   status: SystemStatus;
 }
 
-/** Extract semver-like version number from strings like "2.1.81 (Claude Code)" */
+/** Extract semver-like version number from strings like "2.1.81 (runner)" */
 function extractVersion(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const match = raw.match(/(\d+\.\d+\.\d+)/);
@@ -76,7 +76,7 @@ export function SystemInfo({ status }: SystemInfoProps) {
           <>
             {versions?.latest && (
               <div className="flex items-center justify-between text-sm">
-                <span className="text-muted-foreground">最新版本</span>
+                <span className="text-muted-foreground">最新执行引擎版本</span>
                 <span className="text-foreground font-medium font-mono text-xs">
                   {versions.latest}
                 </span>

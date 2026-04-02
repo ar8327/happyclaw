@@ -509,22 +509,22 @@ export function SystemSettingsSection() {
       <div className="border-t border-border pt-6 space-y-5">
         <h3 className="text-sm font-semibold text-foreground">Provider 扩展接口</h3>
         <p className="text-xs text-muted-foreground -mt-3">
-          用于后续接入更多 SDK/用量接口，Claude 与 Codex 分开配置。
+          用于后续接入更多 SDK 与用量接口，Anthropic 与 OpenAI / Codex 分开配置。
         </p>
         <div>
-          <label className="block text-sm font-medium text-foreground mb-1">Claude 用量 API</label>
+          <label className="block text-sm font-medium text-foreground mb-1">Anthropic 用量 API</label>
           <Input value={claudeUsageApiUrl} onChange={(e) => setClaudeUsageApiUrl(e.target.value)} placeholder="https://..." className="max-w-2xl font-mono" />
         </div>
         <div>
-          <label className="block text-sm font-medium text-foreground mb-1">Codex 用量 API</label>
+          <label className="block text-sm font-medium text-foreground mb-1">OpenAI / Codex 用量 API</label>
           <Input value={codexUsageApiUrl} onChange={(e) => setCodexUsageApiUrl(e.target.value)} placeholder="https://..." className="max-w-2xl font-mono" />
         </div>
         <div>
-          <label className="block text-sm font-medium text-foreground mb-1">Claude SDK Base URL</label>
+          <label className="block text-sm font-medium text-foreground mb-1">Anthropic SDK Base URL</label>
           <Input value={claudeSdkBaseUrl} onChange={(e) => setClaudeSdkBaseUrl(e.target.value)} placeholder="https://..." className="max-w-2xl font-mono" />
         </div>
         <div>
-          <label className="block text-sm font-medium text-foreground mb-1">Codex SDK Base URL</label>
+          <label className="block text-sm font-medium text-foreground mb-1">OpenAI / Codex SDK Base URL</label>
           <Input value={codexSdkBaseUrl} onChange={(e) => setCodexSdkBaseUrl(e.target.value)} placeholder="https://..." className="max-w-2xl font-mono" />
         </div>
       </div>
