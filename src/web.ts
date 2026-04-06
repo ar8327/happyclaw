@@ -94,7 +94,6 @@ import {
 
 // --- App Setup ---
 
-const app = new Hono<{ Variables: Variables }>();
 const terminalManager = new TerminalManager();
 const wsTerminals = new Map<WebSocket, string>(); // ws → groupJid
 const terminalOwners = new Map<string, WebSocket>(); // groupJid → ws
@@ -147,82 +146,259 @@ function isAllowedOrigin(origin: string | undefined): string | null {
   return null;
 }
 
-app.use(
-  '/api/*',
-  cors({
-    origin: (origin) => isAllowedOrigin(origin),
-    credentials: true,
-  }),
-);
-
 // --- Global State ---
 
 let deps: WebDeps | null = null;
 
-// --- Route Mounting ---
+// --- Route Modules Interface ---
 
-app.route('/api/auth', authRoutes);
-app.route('/api/groups', groupRoutes);
-app.route('/api/groups', fileRoutes); // File routes also under /api/groups
-app.route('/api/memory', memoryRoutes);
-app.route('/api/config', configRoutes);
-app.route('/api/tasks', tasksRoutes);
-app.route('/api/skills', skillsRoutes);
-app.route('/api/admin', adminRoutes);
-app.route('/api/browse', browseRoutes);
-app.route('/api/mcp-servers', mcpServersRoutes);
-app.route('/api/groups', agentRoutes); // Agent routes under /api/groups/:jid/agents
-app.route('/api/logs', logsRoutes);
-app.route('/api/groups', turnsRoutes); // Turn routes under /api/groups/:jid/turns
-app.route('/api/agent-definitions', agentDefinitionsRoutes);
-app.route('/api', monitorRoutes);
-app.route('/api/search', searchRoutes);
-app.route('/api/usage', usageRoutes);
-app.route('/api/billing', billingRoutes);
-app.route('/api/internal/memory', memoryAgentInternalRoutes);
-app.route('/api/internal/feishu', feishuApiRoutes);
+type RouteHono = Hono<{ Variables: Variables }>;
 
-// --- POST /api/messages ---
+interface RouteModules {
+  auth: RouteHono;
+  groups: RouteHono;
+  files: RouteHono;
+  memory: RouteHono;
+  config: RouteHono;
+  tasks: RouteHono;
+  skills: RouteHono;
+  admin: RouteHono;
+  browse: RouteHono;
+  mcpServers: RouteHono;
+  agents: RouteHono;
+  logs: RouteHono;
+  turns: RouteHono;
+  agentDefinitions: RouteHono;
+  monitor: RouteHono;
+  search: RouteHono;
+  usage: RouteHono;
+  billing: RouteHono;
+  memoryAgent: RouteHono;
+  feishuApi: RouteHono;
+}
 
-app.post('/api/messages', authMiddleware, async (c) => {
-  const body = await c.req.json().catch(() => ({}));
+// Static route modules (used for initial build)
+const staticRouteModules: RouteModules = {
+  auth: authRoutes,
+  groups: groupRoutes,
+  files: fileRoutes,
+  memory: memoryRoutes,
+  config: configRoutes,
+  tasks: tasksRoutes,
+  skills: skillsRoutes,
+  admin: adminRoutes,
+  browse: browseRoutes,
+  mcpServers: mcpServersRoutes,
+  agents: agentRoutes,
+  logs: logsRoutes,
+  turns: turnsRoutes,
+  agentDefinitions: agentDefinitionsRoutes,
+  monitor: monitorRoutes,
+  search: searchRoutes,
+  usage: usageRoutes,
+  billing: billingRoutes,
+  memoryAgent: memoryAgentInternalRoutes,
+  feishuApi: feishuApiRoutes,
+};
 
-  const validation = MessageCreateSchema.safeParse(body);
-  if (!validation.success) {
-    return c.json(
-      { error: 'Invalid request body', details: validation.error.format() },
-      400,
-    );
-  }
+// --- App Builder ---
 
-  const { chatJid, content, attachments } = validation.data;
-  const group = getRegisteredGroup(chatJid);
-  if (!group) return c.json({ error: 'Group not found' }, 404);
-  const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup(authUser, group)) {
-    return c.json({ error: 'Access denied' }, 403);
-  }
-  if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
-    return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
-      403,
-    );
-  }
+function buildApp(routes: RouteModules): Hono<{ Variables: Variables }> {
+  const app = new Hono<{ Variables: Variables }>();
 
-  const result = await handleWebUserMessage(
-    chatJid,
-    content.trim(),
-    attachments,
-    authUser.id,
-    authUser.display_name || authUser.username,
+  // CORS
+  app.use(
+    '/api/*',
+    cors({
+      origin: (origin) => isAllowedOrigin(origin),
+      credentials: true,
+    }),
   );
-  if (!result.ok) return c.json({ error: result.error }, result.status);
-  return c.json({
-    success: true,
-    messageId: result.messageId,
-    timestamp: result.timestamp,
+
+  // Route Mounting
+  app.route('/api/auth', routes.auth);
+  app.route('/api/groups', routes.groups);
+  app.route('/api/groups', routes.files);
+  app.route('/api/memory', routes.memory);
+  app.route('/api/config', routes.config);
+  app.route('/api/tasks', routes.tasks);
+  app.route('/api/skills', routes.skills);
+  app.route('/api/admin', routes.admin);
+  app.route('/api/browse', routes.browse);
+  app.route('/api/mcp-servers', routes.mcpServers);
+  app.route('/api/groups', routes.agents);
+  app.route('/api/logs', routes.logs);
+  app.route('/api/groups', routes.turns);
+  app.route('/api/agent-definitions', routes.agentDefinitions);
+  app.route('/api', routes.monitor);
+  app.route('/api/search', routes.search);
+  app.route('/api/usage', routes.usage);
+  app.route('/api/billing', routes.billing);
+  app.route('/api/internal/memory', routes.memoryAgent);
+  app.route('/api/internal/feishu', routes.feishuApi);
+
+  // POST /api/messages
+  app.post('/api/messages', authMiddleware, async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+
+    const validation = MessageCreateSchema.safeParse(body);
+    if (!validation.success) {
+      return c.json(
+        { error: 'Invalid request body', details: validation.error.format() },
+        400,
+      );
+    }
+
+    const { chatJid, content, attachments } = validation.data;
+    const group = getRegisteredGroup(chatJid);
+    if (!group) return c.json({ error: 'Group not found' }, 404);
+    const authUser = c.get('user') as AuthUser;
+    if (!canAccessGroup(authUser, group)) {
+      return c.json({ error: 'Access denied' }, 403);
+    }
+    if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
+      return c.json(
+        { error: 'Insufficient permissions for host execution mode' },
+        403,
+      );
+    }
+
+    const result = await handleWebUserMessage(
+      chatJid,
+      content.trim(),
+      attachments,
+      authUser.id,
+      authUser.display_name || authUser.username,
+    );
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({
+      success: true,
+      messageId: result.messageId,
+      timestamp: result.timestamp,
+    });
   });
-});
+
+  // Static Files
+
+  // 带 content hash 的静态资源：长期不可变缓存
+  app.use(
+    '/assets/*',
+    async (c, next) => {
+      await next();
+      if (c.res.status === 200) {
+        c.res.headers.set(
+          'Cache-Control',
+          'public, max-age=31536000, immutable',
+        );
+      }
+    },
+    serveStatic({ root: './web/dist' }),
+  );
+
+  // SPA fallback：index.html / sw.js 等必须每次验证
+  app.use(
+    '/*',
+    async (c, next) => {
+      await next();
+      if (c.res.status === 200) {
+        const p = c.req.path;
+        if (
+          !p.match(/\.\w+$/) ||
+          p === '/sw.js' ||
+          p === '/registerSW.js' ||
+          p === '/manifest.webmanifest'
+        ) {
+          c.res.headers.set(
+            'Cache-Control',
+            'no-cache, no-store, must-revalidate',
+          );
+        }
+      }
+    },
+    serveStatic({
+      root: './web/dist',
+      rewriteRequestPath: (p) => {
+        if (p.startsWith('/api') || p.startsWith('/ws')) return p;
+        if (p.match(/\.\w+$/)) return p;
+        return '/index.html';
+      },
+    }),
+  );
+
+  return app;
+}
+
+let currentApp = buildApp(staticRouteModules);
+
+async function reloadRoutes(): Promise<void> {
+  const bust = `?t=${Date.now()}`;
+  const [
+    auth,
+    groups,
+    files,
+    memory,
+    config,
+    tasks,
+    skills,
+    admin,
+    browse,
+    mcpServers,
+    agents,
+    logs,
+    turns,
+    agentDefinitions,
+    monitor,
+    search,
+    usage,
+    billing,
+    memoryAgent,
+    feishuApi,
+  ] = await Promise.all([
+    import(`./routes/auth.js${bust}`),
+    import(`./routes/groups.js${bust}`),
+    import(`./routes/files.js${bust}`),
+    import(`./routes/memory.js${bust}`),
+    import(`./routes/config.js${bust}`),
+    import(`./routes/tasks.js${bust}`),
+    import(`./routes/skills.js${bust}`),
+    import(`./routes/admin.js${bust}`),
+    import(`./routes/browse.js${bust}`),
+    import(`./routes/mcp-servers.js${bust}`),
+    import(`./routes/agents.js${bust}`),
+    import(`./routes/logs.js${bust}`),
+    import(`./routes/turns.js${bust}`),
+    import(`./routes/agent-definitions.js${bust}`),
+    import(`./routes/monitor.js${bust}`),
+    import(`./routes/search.js${bust}`),
+    import(`./routes/usage.js${bust}`),
+    import(`./routes/billing.js${bust}`),
+    import(`./routes/memory-agent.js${bust}`),
+    import(`./routes/feishu-api.js${bust}`),
+  ]);
+
+  currentApp = buildApp({
+    auth: auth.default,
+    groups: groups.default,
+    files: files.default,
+    memory: memory.default,
+    config: config.default,
+    tasks: tasks.default,
+    skills: skills.default,
+    admin: admin.default,
+    browse: browse.default,
+    mcpServers: mcpServers.default,
+    agents: agents.default,
+    logs: logs.default,
+    turns: turns.default,
+    agentDefinitions: agentDefinitions.default,
+    monitor: monitor.default,
+    search: search.default,
+    usage: usage.usage,
+    billing: billing.default,
+    memoryAgent: memoryAgent.default,
+    feishuApi: feishuApi.default,
+  });
+}
 
 // --- handleWebUserMessage ---
 
@@ -481,52 +657,6 @@ async function handleAgentConversationMessage(
   // 'sent', 'interrupted_stop', 'interrupted_correction' need no further action —
   // for correction, the IPC message was written and the agent handles it after interrupt
 }
-
-// --- Static Files ---
-
-// 带 content hash 的静态资源：长期不可变缓存
-app.use(
-  '/assets/*',
-  async (c, next) => {
-    await next();
-    if (c.res.status === 200) {
-      c.res.headers.set('Cache-Control', 'public, max-age=31536000, immutable');
-    }
-  },
-  serveStatic({ root: './web/dist' }),
-);
-
-// SPA fallback：index.html / sw.js 等必须每次验证
-app.use(
-  '/*',
-  async (c, next) => {
-    await next();
-    if (c.res.status === 200) {
-      const p = c.req.path;
-      // 非文件扩展名路径（SPA fallback → index.html）、SW 脚本、manifest 禁止缓存
-      if (
-        !p.match(/\.\w+$/) ||
-        p === '/sw.js' ||
-        p === '/registerSW.js' ||
-        p === '/manifest.webmanifest'
-      ) {
-        c.res.headers.set(
-          'Cache-Control',
-          'no-cache, no-store, must-revalidate',
-        );
-      }
-    }
-  },
-  serveStatic({
-    root: './web/dist',
-    rewriteRequestPath: (p) => {
-      // SPA fallback
-      if (p.startsWith('/api') || p.startsWith('/ws')) return p;
-      if (p.match(/\.\w+$/)) return p; // Has file extension
-      return '/index.html';
-    },
-  }),
-);
 
 // --- WebSocket ---
 
@@ -1373,13 +1503,25 @@ export function startWebServer(webDeps: WebDeps): void {
 
   httpServer = serve(
     {
-      fetch: app.fetch,
+      fetch: (req: Request, ...args: unknown[]) =>
+        currentApp.fetch(req, ...(args as [unknown])),
       port: WEB_PORT,
     },
     (info) => {
       logger.info({ port: info.port }, 'Web server started');
     },
   );
+
+  // Start hot reload watcher in dev mode
+  if (process.env.NODE_ENV !== 'production') {
+    import('./dev-hot-reload.js')
+      .then(({ startRouteWatcher }) => {
+        startRouteWatcher(() => reloadRoutes());
+      })
+      .catch((err) => {
+        logger.warn({ err }, '[HMR] Failed to start hot reload watcher');
+      });
+  }
 
   wss = setupWebSocket(httpServer);
 
