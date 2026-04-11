@@ -1,6 +1,6 @@
 .PHONY: dev dev-backend dev-web build build-backend build-web build-memory-agent start \
        typecheck typecheck-backend typecheck-web typecheck-agent-runner-core typecheck-agent-runner typecheck-memory-agent \
-       format format-check install clean reset-init update-sdk sync-types \
+       format format-check install clean reset-init sync-types \
        backup restore help
 
 # ─── Development ─────────────────────────────────────────────
@@ -73,12 +73,6 @@ format-check: ## 检查代码格式
 
 sync-types: ## 同步 shared/ 下的类型定义到各子项目
 	@./scripts/sync-stream-event.sh
-
-# ─── SDK ─────────────────────────────────────────────────────
-
-update-sdk: ## 更新 agent-runner 的 Claude Agent SDK 到最新版本
-	cd container/agent-runner && npm update @anthropic-ai/claude-agent-sdk && npm run build
-	@echo "SDK updated. Run 'make typecheck' to verify."
 
 # ─── Setup ───────────────────────────────────────────────────
 

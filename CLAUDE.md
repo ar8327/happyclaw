@@ -8,7 +8,7 @@
 
 **核心差异**：Memory Agent 系统（per-user 记忆子进程）、显式消息路由（stdout→Web，IM 需 `send_message`）、Skills 自主创建。
 
-**系统概要**：自托管多用户 AI Agent 系统。输入：飞书/Telegram/QQ/Web。执行：Docker 容器或宿主机进程（Claude Agent SDK）。输出：Web 流式推送 + IM 显式发送。
+**系统概要**：自托管多用户 AI Agent 系统。输入：飞书/Telegram/QQ/Web。执行：Docker 容器或宿主机进程。主 Agent 通过 Claude Code CLI 的 `claude -p` runner 运行，Memory Agent 仍使用 Claude Agent SDK。输出：Web 流式推送 + IM 显式发送。
 
 ## 关键架构要点
 
@@ -61,7 +61,6 @@ shared/                                    # 跨项目共享类型
 - **Git commit message 使用简体中文**，格式：`类型: 简要描述`
 - 系统路径不可通过文件 API 操作：`logs/`、`CLAUDE.md`、`.claude/`、`conversations/`
 - StreamEvent 类型以 `shared/stream-event.ts` 为单一真相源，修改后运行 `make sync-types` 同步
-- Claude SDK 和 CLI 始终使用最新版本（`make update-sdk`）
 - 容器内以 `node` 非 root 用户运行
 
 ## 本地开发
@@ -73,7 +72,6 @@ make start         # 生产环境启动
 make typecheck     # 全量类型检查
 make format        # prettier 格式化
 make sync-types    # 同步 shared/ 类型
-make update-sdk    # 更新 Claude Agent SDK
 make help          # 所有命令
 ```
 
@@ -81,9 +79,9 @@ make help          # 所有命令
 
 ## 常见变更指引
 
-**新增 MCP 工具**：`agent-runner/src/mcp-tools.ts` 添加 tool() → `src/index.ts` IPC 处理器加分支 → `./container/build.sh`
+**新增 MCP 工具**：`container/agent-runner/src/happyclaw-mcp-server.ts` 暴露工具 → `src/index.ts` 或对应 route / IPC 处理器补宿主机分支 → 必要时重建容器镜像
 
-**新增 StreamEvent**：`shared/stream-event.ts` 加类型 → `make sync-types` → `stream-processor.ts` 发射 → `web/src/stores/chat.ts` 处理
+**新增 StreamEvent**：`shared/stream-event.ts` 加类型 → `make sync-types` → `container/agent-runner/src/providers/claude/claude-stream-processor.ts` 或对应 provider 发射 → `web/src/stores/chat.ts` 处理
 
 **新增 IM 渠道**：创建连接工厂 → `im-manager.ts` 加方法 → `routes/config.ts` 加路由 → `index.ts` loadState 加载 → 前端配置表单
 
