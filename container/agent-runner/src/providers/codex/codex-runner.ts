@@ -106,7 +106,7 @@ export class CodexRunner implements AgentRunner {
     // Resolve MCP server path (compiled JS entry point)
     this.mcpServerPath = path.resolve(
       path.dirname(new URL(import.meta.url).pathname),
-      'codex-mcp-server.js',
+      '../../happyclaw-mcp-server.js',
     );
 
     // Build MCP server environment

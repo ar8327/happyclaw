@@ -1,15 +1,25 @@
-/**
- * Claude provider configuration constants.
- */
-
-/** Default allowed tools for the Claude SDK query. */
-export const DEFAULT_ALLOWED_TOOLS = [
+export const DEFAULT_CLAUDE_BUILTIN_TOOLS = [
+  'AskUserQuestion',
   'Bash',
-  'Read', 'Write', 'Edit', 'Glob', 'Grep',
-  'WebSearch', 'WebFetch',
-  'Task', 'TaskOutput', 'TaskStop',
-  'TeamCreate', 'TeamDelete', 'SendMessage',
-  'TodoWrite', 'ToolSearch', 'Skill',
+  'Edit',
+  'EnterPlanMode',
+  'ExitPlanMode',
+  'Glob',
+  'Grep',
   'NotebookEdit',
-  'mcp__happyclaw__*'
+  'Read',
+  'Skill',
+  'Task',
+  'TaskOutput',
+  'TaskStop',
+  'TodoWrite',
+  'ToolSearch',
+  'WebFetch',
+  'WebSearch',
+  'Write',
+];
+
+export const DEFAULT_ALLOWED_TOOLS = [
+  ...DEFAULT_CLAUDE_BUILTIN_TOOLS,
+  'mcp__happyclaw__*',
 ];

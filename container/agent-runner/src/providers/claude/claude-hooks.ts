@@ -1,12 +1,5 @@
-/**
- * Claude-specific hooks: PreCompact transcript archival + Safety Lite.
- *
- * Merged from transcript-archive.ts and safety-lite.ts.
- */
-
 import fs from 'fs';
 import path from 'path';
-import type { HookCallback, PreCompactHookInput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import type { SessionsIndex, ParsedMessage } from '../../types.js';
 import { sanitizeFilename, generateFallbackName } from '../../utils.js';
 import { writeIpcFile } from 'happyclaw-agent-runner-core';
@@ -21,6 +14,21 @@ const WORKSPACE_IPC = process.env.HAPPYCLAW_WORKSPACE_IPC || '/workspace/ipc';
 
 function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
+}
+
+interface HookInputBase {
+  session_id?: string;
+  transcript_path?: string;
+}
+
+interface PreCompactHookInput extends HookInputBase {
+  hook_event_name?: 'PreCompact';
+}
+
+interface PreToolUseHookInput extends HookInputBase {
+  hook_event_name?: 'PreToolUse';
+  tool_name?: string;
+  tool_input?: unknown;
 }
 
 function getSessionSummary(sessionId: string, transcriptPath: string): string | null {
@@ -45,64 +53,73 @@ function getSessionSummary(sessionId: string, transcriptPath: string): string | 
   return null;
 }
 
+export async function runPreCompactHook(
+  input: PreCompactHookInput,
+  options: {
+    isHome: boolean;
+    isAdminHome: boolean;
+    groupFolder: string;
+    userId?: string;
+  },
+): Promise<void> {
+  const transcriptPath = input.transcript_path;
+  const sessionId = input.session_id;
+
+  if (!transcriptPath || !sessionId || !fs.existsSync(transcriptPath)) {
+    log('No transcript found for archiving');
+    return;
+  }
+
+  try {
+    const content = fs.readFileSync(transcriptPath, 'utf-8');
+    const messages = parseTranscript(content);
+
+    if (messages.length === 0) {
+      log('No messages to archive');
+      return;
+    }
+
+    const summary = getSessionSummary(sessionId, transcriptPath);
+    const name = summary ? sanitizeFilename(summary) : generateFallbackName();
+
+    const conversationsDir = path.join(WORKSPACE_GROUP, 'conversations');
+    fs.mkdirSync(conversationsDir, { recursive: true });
+
+    const date = new Date().toISOString().split('T')[0];
+    const filename = `${date}-${name}.md`;
+    const filePath = path.join(conversationsDir, filename);
+
+    const markdown = formatTranscriptMarkdown(messages, summary);
+    fs.writeFileSync(filePath, markdown);
+
+    log(`Archived conversation to ${filePath}`);
+
+    if (options.isHome && options.userId) {
+      const tasksDir = path.join(WORKSPACE_IPC, 'tasks');
+      writeIpcFile(tasksDir, {
+        type: 'session_wrapup',
+        groupFolder: options.groupFolder,
+        userId: options.userId,
+        timestamp: new Date().toISOString(),
+      });
+      log(`Sent session_wrapup IPC signal for ${options.groupFolder}`);
+    }
+  } catch (err) {
+    log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 /**
  * Archive the full transcript to conversations/ before compaction.
  */
 export function createPreCompactHook(
   isHome: boolean,
-  _isAdminHome: boolean,
+  isAdminHome: boolean,
   groupFolder: string,
   userId?: string,
-): HookCallback {
-  return async (input, _toolUseId, _context) => {
-    const preCompact = input as PreCompactHookInput;
-    const transcriptPath = preCompact.transcript_path;
-    const sessionId = preCompact.session_id;
-
-    if (!transcriptPath || !fs.existsSync(transcriptPath)) {
-      log('No transcript found for archiving');
-      return {};
-    }
-
-    try {
-      const content = fs.readFileSync(transcriptPath, 'utf-8');
-      const messages = parseTranscript(content);
-
-      if (messages.length === 0) {
-        log('No messages to archive');
-        return {};
-      }
-
-      const summary = getSessionSummary(sessionId, transcriptPath);
-      const name = summary ? sanitizeFilename(summary) : generateFallbackName();
-
-      const conversationsDir = path.join(WORKSPACE_GROUP, 'conversations');
-      fs.mkdirSync(conversationsDir, { recursive: true });
-
-      const date = new Date().toISOString().split('T')[0];
-      const filename = `${date}-${name}.md`;
-      const filePath = path.join(conversationsDir, filename);
-
-      const markdown = formatTranscriptMarkdown(messages, summary);
-      fs.writeFileSync(filePath, markdown);
-
-      log(`Archived conversation to ${filePath}`);
-
-      // Signal main process to trigger session_wrapup for memory system
-      if (isHome && userId) {
-        const tasksDir = path.join(WORKSPACE_IPC, 'tasks');
-        writeIpcFile(tasksDir, {
-          type: 'session_wrapup',
-          groupFolder,
-          userId,
-          timestamp: new Date().toISOString(),
-        });
-        log(`Sent session_wrapup IPC signal for ${groupFolder}`);
-      }
-    } catch (err) {
-      log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
-    }
-
+): (input: PreCompactHookInput) => Promise<Record<string, never>> {
+  return async (input) => {
+    await runPreCompactHook(input, { isHome, isAdminHome, groupFolder, userId });
     return {};
   };
 }
@@ -175,31 +192,37 @@ const DANGEROUS_PATTERNS = [
   /:\(\)\{ :\|:& \};:/, // fork bomb (escaped (){}|)
 ];
 
-/**
- * Lightweight PreToolUse hook for host mode only.
- * Simple regex pattern matching — a "speed bump", not a security boundary.
- */
-export function createSafetyLiteHook(): HookCallback {
-  return async (input, _toolUseID, _options) => {
-    const hookInput = input as PreToolUseHookInput;
-    if (hookInput.hook_event_name !== 'PreToolUse') return {};
-    if (hookInput.tool_name !== 'Bash') return {};
-    const cmd =
-      typeof hookInput.tool_input === 'object' &&
-      hookInput.tool_input !== null &&
-      'command' in hookInput.tool_input &&
-      typeof (hookInput.tool_input as Record<string, unknown>).command ===
-        'string'
-        ? (hookInput.tool_input as Record<string, unknown>).command as string
-        : '';
-    for (const pattern of DANGEROUS_PATTERNS) {
-      if (pattern.test(cmd)) {
-        return {
-          decision: 'block' as const,
-          reason: `Safety-lite blocked: ${pattern}`,
-        };
-      }
+export function evaluateSafetyLite(input: PreToolUseHookInput): { blocked: boolean; reason?: string } {
+  if (input.hook_event_name !== 'PreToolUse') return { blocked: false };
+  if (input.tool_name !== 'Bash') return { blocked: false };
+  const cmd =
+    typeof input.tool_input === 'object' &&
+    input.tool_input !== null &&
+    'command' in input.tool_input &&
+    typeof (input.tool_input as Record<string, unknown>).command === 'string'
+      ? (input.tool_input as Record<string, unknown>).command as string
+      : '';
+  for (const pattern of DANGEROUS_PATTERNS) {
+    if (pattern.test(cmd)) {
+      return {
+        blocked: true,
+        reason: `Safety-lite blocked: ${pattern}`,
+      };
     }
-    return {};
+  }
+  return { blocked: false };
+}
+
+export function createSafetyLiteHook(): (input: PreToolUseHookInput) => Promise<Record<string, unknown> | {
+  decision: 'block';
+  reason: string;
+}> {
+  return async (input) => {
+    const result = evaluateSafetyLite(input);
+    if (!result.blocked || !result.reason) return {};
+    return {
+      decision: 'block',
+      reason: result.reason,
+    };
   };
 }

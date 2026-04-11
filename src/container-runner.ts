@@ -1142,7 +1142,7 @@ export async function runHostAgent(
   const agentRunnerNodeModules = path.join(agentRunnerRoot, 'node_modules');
   const agentRunnerDist = path.join(agentRunnerRoot, 'dist', 'index.js');
 
-  const requiredDeps = ['@anthropic-ai/claude-agent-sdk'];
+  const requiredDeps = ['@modelcontextprotocol/sdk', '@openai/codex-sdk'];
   const installHint = `npm --prefix container/${runnerSubdir} install`;
   const buildHint = `npm --prefix container/${runnerSubdir} run build`;
 
