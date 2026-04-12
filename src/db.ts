@@ -5,6 +5,7 @@ import path from 'path';
 
 import { DATA_DIR, STORE_DIR, GROUPS_DIR } from './config.js';
 import { logger } from './logger.js';
+import { getDefaultRunnerId } from './runner-registry.js';
 import {
   AgentKind,
   AgentStatus,
@@ -2434,12 +2435,14 @@ function parseWorkerSessionRow(
 function deriveRunnerId(
   group: Pick<RegisteredGroup, 'llm_provider'> | null | undefined,
 ): SessionRecord['runner_id'] {
-  return group?.llm_provider === 'openai' ? 'codex' : 'claude';
+  if (group?.llm_provider === 'openai') return 'codex';
+  if (group?.llm_provider === 'claude') return 'claude';
+  return getDefaultRunnerId();
 }
 
 function normalizeStoredRunnerId(
   raw: unknown,
-  fallback: SessionRecord['runner_id'] = 'claude',
+  fallback: SessionRecord['runner_id'] = getDefaultRunnerId(),
 ): SessionRecord['runner_id'] {
   if (typeof raw !== 'string') return fallback;
   const runnerId = raw.trim();
@@ -3252,7 +3255,7 @@ function syncMemorySessionProjectionForOwner(ownerKey: string): void {
     existing?.name || `memory:${ownerKey}`,
     primarySession?.id ?? null,
     path.join(DATA_DIR, 'memory', ownerKey),
-    existing?.runner_id || (homeGroup ? deriveRunnerId(homeGroup) : 'claude'),
+    existing?.runner_id || deriveRunnerId(homeGroup ?? null),
     existing?.model ?? homeGroup?.model ?? null,
     existing?.thinking_effort ?? homeGroup?.thinking_effort ?? null,
     existing?.context_compression ?? homeGroup?.context_compression ?? 'off',

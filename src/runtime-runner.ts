@@ -12,6 +12,7 @@ import path from 'path';
 
 import { DATA_DIR, GROUPS_DIR } from './config.js';
 import { logger } from './logger.js';
+import { getDefaultRunnerId } from './runner-registry.js';
 import {
   loadMountAllowlist,
 } from './mount-security.js';
@@ -463,7 +464,9 @@ export async function runHostAgent(
 
   const effectiveRunnerId =
     sessionRecord?.runner_id
-      || (group.llm_provider === 'openai' ? 'codex' : 'claude');
+      || (group.llm_provider === 'openai'
+        ? 'codex'
+        : (group.llm_provider === 'claude' ? 'claude' : getDefaultRunnerId()));
   const effectiveModel = sessionRecord?.model ?? group.model;
   const effectiveThinkingEffort =
     sessionRecord?.thinking_effort ?? group.thinking_effort;
