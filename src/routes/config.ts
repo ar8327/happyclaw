@@ -1327,6 +1327,28 @@ function applyBindingUpdate(imJid: string, updated: RegisteredGroup): void {
   }
 }
 
+function resolveDefaultBindingSessionId(imGroup: RegisteredGroup): string {
+  return `main:${imGroup.folder}`;
+}
+
+function isImplicitDefaultSessionBinding(
+  imGroup: RegisteredGroup,
+  binding: ReturnType<typeof getSessionBinding> | undefined,
+): boolean {
+  return !!binding
+    && !imGroup.target_agent_id
+    && !imGroup.target_main_jid
+    && binding.session_id === resolveDefaultBindingSessionId(imGroup);
+}
+
+function getExplicitSessionBinding(
+  imJid: string,
+  imGroup: RegisteredGroup,
+): ReturnType<typeof getSessionBinding> | undefined {
+  const binding = getSessionBinding(imJid);
+  return isImplicitDefaultSessionBinding(imGroup, binding) ? undefined : binding;
+}
+
 function applyExplicitSessionBinding(
   imJid: string,
   sessionId: string | null,
@@ -1346,7 +1368,7 @@ function applyExplicitSessionBinding(
       ? updates.require_mention
       : imGroup.require_mention === true;
 
-  if (!sessionId) {
+  if (!sessionId || sessionId === resolveDefaultBindingSessionId(imGroup)) {
     deleteSessionBinding(imJid);
     return;
   }
@@ -2848,7 +2870,13 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
           : imGroup.require_mention,
     };
     applyBindingUpdate(imJid, updated);
-    applyExplicitSessionBinding(imJid, getSessionBinding(imJid)?.session_id || null, updated, {});
+    applyExplicitSessionBinding(
+      imJid,
+      getExplicitSessionBinding(imJid, imGroup)?.session_id
+        || resolveDefaultBindingSessionId(updated),
+      updated,
+      {},
+    );
     return c.json({ success: true });
   }
 
@@ -2894,7 +2922,7 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
     }
 
     const force = body.force === true;
-    const currentBinding = getSessionBinding(imJid);
+    const currentBinding = getExplicitSessionBinding(imJid, imGroup);
     const targetSessionId = `worker:${agentId}`;
     const hasConflict =
       !!currentBinding && currentBinding.session_id !== targetSessionId;
@@ -2942,7 +2970,7 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
     }
 
     const force = body.force === true;
-    const currentBinding = getSessionBinding(imJid);
+    const currentBinding = getExplicitSessionBinding(imJid, imGroup);
     const targetSessionId = `main:${targetGroup.folder}`;
     const hasConflict =
       !!currentBinding && currentBinding.session_id !== targetSessionId;
@@ -2952,7 +2980,8 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
 
     const updated: RegisteredGroup = {
       ...imGroup,
-      target_main_jid: targetMainJid,
+      target_main_jid:
+        targetGroup.folder === imGroup.folder ? undefined : targetMainJid,
       target_agent_id: undefined,
       reply_policy: replyPolicy ?? imGroup.reply_policy,
       activation_mode:
