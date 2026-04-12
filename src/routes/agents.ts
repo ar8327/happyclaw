@@ -68,9 +68,12 @@ function upsertImBinding(
 
 function resolveRouteGroup(
   id: string,
+  options?: { allowImGroupAlias?: boolean },
 ): { accessJid: string; group: RegisteredGroup } | null {
   const direct = getRegisteredGroup(id);
-  if (direct) return { accessJid: id, group: direct };
+  if (direct && ((options?.allowImGroupAlias ?? true) || id.startsWith('web:'))) {
+    return { accessJid: id, group: direct };
+  }
 
   const session = getSessionRecord(id);
   if (!session) return null;
@@ -92,8 +95,9 @@ function resolveRouteGroup(
 router.get('/:jid/agents', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const user = c.get('user');
+  const allowImGroupAlias = !c.req.path.startsWith('/api/sessions/');
 
-  const resolved = resolveRouteGroup(jid);
+  const resolved = resolveRouteGroup(jid, { allowImGroupAlias });
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -135,8 +139,9 @@ router.get('/:jid/agents', authMiddleware, async (c) => {
 router.post('/:jid/agents', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const user = c.get('user');
+  const allowImGroupAlias = !c.req.path.startsWith('/api/sessions/');
 
-  const resolved = resolveRouteGroup(jid);
+  const resolved = resolveRouteGroup(jid, { allowImGroupAlias });
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -227,8 +232,9 @@ router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const agentId = c.req.param('agentId');
   const user = c.get('user');
+  const allowImGroupAlias = !c.req.path.startsWith('/api/sessions/');
 
-  const resolved = resolveRouteGroup(jid);
+  const resolved = resolveRouteGroup(jid, { allowImGroupAlias });
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -340,8 +346,9 @@ function isTelegramPrivateChat(jid: string): boolean {
 router.get('/:jid/im-groups', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const user = c.get('user');
+  const allowImGroupAlias = !c.req.path.startsWith('/api/sessions/');
 
-  const resolved = resolveRouteGroup(jid);
+  const resolved = resolveRouteGroup(jid, { allowImGroupAlias });
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -483,8 +490,9 @@ router.put('/:jid/agents/:agentId/im-binding', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const agentId = c.req.param('agentId');
   const user = c.get('user');
+  const allowImGroupAlias = !c.req.path.startsWith('/api/sessions/');
 
-  const resolved = resolveRouteGroup(jid);
+  const resolved = resolveRouteGroup(jid, { allowImGroupAlias });
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -553,8 +561,9 @@ router.delete(
   const agentId = c.req.param('agentId');
   const imJid = decodeURIComponent(c.req.param('imJid'));
   const user = c.get('user');
+  const allowImGroupAlias = !c.req.path.startsWith('/api/sessions/');
 
-    const resolved = resolveRouteGroup(jid);
+  const resolved = resolveRouteGroup(jid, { allowImGroupAlias });
     if (!resolved) {
       return c.json({ error: 'Group not found' }, 404);
     }
@@ -602,8 +611,9 @@ router.delete(
 router.put('/:jid/im-binding', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const user = c.get('user');
+  const allowImGroupAlias = !c.req.path.startsWith('/api/sessions/');
 
-  const resolved = resolveRouteGroup(jid);
+  const resolved = resolveRouteGroup(jid, { allowImGroupAlias });
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -667,8 +677,9 @@ router.delete('/:jid/im-binding/:imJid', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const imJid = decodeURIComponent(c.req.param('imJid'));
   const user = c.get('user');
+  const allowImGroupAlias = !c.req.path.startsWith('/api/sessions/');
 
-  const resolved = resolveRouteGroup(jid);
+  const resolved = resolveRouteGroup(jid, { allowImGroupAlias });
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }

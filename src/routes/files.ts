@@ -32,13 +32,14 @@ const execFileAsync = promisify(execFile);
 
 function resolveRouteGroup(
   id: string,
+  options?: { allowImGroupAlias?: boolean },
 ): {
   accessJid: string;
   group: RegisteredGroup;
   session: ReturnType<typeof getSessionRecord> | null;
 } | null {
   const direct = getRegisteredGroup(id);
-  if (direct) {
+  if (direct && ((options?.allowImGroupAlias ?? true) || id.startsWith('web:'))) {
     const session = id.startsWith('web:')
       ? getSessionRecord(`main:${direct.folder}`) || null
       : null;
@@ -276,7 +277,9 @@ fileRoutes.get('/:jid/files', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const subPath = c.req.query('path') || '';
 
-  const resolved = resolveRouteGroup(jid);
+  const resolved = resolveRouteGroup(jid, {
+    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
+  });
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -310,7 +313,9 @@ fileRoutes.get('/:jid/files', authMiddleware, (c) => {
 fileRoutes.post('/:jid/files', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
 
-  const resolved = resolveRouteGroup(jid);
+  const resolved = resolveRouteGroup(jid, {
+    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
+  });
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -415,7 +420,9 @@ fileRoutes.post('/:jid/files', authMiddleware, async (c) => {
 fileRoutes.post('/:jid/files/open-directory', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
 
-  const resolved = resolveRouteGroup(jid);
+  const resolved = resolveRouteGroup(jid, {
+    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
+  });
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -477,7 +484,9 @@ fileRoutes.get('/:jid/files/download/:path', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const resolved = resolveRouteGroup(jid);
+  const resolved = resolveRouteGroup(jid, {
+    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
+  });
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -592,7 +601,9 @@ fileRoutes.get('/:jid/files/preview/:path', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const resolved = resolveRouteGroup(jid);
+  const resolved = resolveRouteGroup(jid, {
+    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
+  });
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -666,7 +677,9 @@ fileRoutes.get('/:jid/files/content/:path', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const resolved = resolveRouteGroup(jid);
+  const resolved = resolveRouteGroup(jid, {
+    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
+  });
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -730,7 +743,9 @@ fileRoutes.put('/:jid/files/content/:path', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const resolved = resolveRouteGroup(jid);
+  const resolved = resolveRouteGroup(jid, {
+    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
+  });
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -824,7 +839,9 @@ fileRoutes.delete('/:jid/files/:path', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const resolved = resolveRouteGroup(jid);
+  const resolved = resolveRouteGroup(jid, {
+    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
+  });
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -873,7 +890,9 @@ fileRoutes.delete('/:jid/files/:path', authMiddleware, (c) => {
 fileRoutes.post('/:jid/directories', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
 
-  const resolved = resolveRouteGroup(jid);
+  const resolved = resolveRouteGroup(jid, {
+    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
+  });
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }

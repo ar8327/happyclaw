@@ -142,14 +142,14 @@ function resolveBackingJid(session: SessionRecord): string | null {
   );
 }
 
-function getSessionById(id: string): SessionRecord | undefined {
-  return getSessionRecord(id) || getSessionRecord(resolveMainSessionIdFromRouteId(id));
+function resolveSessionRouteAlias(id: string): string {
+  const group = getRegisteredGroup(id);
+  if (!group || !id.startsWith('web:')) return id;
+  return `main:${group.folder}`;
 }
 
-function resolveMainSessionIdFromRouteId(id: string): string {
-  const group = getRegisteredGroup(id);
-  if (!group) return id;
-  return `main:${group.folder}`;
+function getSessionById(id: string): SessionRecord | undefined {
+  return getSessionRecord(id) || getSessionRecord(resolveSessionRouteAlias(id));
 }
 
 function resolveSessionOrThrow(user: AuthUser, id: string): SessionRecord | null {
@@ -624,6 +624,12 @@ sessionRoutes.put('/bindings/:channelJid', authMiddleware, async (c) => {
   const channelJid = decodeURIComponent(c.req.param('channelJid'));
   const imGroup = getRegisteredGroup(channelJid);
   if (!imGroup) return c.json({ error: 'IM group not found' }, 404);
+  if (channelJid.startsWith('web:')) {
+    return c.json(
+      { error: 'Session bindings only support IM channels, not web session JIDs' },
+      400,
+    );
+  }
   if (!canAccessGroup(user, { ...imGroup, jid: channelJid })) {
     return c.json({ error: 'Forbidden' }, 403);
   }
