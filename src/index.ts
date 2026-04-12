@@ -618,12 +618,6 @@ function resolveDefaultSessionBinding(
   group: RegisteredGroup,
 ): string | null {
   if (group.activation_mode === 'disabled') return null;
-  if (group.target_agent_id) return `worker:${group.target_agent_id}`;
-  if (group.target_main_jid) {
-    const targetGroup = registeredGroups[group.target_main_jid]
-      ?? getRegisteredGroup(group.target_main_jid);
-    if (targetGroup) return `main:${targetGroup.folder}`;
-  }
   if (chatJid.startsWith('web:')) return null;
   return `main:${group.folder}`;
 }
@@ -650,12 +644,10 @@ function unbindImGroup(jid: string, reason: string): void {
   const group = registeredGroups[jid] ?? getRegisteredGroup(jid);
   const storedBinding = getSessionBinding(jid);
   const binding = getExplicitSessionBinding(jid, group);
-  if (!binding && !group?.target_agent_id && !group?.target_main_jid) {
+  if (!binding) {
     if (storedBinding) deleteSessionBinding(jid);
     return;
   }
-  const agentId = group?.target_agent_id;
-  const targetMainJid = group?.target_main_jid;
   if (!group) {
     deleteSessionBinding(jid);
     logger.info(
@@ -676,7 +668,7 @@ function unbindImGroup(jid: string, reason: string): void {
   registeredGroups[jid] = updated;
   imSendFailCounts.delete(jid);
   imHealthCheckFailCounts.delete(jid);
-  logger.info({ jid, agentId, targetMainJid }, reason);
+  logger.info({ jid, sessionId: binding.session_id }, reason);
 }
 
 /** Check per-user IM setting to decide whether auto-unbind on failure is enabled. */

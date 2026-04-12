@@ -2556,6 +2556,15 @@ function resolveBindingSessionId(
   return buildMainSessionId(group.folder);
 }
 
+function isImplicitDefaultBindingSessionId(
+  group: RegisteredGroup & { jid: string },
+  sessionId: string | null,
+): boolean {
+  if (!sessionId) return false;
+  if (group.jid.startsWith('web:')) return false;
+  return sessionId === buildMainSessionId(group.folder);
+}
+
 function ensureSessionRecordFromGroup(
   jid: string,
   group: RegisteredGroup,
@@ -2653,7 +2662,7 @@ function ensureSessionRecordForLegacyKey(
   return sessionId;
 }
 
-function syncSessionBindingFromGroup(
+function syncLegacySessionBindingFromGroup(
   jid: string,
   group: RegisteredGroup,
 ): void {
@@ -2661,9 +2670,22 @@ function syncSessionBindingFromGroup(
     db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(jid);
     return;
   }
-  const sessionId = resolveBindingSessionId({ ...group, jid });
-  if (!sessionId) {
-    db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(jid);
+  const projectedGroup = { ...group, jid };
+  const currentBinding = getSessionBinding(jid);
+  const sessionId = resolveBindingSessionId(projectedGroup);
+  if (!sessionId || isImplicitDefaultBindingSessionId(projectedGroup, sessionId)) {
+    if (
+      currentBinding
+      && isImplicitDefaultBindingSessionId(projectedGroup, currentBinding.session_id)
+    ) {
+      db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(jid);
+    }
+    return;
+  }
+  if (
+    currentBinding
+    && !isImplicitDefaultBindingSessionId(projectedGroup, currentBinding.session_id)
+  ) {
     return;
   }
   const now = new Date().toISOString();
@@ -2698,7 +2720,6 @@ function syncSessionProjectionForGroup(
   group: RegisteredGroup,
 ): void {
   ensureSessionRecordFromGroup(jid, group);
-  syncSessionBindingFromGroup(jid, group);
 }
 
 function deleteSessionProjectionForGroup(jid: string): void {
@@ -3367,6 +3388,10 @@ function syncSessionWorkbenchProjection(): void {
     for (const agentRow of agents) {
       syncWorkerSession(mapAgentRow(agentRow));
     }
+  }
+
+  for (const [jid, group] of Object.entries(groups)) {
+    syncLegacySessionBindingFromGroup(jid, group);
   }
 
   const memoryOwners = new Set<string>();
