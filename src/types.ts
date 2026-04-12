@@ -286,7 +286,7 @@ export interface SubAgent {
 export type SessionKind = 'main' | 'workspace' | 'worker' | 'memory';
 export type SessionRuntimeMode = 'local' | 'container' | 'host';
 export type SessionBindingMode = 'direct' | 'source_only' | 'mirror';
-export type RunnerId = 'claude' | 'codex';
+export type RunnerId = string;
 export type ResumeStrength = 'none' | 'weak' | 'strong';
 export type InterruptStrength = 'none' | 'weak' | 'strong';
 export type UsageQuality = 'none' | 'approx' | 'exact';

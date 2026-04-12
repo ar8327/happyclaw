@@ -15,6 +15,7 @@ import {
 } from '../db.js';
 import { getSystemSettings } from '../runtime-config.js';
 import { logger } from '../logger.js';
+import { getDefaultRunnerId } from '../runner-registry.js';
 
 // --- Claude Code version cache (1h TTL) ---
 
@@ -76,9 +77,10 @@ function resolveRuntimeAccess(
 ): {
   accessJid: string;
   sessionId: string | null;
-  runnerId: 'claude' | 'codex';
+  runnerId: string;
   runtimeMode: 'local';
 } | null {
+  const defaultRunnerId = getDefaultRunnerId();
   const agentSep = runtimeJid.indexOf('#agent:');
   if (agentSep >= 0) {
     const accessJid = runtimeJid.slice(0, agentSep);
@@ -92,7 +94,7 @@ function resolveRuntimeAccess(
     return {
       accessJid,
       sessionId: workerSession.id,
-      runnerId: workerSession.runner_id || parentSession?.runner_id || 'claude',
+      runnerId: workerSession.runner_id || parentSession?.runner_id || defaultRunnerId,
       runtimeMode: 'local',
     };
   }
@@ -103,7 +105,7 @@ function resolveRuntimeAccess(
   return {
     accessJid: runtimeJid,
     sessionId: session?.id || null,
-    runnerId: session?.runner_id || (group.llm_provider === 'openai' ? 'codex' : 'claude'),
+    runnerId: session?.runner_id || (group.llm_provider === 'openai' ? 'codex' : defaultRunnerId),
     runtimeMode: 'local',
   };
 }
@@ -165,6 +167,7 @@ monitorRoutes.get('/status', authMiddleware, async (c) => {
 
   const authUser = c.get('user') as AuthUser;
   const isAdmin = hasHostExecutionPermission(authUser);
+  const defaultRunnerId = getDefaultRunnerId();
   const queueStatus = deps.queue.getRuntimeStatus();
 
   // 监控页面属于系统管理功能，admin 可见所有群组状态（不受工作区隔离约束）
@@ -187,7 +190,7 @@ monitorRoutes.get('/status', authMiddleware, async (c) => {
       ...runtime,
       session_id: resolved?.sessionId || null,
       runtime_mode: resolved?.runtimeMode || 'local',
-      runner_id: resolved?.runnerId || 'claude',
+      runner_id: resolved?.runnerId || defaultRunnerId,
       runtime_identifier: normalizeRuntimeLabel(runtime.runtimeIdentifier),
       runtime_label: normalizeRuntimeLabel(runtime.runtimeLabel),
     };

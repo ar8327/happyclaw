@@ -83,6 +83,14 @@ export function listRunnerDescriptors(): RunnerDescriptor[] {
   return Object.values(RUNNER_REGISTRY);
 }
 
+export function getDefaultRunnerDescriptor(): RunnerDescriptor | undefined {
+  return listRunnerDescriptors()[0];
+}
+
+export function getDefaultRunnerId(): RunnerDescriptor['id'] {
+  return getDefaultRunnerDescriptor()?.id || 'claude';
+}
+
 export function canServeAsMemoryRunner(descriptor: RunnerDescriptor): boolean {
   if (descriptor.compatibility.memory === 'unsupported') return false;
   if (descriptor.capabilities.customTools === 'none') return false;

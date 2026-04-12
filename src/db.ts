@@ -2316,7 +2316,7 @@ function parseSessionRecord(row: Record<string, unknown>): SessionRecord {
     parent_session_id:
       typeof row.parent_session_id === 'string' ? row.parent_session_id : null,
     cwd: String(row.cwd),
-    runner_id: (row.runner_id === 'codex' ? 'codex' : 'claude'),
+    runner_id: normalizeStoredRunnerId(row.runner_id),
     runner_profile_id:
       typeof row.runner_profile_id === 'string' ? row.runner_profile_id : null,
     runtime_mode:
@@ -2350,7 +2350,7 @@ function parseRunnerProfileRecord(
 ): RunnerProfileRecord {
   return {
     id: String(row.id),
-    runner_id: row.runner_id === 'codex' ? 'codex' : 'claude',
+    runner_id: normalizeStoredRunnerId(row.runner_id),
     name: String(row.name),
     config_json:
       typeof row.config_json === 'string' ? row.config_json : '{}',
@@ -2433,8 +2433,17 @@ function parseWorkerSessionRow(
 
 function deriveRunnerId(
   group: Pick<RegisteredGroup, 'llm_provider'> | null | undefined,
-): 'claude' | 'codex' {
+): SessionRecord['runner_id'] {
   return group?.llm_provider === 'openai' ? 'codex' : 'claude';
+}
+
+function normalizeStoredRunnerId(
+  raw: unknown,
+  fallback: SessionRecord['runner_id'] = 'claude',
+): SessionRecord['runner_id'] {
+  if (typeof raw !== 'string') return fallback;
+  const runnerId = raw.trim();
+  return runnerId || fallback;
 }
 
 function deriveRuntimeMode(

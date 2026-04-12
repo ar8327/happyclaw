@@ -24,6 +24,7 @@ import {
 } from './db.js';
 import { SessionRuntimeManager } from './session-runtime-manager.js';
 import { logger } from './logger.js';
+import { getDefaultRunnerId } from './runner-registry.js';
 import { getSystemSettings } from './runtime-config.js';
 import type { MessageCursor } from './types.js';
 import { runSessionAgent } from './session-launcher.js';
@@ -830,7 +831,8 @@ export class MemoryAgentManager {
     fs.mkdirSync(ipcInputDir, { recursive: true });
 
     const user = getUserById(userId);
-    const runnerId = memorySession?.runner_id || primarySession?.runner_id || 'claude';
+    const runnerId =
+      memorySession?.runner_id || primarySession?.runner_id || getDefaultRunnerId();
     const input = {
       prompt: buildMemoryPrompt(request, memDir),
       sessionId: runtimeState?.provider_session_id || undefined,

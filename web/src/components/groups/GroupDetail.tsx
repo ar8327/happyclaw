@@ -22,6 +22,15 @@ const DEFAULT_RUNNER_OPTIONS = [
   { value: 'codex', label: 'Codex' },
 ];
 
+function resolveRunnerValue(
+  runnerId: string | null | undefined,
+  options: RunnerOption[] = DEFAULT_RUNNER_OPTIONS,
+): string {
+  const normalized = typeof runnerId === 'string' ? runnerId.trim() : '';
+  if (normalized) return normalized;
+  return options[0]?.value || '';
+}
+
 const THINKING_OPTIONS = [
   { value: '__default__', label: '默认' },
   { value: 'low', label: '低' },
@@ -59,7 +68,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
   const isSessionView = !!group.session_kind;
   const backingJid = group.backing_jid || group.jid;
   const [runnerId, setRunnerId] = useState<string>(
-    group.runner_id || 'claude',
+    resolveRunnerValue(group.runner_id),
   );
   const [runnerProfileId, setRunnerProfileId] = useState<string>(
     group.runner_profile_id || '',
@@ -82,7 +91,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
   // Sync local state when group prop changes
   useEffect(() => {
     setRunnerId(
-      group.runner_id || 'claude',
+      resolveRunnerValue(group.runner_id, runnerOptions),
     );
     setRunnerProfileId(group.runner_profile_id || '');
     setModel(group.model || '');
@@ -107,7 +116,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
 
   const runnerDirty =
     runnerId !==
-    (group.runner_id || 'claude');
+    resolveRunnerValue(group.runner_id, runnerOptions);
   const runnerProfileDirty = runnerProfileId !== (group.runner_profile_id || '');
   const modelDirty = model !== (group.model || '');
   const thinkingDirty = thinkingEffort !== (group.thinking_effort || '');

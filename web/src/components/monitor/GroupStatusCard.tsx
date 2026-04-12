@@ -8,7 +8,7 @@ interface GroupStatusCardProps {
     pendingMessages: boolean;
     pendingTasks: number;
     runtime_mode?: 'local';
-    runner_id?: 'claude' | 'codex';
+    runner_id?: string;
     runtime_identifier?: string | null;
   };
 }

@@ -2107,7 +2107,7 @@ export function mergeRuntimeEnvConfig(
 }
 
 export function parseRunnerProfileRuntimeOverride(
-  runnerId: 'claude' | 'codex',
+  runnerId: string,
   configJson?: string | null,
 ): RunnerProfileRuntimeOverride {
   if (!configJson || !configJson.trim()) return {};

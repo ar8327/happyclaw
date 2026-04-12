@@ -186,6 +186,15 @@ function normalizeRunnerId(
   return fallback;
 }
 
+function mapLegacyLlmProvider(
+  runnerId: SessionRecord['runner_id'],
+  fallback?: RegisteredGroup['llm_provider'],
+): RegisteredGroup['llm_provider'] | undefined {
+  if (runnerId === 'codex') return 'openai';
+  if (runnerId === 'claude') return 'claude';
+  return fallback;
+}
+
 function normalizeSelectedSkills(
   raw: unknown,
 ): string[] | null | undefined {
@@ -489,7 +498,7 @@ function buildSessionPayload(
     created_by: backingGroup?.created_by,
     runner_id: session.runner_id,
     runner_profile_id: session.runner_profile_id,
-    llm_provider: session.runner_id === 'codex' ? 'openai' : 'claude',
+    llm_provider: mapLegacyLlmProvider(session.runner_id, backingGroup?.llm_provider),
     model: session.model,
     thinking_effort: session.thinking_effort,
     context_compression: session.context_compression,
@@ -1194,7 +1203,7 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
     const updatedGroup = {
       ...backingGroup,
       name: nextName,
-      llm_provider: nextRunnerId === 'codex' ? 'openai' as const : 'claude' as const,
+      llm_provider: mapLegacyLlmProvider(nextRunnerId, backingGroup.llm_provider),
       model: nextModel ?? undefined,
       thinking_effort: nextThinkingEffort ?? undefined,
       context_compression: nextContextCompression,

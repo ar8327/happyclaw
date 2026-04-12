@@ -84,7 +84,7 @@ export function RuntimeEnvPanel({
   const session = sessionProp ?? sessionFromChat;
   const [runnerOptions, setRunnerOptions] = useState<RunnerOption[]>([]);
 
-  const currentRunnerId = session?.runner_id || runnerOptions[0]?.id || 'claude';
+  const currentRunnerId = session?.runner_id || runnerOptions[0]?.id || '';
   const isCodex = currentRunnerId === 'codex';
   const { models: codexModelOptions, loading: codexModelsLoading } = useCodexModels(isCodex);
 

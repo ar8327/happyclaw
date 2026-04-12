@@ -14,7 +14,7 @@ export interface SystemStatus {
     pendingMessages: boolean;
     pendingTasks: number;
     runtime_mode?: 'local';
-    runner_id?: 'claude' | 'codex';
+    runner_id?: string;
     runtime_identifier?: string | null;
   }>;
   sessions?: Array<{
@@ -24,7 +24,7 @@ export interface SystemStatus {
     pendingMessages: boolean;
     pendingTasks: number;
     runtime_mode?: 'local';
-    runner_id?: 'claude' | 'codex';
+    runner_id?: string;
     runtime_identifier?: string | null;
   }>;
 }
