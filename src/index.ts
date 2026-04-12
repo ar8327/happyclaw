@@ -1201,9 +1201,14 @@ function handleListCommand(chatJid: string): string {
 
   const workspaces = collectWorkspaces(userId);
   if (workspaces.length === 0) return '没有可用的工作区';
+  const location = getLocationForGroup(chatJid, group);
 
   return (
-    formatWorkspaceList(workspaces, group.folder, null) +
+    formatWorkspaceList(
+      workspaces,
+      location.folder,
+      location.boundAgentId,
+    ) +
     '\n💡 使用 /bind <workspace> 或 /bind <workspace>/<agent短ID>'
   );
 }
@@ -1213,6 +1218,7 @@ function handleStatusCommand(chatJid: string): string {
   if (!group) return '当前 IM 未绑定工作区';
 
   const location = getLocationForGroup(chatJid, group);
+  const effectiveQueueJid = location.effectiveJid || chatJid;
 
   const queueStatus = queue.getRuntimeStatus();
   const settings = getSystemSettings();
@@ -1220,15 +1226,20 @@ function handleStatusCommand(chatJid: string): string {
   // Check if the current group's folder is active or queued
   const lookupGroup = (jid: string) =>
     registeredGroups[jid] ?? getRegisteredGroup(jid);
-  const groupState = queueStatus.groups.find((g) => {
-    const rg = lookupGroup(g.jid);
-    return rg?.folder === location.folder;
-  });
+  const groupState =
+    queueStatus.groups.find((g) => g.jid === effectiveQueueJid)
+    || queueStatus.groups.find((g) => {
+      const rg = lookupGroup(g.jid);
+      return rg?.folder === location.folder;
+    });
   const isActive = !!groupState?.active;
-  const queuePosition =
-    !isActive && queueStatus.waitingGroupJids.includes(chatJid)
-      ? queueStatus.waitingGroupJids.indexOf(chatJid) + 1
-      : null;
+  const waitingTargets = [effectiveQueueJid, chatJid];
+  const queueIndex = waitingTargets
+    .map((jid) => queueStatus.waitingGroupJids.indexOf(jid))
+    .find((index) => index >= 0);
+  const queuePosition = !isActive && queueIndex !== undefined
+    ? queueIndex + 1
+    : null;
 
   return formatSystemStatus(
     location,
@@ -1254,6 +1265,7 @@ function getLocationForGroup(chatJid: string, group: RegisteredGroup) {
     folder: resolved.folder,
     replyPolicy: resolved.replyPolicy,
     boundAgentId: resolved.boundAgentId,
+    effectiveJid: resolved.effectiveJid,
   };
 }
 
