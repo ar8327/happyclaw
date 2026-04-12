@@ -2432,6 +2432,64 @@ function parseWorkerSessionRow(
   };
 }
 
+function extractAgentIdFromWorkerSessionId(sessionId: string): string {
+  return sessionId.startsWith(WORKER_SESSION_ID_PREFIX)
+    ? sessionId.slice(WORKER_SESSION_ID_PREFIX.length)
+    : sessionId;
+}
+
+function deriveWorkerGroupFolder(
+  row: Record<string, unknown>,
+): string {
+  const parentSessionId =
+    typeof row.parent_session_id === 'string' ? row.parent_session_id : '';
+  if (parentSessionId.startsWith(MAIN_SESSION_ID_PREFIX)) {
+    return parentSessionId.slice(MAIN_SESSION_ID_PREFIX.length);
+  }
+  const sourceChatJid =
+    typeof row.source_chat_jid === 'string' ? row.source_chat_jid : '';
+  const sourceGroup = sourceChatJid ? getRegisteredGroup(sourceChatJid) : undefined;
+  return sourceGroup?.folder || '';
+}
+
+function mapWorkerAgentRow(row: Record<string, unknown>): SubAgent {
+  const sessionId = String(row.session_id);
+  return {
+    id: extractAgentIdFromWorkerSessionId(sessionId),
+    group_folder: deriveWorkerGroupFolder(row),
+    chat_jid: String(row.source_chat_jid),
+    name: String(row.name),
+    prompt: String(row.prompt),
+    status: (row.status as AgentStatus) || 'idle',
+    kind: (row.kind as AgentKind) || 'task',
+    created_by:
+      typeof row.owner_key === 'string'
+        ? row.owner_key
+        : typeof row.created_by === 'string'
+          ? row.created_by
+          : null,
+    created_at: String(row.created_at),
+    completed_at:
+      typeof row.completed_at === 'string' ? row.completed_at : null,
+    result_summary:
+      typeof row.result_summary === 'string' ? row.result_summary : null,
+  };
+}
+
+function mergeAgentsPreferPrimary(
+  primary: SubAgent[],
+  legacy: SubAgent[],
+): SubAgent[] {
+  if (legacy.length === 0) return primary;
+  const merged = new Map(primary.map((agent) => [agent.id, agent]));
+  for (const agent of legacy) {
+    if (!merged.has(agent.id)) merged.set(agent.id, agent);
+  }
+  return Array.from(merged.values()).sort((a, b) =>
+    b.created_at.localeCompare(a.created_at),
+  );
+}
+
 function deriveRunnerId(
   group: Pick<RegisteredGroup, 'llm_provider'> | null | undefined,
 ): SessionRecord['runner_id'] {
@@ -4938,6 +4996,16 @@ export function createAgent(agent: SubAgent): void {
 }
 
 export function getAgent(id: string): SubAgent | undefined {
+  const workerRow = db
+    .prepare(
+      `SELECT ws.*, s.owner_key
+       FROM worker_sessions ws
+       LEFT JOIN sessions s ON s.id = ws.session_id
+       WHERE ws.session_id = ?`,
+    )
+    .get(buildWorkerSessionId(id)) as Record<string, unknown> | undefined;
+  if (workerRow) return mapWorkerAgentRow(workerRow);
+
   const row = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as
     | Record<string, unknown>
     | undefined;
@@ -4946,19 +5014,41 @@ export function getAgent(id: string): SubAgent | undefined {
 }
 
 export function listAgentsByFolder(folder: string): SubAgent[] {
-  const rows = db
+  const primaryRows = db
+    .prepare(
+      `SELECT ws.*, s.owner_key
+       FROM worker_sessions ws
+       LEFT JOIN sessions s ON s.id = ws.session_id
+       WHERE ws.parent_session_id = ?
+       ORDER BY ws.created_at DESC`,
+    )
+    .all(buildMainSessionId(folder)) as Array<Record<string, unknown>>;
+  const primaryAgents = primaryRows.map(mapWorkerAgentRow);
+
+  const legacyRows = db
     .prepare(
       'SELECT * FROM agents WHERE group_folder = ? ORDER BY created_at DESC',
     )
     .all(folder) as Array<Record<string, unknown>>;
-  return rows.map(mapAgentRow);
+  return mergeAgentsPreferPrimary(primaryAgents, legacyRows.map(mapAgentRow));
 }
 
 export function listAgentsByJid(chatJid: string): SubAgent[] {
-  const rows = db
+  const primaryRows = db
+    .prepare(
+      `SELECT ws.*, s.owner_key
+       FROM worker_sessions ws
+       LEFT JOIN sessions s ON s.id = ws.session_id
+       WHERE ws.source_chat_jid = ?
+       ORDER BY ws.created_at DESC`,
+    )
+    .all(chatJid) as Array<Record<string, unknown>>;
+  const primaryAgents = primaryRows.map(mapWorkerAgentRow);
+
+  const legacyRows = db
     .prepare('SELECT * FROM agents WHERE chat_jid = ? ORDER BY created_at DESC')
     .all(chatJid) as Array<Record<string, unknown>>;
-  return rows.map(mapAgentRow);
+  return mergeAgentsPreferPrimary(primaryAgents, legacyRows.map(mapAgentRow));
 }
 
 export function updateAgentStatus(
@@ -5001,43 +5091,97 @@ export function updateAgentInfo(
 }
 
 export function deleteCompletedTaskAgents(beforeTimestamp: string): number {
-  const result = db
+  const workerRows = db
+    .prepare(
+      `SELECT session_id
+       FROM worker_sessions
+       WHERE kind = 'task'
+         AND status IN ('completed', 'error')
+         AND completed_at IS NOT NULL
+         AND completed_at < ?`,
+    )
+    .all(beforeTimestamp) as Array<{ session_id: string }>;
+  const sessionIds = workerRows.map((row) => row.session_id);
+
+  if (sessionIds.length > 0) {
+    const placeholders = sessionIds.map(() => '?').join(', ');
+    db.prepare(
+      `DELETE FROM session_state WHERE session_id IN (${placeholders})`,
+    ).run(...sessionIds);
+    db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(
+      ...sessionIds,
+    );
+    db.prepare(
+      `DELETE FROM worker_sessions WHERE session_id IN (${placeholders})`,
+    ).run(...sessionIds);
+
+    const agentIds = sessionIds.map(extractAgentIdFromWorkerSessionId);
+    const agentPlaceholders = agentIds.map(() => '?').join(', ');
+    db.prepare(`DELETE FROM agents WHERE id IN (${agentPlaceholders})`).run(
+      ...agentIds,
+    );
+  }
+
+  const legacyResult = db
     .prepare(
       "DELETE FROM agents WHERE kind = 'task' AND status IN ('completed', 'error') AND completed_at IS NOT NULL AND completed_at < ?",
     )
     .run(beforeTimestamp);
-  return result.changes;
+  return sessionIds.length + legacyResult.changes;
 }
 
 export function getRunningTaskAgentsByChat(chatJid: string): SubAgent[] {
-  const rows = db
+  const primaryRows = db
+    .prepare(
+      `SELECT ws.*, s.owner_key
+       FROM worker_sessions ws
+       LEFT JOIN sessions s ON s.id = ws.session_id
+       WHERE ws.source_chat_jid = ?
+         AND ws.kind = 'task'
+         AND ws.status = 'running'
+       ORDER BY ws.created_at DESC`,
+    )
+    .all(chatJid) as Array<Record<string, unknown>>;
+  const primaryAgents = primaryRows.map(mapWorkerAgentRow);
+
+  const legacyRows = db
     .prepare(
       "SELECT * FROM agents WHERE chat_jid = ? AND kind = 'task' AND status = 'running'",
     )
     .all(chatJid) as Array<Record<string, unknown>>;
-  return rows.map(mapAgentRow);
+  return mergeAgentsPreferPrimary(primaryAgents, legacyRows.map(mapAgentRow));
 }
 
 export function markRunningTaskAgentsAsError(chatJid: string): number {
   const now = new Date().toISOString();
-  const result = db
+  const workerResult = db
+    .prepare(
+      "UPDATE worker_sessions SET status = 'error', completed_at = ? WHERE source_chat_jid = ? AND kind = 'task' AND status = 'running'",
+    )
+    .run(now, chatJid);
+  const legacyResult = db
     .prepare(
       "UPDATE agents SET status = 'error', completed_at = ? WHERE chat_jid = ? AND kind = 'task' AND status = 'running'",
     )
     .run(now, chatJid);
-  return result.changes;
+  return Math.max(workerResult.changes, legacyResult.changes);
 }
 
 export function markAllRunningTaskAgentsAsError(
   summary = '进程重启，任务中断',
 ): number {
   const now = new Date().toISOString();
-  const result = db
+  const workerResult = db
+    .prepare(
+      "UPDATE worker_sessions SET status = 'error', completed_at = ?, result_summary = COALESCE(result_summary, ?) WHERE kind = 'task' AND status = 'running'",
+    )
+    .run(now, summary);
+  const legacyResult = db
     .prepare(
       "UPDATE agents SET status = 'error', completed_at = ?, result_summary = COALESCE(result_summary, ?) WHERE kind = 'task' AND status = 'running'",
     )
     .run(now, summary);
-  return result.changes;
+  return Math.max(workerResult.changes, legacyResult.changes);
 }
 
 export function deleteAgent(id: string): void {
