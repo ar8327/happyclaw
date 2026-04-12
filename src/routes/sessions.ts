@@ -1710,6 +1710,9 @@ sessionRoutes.get('/:id/summary', authMiddleware, (c) => {
 
 sessionRoutes.get('/:id/members', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
+  const id = decodeURIComponent(c.req.param('id'));
+  const session = resolveSessionOrThrow(user, id);
+  if (!session) return c.json({ error: 'Session not found' }, 404);
   return c.json({
     members: [
       {
@@ -1724,10 +1727,18 @@ sessionRoutes.get('/:id/members', authMiddleware, (c) => {
 });
 
 sessionRoutes.get('/:id/members/search', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const id = decodeURIComponent(c.req.param('id'));
+  const session = resolveSessionOrThrow(user, id);
+  if (!session) return c.json({ error: 'Session not found' }, 404);
   return c.json({ users: [] });
 });
 
 sessionRoutes.post('/:id/members', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const id = decodeURIComponent(c.req.param('id'));
+  const session = resolveSessionOrThrow(user, id);
+  if (!session) return c.json({ error: 'Session not found' }, 404);
   return c.json(
     { error: 'Single-user mode does not support session members' },
     400,
@@ -1735,6 +1746,10 @@ sessionRoutes.post('/:id/members', authMiddleware, async (c) => {
 });
 
 sessionRoutes.delete('/:id/members/:userId', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const id = decodeURIComponent(c.req.param('id'));
+  const session = resolveSessionOrThrow(user, id);
+  if (!session) return c.json({ error: 'Session not found' }, 404);
   return c.json(
     { error: 'Single-user mode does not support session members' },
     400,
