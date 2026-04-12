@@ -8,6 +8,7 @@ import {
   searchMessages,
   countSearchResults,
   getSessionRecord,
+  listAgentsByJid,
 } from '../db.js';
 
 const searchRoutes = new Hono<{ Variables: Variables }>();
@@ -38,7 +39,7 @@ searchRoutes.get('/messages', authMiddleware, (c) => {
 
   // Collect all JIDs the user can access
   const allGroups = getAllRegisteredGroups();
-  const accessibleJids: string[] = [];
+  const accessibleJids = new Set<string>();
   const groupInfoMap = new Map<
     string,
     {
@@ -52,7 +53,7 @@ searchRoutes.get('/messages', authMiddleware, (c) => {
 
   for (const [jid, group] of Object.entries(allGroups)) {
     if (canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid })) {
-      accessibleJids.push(jid);
+      accessibleJids.add(jid);
       const sessionId = `main:${group.folder}`;
       const session = getSessionRecord(sessionId);
       groupInfoMap.set(jid, {
@@ -62,15 +63,34 @@ searchRoutes.get('/messages', authMiddleware, (c) => {
         session_folder: group.folder,
         session_name: session?.name || group.name || group.folder,
       });
+
+      if (!jid.startsWith('web:')) continue;
+
+      for (const agent of listAgentsByJid(jid)) {
+        if (agent.kind !== 'conversation') continue;
+        const workerSessionId = `worker:${agent.id}`;
+        const workerSession = getSessionRecord(workerSessionId);
+        const workerJid = `${jid}#agent:${agent.id}`;
+        accessibleJids.add(workerJid);
+        groupInfoMap.set(workerJid, {
+          folder: group.folder,
+          name: `${group.name} / ${agent.name}`,
+          session_id: workerSession?.id || workerSessionId,
+          session_folder: group.folder,
+          session_name: workerSession?.name || agent.name,
+        });
+      }
     }
   }
 
-  if (accessibleJids.length === 0) {
+  const searchableJids = Array.from(accessibleJids);
+
+  if (searchableJids.length === 0) {
     return c.json({ results: [], total: 0, hasMore: false });
   }
 
-  const results = searchMessages(accessibleJids, q, limit, offset, sinceTs);
-  const total = countSearchResults(accessibleJids, q, sinceTs);
+  const results = searchMessages(searchableJids, q, limit, offset, sinceTs);
+  const total = countSearchResults(searchableJids, q, sinceTs);
   const hasMore = offset + results.length < total;
 
   // Enrich results with group info
