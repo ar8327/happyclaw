@@ -29,9 +29,10 @@ const MAX_BUFFER = 1024 * 1024; // 1MB
 export async function runScript(
   command: string,
   groupFolder: string,
+  cwdOverride?: string,
 ): Promise<ScriptRunResult> {
   const { scriptTimeout } = getSystemSettings();
-  const cwd = path.join(GROUPS_DIR, groupFolder);
+  const cwd = cwdOverride?.trim() || path.join(GROUPS_DIR, groupFolder);
   const startTime = Date.now();
 
   activeScriptCount++;

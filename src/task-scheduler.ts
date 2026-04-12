@@ -189,6 +189,7 @@ async function runScriptTask(
     const scriptResult = await runScript(
       task.script_command,
       task.group_folder,
+      groupDir,
     );
 
     if (scriptResult.timedOut) {
