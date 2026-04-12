@@ -7,6 +7,7 @@ import {
   getAllRegisteredGroups,
   searchMessages,
   countSearchResults,
+  getSessionRecord,
 } from '../db.js';
 
 const searchRoutes = new Hono<{ Variables: Variables }>();
@@ -40,15 +41,26 @@ searchRoutes.get('/messages', authMiddleware, (c) => {
   const accessibleJids: string[] = [];
   const groupInfoMap = new Map<
     string,
-    { folder: string; name?: string }
+    {
+      folder: string;
+      name?: string;
+      session_id: string;
+      session_folder: string;
+      session_name: string;
+    }
   >();
 
   for (const [jid, group] of Object.entries(allGroups)) {
     if (canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid })) {
       accessibleJids.push(jid);
+      const sessionId = `main:${group.folder}`;
+      const session = getSessionRecord(sessionId);
       groupInfoMap.set(jid, {
         folder: group.folder,
         name: group.name,
+        session_id: session?.id || sessionId,
+        session_folder: group.folder,
+        session_name: session?.name || group.name || group.folder,
       });
     }
   }
@@ -66,6 +78,9 @@ searchRoutes.get('/messages', authMiddleware, (c) => {
     const info = groupInfoMap.get(r.chat_jid);
     return {
       ...r,
+      session_id: info?.session_id,
+      session_folder: info?.session_folder,
+      session_name: info?.session_name,
       group_folder: info?.folder,
       group_name: info?.name,
     };

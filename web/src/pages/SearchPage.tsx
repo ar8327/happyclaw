@@ -81,9 +81,9 @@ export function SearchPage() {
 
   const handleResultClick = useCallback(
     (result: GlobalSearchResult) => {
-      const sessionSlug = result.group_folder;
+      const sessionSlug = result.session_id || result.session_folder || result.group_folder;
       if (sessionSlug) {
-        navigate(`/chat/${sessionSlug}?highlightId=${encodeURIComponent(result.id)}&ts=${encodeURIComponent(result.timestamp)}`);
+        navigate(`/chat/${encodeURIComponent(sessionSlug)}?highlightId=${encodeURIComponent(result.id)}&ts=${encodeURIComponent(result.timestamp)}`);
       }
     },
     [navigate],
@@ -122,12 +122,15 @@ export function SearchPage() {
     );
   };
 
-  // Group results by session slug
+  // Group results by session
   const grouped = results.reduce<Record<string, { name: string; results: GlobalSearchResult[] }>>(
     (acc, result) => {
-      const key = result.group_folder || 'unknown';
+      const key = result.session_id || result.session_folder || result.group_folder || 'unknown';
       if (!acc[key]) {
-        acc[key] = { name: result.group_name || key, results: [] };
+        acc[key] = {
+          name: result.session_name || result.group_name || result.session_folder || result.group_folder || key,
+          results: [],
+        };
       }
       acc[key].results.push(result);
       return acc;

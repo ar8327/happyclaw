@@ -14,6 +14,7 @@ export function ChatPage() {
   const routeSessionJid = useMemo(() => {
     if (!sessionSlug) return null;
     const entry =
+      Object.entries(groups).find(([_, info]) => info.id === sessionSlug) ||
       Object.entries(groups).find(
         ([jid, info]) =>
           info.folder === sessionSlug &&
