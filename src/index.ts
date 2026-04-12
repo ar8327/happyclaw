@@ -3683,6 +3683,7 @@ async function processTaskIpc(
             : 'isolated';
         createTask({
           id: taskId,
+          session_id: `main:${targetFolder}`,
           group_folder: targetFolder,
           chat_jid: targetJid,
           prompt: data.prompt || '',

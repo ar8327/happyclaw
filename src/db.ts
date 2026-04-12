@@ -172,6 +172,7 @@ export function initDatabase(): void {
 
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       id TEXT PRIMARY KEY,
+      session_id TEXT,
       group_folder TEXT NOT NULL,
       chat_jid TEXT NOT NULL,
       prompt TEXT NOT NULL,
@@ -629,6 +630,7 @@ export function initDatabase(): void {
   ensureColumn('users', 'ai_avatar_color', 'TEXT');
   ensureColumn('users', 'ai_avatar_url', 'TEXT');
   ensureColumn('scheduled_tasks', 'created_by', 'TEXT');
+  ensureColumn('scheduled_tasks', 'session_id', 'TEXT');
   ensureColumn('scheduled_tasks', 'execution_type', "TEXT DEFAULT 'agent'");
   ensureColumn('scheduled_tasks', 'script_command', 'TEXT');
   ensureColumn('registered_groups', 'selected_skills', 'TEXT');
@@ -650,6 +652,13 @@ export function initDatabase(): void {
   ensureColumn('registered_groups', 'context_compression', "TEXT DEFAULT 'off'");
   ensureColumn('registered_groups', 'knowledge_extraction', 'INTEGER DEFAULT 0');
   ensureColumn('scheduled_tasks', 'model', 'TEXT');
+  db.prepare(
+    `UPDATE scheduled_tasks
+       SET session_id = 'main:' || group_folder
+     WHERE (session_id IS NULL OR TRIM(session_id) = '')
+       AND group_folder IS NOT NULL
+       AND TRIM(group_folder) != ''`,
+  ).run();
 
   // Context summaries table for conversation compression
   db.exec(`
@@ -735,18 +744,22 @@ export function initDatabase(): void {
   ]);
   assertSchema('scheduled_tasks', [
     'id',
+    'session_id',
     'group_folder',
     'chat_jid',
     'prompt',
     'schedule_type',
     'schedule_value',
     'context_mode',
+    'execution_type',
+    'script_command',
     'next_run',
     'last_run',
     'last_result',
     'status',
     'created_at',
     'created_by',
+    'model',
   ]);
   assertSchema(
     'registered_groups',
@@ -2004,11 +2017,12 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, execution_type, script_command, next_run, status, created_at, created_by, model)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, session_id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, execution_type, script_command, next_run, status, created_at, created_by, model)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
+    task.session_id ?? null,
     task.group_folder,
     task.chat_jid,
     task.prompt,

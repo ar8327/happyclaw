@@ -13,8 +13,10 @@ import {
   cleanupOldTaskRunLogs,
   ensureChatExists,
   getDueTasks,
+  getJidsByFolder,
   getSessionRecord,
   getTaskById,
+  getRegisteredGroup,
   logTaskRun,
   storeMessageDirect,
   updateTaskAfterRun,
@@ -114,6 +116,40 @@ function triggerAgentTask(
   );
 }
 
+function getTaskTargetSession(task: ScheduledTask) {
+  const sessionId = task.session_id?.trim();
+  return sessionId
+    ? getSessionRecord(sessionId)
+    : getSessionRecord(`main:${task.group_folder}`);
+}
+
+function resolveScheduledTaskTargetJid(
+  task: ScheduledTask,
+  groups: Record<string, RegisteredGroup>,
+): string {
+  const taskSession = getTaskTargetSession(task);
+  const folder =
+    taskSession?.id.startsWith('main:')
+      ? taskSession.id.slice('main:'.length)
+      : taskSession?.parent_session_id?.startsWith('main:')
+        ? taskSession.parent_session_id.slice('main:'.length)
+        : task.group_folder;
+  const directTarget = groups[task.chat_jid];
+  if (directTarget && directTarget.folder === folder) {
+    return task.chat_jid;
+  }
+  const backingJid = getJidsByFolder(folder).find((jid) => jid.startsWith('web:'));
+  if (backingJid && getRegisteredGroup(backingJid)) {
+    return backingJid;
+  }
+  const sameFolder = Object.entries(groups).filter(
+    ([, group]) => group.folder === folder,
+  );
+  const preferred =
+    sameFolder.find(([jid]) => jid.startsWith('web:')) || sameFolder[0];
+  return preferred?.[0] || '';
+}
+
 async function runScriptTask(
   task: ScheduledTask,
   deps: SchedulerDependencies,
@@ -126,7 +162,8 @@ async function runScriptTask(
     'Running script task',
   );
 
-  const groupDir = path.join(GROUPS_DIR, task.group_folder);
+  const taskSession = getTaskTargetSession(task);
+  const groupDir = taskSession?.cwd || path.join(GROUPS_DIR, task.group_folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
   if (!task.script_command) {
@@ -253,20 +290,15 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         }
 
         const groups = deps.registeredGroups();
-        let targetGroupJid = currentTask.chat_jid;
-        const directTarget = groups[targetGroupJid];
-        if (!directTarget || directTarget.folder !== currentTask.group_folder) {
-          const sameFolder = Object.entries(groups).filter(
-            ([, group]) => group.folder === currentTask.group_folder,
-          );
-          const preferred =
-            sameFolder.find(([jid]) => jid.startsWith('web:')) || sameFolder[0];
-          targetGroupJid = preferred?.[0] || '';
-        }
+        const targetGroupJid = resolveScheduledTaskTargetJid(currentTask, groups);
 
         if (!targetGroupJid) {
           logger.error(
-            { taskId: currentTask.id, groupFolder: currentTask.group_folder },
+            {
+              taskId: currentTask.id,
+              sessionId: currentTask.session_id ?? null,
+              groupFolder: currentTask.group_folder,
+            },
             'Target group not registered, skipping scheduled task',
           );
           continue;

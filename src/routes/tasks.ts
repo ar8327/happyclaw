@@ -65,13 +65,40 @@ function resolveTaskTarget(
 }
 
 function buildTaskPayload(task: ScheduledTask): ScheduledTask {
-  const derivedSessionId = `main:${task.group_folder}`;
-  const session = getSessionRecord(derivedSessionId);
+  const sessionId = task.session_id?.trim() || `main:${task.group_folder}`;
+  const session = resolveTaskSession(sessionId);
   return {
     ...task,
-    session_id: session?.id || derivedSessionId,
+    session_id: session?.id || sessionId,
     session_name: session?.name || getRegisteredGroup(task.chat_jid)?.name || null,
   };
+}
+
+function resolveStoredTaskTarget(
+  task: ScheduledTask,
+): {
+  session: SessionRecord;
+  group: NonNullable<ReturnType<typeof getRegisteredGroup>>;
+  chatJid: string;
+  groupFolder: string;
+} | null {
+  const sessionId = task.session_id?.trim();
+  if (sessionId) {
+    const target = resolveTaskTarget(sessionId);
+    if (target) return target;
+  }
+
+  const legacyGroup = getRegisteredGroup(task.chat_jid);
+  if (!legacyGroup || legacyGroup.folder !== task.group_folder) return null;
+  const session = getSessionRecord(`main:${task.group_folder}`);
+  return session
+    ? {
+        session,
+        group: legacyGroup,
+        chatJid: task.chat_jid,
+        groupFolder: task.group_folder,
+      }
+    : null;
 }
 
 // --- Routes ---
@@ -79,7 +106,8 @@ function buildTaskPayload(task: ScheduledTask): ScheduledTask {
 tasksRoutes.get('/', authMiddleware, (c) => {
   const authUser = c.get('user') as AuthUser;
   const tasks = getAllTasks().filter((task) => {
-    const group = getRegisteredGroup(task.chat_jid);
+    const group =
+      resolveStoredTaskTarget(task)?.group || getRegisteredGroup(task.chat_jid);
     // Conservative: if group can't be resolved, only admin can see (may be orphaned task)
     if (!group) return authUser.role === 'admin';
     if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group))
@@ -210,7 +238,8 @@ tasksRoutes.patch('/:id', authMiddleware, async (c) => {
   const existing = getTaskById(id);
   if (!existing) return c.json({ error: 'Task not found' }, 404);
   const authUser = c.get('user') as AuthUser;
-  const group = getRegisteredGroup(existing.chat_jid);
+  const group =
+    resolveStoredTaskTarget(existing)?.group || getRegisteredGroup(existing.chat_jid);
   if (!group) {
     if (authUser.role !== 'admin')
       return c.json({ error: 'Task not found' }, 404);
@@ -254,7 +283,8 @@ tasksRoutes.delete('/:id', authMiddleware, (c) => {
   const existing = getTaskById(id);
   if (!existing) return c.json({ error: 'Task not found' }, 404);
   const authUser = c.get('user') as AuthUser;
-  const group = getRegisteredGroup(existing.chat_jid);
+  const group =
+    resolveStoredTaskTarget(existing)?.group || getRegisteredGroup(existing.chat_jid);
   if (!group) {
     if (authUser.role !== 'admin')
       return c.json({ error: 'Task not found' }, 404);
@@ -278,7 +308,8 @@ tasksRoutes.get('/:id/logs', authMiddleware, (c) => {
   const existing = getTaskById(id);
   if (!existing) return c.json({ error: 'Task not found' }, 404);
   const authUser = c.get('user') as AuthUser;
-  const group = getRegisteredGroup(existing.chat_jid);
+  const group =
+    resolveStoredTaskTarget(existing)?.group || getRegisteredGroup(existing.chat_jid);
   if (!group) {
     if (authUser.role !== 'admin')
       return c.json({ error: 'Task not found' }, 404);
