@@ -1,9 +1,9 @@
 /**
  * IM Connection Pool Manager
  *
- * Manages per-user IM connections using the unified IMChannel interface.
- * Each user can have independent IM connections that route messages
- * to their home container.
+ * Manages per-owner IM connections using the unified IMChannel interface.
+ * Session owner_key is the primary routing source; legacy created_by only
+ * remains as a compatibility fallback.
  */
 import {
   type IMChannel,
@@ -24,7 +24,6 @@ import type { StreamingCardController } from './feishu-streaming-card.js';
 import { ProgressCardController } from './feishu-progress-card.js';
 import {
   getRegisteredGroup,
-  getJidsByFolder,
   getSessionBinding,
   getSessionRecord,
 } from './db.js';
@@ -132,8 +131,7 @@ class IMConnectionManager {
 
   /**
    * Send a message to an IM chat, auto-routing via JID prefix.
-   * Resolves the user by looking up chatJid -> registered_groups.created_by.
-   * Falls back to iterating sibling groups if no created_by is set.
+   * Resolves the owner from session binding / session owner_key first.
    */
   async sendMessage(
     jid: string,
@@ -300,14 +298,7 @@ class IMConnectionManager {
       }
     }
 
-    // Direct lookup via group ownership
     const group = getRegisteredGroup(jid);
-    if (group?.created_by) {
-      const conn = this.connections.get(group.created_by);
-      const ch = conn?.channels.get(channelType);
-      if (ch?.isConnected()) return ch;
-    }
-
     if (group) {
       const sessionOwner = getSessionRecord(`main:${group.folder}`)?.owner_key;
       if (sessionOwner) {
@@ -317,24 +308,11 @@ class IMConnectionManager {
       }
     }
 
-    // Fallback: find owner via sibling groups sharing the same folder
-    if (group) {
-      const siblingJids = getJidsByFolder(group.folder);
-      for (const sibJid of siblingJids) {
-        if (sibJid === jid) continue;
-        const sibling = getRegisteredGroup(sibJid);
-        if (sibling?.created_by) {
-          const conn = this.connections.get(sibling.created_by);
-          const ch = conn?.channels.get(channelType);
-          if (ch?.isConnected()) {
-            logger.warn(
-              { jid, fallbackUserId: sibling.created_by, folder: group.folder },
-              'IM message routed via sibling group owner connection',
-            );
-            return ch;
-          }
-        }
-      }
+    // Compatibility fallback for legacy groups not yet covered by session owner_key.
+    if (group?.created_by) {
+      const conn = this.connections.get(group.created_by);
+      const ch = conn?.channels.get(channelType);
+      if (ch?.isConnected()) return ch;
     }
 
     return undefined;

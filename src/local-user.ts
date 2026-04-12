@@ -44,20 +44,14 @@ function resolvePrimaryOwnerKey(): string | null {
       session.owner_key.trim().length > 0,
   )?.owner_key;
   if (sessionOwner) return sessionOwner;
-
-  const users = getAllUsers().filter((user) => user.status !== 'deleted');
-  if (users.length > 0) return users[0].id;
   return null;
 }
 
 function resolveBackingUser(): UserPublic | null {
   const ownerKey = resolvePrimaryOwnerKey();
+  if (!ownerKey) return null;
   const users = getAllUsers().filter((user) => user.status !== 'deleted');
-  if (ownerKey) {
-    const matched = users.find((user) => user.id === ownerKey);
-    if (matched) return matched;
-  }
-  return users[0] || null;
+  return users.find((user) => user.id === ownerKey) || null;
 }
 
 export function getLocalWorkbenchSessionId(): string {
