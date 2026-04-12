@@ -27,7 +27,6 @@ import {
   getDailyUsageSumForMonth,
   correctMonthlyUsage,
 } from './db.js';
-import { getSystemSettings } from './runtime-config.js';
 import { logger } from './logger.js';
 import type {
   BillingAccessResult,
@@ -37,6 +36,7 @@ import type {
 } from './types.js';
 
 const BILLING_COMPAT_DISABLED = true;
+const BILLING_MIN_START_BALANCE_USD = 0.01;
 
 function buildBillingDisabledAccess(userId: string): BillingAccessResult {
   const balance = getUserBalance(userId);
@@ -55,8 +55,7 @@ function buildBillingDisabledAccess(userId: string): BillingAccessResult {
 // No extra manual cache needed — avoids stale state when settings change.
 
 export function isBillingEnabled(): boolean {
-  if (BILLING_COMPAT_DISABLED) return false;
-  return getSystemSettings().billingEnabled === true;
+  return false;
 }
 
 /** @deprecated No longer needed — isBillingEnabled reads from getSystemSettings cache */
@@ -252,7 +251,7 @@ function _checkBillingAccessInternal(
   userRole: string,
 ): BillingAccessResult {
   const balance = getUserBalance(userId);
-  const minBalanceUsd = getSystemSettings().billingMinStartBalanceUsd ?? 0.01;
+  const minBalanceUsd = BILLING_MIN_START_BALANCE_USD;
 
   if (userRole === 'admin' || !isBillingEnabled()) {
     return {

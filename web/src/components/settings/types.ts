@@ -70,15 +70,8 @@ export interface SystemSettings {
   idleTimeout: number;
   runtimeMaxOutputSize: number;
   maxConcurrentRuntimes: number;
-  maxLoginAttempts: number;
-  loginLockoutMinutes: number;
   maxConcurrentScripts: number;
   scriptTimeout: number;
-  billingEnabled: boolean;
-  billingMode: 'wallet_first';
-  billingMinStartBalanceUsd: number;
-  billingCurrency: string;
-  billingCurrencyRate: number;
   memoryQueryTimeout: number;
   memoryGlobalSleepTimeout: number;
   memorySendTimeout: number;
@@ -96,7 +89,7 @@ export type SettingsTab =
   | 'appearance'
   | 'system'
   | 'profile'
-  | 'my-channels'
+  | 'channels'
   | 'sessions'
   | 'memory'
   | 'skills'

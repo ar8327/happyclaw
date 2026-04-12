@@ -21,7 +21,7 @@ interface NavItem {
   key: SettingsTab;
   label: string;
   icon: React.ReactNode;
-  group: 'system' | 'account' | 'features';
+  group: 'system' | 'workbench' | 'features';
 }
 
 const systemItems: NavItem[] = [
@@ -33,8 +33,8 @@ const systemItems: NavItem[] = [
 ];
 
 const accountItems: NavItem[] = [
-  { key: 'profile', label: '个人资料', icon: <User className="w-4 h-4" />, group: 'account' },
-  { key: 'my-channels', label: '消息渠道', icon: <MessageSquare className="w-4 h-4" />, group: 'account' },
+  { key: 'profile', label: '个人资料', icon: <User className="w-4 h-4" />, group: 'workbench' },
+  { key: 'channels', label: '消息渠道', icon: <MessageSquare className="w-4 h-4" />, group: 'workbench' },
 ];
 
 const featureItems: NavItem[] = [
@@ -62,7 +62,7 @@ export function SettingsNav({ activeTab, onTabChange, canManageSystemConfig, mus
   if (canManageSystemConfig) {
     visibleItems.push({ group: '系统配置', items: systemItems });
   }
-  visibleItems.push({ group: '账户设置', items: accountItems });
+  visibleItems.push({ group: '工作台设置', items: accountItems });
 
   const visibleFeatures = featureItems;
   if (visibleFeatures.length > 0) {

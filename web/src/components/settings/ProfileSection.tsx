@@ -151,9 +151,9 @@ export function ProfileSection({ setNotice, setError }: ProfileSectionProps) {
       {/* Divider */}
       <div className="border-t border-slate-200" />
 
-      {/* Account Info */}
+      {/* Operator Info */}
       <div>
-        <h3 className="text-base font-semibold text-slate-900 mb-4">账户信息</h3>
+        <h3 className="text-base font-semibold text-slate-900 mb-4">Operator 资料</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
           <div>
             <label className="block text-xs text-slate-500 mb-1">用户名</label>
@@ -174,7 +174,7 @@ export function ProfileSection({ setNotice, setError }: ProfileSectionProps) {
         </div>
         <div className="mt-4 flex flex-wrap items-center gap-4 text-xs text-slate-500">
           <span>Operator：本机单用户</span>
-          <span>最近登录：{currentUser?.last_login_at ? new Date(currentUser.last_login_at).toLocaleString('zh-CN') : '-'}</span>
+          <span>最近活动：{currentUser?.last_login_at ? new Date(currentUser.last_login_at).toLocaleString('zh-CN') : '-'}</span>
         </div>
         <div className="mt-4">
           <Button

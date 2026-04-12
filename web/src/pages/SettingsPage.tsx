@@ -20,7 +20,7 @@ import { BindingsSection } from '../components/settings/BindingsSection';
 import { AgentDefinitionsPage } from './AgentDefinitionsPage';
 import type { SettingsTab } from '../components/settings/types';
 
-const VALID_TABS: SettingsTab[] = ['claude', 'codex', 'runners', 'appearance', 'system', 'profile', 'my-channels', 'sessions', 'memory', 'skills', 'mcp-servers', 'agent-definitions', 'about', 'bindings'];
+const VALID_TABS: SettingsTab[] = ['claude', 'codex', 'runners', 'appearance', 'system', 'profile', 'channels', 'sessions', 'memory', 'skills', 'mcp-servers', 'agent-definitions', 'about', 'bindings'];
 const SYSTEM_TABS: SettingsTab[] = ['claude', 'codex', 'runners', 'appearance', 'system'];
 const FULLPAGE_TABS: SettingsTab[] = ['sessions', 'memory', 'runners', 'skills', 'mcp-servers', 'agent-definitions', 'bindings'];
 
@@ -41,7 +41,12 @@ export function SettingsPage() {
   const activeTab = useMemo((): SettingsTab => {
     if (mustChangePassword) return 'profile';
     const rawParam = searchParams.get('tab');
-    const normalized = rawParam === 'groups' ? 'sessions' : rawParam;
+    const normalized =
+      rawParam === 'groups'
+        ? 'sessions'
+        : rawParam === 'my-channels'
+          ? 'channels'
+          : rawParam;
     if (normalized && (VALID_TABS as string[]).includes(normalized)) {
       const tab = normalized as SettingsTab;
       if (SYSTEM_TABS.includes(tab) && !canManageSystemConfig) return defaultTab;
@@ -61,7 +66,7 @@ export function SettingsPage() {
   const mobileTabs = useMemo(() => {
     const tabs: { key: SettingsTab; label: string }[] = [];
     tabs.push({ key: 'profile', label: '个人资料' });
-    tabs.push({ key: 'my-channels', label: '消息渠道' });
+    tabs.push({ key: 'channels', label: '消息渠道' });
     if (canManageSystemConfig) {
       tabs.push({ key: 'runners', label: 'Runners' });
       tabs.push({ key: 'claude', label: 'Claude' });
@@ -97,7 +102,7 @@ export function SettingsPage() {
     appearance: '外观设置（全局默认）',
     system: '系统参数',
     profile: '个人资料',
-    'my-channels': '消息渠道',
+    channels: '消息渠道',
     sessions: '会话管理',
     memory: '记忆管理',
     skills: '技能管理',
@@ -198,7 +203,7 @@ export function SettingsPage() {
                 {activeTab === 'appearance' && <AppearanceSection setNotice={setNotice} setError={setError} />}
                 {activeTab === 'system' && <SystemSettingsSection setNotice={setNotice} setError={setError} />}
                 {activeTab === 'profile' && <ProfileSection setNotice={setNotice} setError={setError} />}
-                {activeTab === 'my-channels' && <UserChannelsSection setNotice={setNotice} setError={setError} />}
+                {activeTab === 'channels' && <UserChannelsSection setNotice={setNotice} setError={setError} />}
                 {activeTab === 'about' && <AboutSection />}
               </div>
             </div>

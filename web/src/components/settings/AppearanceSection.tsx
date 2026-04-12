@@ -82,7 +82,7 @@ export function AppearanceSection({ setNotice, setError }: AppearanceSectionProp
   return (
     <div className="space-y-6">
       <p className="text-sm text-slate-500 bg-slate-50 rounded-lg px-4 py-3">
-        以下为全局默认值，对所有用户生效。用户可在「个人资料」中覆盖自己的 AI 外观。
+        以下为整个工作台的默认外观。当前 operator 仍可在「个人资料」里覆盖自己的 AI 外观。
       </p>
       {/* Preview */}
       <div>
@@ -126,7 +126,7 @@ export function AppearanceSection({ setNotice, setError }: AppearanceSectionProp
           placeholder="HappyClaw"
           className="max-w-xs"
         />
-        <p className="text-xs text-slate-500 mt-1">所有用户看到的默认 AI 助手名称（用户可在个人资料中单独覆盖）</p>
+        <p className="text-xs text-slate-500 mt-1">工作台默认显示的 AI 助手名称，当前 operator 可在个人资料里单独覆盖</p>
       </div>
 
       {/* AI Avatar Emoji */}

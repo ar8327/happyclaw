@@ -525,7 +525,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           <Link className="w-4 h-4 flex-shrink-0" />
           <span className="flex-1 min-w-0">未配置 IM 渠道，飞书 / Telegram 消息无法与主会话互通</span>
           <button
-            onClick={() => navigate('/settings?tab=my-channels')}
+            onClick={() => navigate('/settings?tab=channels')}
             className="flex-shrink-0 px-3 py-1 text-xs font-medium rounded-md bg-amber-600 text-white hover:bg-amber-700 transition-colors cursor-pointer"
           >
             去配置

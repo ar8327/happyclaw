@@ -58,7 +58,7 @@ export function UserChannelsSection({ setNotice, setError }: UserChannelsSection
   return (
     <div className="space-y-6">
       <p className="text-sm text-slate-500 bg-slate-50 rounded-lg px-4 py-3">
-        绑定你的 IM 账号，消息将发送到你的主会话。
+        这里管理这台工作台的全局 IM 渠道。接入后，消息会按当前绑定规则进入主会话或独立会话。
       </p>
 
       <div className="bg-white border border-slate-200 rounded-lg p-4 space-y-4">

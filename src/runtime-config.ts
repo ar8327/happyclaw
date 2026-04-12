@@ -3150,16 +3150,8 @@ export interface SystemSettings {
   idleTimeout: number;
   runtimeMaxOutputSize: number;
   maxConcurrentRuntimes: number;
-  maxLoginAttempts: number;
-  loginLockoutMinutes: number;
   maxConcurrentScripts: number;
   scriptTimeout: number;
-  // Billing
-  billingEnabled: boolean;
-  billingMode: 'wallet_first';
-  billingMinStartBalanceUsd: number;
-  billingCurrency: string;
-  billingCurrencyRate: number;
   memoryQueryTimeout: number;
   memoryGlobalSleepTimeout: number;
   memorySendTimeout: number;
@@ -3180,15 +3172,8 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   idleTimeout: 1500000,
   runtimeMaxOutputSize: 10485760,
   maxConcurrentRuntimes: 20,
-  maxLoginAttempts: 5,
-  loginLockoutMinutes: 15,
   maxConcurrentScripts: 10,
   scriptTimeout: 60000,
-  billingEnabled: false,
-  billingMode: 'wallet_first',
-  billingMinStartBalanceUsd: 0.01,
-  billingCurrency: 'USD',
-  billingCurrencyRate: 1,
   memoryQueryTimeout: 60000,
   memoryGlobalSleepTimeout: 300000,
   memorySendTimeout: 120000,
@@ -3258,14 +3243,6 @@ function readSystemSettingsFromFile(): SystemSettings | null {
       'maxConcurrentContainers',
       DEFAULT_SYSTEM_SETTINGS.maxConcurrentRuntimes,
     ),
-    maxLoginAttempts:
-      typeof raw.maxLoginAttempts === 'number' && raw.maxLoginAttempts > 0
-        ? raw.maxLoginAttempts
-        : DEFAULT_SYSTEM_SETTINGS.maxLoginAttempts,
-    loginLockoutMinutes:
-      typeof raw.loginLockoutMinutes === 'number' && raw.loginLockoutMinutes > 0
-        ? raw.loginLockoutMinutes
-        : DEFAULT_SYSTEM_SETTINGS.loginLockoutMinutes,
     maxConcurrentScripts:
       typeof raw.maxConcurrentScripts === 'number' &&
       raw.maxConcurrentScripts > 0
@@ -3275,24 +3252,6 @@ function readSystemSettingsFromFile(): SystemSettings | null {
       typeof raw.scriptTimeout === 'number' && raw.scriptTimeout > 0
         ? raw.scriptTimeout
         : DEFAULT_SYSTEM_SETTINGS.scriptTimeout,
-    billingEnabled:
-      typeof raw.billingEnabled === 'boolean'
-        ? raw.billingEnabled
-        : DEFAULT_SYSTEM_SETTINGS.billingEnabled,
-    billingMode: 'wallet_first',
-    billingMinStartBalanceUsd:
-      typeof raw.billingMinStartBalanceUsd === 'number' &&
-      raw.billingMinStartBalanceUsd >= 0
-        ? raw.billingMinStartBalanceUsd
-        : DEFAULT_SYSTEM_SETTINGS.billingMinStartBalanceUsd,
-    billingCurrency:
-      typeof raw.billingCurrency === 'string' && raw.billingCurrency
-        ? raw.billingCurrency
-        : DEFAULT_SYSTEM_SETTINGS.billingCurrency,
-    billingCurrencyRate:
-      typeof raw.billingCurrencyRate === 'number' && raw.billingCurrencyRate > 0
-        ? raw.billingCurrencyRate
-        : DEFAULT_SYSTEM_SETTINGS.billingCurrencyRate,
     memoryQueryTimeout:
       typeof raw.memoryQueryTimeout === 'number' && raw.memoryQueryTimeout > 0
         ? raw.memoryQueryTimeout
@@ -3367,14 +3326,6 @@ function buildEnvFallbackSettings(): SystemSettings {
         process.env.MAX_CONCURRENT_CONTAINERS,
       DEFAULT_SYSTEM_SETTINGS.maxConcurrentRuntimes,
     ),
-    maxLoginAttempts: parseIntEnv(
-      process.env.MAX_LOGIN_ATTEMPTS,
-      DEFAULT_SYSTEM_SETTINGS.maxLoginAttempts,
-    ),
-    loginLockoutMinutes: parseIntEnv(
-      process.env.LOGIN_LOCKOUT_MINUTES,
-      DEFAULT_SYSTEM_SETTINGS.loginLockoutMinutes,
-    ),
     maxConcurrentScripts: parseIntEnv(
       process.env.MAX_CONCURRENT_SCRIPTS,
       DEFAULT_SYSTEM_SETTINGS.maxConcurrentScripts,
@@ -3382,20 +3333,6 @@ function buildEnvFallbackSettings(): SystemSettings {
     scriptTimeout: parseIntEnv(
       process.env.SCRIPT_TIMEOUT,
       DEFAULT_SYSTEM_SETTINGS.scriptTimeout,
-    ),
-    billingEnabled:
-      process.env.BILLING_ENABLED === 'true' ||
-      DEFAULT_SYSTEM_SETTINGS.billingEnabled,
-    billingMode: 'wallet_first',
-    billingMinStartBalanceUsd: parseFloatEnv(
-      process.env.BILLING_MIN_START_BALANCE_USD,
-      DEFAULT_SYSTEM_SETTINGS.billingMinStartBalanceUsd,
-    ),
-    billingCurrency:
-      process.env.BILLING_CURRENCY || DEFAULT_SYSTEM_SETTINGS.billingCurrency,
-    billingCurrencyRate: parseFloatEnv(
-      process.env.BILLING_CURRENCY_RATE,
-      DEFAULT_SYSTEM_SETTINGS.billingCurrencyRate,
     ),
     memoryQueryTimeout: parseIntEnv(
       process.env.MEMORY_QUERY_TIMEOUT,
@@ -3489,20 +3426,10 @@ export function saveSystemSettings(
   if (merged.maxConcurrentRuntimes < 1) merged.maxConcurrentRuntimes = 1;
   if (merged.maxConcurrentRuntimes > 100)
     merged.maxConcurrentRuntimes = 100;
-  if (merged.maxLoginAttempts < 1) merged.maxLoginAttempts = 1;
-  if (merged.maxLoginAttempts > 100) merged.maxLoginAttempts = 100;
-  if (merged.loginLockoutMinutes < 1) merged.loginLockoutMinutes = 1;
-  if (merged.loginLockoutMinutes > 1440) merged.loginLockoutMinutes = 1440; // max 24 hours
   if (merged.maxConcurrentScripts < 1) merged.maxConcurrentScripts = 1;
   if (merged.maxConcurrentScripts > 50) merged.maxConcurrentScripts = 50;
   if (merged.scriptTimeout < 5000) merged.scriptTimeout = 5000; // min 5s
   if (merged.scriptTimeout > 600000) merged.scriptTimeout = 600000; // max 10 min
-  merged.billingMode = 'wallet_first';
-  if (merged.billingMinStartBalanceUsd < 0)
-    merged.billingMinStartBalanceUsd =
-      DEFAULT_SYSTEM_SETTINGS.billingMinStartBalanceUsd;
-  if (merged.billingMinStartBalanceUsd > 1000000)
-    merged.billingMinStartBalanceUsd = 1000000;
   if (merged.memoryQueryTimeout < 10000) merged.memoryQueryTimeout = 10000; // min 10s
   if (merged.memoryQueryTimeout > 600000) merged.memoryQueryTimeout = 600000; // max 10 min
   if (merged.memoryGlobalSleepTimeout < 60000)
