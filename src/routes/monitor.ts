@@ -103,7 +103,9 @@ function resolveRuntimeAccess(
   return {
     accessJid: runtimeJid,
     sessionId: session?.id || null,
-    runnerId: session?.runner_id || (group.llm_provider === 'openai' ? 'codex' : defaultRunnerId),
+    runnerId:
+      session?.runner_id
+        || resolveLegacyRunnerId(group.llm_provider, defaultRunnerId),
   };
 }
 
@@ -112,6 +114,15 @@ function normalizeRuntimeLabel(raw: string | null | undefined): string | null {
   if (raw.startsWith('host-')) return `local-${raw.slice('host-'.length)}`;
   if (raw.startsWith('container-')) return `local-${raw.slice('container-'.length)}`;
   return raw;
+}
+
+function resolveLegacyRunnerId(
+  llmProvider: 'claude' | 'openai' | undefined,
+  fallback: string,
+): string {
+  if (llmProvider === 'openai') return 'codex';
+  if (llmProvider === 'claude') return 'claude';
+  return fallback;
 }
 
 const monitorRoutes = new Hono<{ Variables: Variables }>();
