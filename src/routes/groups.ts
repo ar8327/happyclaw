@@ -7,7 +7,7 @@ import {
   GroupMemberAddSchema,
   ContainerEnvSchema,
 } from '../schemas.js';
-import type { AuthUser, RegisteredGroup, ExecutionMode } from '../types.js';
+import type { AuthUser, RegisteredGroup } from '../types.js';
 import { checkGroupLimit } from '../billing.js';
 import { DATA_DIR, GROUPS_DIR } from '../config.js';
 import {
@@ -57,25 +57,26 @@ import {
   searchMessages,
   countSearchResults,
   getContextSummary,
+  getSessionRecord,
 } from '../db.js';
 import { compressContext, isCompressing } from '../context-compressor.js';
 import { logger } from '../logger.js';
 import {
-  getContainerEnvConfig,
-  saveContainerEnvConfig,
-  deleteContainerEnvConfig,
-  toPublicContainerEnvConfig,
+  getRuntimeEnvConfig,
+  saveRuntimeEnvConfig,
+  deleteRuntimeEnvConfig,
+  toPublicRuntimeEnvConfig,
 } from '../runtime-config.js';
 import {
   loadMountAllowlist,
   findAllowedRoot,
   matchesBlockedPattern,
 } from '../mount-security.js';
+import { initializeWorkspaceFromLocalDirectory } from '../workspace-init.js';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs';
-import fsp from 'node:fs/promises';
 import path from 'node:path';
 import net from 'node:net';
 import { z } from 'zod';
@@ -164,6 +165,28 @@ function normalizeGroupName(name: unknown): string {
   return name.trim().slice(0, MAX_GROUP_NAME_LEN);
 }
 
+function resolveRouteGroup(
+  id: string,
+): { accessJid: string; group: RegisteredGroup } | null {
+  const direct = getRegisteredGroup(id);
+  if (direct) return { accessJid: id, group: direct };
+
+  const session = getSessionRecord(id);
+  if (!session) return null;
+
+  const folder = session.id.startsWith('main:')
+    ? session.id.slice('main:'.length)
+    : session.parent_session_id?.startsWith('main:')
+      ? session.parent_session_id.slice('main:'.length)
+      : null;
+  if (!folder) return null;
+
+  const accessJid = getJidsByFolder(folder).find((jid) => jid.startsWith('web:'));
+  if (!accessJid) return null;
+  const group = getRegisteredGroup(accessJid);
+  return group ? { accessJid, group } : null;
+}
+
 interface GroupPayloadItem {
   name: string;
   folder: string;
@@ -173,7 +196,7 @@ interface GroupPayloadItem {
   deletable: boolean;
   lastMessage?: string;
   lastMessageTime?: string;
-  execution_mode: 'container' | 'host';
+  execution_mode: 'local';
   custom_cwd?: string;
   is_home?: boolean;
   is_my_home?: boolean;
@@ -207,8 +230,6 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
   for (const [jid, group] of Object.entries(groups)) {
     const isHome = !!group.is_home;
     const isWeb = jid.startsWith('web:');
-    const isHost = isHostExecutionGroup(group);
-
     // Hide IM channels that belong to a home folder.
     // These are merged into the home conversation in UI and message APIs.
     if (!isWeb && !isHome && homeFolders.has(group.folder)) continue;
@@ -216,10 +237,6 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
     // Hide other users' home groups from the chat sidebar.
     // Each user only sees their own home container.
     if (isHome && group.created_by !== user.id) continue;
-
-    // Host execution groups require admin unless it's the user's own home group
-    if (isHost && !isAdmin && !(isHome && group.created_by === user.id))
-      continue;
 
     // User isolation: all users only see their own groups + shared groups
     if (!canAccessGroup({ id: user.id, role: user.role }, { ...group, jid }))
@@ -287,7 +304,7 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
         latest?.timestamp ||
         chats.get(jid)?.last_message_time ||
         group.added_at,
-      execution_mode: group.executionMode || 'container',
+      execution_mode: 'local',
       custom_cwd: isAdmin ? group.customCwd : undefined,
       is_home: isHome || undefined,
       is_my_home: (isHome && group.created_by === user.id) || undefined,
@@ -326,7 +343,7 @@ function removeFlowArtifacts(folder: string): void {
     recursive: true,
     force: true,
   });
-  deleteContainerEnvConfig(folder);
+  deleteRuntimeEnvConfig(folder);
 }
 
 function clearSessionJsonlFiles(folder: string, agentId?: string): void {
@@ -372,10 +389,10 @@ function resetWorkspaceForGroup(folder: string): void {
 }
 
 function toPublicContainerEnvForUser(
-  config: ReturnType<typeof getContainerEnvConfig>,
+  config: ReturnType<typeof getRuntimeEnvConfig>,
   user: AuthUser,
 ) {
-  const base = toPublicContainerEnvConfig(config);
+  const base = toPublicRuntimeEnvConfig(config);
   if (
     user.role === 'admin' ||
     (user.permissions && user.permissions.includes('manage_group_env'))
@@ -414,8 +431,8 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     return c.json({ error: 'Group name is required' }, 400);
   }
 
-  const executionMode = validation.data.execution_mode || 'container';
-  const customCwd = validation.data.custom_cwd; // Schema already trims and converts empty to undefined
+  const executionMode = validation.data.execution_mode;
+  const customCwd = validation.data.custom_cwd;
   const initSourcePath = validation.data.init_source_path;
   const initGitUrl = validation.data.init_git_url;
   const authUser = c.get('user') as AuthUser;
@@ -434,89 +451,24 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     );
   }
 
-  // init_source_path / init_git_url 仅 container 模式可用
-  if (executionMode === 'host' && (initSourcePath || initGitUrl)) {
+  if (executionMode) {
     return c.json(
       {
         error:
-          'init_source_path and init_git_url are only valid for container mode',
+          'execution_mode has been removed. New sessions always use the unified local runtime.',
       },
       400,
     );
   }
 
-  if (executionMode === 'host') {
-    if (!hasHostExecutionPermission(authUser)) {
-      return c.json(
-        { error: 'Insufficient permissions for host execution mode' },
-        403,
-      );
-    }
-    if (customCwd) {
-      if (!path.isAbsolute(customCwd)) {
-        return c.json({ error: 'custom_cwd must be an absolute path' }, 400);
-      }
-
-      // 检查路径是否存在
-      let realPath: string;
-      try {
-        const stat = fs.statSync(customCwd);
-        if (!stat.isDirectory()) {
-          return c.json(
-            { error: 'custom_cwd must be an existing directory' },
-            400,
-          );
-        }
-        realPath = fs.realpathSync(customCwd);
-      } catch {
-        return c.json({ error: 'custom_cwd directory does not exist' }, 400);
-      }
-
-      // 白名单校验：检查路径是否在允许的根目录下
-      const allowlist = loadMountAllowlist();
-      if (
-        allowlist &&
-        allowlist.allowedRoots &&
-        allowlist.allowedRoots.length > 0
-      ) {
-        let allowed = false;
-        for (const root of allowlist.allowedRoots) {
-          const expandedRoot = root.path.startsWith('~')
-            ? path.join(
-                process.env.HOME || '/Users/user',
-                root.path.slice(root.path.startsWith('~/') ? 2 : 1),
-              )
-            : path.resolve(root.path);
-
-          let realRoot: string;
-          try {
-            realRoot = fs.realpathSync(expandedRoot);
-          } catch {
-            continue; // 允许的根目录不存在，跳过
-          }
-
-          const relative = path.relative(realRoot, realPath);
-          if (!relative.startsWith('..') && !path.isAbsolute(relative)) {
-            allowed = true;
-            break;
-          }
-        }
-
-        if (!allowed) {
-          const allowedPaths = allowlist.allowedRoots
-            .map((r) => r.path)
-            .join(', ');
-          return c.json(
-            {
-              error: `custom_cwd must be under an allowed root. Allowed roots: ${allowedPaths}. Check config/mount-allowlist.json`,
-            },
-            403,
-          );
-        }
-      }
-    }
-  } else if (customCwd) {
-    return c.json({ error: 'custom_cwd is only valid for host mode' }, 400);
+  if (customCwd) {
+    return c.json(
+      {
+        error:
+          'custom_cwd has moved to session settings. New sessions no longer accept it at creation time.',
+      },
+      400,
+    );
   }
 
   // 验证 init_source_path
@@ -631,10 +583,9 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     name,
     folder,
     added_at: now,
-    executionMode: executionMode as ExecutionMode,
-    customCwd: executionMode === 'host' ? customCwd : undefined,
-    initSourcePath: executionMode !== 'host' ? initSourcePath : undefined,
-    initGitUrl: executionMode !== 'host' ? initGitUrl : undefined,
+    executionMode: 'local',
+    initSourcePath,
+    initGitUrl,
     created_by: authUser.id,
   };
 
@@ -650,8 +601,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
 
   try {
     if (initSourcePath) {
-      await fsp.mkdir(groupDir, { recursive: true });
-      await fsp.cp(initSourcePath, groupDir, { recursive: true });
+      await initializeWorkspaceFromLocalDirectory(initSourcePath, groupDir);
       logger.info(
         { folder, source: initSourcePath },
         'Workspace initialized from local directory',
@@ -693,10 +643,8 @@ groupRoutes.post('/', authMiddleware, async (c) => {
       name: group.name,
       folder: group.folder,
       added_at: group.added_at,
-      execution_mode: group.executionMode || 'container',
-      custom_cwd: hasHostExecutionPermission(authUser)
-        ? group.customCwd
-        : undefined,
+      execution_mode: 'local' as const,
+      custom_cwd: undefined,
       kind: 'web',
       editable: true,
       deletable: true,
@@ -715,8 +663,9 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
   if (!deps) return c.json({ error: 'Server not initialized' }, 500);
 
   const jid = c.req.param('jid');
-  const existing = getRegisteredGroup(jid);
-  if (!existing) return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) return c.json({ error: 'Group not found' }, 404);
+  const { accessJid, group: existing } = resolved;
 
   const authUser = c.get('user') as AuthUser;
 
@@ -769,7 +718,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     if (
       !canAccessGroup(
         { id: authUser.id, role: authUser.role },
-        { ...existing, jid },
+        { ...existing, jid: accessJid },
       )
     ) {
       return c.json({ error: 'Group not found' }, 404);
@@ -779,12 +728,12 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     if (
       !canModifyGroup(
         { id: authUser.id, role: authUser.role },
-        { ...existing, jid },
+        { ...existing, jid: accessJid },
       )
     ) {
       return c.json({ error: 'Group not found' }, 404);
     }
-    if (!jid.startsWith('web:') && authUser.role !== 'admin') {
+    if (!accessJid.startsWith('web:') && authUser.role !== 'admin') {
       return c.json({ error: 'This group cannot be edited' }, 403);
     }
     if (
@@ -801,9 +750,9 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
   // Handle pin/unpin (per-user, separate table)
   let pinned_at: string | undefined;
   if (is_pinned === true) {
-    pinned_at = pinGroup(authUser.id, jid);
+    pinned_at = pinGroup(authUser.id, accessJid);
   } else if (is_pinned === false) {
-    unpinGroup(authUser.id, jid);
+    unpinGroup(authUser.id, accessJid);
   }
 
   // Update registered group if name, skills, activation_mode, llm_provider, model, or thinking_effort changed
@@ -813,7 +762,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
       folder: existing.folder,
       added_at: existing.added_at,
       containerConfig: existing.containerConfig,
-      executionMode: existing.executionMode,
+      executionMode: 'local',
       customCwd: existing.customCwd,
       initSourcePath: existing.initSourcePath,
       initGitUrl: existing.initGitUrl,
@@ -853,9 +802,9 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
           : existing.knowledge_extraction,
     };
 
-    setRegisteredGroup(jid, updated);
-    if (name) updateChatName(jid, name);
-    deps.getRegisteredGroups()[jid] = updated;
+    setRegisteredGroup(accessJid, updated);
+    if (name) updateChatName(accessJid, name);
+    deps.getRegisteredGroups()[accessJid] = updated;
   }
 
   return c.json({ success: true, pinned_at });
@@ -867,21 +816,22 @@ groupRoutes.post('/:jid/compress', authMiddleware, async (c) => {
   if (!deps) return c.json({ error: 'Server not initialized' }, 500);
 
   const jid = c.req.param('jid');
-  const existing = getRegisteredGroup(jid);
-  if (!existing) return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) return c.json({ error: 'Group not found' }, 404);
+  const { accessJid, group: existing } = resolved;
 
   const authUser = c.get('user') as AuthUser;
   if (
     !canModifyGroup(
       { id: authUser.id, role: authUser.role },
-      { ...existing, jid },
+      { ...existing, jid: accessJid },
     )
   ) {
     return c.json({ error: 'Group not found' }, 404);
   }
 
   // Reject if agent is currently running or compression already in progress
-  if (deps.queue.hasDirectActiveRunner(jid)) {
+  if (deps.queue.hasDirectActiveRunner(accessJid)) {
     return c.json(
       { error: 'Agent 正在运行中，请等待完成后再压缩' },
       409,
@@ -901,7 +851,7 @@ groupRoutes.post('/:jid/compress', authMiddleware, async (c) => {
   const compressOpts = deps.buildCompressOptions?.(existing) ?? {};
   // Snapshot boundary — only compress messages that exist right now
   compressOpts.beforeTimestamp = new Date().toISOString();
-  const result = await compressContext(existing.folder, jid, compressOpts);
+  const result = await compressContext(existing.folder, accessJid, compressOpts);
   if (!result.success) {
     return c.json({ error: result.error }, 400);
   }
@@ -922,20 +872,21 @@ groupRoutes.post('/:jid/compress', authMiddleware, async (c) => {
 // GET /api/groups/:jid/summary - 获取压缩摘要
 groupRoutes.get('/:jid/summary', authMiddleware, (c) => {
   const jid = c.req.param('jid');
-  const existing = getRegisteredGroup(jid);
-  if (!existing) return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) return c.json({ error: 'Group not found' }, 404);
+  const { accessJid, group: existing } = resolved;
 
   const authUser = c.get('user') as AuthUser;
   if (
     !canAccessGroup(
       { id: authUser.id, role: authUser.role },
-      { ...existing, jid },
+      { ...existing, jid: accessJid },
     )
   ) {
     return c.json({ error: 'Group not found' }, 404);
   }
 
-  const summary = getContextSummary(existing.folder, jid);
+  const summary = getContextSummary(existing.folder, accessJid);
   return c.json({ summary: summary ?? null });
 });
 
@@ -945,15 +896,21 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
   if (!deps) return c.json({ error: 'Server not initialized' }, 500);
 
   const jid = c.req.param('jid');
-  const existing = getRegisteredGroup(jid);
-  if (!existing) return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) return c.json({ error: 'Group not found' }, 404);
+  const { accessJid, group: existing } = resolved;
 
   const authUser = c.get('user') as AuthUser;
-  if (!canDeleteGroup({ id: authUser.id, role: authUser.role }, existing)) {
+  if (
+    !canDeleteGroup(
+      { id: authUser.id, role: authUser.role },
+      { ...existing, jid: accessJid },
+    )
+  ) {
     return c.json({ error: 'Group not found' }, 404);
   }
 
-  if (!jid.startsWith('web:')) {
+  if (!accessJid.startsWith('web:')) {
     return c.json({ error: 'This group cannot be deleted' }, 403);
   }
 
@@ -965,7 +922,7 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
   }
 
   // Block deletion if any IM binding exists (agent or main conversation)
-  const agents = listAgentsByJid(jid);
+  const agents = listAgentsByJid(accessJid);
   const boundAgents: Array<{
     agentId: string;
     agentName: string;
@@ -984,10 +941,10 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
     }
   }
   // Search by actual JID; also check legacy folder-based format for backward compat
-  const mainBoundByJid = getGroupsByTargetMainJid(jid);
+  const mainBoundByJid = getGroupsByTargetMainJid(accessJid);
   const legacyMainJid = `web:${existing.folder}`;
   const mainBoundByFolder =
-    legacyMainJid !== jid ? getGroupsByTargetMainJid(legacyMainJid) : [];
+    legacyMainJid !== accessJid ? getGroupsByTargetMainJid(legacyMainJid) : [];
   const mainBoundJids = new Set(mainBoundByJid.map((l) => l.jid));
   const mainBound = [
     ...mainBoundByJid,
@@ -1010,50 +967,56 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
 
   // Wait for container to fully stop before cleaning up its files
   try {
-    await deps.queue.stopGroup(jid);
+    await deps.queue.stopSession(accessJid);
   } catch (err) {
     logger.error(
-      { jid, err },
-      'Failed to stop container before deleting group',
+      { jid: accessJid, err },
+      'Failed to stop runtime before deleting group',
     );
     return c.json(
-      { error: 'Failed to stop container, group not deleted' },
+      { error: 'Failed to stop runtime, group not deleted' },
       500,
     );
   }
-  deleteGroupData(jid, existing.folder);
+  deleteGroupData(accessJid, existing.folder);
   removeFlowArtifacts(existing.folder);
 
-  delete deps.getRegisteredGroups()[jid];
+  delete deps.getRegisteredGroups()[accessJid];
   delete deps.getSessions()[existing.folder];
-  deps.setLastAgentTimestamp(jid, { rowid: 0 });
+  deps.setLastAgentTimestamp(accessJid, { rowid: 0 });
 
   return c.json({ success: true });
 });
 
-// POST /api/groups/:jid/stop - 停止当前运行的容器/进程
+// POST /api/groups/:jid/stop - 停止当前运行的 Runtime
 groupRoutes.post('/:jid/stop', authMiddleware, async (c) => {
   const deps = getWebDeps();
   if (!deps) return c.json({ error: 'Server not initialized' }, 500);
 
   const jid = c.req.param('jid');
-  const group = getRegisteredGroup(jid);
-  if (!group) return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) return c.json({ error: 'Group not found' }, 404);
+  const { accessJid, group } = resolved;
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
+  if (
+    !canAccessGroup(
+      { id: authUser.id, role: authUser.role },
+      { ...group, jid: accessJid },
+    )
+  ) {
     return c.json({ error: 'Group not found' }, 404);
   }
 
   try {
-    await deps.queue.stopGroup(jid);
+    await deps.queue.stopSession(accessJid);
     return c.json({ success: true });
   } catch (err) {
     logger.error({ jid, err }, 'Failed to stop group');
-    return c.json({ error: 'Failed to stop container' }, 500);
+    return c.json({ error: 'Failed to stop runtime' }, 500);
   }
 });
 
-// POST /api/groups/:jid/interrupt - 中断当前查询（不杀容器）
+// POST /api/groups/:jid/interrupt - 中断当前查询
 groupRoutes.post('/:jid/interrupt', authMiddleware, async (c) => {
   const deps = getWebDeps();
   if (!deps) return c.json({ error: 'Server not initialized' }, 500);
@@ -1063,16 +1026,23 @@ groupRoutes.post('/:jid/interrupt', authMiddleware, async (c) => {
   // Support virtual JIDs for conversation agents: {jid}#agent:{agentId}
   const agentSep = jid.indexOf('#agent:');
   const baseJid = agentSep >= 0 ? jid.slice(0, agentSep) : jid;
-  const group = getRegisteredGroup(baseJid);
-  if (!group) return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(baseJid);
+  if (!resolved) return c.json({ error: 'Group not found' }, 404);
+  const { accessJid, group } = resolved;
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
+  if (
+    !canAccessGroup(
+      { id: authUser.id, role: authUser.role },
+      { ...group, jid: accessJid },
+    )
+  ) {
     return c.json({ error: 'Group not found' }, 404);
   }
+  const targetJid = agentSep >= 0 ? `${accessJid}${jid.slice(agentSep)}` : accessJid;
 
-  const interrupted = deps.queue.interruptQuery(jid);
+  const interrupted = deps.queue.interruptQuery(targetJid);
   if (interrupted) {
-    broadcastRunnerState(jid, 'interrupting', '正在中断当前 Turn');
+    broadcastRunnerState(targetJid, 'interrupting', '正在中断当前 Turn');
     if (agentSep < 0) {
       turnObservabilityManager.setRunnerState(
         group.folder,
@@ -1086,19 +1056,19 @@ groupRoutes.post('/:jid/interrupt', authMiddleware, async (c) => {
     const messageId = crypto.randomUUID();
     const timestamp = new Date().toISOString();
     try {
-      ensureChatExists(jid);
+      ensureChatExists(targetJid);
       storeMessageDirect(
         messageId,
-        jid,
+        targetJid,
         '__system__',
         'system',
         'query_interrupted',
         timestamp,
         true,
       );
-      broadcastNewMessage(jid, {
+      broadcastNewMessage(targetJid, {
         id: messageId,
-        chat_jid: jid,
+        chat_jid: targetJid,
         sender: '__system__',
         sender_name: 'system',
         content: 'query_interrupted',
@@ -1122,11 +1092,15 @@ groupRoutes.post('/:jid/reset-session', authMiddleware, async (c) => {
   if (!deps) return c.json({ error: 'Server not initialized' }, 500);
 
   const jid = c.req.param('jid');
-  const group = getRegisteredGroup(jid);
-  if (!group) return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) return c.json({ error: 'Group not found' }, 404);
+  const { accessJid, group } = resolved;
   const authUser = c.get('user') as AuthUser;
   if (
-    !canModifyGroup({ id: authUser.id, role: authUser.role }, { ...group, jid })
+    !canModifyGroup(
+      { id: authUser.id, role: authUser.role },
+      { ...group, jid: accessJid },
+    )
   ) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -1151,7 +1125,7 @@ groupRoutes.post('/:jid/reset-session', authMiddleware, async (c) => {
   // Validate agentId belongs to this group
   if (agentId) {
     const agent = getAgent(agentId);
-    if (!agent || agent.chat_jid !== jid) {
+    if (!agent || agent.chat_jid !== accessJid) {
       return c.json({ error: 'Agent not found' }, 404);
     }
   }
@@ -1170,22 +1144,22 @@ groupRoutes.post('/:jid/reset-session', authMiddleware, async (c) => {
   try {
     if (agentId) {
       // Agent-specific: only stop the agent's virtual JID process
-      const virtualJid = `${jid}#agent:${agentId}`;
-      await deps.queue.stopGroup(virtualJid, { force: true });
+      const virtualJid = `${accessJid}#agent:${agentId}`;
+      await deps.queue.stopSession(virtualJid, { force: true });
     } else {
       // Main session: stop ALL processes for this folder
       const siblingJids = getJidsByFolder(group.folder);
       await Promise.all(
-        siblingJids.map((j) => deps.queue.stopGroup(j, { force: true })),
+        siblingJids.map((j) => deps.queue.stopSession(j, { force: true })),
       );
     }
   } catch (err) {
     logger.error(
       { jid, agentId, err },
-      'Failed to stop containers before resetting session',
+      'Failed to stop runtimes before resetting session',
     );
     return c.json(
-      { error: 'Failed to stop container, session not reset' },
+      { error: 'Failed to stop runtime, session not reset' },
       500,
     );
   }
@@ -1222,7 +1196,7 @@ groupRoutes.post('/:jid/reset-session', authMiddleware, async (c) => {
   }
 
   // 4. Insert system divider message into the correct JID (best-effort).
-  const targetJid = agentId ? `${jid}#agent:${agentId}` : jid;
+  const targetJid = agentId ? `${accessJid}#agent:${agentId}` : accessJid;
   const dividerMessageId = crypto.randomUUID();
   const timestamp = new Date().toISOString();
   let dividerRowid = 0;
@@ -1257,8 +1231,8 @@ groupRoutes.post('/:jid/reset-session', authMiddleware, async (c) => {
   // 5. Advance lastAgentTimestamp so old messages before the reset are not
   //    re-sent to the next fresh agent session.
   if (agentId) {
-    const virtualJid = `${jid}#agent:${agentId}`;
-    deps.setLastAgentTimestamp(virtualJid, { rowid: dividerRowid });
+    const virtualAccessJid = `${accessJid}#agent:${agentId}`;
+    deps.setLastAgentTimestamp(virtualAccessJid, { rowid: dividerRowid });
   } else {
     // Main session: advance cursor for ALL sibling JIDs sharing this folder.
     const siblingJids = getJidsByFolder(group.folder);
@@ -1269,7 +1243,7 @@ groupRoutes.post('/:jid/reset-session', authMiddleware, async (c) => {
 
   logger.info(
     { jid, folder: group.folder, agentId },
-    'Session reset: cleared session files and stopped containers',
+    'Session reset: cleared session files and stopped runtimes',
   );
 
   return c.json({ success: true, dividerMessageId });
@@ -1281,11 +1255,15 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
   if (!deps) return c.json({ error: 'Server not initialized' }, 500);
 
   const jid = c.req.param('jid');
-  const group = getRegisteredGroup(jid);
-  if (!group) return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) return c.json({ error: 'Group not found' }, 404);
+  const { accessJid, group } = resolved;
   const authUser = c.get('user') as AuthUser;
   if (
-    !canModifyGroup({ id: authUser.id, role: authUser.role }, { ...group, jid })
+    !canModifyGroup(
+      { id: authUser.id, role: authUser.role },
+      { ...group, jid: accessJid },
+    )
   ) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -1299,18 +1277,18 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
   // Collect all JIDs sharing the same folder (e.g., web:main + feishu groups)
   const siblingJids = getJidsByFolder(group.folder);
 
-  // 1. Stop ALL active processes for this folder first to avoid writes during cleanup.
+  // 1. Stop all active runtimes for this folder first to avoid writes during cleanup.
   try {
     await Promise.all(
-      siblingJids.map((j) => deps.queue.stopGroup(j, { force: true })),
+      siblingJids.map((j) => deps.queue.stopSession(j, { force: true })),
     );
   } catch (err) {
     logger.error(
       { jid, siblingJids, err },
-      'Failed to stop containers before clearing history',
+      'Failed to stop runtimes before clearing history',
     );
     return c.json(
-      { error: 'Failed to stop container, history not cleared' },
+      { error: 'Failed to stop runtime, history not cleared' },
       500,
     );
   }
@@ -1357,13 +1335,19 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
 // GET /api/groups/:jid/messages - 获取消息历史
 groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
-  const group = getRegisteredGroup(jid);
-  if (!group) {
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
+  const { accessJid, group } = resolved;
 
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
+  if (
+    !canAccessGroup(
+      { id: authUser.id, role: authUser.role },
+      { ...group, jid: accessJid },
+    )
+  ) {
     return c.json({ error: 'Group not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
@@ -1385,11 +1369,11 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
   // Agent conversation: query messages from the virtual chat_jid
   if (agentIdParam) {
     const agent = getAgent(agentIdParam);
-    if (!agent || agent.chat_jid !== jid) {
+    if (!agent || agent.chat_jid !== accessJid) {
       return c.json({ error: 'Agent not found' }, 404);
     }
 
-    const virtualJid = `${jid}#agent:${agentIdParam}`;
+    const virtualJid = `${accessJid}#agent:${agentIdParam}`;
     if (after) {
       const messages = getMessagesAfter(virtualJid, after, limit);
       annotateMessagesWithTrace(messages);
@@ -1405,7 +1389,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
   // is_home 群组合并查询：将同 folder 下所有 JID（web + feishu/telegram IM 通道）的消息合并展示
   // - admin: merge all siblings in the folder (shared admin home)
   // - member: merge only siblings with same owner to prevent cross-user leakage
-  const queryJids = [jid];
+  const queryJids = [accessJid];
   if (group.is_home) {
     const siblingJids = getJidsByFolder(group.folder);
     for (const siblingJid of siblingJids) {
@@ -1426,11 +1410,11 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
   if (queryJids.length === 1) {
     // 单 JID 走原路径
     if (after) {
-      const messages = getMessagesAfter(jid, after, limit);
+      const messages = getMessagesAfter(accessJid, after, limit);
       annotateMessagesWithTrace(messages);
       return c.json({ messages });
     }
-    const rows = getMessagesPage(jid, before, limit + 1);
+    const rows = getMessagesPage(accessJid, before, limit + 1);
     const hasMore = rows.length > limit;
     const messages = hasMore ? rows.slice(0, limit) : rows;
     annotateMessagesWithTrace(messages);
@@ -1453,13 +1437,19 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
 // GET /api/groups/:jid/messages/search - 工作区内搜索消息
 groupRoutes.get('/:jid/messages/search', authMiddleware, (c) => {
   const jid = c.req.param('jid');
-  const group = getRegisteredGroup(jid);
-  if (!group) {
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
+  const { accessJid, group } = resolved;
 
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
+  if (
+    !canAccessGroup(
+      { id: authUser.id, role: authUser.role },
+      { ...group, jid: accessJid },
+    )
+  ) {
     return c.json({ error: 'Group not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
@@ -1490,7 +1480,7 @@ groupRoutes.get('/:jid/messages/search', authMiddleware, (c) => {
     : undefined;
 
   // Home group: merge sibling JIDs (same logic as messages endpoint)
-  const queryJids = [jid];
+  const queryJids = [accessJid];
   if (group.is_home) {
     const siblingJids = getJidsByFolder(group.folder);
     for (const siblingJid of siblingJids) {
@@ -1518,10 +1508,16 @@ groupRoutes.get('/:jid/messages/search', authMiddleware, (c) => {
 groupRoutes.get('/:jid/messages/:messageId/trace', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const messageId = c.req.param('messageId');
-  const group = getRegisteredGroup(jid);
-  if (!group) return c.json({ blocks: [] });
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) return c.json({ blocks: [] });
+  const { accessJid, group } = resolved;
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
+  if (
+    !canAccessGroup(
+      { id: authUser.id, role: authUser.role },
+      { ...group, jid: accessJid },
+    )
+  ) {
     return c.json({ blocks: [] });
   }
 
@@ -1538,18 +1534,24 @@ groupRoutes.get('/:jid/messages/:messageId/trace', authMiddleware, (c) => {
 groupRoutes.delete('/:jid/messages/:messageId', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const messageId = c.req.param('messageId');
-  const group = getRegisteredGroup(jid);
-  if (!group) {
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
+  const { accessJid, group } = resolved;
 
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
+  if (
+    !canAccessGroup(
+      { id: authUser.id, role: authUser.role },
+      { ...group, jid: accessJid },
+    )
+  ) {
     return c.json({ error: 'Group not found' }, 404);
   }
 
   // Ownership check: admin can delete any message, non-admin can only delete their own
-  const msg = getMessage(jid, messageId);
+  const msg = getMessage(accessJid, messageId);
   if (!msg) {
     return c.json({ error: 'Message not found' }, 404);
   }
@@ -1561,7 +1563,7 @@ groupRoutes.delete('/:jid/messages/:messageId', authMiddleware, (c) => {
     }
   }
 
-  const deleted = deleteMessage(jid, messageId);
+  const deleted = deleteMessage(accessJid, messageId);
   if (!deleted) {
     return c.json({ error: 'Message not found' }, 404);
   }
@@ -1572,11 +1574,12 @@ groupRoutes.delete('/:jid/messages/:messageId', authMiddleware, (c) => {
 // GET /api/groups/:jid/env - 获取容器环境变量配置
 groupRoutes.get('/:jid/env', authMiddleware, (c) => {
   const jid = c.req.param('jid');
-  const group = getRegisteredGroup(jid);
-  if (!group) return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) return c.json({ error: 'Group not found' }, 404);
+  const { accessJid, group } = resolved;
 
   const user = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: user.id, role: user.role }, group)) {
+  if (!canAccessGroup({ id: user.id, role: user.role }, { ...group, jid: accessJid })) {
     return c.json({ error: 'Group not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(user)) {
@@ -1594,18 +1597,24 @@ groupRoutes.get('/:jid/env', authMiddleware, (c) => {
     return c.json({ error: 'Insufficient permissions' }, 403);
   }
 
-  const config = getContainerEnvConfig(group.folder);
+  const config = getRuntimeEnvConfig(group.folder);
   return c.json(toPublicContainerEnvForUser(config, user));
 });
 
 // PUT /api/groups/:jid/env - 更新容器环境变量配置
 groupRoutes.put('/:jid/env', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
-  const group = getRegisteredGroup(jid);
-  if (!group) return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) return c.json({ error: 'Group not found' }, 404);
+  const { accessJid, group } = resolved;
 
   const envUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: envUser.id, role: envUser.role }, group)) {
+  if (
+    !canAccessGroup(
+      { id: envUser.id, role: envUser.role },
+      { ...group, jid: accessJid },
+    )
+  ) {
     return c.json({ error: 'Group not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(envUser)) {
@@ -1654,7 +1663,7 @@ groupRoutes.put('/:jid/env', authMiddleware, async (c) => {
     }
   }
 
-  const current = getContainerEnvConfig(group.folder);
+  const current = getRuntimeEnvConfig(group.folder);
 
   // Build updated config: only update fields that are explicitly provided
   const updated = { ...current };
@@ -1672,19 +1681,19 @@ groupRoutes.put('/:jid/env', authMiddleware, async (c) => {
   if (data.customEnv !== undefined) updated.customEnv = data.customEnv;
 
   try {
-    saveContainerEnvConfig(group.folder, updated);
+    saveRuntimeEnvConfig(group.folder, updated);
 
     // Restart container so it picks up the new env immediately
     const deps = getWebDeps();
     if (deps) {
-      await deps.queue.restartGroup(jid);
+      await deps.queue.restartSession(accessJid);
       logger.info(
-        { jid, folder: group.folder },
-        'Restarted container after env config update',
+        { jid: accessJid, folder: group.folder },
+        'Restarted runtime after env config update',
       );
     }
 
-    return c.json(toPublicContainerEnvConfig(updated));
+    return c.json(toPublicRuntimeEnvConfig(updated));
   } catch (err) {
     logger.error({ err }, 'Failed to save container env config');
     return c.json({ error: 'Failed to save config' }, 500);
@@ -1696,11 +1705,17 @@ groupRoutes.put('/:jid/env', authMiddleware, async (c) => {
 // GET /api/groups/:jid/members - 列出成员
 groupRoutes.get('/:jid/members', authMiddleware, (c) => {
   const jid = c.req.param('jid');
-  const group = getRegisteredGroup(jid);
-  if (!group) return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) return c.json({ error: 'Group not found' }, 404);
+  const { accessJid, group } = resolved;
 
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
+  if (
+    !canAccessGroup(
+      { id: authUser.id, role: authUser.role },
+      { ...group, jid: accessJid },
+    )
+  ) {
     return c.json({ error: 'Group not found' }, 404);
   }
 
@@ -1711,14 +1726,15 @@ groupRoutes.get('/:jid/members', authMiddleware, (c) => {
 // GET /api/groups/:jid/members/search?q=... - 搜索可添加的用户（owner/admin 权限）
 groupRoutes.get('/:jid/members/search', authMiddleware, (c) => {
   const jid = c.req.param('jid');
-  const group = getRegisteredGroup(jid);
-  if (!group) return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) return c.json({ error: 'Group not found' }, 404);
+  const { accessJid, group } = resolved;
 
   const authUser = c.get('user') as AuthUser;
   if (
     !canManageGroupMembers(
       { id: authUser.id, role: authUser.role },
-      { ...group, jid },
+      { ...group, jid: accessJid },
     )
   ) {
     return c.json({ error: 'Forbidden' }, 403);
@@ -1745,11 +1761,17 @@ groupRoutes.get('/:jid/members/search', authMiddleware, (c) => {
 // POST /api/groups/:jid/members - 添加成员
 groupRoutes.post('/:jid/members', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
-  const group = getRegisteredGroup(jid);
-  if (!group) return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) return c.json({ error: 'Group not found' }, 404);
+  const { accessJid, group } = resolved;
 
   const authUser = c.get('user') as AuthUser;
-  if (!canManageGroupMembers({ id: authUser.id, role: authUser.role }, group)) {
+  if (
+    !canManageGroupMembers(
+      { id: authUser.id, role: authUser.role },
+      { ...group, jid: accessJid },
+    )
+  ) {
     return c.json({ error: 'Insufficient permissions' }, 403);
   }
 
@@ -1778,9 +1800,9 @@ groupRoutes.post('/:jid/members', authMiddleware, async (c) => {
   }
 
   addGroupMember(group.folder, targetUserId, 'member', authUser.id);
-  invalidateAllowedUserCache(jid);
+  invalidateAllowedUserCache(accessJid);
   logger.info(
-    { jid, folder: group.folder, targetUserId, addedBy: authUser.id },
+    { jid: accessJid, folder: group.folder, targetUserId, addedBy: authUser.id },
     'Group member added',
   );
 
@@ -1792,8 +1814,9 @@ groupRoutes.post('/:jid/members', authMiddleware, async (c) => {
 groupRoutes.delete('/:jid/members/:userId', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const targetUserId = c.req.param('userId');
-  const group = getRegisteredGroup(jid);
-  if (!group) return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) return c.json({ error: 'Group not found' }, 404);
+  const { accessJid, group } = resolved;
 
   const authUser = c.get('user') as AuthUser;
 
@@ -1801,7 +1824,10 @@ groupRoutes.delete('/:jid/members/:userId', authMiddleware, (c) => {
   const isSelfRemoval = targetUserId === authUser.id;
   if (!isSelfRemoval) {
     if (
-      !canManageGroupMembers({ id: authUser.id, role: authUser.role }, group)
+      !canManageGroupMembers(
+        { id: authUser.id, role: authUser.role },
+        { ...group, jid: accessJid },
+      )
     ) {
       return c.json({ error: 'Insufficient permissions' }, 403);
     }
@@ -1819,10 +1845,10 @@ groupRoutes.delete('/:jid/members/:userId', authMiddleware, (c) => {
   }
 
   removeGroupMember(group.folder, targetUserId);
-  invalidateAllowedUserCache(jid);
+  invalidateAllowedUserCache(accessJid);
   logger.info(
     {
-      jid,
+      jid: accessJid,
       folder: group.folder,
       targetUserId,
       removedBy: authUser.id,
@@ -1843,11 +1869,12 @@ groupRoutes.put('/:jid/mode', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
   const jid = decodeURIComponent(c.req.param('jid'));
 
-  const group = getRegisteredGroup(jid);
-  if (!group) {
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
-  if (!canAccessGroup(user, { ...group, jid })) {
+  const { accessJid, group } = resolved;
+  if (!canAccessGroup(user, { ...group, jid: accessJid })) {
     return c.json({ error: 'Not authorized' }, 403);
   }
 
@@ -1866,7 +1893,7 @@ groupRoutes.put('/:jid/mode', authMiddleware, async (c) => {
   const deps = getWebDeps();
   if (!deps) return c.json({ error: 'Server not initialized' }, 500);
 
-  const sent = deps.queue.setPermissionMode(jid, mode);
+  const sent = deps.queue.setPermissionMode(accessJid, mode);
   return c.json({ success: true, mode, applied: sent });
 });
 
@@ -1875,11 +1902,17 @@ groupRoutes.put('/:jid/mode', authMiddleware, async (c) => {
 // GET /api/groups/:jid/mcp - 获取工作区 MCP 配置
 groupRoutes.get('/:jid/mcp', authMiddleware, (c) => {
   const jid = c.req.param('jid');
-  const group = getRegisteredGroup(jid);
-  if (!group) return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) return c.json({ error: 'Group not found' }, 404);
+  const { accessJid, group } = resolved;
 
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
+  if (
+    !canAccessGroup(
+      { id: authUser.id, role: authUser.role },
+      { ...group, jid: accessJid },
+    )
+  ) {
     return c.json({ error: 'Group not found' }, 404);
   }
 
@@ -1892,11 +1925,17 @@ groupRoutes.get('/:jid/mcp', authMiddleware, (c) => {
 // PUT /api/groups/:jid/mcp - 更新工作区 MCP 配置
 groupRoutes.put('/:jid/mcp', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
-  const group = getRegisteredGroup(jid);
-  if (!group) return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) return c.json({ error: 'Group not found' }, 404);
+  const { accessJid, group } = resolved;
 
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
+  if (
+    !canAccessGroup(
+      { id: authUser.id, role: authUser.role },
+      { ...group, jid: accessJid },
+    )
+  ) {
     return c.json({ error: 'Group not found' }, 404);
   }
 
@@ -1933,7 +1972,7 @@ groupRoutes.put('/:jid/mcp', authMiddleware, async (c) => {
       selected_mcps !== undefined ? selected_mcps : group.selected_mcps,
   };
 
-  setRegisteredGroup(jid, updatedGroup);
+  setRegisteredGroup(accessJid, updatedGroup);
 
   return c.json({
     success: true,
@@ -1942,14 +1981,20 @@ groupRoutes.put('/:jid/mcp', authMiddleware, async (c) => {
   });
 });
 
-// POST /api/groups/:jid/stop - 停止工作区容器/进程（下次发送消息时自动重启）
+// POST /api/groups/:jid/stop - 停止工作区 Runtime 下次发消息时自动重启
 groupRoutes.post('/:jid/stop', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
-  const group = getRegisteredGroup(jid);
-  if (!group) return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) return c.json({ error: 'Group not found' }, 404);
+  const { accessJid, group } = resolved;
 
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
+  if (
+    !canAccessGroup(
+      { id: authUser.id, role: authUser.role },
+      { ...group, jid: accessJid },
+    )
+  ) {
     return c.json({ error: 'Group not found' }, 404);
   }
 
@@ -1957,14 +2002,14 @@ groupRoutes.post('/:jid/stop', authMiddleware, async (c) => {
   if (!deps) return c.json({ error: 'Server not initialized' }, 500);
 
   try {
-    await deps.queue.stopGroup(jid);
+    await deps.queue.stopSession(accessJid);
     return c.json({
       success: true,
-      message: 'Container stopped. It will restart on the next message.',
+      message: 'Runtime stopped. It will restart on the next message.',
     });
   } catch (err) {
     logger.error({ jid, err }, 'Failed to stop group');
-    return c.json({ error: 'Failed to stop container' }, 500);
+    return c.json({ error: 'Failed to stop runtime' }, 500);
   }
 });
 
