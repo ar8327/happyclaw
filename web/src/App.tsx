@@ -57,7 +57,7 @@ export function App() {
           <Route path="/settings" element={<ErrorBoundary label="SettingsPage"><Suspense fallback={null}><SettingsPage /></Suspense></ErrorBoundary>} />
         </Route>
 
-        {/* Default redirect — go through AuthGuard to detect setup state */}
+        {/* Default redirect */}
         <Route path="/" element={<Navigate to="/chat" replace />} />
         <Route path="*" element={<Navigate to="/chat" replace />} />
       </Routes>

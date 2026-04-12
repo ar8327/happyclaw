@@ -34,27 +34,14 @@ export interface AppearanceConfig {
   aiAvatarColor: string;
 }
 
-export interface SetupStatus {
-  needsSetup: boolean;
-  claudeConfigured: boolean;
-  codexConfigured?: boolean;
-  feishuConfigured: boolean;
-}
-
 interface AuthState {
   authenticated: boolean;
   user: UserPublic | null;
-  setupStatus: SetupStatus | null;
   appearance: AppearanceConfig | null;
   initialized: boolean | null; // null = not checked yet
   checking: boolean;
-  login: (username: string, password: string) => Promise<void>;
-  register: (data: { username: string; password: string; display_name?: string; invite_code?: string }) => Promise<void>;
   logout: () => Promise<void>;
   checkAuth: () => Promise<void>;
-  checkStatus: () => Promise<void>;
-  setupAdmin: (username: string, password: string) => Promise<void>;
-  changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
   updateProfile: (payload: { username?: string; display_name?: string; avatar_emoji?: string | null; avatar_color?: string | null; ai_name?: string | null; ai_avatar_emoji?: string | null; ai_avatar_color?: string | null; ai_avatar_url?: string | null }) => Promise<void>;
   uploadAvatar: (file: File) => Promise<string>;
   fetchAppearance: () => Promise<void>;
@@ -66,59 +53,13 @@ let checkAuthInFlight: Promise<void> | null = null;
 export const useAuthStore = create<AuthState>((set, get) => ({
   authenticated: false,
   user: null,
-  setupStatus: null,
   appearance: null,
   initialized: null,
   checking: true,
 
-  login: async (username: string, password: string) => {
-    const data = await api.post<{ success: boolean; user: UserPublic; setupStatus?: SetupStatus; appearance?: AppearanceConfig }>(
-      '/api/auth/login',
-      { username, password },
-    );
-    set({ authenticated: true, user: data.user, setupStatus: data.setupStatus ?? null, appearance: data.appearance ?? null, initialized: true });
-  },
-
-  register: async (payload) => {
-    const data = await api.post<{ success: boolean; user: UserPublic }>('/api/auth/register', payload);
-    set({ authenticated: true, user: data.user, setupStatus: null, initialized: true });
-  },
-
   logout: async () => {
-    await api.post('/api/auth/logout');
-    const data = await api.get<{ user: UserPublic; setupStatus?: SetupStatus; appearance?: AppearanceConfig }>('/api/auth/me');
-    set({
-      authenticated: true,
-      user: data.user,
-      setupStatus: data.setupStatus ?? null,
-      appearance: data.appearance ?? null,
-      initialized: true,
-      checking: false,
-    });
-  },
-
-  checkStatus: async () => {
-    try {
-      const data = await api.get<{ initialized: boolean }>('/api/auth/status');
-      set({ initialized: data.initialized });
-    } catch {
-      // If status endpoint fails, assume initialized (safe default)
-      set({ initialized: true });
-    }
-  },
-
-  setupAdmin: async (username: string, password: string) => {
-    const data = await api.post<{ success: boolean; user: UserPublic; setupStatus?: SetupStatus; appearance?: AppearanceConfig }>(
-      '/api/auth/setup',
-      { username, password },
-    );
-    set({
-      authenticated: true,
-      user: data.user,
-      setupStatus: data.setupStatus ?? null,
-      appearance: data.appearance ?? null,
-      initialized: true,
-    });
+    await api.post('/api/auth/logout').catch(() => {});
+    await get().checkAuth();
   },
 
   checkAuth: async () => {
@@ -128,8 +69,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       set({ checking: true });
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          const data = await api.get<{ user: UserPublic; setupStatus?: SetupStatus; appearance?: AppearanceConfig }>('/api/auth/me');
-          set({ authenticated: true, user: data.user, setupStatus: data.setupStatus ?? null, appearance: data.appearance ?? null, initialized: true, checking: false });
+          const data = await api.get<{ user: UserPublic; appearance?: AppearanceConfig }>('/api/auth/me');
+          set({ authenticated: true, user: data.user, appearance: data.appearance ?? null, initialized: true, checking: false });
           return;
         } catch (err) {
           const status =
@@ -138,9 +79,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               : NaN;
           const retryable = status === 0 || status === 408;
           if (!retryable || attempt === 2) {
-            // On auth failure, check if system is initialized
-            await get().checkStatus();
-            set({ authenticated: false, user: null, setupStatus: null, checking: false });
+            set({
+              authenticated: false,
+              user: null,
+              appearance: null,
+              initialized: retryable ? false : true,
+              checking: false,
+            });
             return;
           }
           await new Promise((resolve) => setTimeout(resolve, 1200));
@@ -151,14 +96,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     });
 
     return checkAuthInFlight;
-  },
-
-  changePassword: async (currentPassword: string, newPassword: string) => {
-    const data = await api.put<{ success: boolean; user: UserPublic }>('/api/auth/password', {
-      current_password: currentPassword,
-      new_password: newPassword,
-    });
-    set({ user: data.user });
   },
 
   updateProfile: async (payload) => {

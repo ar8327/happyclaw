@@ -43,7 +43,7 @@ export function AuthGuard({
           <div className="max-w-md text-center bg-card rounded-xl border border-border p-6">
             <h2 className="text-lg font-semibold text-foreground mb-2">页面初始化超时</h2>
             <p className="text-sm text-slate-600 mb-4">
-              后端可能刚启动或浏览器缓存异常，请先刷新页面；若仍失败，重新登录。
+              后端可能刚启动或浏览器缓存异常，请先刷新页面。
             </p>
             <div className="flex items-center justify-center gap-3">
               <button
