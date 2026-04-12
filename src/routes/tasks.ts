@@ -14,8 +14,10 @@ import {
   deleteTask,
   getTaskRunLogs,
   getRegisteredGroup,
+  getSessionRecord,
+  getJidsByFolder,
 } from '../db.js';
-import type { AuthUser } from '../types.js';
+import type { AuthUser, ScheduledTask, SessionRecord } from '../types.js';
 import { TIMEZONE } from '../config.js';
 import {
   isHostExecutionGroup,
@@ -24,6 +26,53 @@ import {
 } from '../web-context.js';
 
 const tasksRoutes = new Hono<{ Variables: Variables }>();
+
+function resolveTaskSession(id: string): SessionRecord | undefined {
+  const direct = getSessionRecord(id);
+  if (direct) return direct;
+  const backingGroup = getRegisteredGroup(id);
+  if (!backingGroup || !id.startsWith('web:')) return undefined;
+  return getSessionRecord(`main:${backingGroup.folder}`);
+}
+
+function getFolderForTaskSession(session: SessionRecord): string | null {
+  if (session.id.startsWith('main:')) return session.id.slice('main:'.length);
+  if (session.parent_session_id?.startsWith('main:')) {
+    return session.parent_session_id.slice('main:'.length);
+  }
+  return null;
+}
+
+function resolveTaskTarget(
+  sessionId: string,
+): {
+  session: SessionRecord;
+  group: NonNullable<ReturnType<typeof getRegisteredGroup>>;
+  chatJid: string;
+  groupFolder: string;
+} | null {
+  const session = resolveTaskSession(sessionId);
+  if (!session) return null;
+  if (session.kind !== 'main' && session.kind !== 'workspace') return null;
+
+  const folder = getFolderForTaskSession(session);
+  if (!folder) return null;
+  const chatJid = getJidsByFolder(folder).find((jid) => jid.startsWith('web:'));
+  if (!chatJid) return null;
+  const group = getRegisteredGroup(chatJid);
+  if (!group) return null;
+  return { session, group, chatJid, groupFolder: folder };
+}
+
+function buildTaskPayload(task: ScheduledTask): ScheduledTask {
+  const derivedSessionId = `main:${task.group_folder}`;
+  const session = getSessionRecord(derivedSessionId);
+  return {
+    ...task,
+    session_id: session?.id || derivedSessionId,
+    session_name: session?.name || getRegisteredGroup(task.chat_jid)?.name || null,
+  };
+}
 
 // --- Routes ---
 
@@ -39,7 +88,7 @@ tasksRoutes.get('/', authMiddleware, (c) => {
       return false;
     return true;
   });
-  return c.json({ tasks });
+  return c.json({ tasks: tasks.map(buildTaskPayload) });
 });
 
 tasksRoutes.post('/', authMiddleware, async (c) => {
@@ -54,6 +103,7 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
   }
 
   const {
+    session_id,
     group_folder,
     chat_jid,
     prompt,
@@ -64,13 +114,42 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
     script_command,
     model,
   } = validation.data;
-  const group = getRegisteredGroup(chat_jid);
-  if (!group) return c.json({ error: 'Group not found' }, 404);
-  if (group.folder !== group_folder) {
-    return c.json(
-      { error: 'group_folder does not match chat_jid group folder' },
-      400,
+  const target = session_id
+    ? resolveTaskTarget(session_id)
+    : (
+      chat_jid && group_folder
+        ? (() => {
+            const legacyGroup = getRegisteredGroup(chat_jid);
+            if (!legacyGroup || legacyGroup.folder !== group_folder) return null;
+            const session = getSessionRecord(`main:${group_folder}`);
+            return session
+              ? {
+                  session,
+                  group: legacyGroup,
+                  chatJid: chat_jid,
+                  groupFolder: group_folder,
+                }
+              : null;
+          })()
+        : null
     );
+  if (!target) {
+    return c.json({ error: 'Session not found or cannot accept tasks' }, 404);
+  }
+  const { session, group, chatJid, groupFolder } = target;
+  if (
+    session_id &&
+    group_folder &&
+    groupFolder !== group_folder
+  ) {
+    return c.json({ error: 'session_id does not match group_folder' }, 400);
+  }
+  if (
+    session_id &&
+    chat_jid &&
+    chatJid !== chat_jid
+  ) {
+    return c.json({ error: 'session_id does not match chat_jid' }, 400);
   }
   const authUser = c.get('user') as AuthUser;
   if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
@@ -107,8 +186,9 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
 
   createTask({
     id: taskId,
-    group_folder,
-    chat_jid,
+    session_id: session.id,
+    group_folder: groupFolder,
+    chat_jid: chatJid,
     prompt: prompt || '',
     schedule_type,
     schedule_value,

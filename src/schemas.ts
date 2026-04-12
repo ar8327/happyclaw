@@ -23,8 +23,9 @@ const CRON_REGEX = /^(\S+\s+){4,5}\S+$/;
 
 export const TaskCreateSchema = z
   .object({
-    group_folder: z.string().min(1),
-    chat_jid: z.string().min(1),
+    session_id: z.string().min(1).optional(),
+    group_folder: z.string().min(1).optional(),
+    chat_jid: z.string().min(1).optional(),
     prompt: z.string().optional().default(''),
     schedule_type: z.enum(['cron', 'interval', 'once']),
     schedule_value: z.string().min(1),
@@ -35,6 +36,13 @@ export const TaskCreateSchema = z
     notify_channels: z.array(z.enum(['feishu', 'telegram', 'qq', 'wechat'])).nullable().optional(),
   })
   .superRefine((data, ctx) => {
+    if (!data.session_id && !(data.group_folder?.trim() && data.chat_jid?.trim())) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['session_id'],
+        message: '必须提供 session_id，或同时提供 group_folder 与 chat_jid',
+      });
+    }
     const execType = data.execution_type || 'agent';
     if (execType === 'agent' && !data.prompt?.trim()) {
       ctx.addIssue({

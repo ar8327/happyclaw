@@ -3,6 +3,8 @@ import { api } from '../api/client';
 
 export interface ScheduledTask {
   id: string;
+  session_id?: string;
+  session_name?: string | null;
   group_folder: string;
   chat_jid: string;
   prompt: string;
@@ -36,8 +38,7 @@ interface TasksState {
   error: string | null;
   loadTasks: () => Promise<void>;
   createTask: (
-    sessionFolder: string,
-    chatJid: string,
+    sessionId: string,
     prompt: string,
     scheduleType: 'cron' | 'interval' | 'once',
     scheduleValue: string,
@@ -77,8 +78,7 @@ export const useTasksStore = create<TasksState>((set, get) => ({
   },
 
   createTask: async (
-    sessionFolder: string,
-    chatJid: string,
+    sessionId: string,
     prompt: string,
     scheduleType: 'cron' | 'interval' | 'once',
     scheduleValue: string,
@@ -94,8 +94,7 @@ export const useTasksStore = create<TasksState>((set, get) => ({
           : scheduleValue.trim();
 
       const body: Record<string, unknown> = {
-        group_folder: sessionFolder,
-        chat_jid: chatJid,
+        session_id: sessionId,
         prompt: prompt.trim(),
         schedule_type: scheduleType,
         schedule_value: normalizedScheduleValue,

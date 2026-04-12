@@ -13,7 +13,7 @@ import {
 import { cn } from '@/lib/utils';
 
 interface SessionOption {
-  jid: string;
+  id: string;
   name: string;
   folder: string;
 }
@@ -21,8 +21,7 @@ interface SessionOption {
 interface CreateTaskFormProps {
   sessions: SessionOption[];
   onSubmit: (data: {
-    sessionFolder: string;
-    chatJid: string;
+    sessionId: string;
     prompt: string;
     scheduleType: 'cron' | 'interval' | 'once';
     scheduleValue: string;
@@ -45,8 +44,7 @@ const INTERVAL_UNITS = [
 
 export function CreateTaskForm({ sessions, onSubmit, onClose, isAdmin }: CreateTaskFormProps) {
   const [formData, setFormData] = useState({
-    sessionFolder: '',
-    chatJid: '',
+    sessionId: '',
     prompt: '',
     scheduleType: 'cron' as 'cron' | 'interval' | 'once',
     scheduleValue: '',
@@ -66,8 +64,8 @@ export function CreateTaskForm({ sessions, onSubmit, onClose, isAdmin }: CreateT
   const validateForm = () => {
     const newErrors: Record<string, string> = {};
 
-    if (!formData.sessionFolder) {
-      newErrors.sessionFolder = '请选择会话';
+    if (!formData.sessionId) {
+      newErrors.sessionId = '请选择会话';
     }
 
     if (isScript) {
@@ -139,11 +137,10 @@ export function CreateTaskForm({ sessions, onSubmit, onClose, isAdmin }: CreateT
   };
 
   const handleSessionChange = (value: string) => {
-    const selectedSession = sessions.find((session) => session.folder === value);
+    const selectedSession = sessions.find((session) => session.id === value);
     setFormData({
       ...formData,
-      sessionFolder: value,
-      chatJid: selectedSession?.jid || '',
+      sessionId: selectedSession?.id || value,
     });
   };
 
@@ -168,20 +165,20 @@ export function CreateTaskForm({ sessions, onSubmit, onClose, isAdmin }: CreateT
             <label className="block text-sm font-medium text-foreground mb-2">
               选择会话 <span className="text-red-500">*</span>
             </label>
-            <Select value={formData.sessionFolder || undefined} onValueChange={handleSessionChange}>
-              <SelectTrigger className={cn("w-full", errors.sessionFolder && "border-red-500")}>
+            <Select value={formData.sessionId || undefined} onValueChange={handleSessionChange}>
+              <SelectTrigger className={cn("w-full", errors.sessionId && "border-red-500")}>
                 <SelectValue placeholder="请选择" />
               </SelectTrigger>
               <SelectContent>
                 {sessions.map((session) => (
-                  <SelectItem key={session.jid} value={session.folder}>
+                  <SelectItem key={session.id} value={session.id}>
                     {session.name} ({session.folder})
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
-            {errors.sessionFolder && (
-              <p className="mt-1 text-sm text-red-600">{errors.sessionFolder}</p>
+            {errors.sessionId && (
+              <p className="mt-1 text-sm text-red-600">{errors.sessionId}</p>
             )}
           </div>
 

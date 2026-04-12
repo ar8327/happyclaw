@@ -70,6 +70,13 @@ export function TaskDetail({ task }: TaskDetailProps) {
         </div>
 
         <div>
+          <div className="text-xs text-slate-500 mb-1">会话</div>
+          <div className="text-sm text-foreground">
+            {task.session_name || task.group_folder}
+          </div>
+        </div>
+
+        <div>
           <div className="text-xs text-slate-500 mb-1">调度类型</div>
           <div className="text-sm text-foreground">
             {task.schedule_type === 'cron' && 'Cron 表达式'}
