@@ -174,14 +174,29 @@ function getFileRootOverride(
   return group.customCwd || undefined;
 }
 
+function resolveFileOwnerKey(
+  group: RegisteredGroup,
+  session?: ReturnType<typeof getSessionRecord> | null,
+): string | null {
+  if (session?.owner_key) return session.owner_key;
+  if (session?.parent_session_id) {
+    const parentSession = getSessionRecord(session.parent_session_id);
+    if (parentSession?.owner_key) return parentSession.owner_key;
+  }
+  if (group.folder) {
+    const mainSession = getSessionRecord(`main:${group.folder}`);
+    if (mainSession?.owner_key) return mainSession.owner_key;
+  }
+  return group.created_by || null;
+}
+
 /** Try to resolve a relative path from the user-global directory as fallback. */
 function tryUserGlobalFallback(
-  group: RegisteredGroup,
+  ownerKey: string | null,
   relativePath: string,
 ): string | null {
-  const userId = group.created_by;
-  if (!userId) return null;
-  const globalRoot = path.join(GROUPS_DIR, 'user-global', userId);
+  if (!ownerKey) return null;
+  const globalRoot = path.join(GROUPS_DIR, 'user-global', ownerKey);
   const resolved = path.resolve(globalRoot, path.normalize(relativePath));
   // Security: must stay within user-global dir
   if (!resolved.startsWith(globalRoot + path.sep) && resolved !== globalRoot) {
@@ -333,6 +348,7 @@ fileRoutes.post('/:jid/files', authMiddleware, async (c) => {
   }
 
   const rootOverride = getFileRootOverride(group, session);
+  const ownerKey = resolveFileOwnerKey(group, session);
 
   try {
     const body = await c.req.parseBody({ all: true });
@@ -348,14 +364,14 @@ fileRoutes.post('/:jid/files', authMiddleware, async (c) => {
     const uploadedFiles: string[] = [];
 
     // Billing: check storage limit before uploading
-    if (isBillingEnabled() && group.created_by) {
+    if (isBillingEnabled() && ownerKey) {
       const totalUploadSize = fileList.reduce(
         (sum, f) => sum + (f instanceof File ? f.size : 0),
         0,
       );
       const currentUsage = getGroupStorageUsage(group.folder, rootOverride);
       const storageCheck = checkStorageLimit(
-        group.created_by,
+        ownerKey,
         authUser.role,
         currentUsage,
         totalUploadSize,
@@ -504,6 +520,7 @@ fileRoutes.get('/:jid/files/download/:path', authMiddleware, (c) => {
   }
 
   try {
+    const ownerKey = resolveFileOwnerKey(group, session);
     // 解码 base64url 路径
     const relativePath = Buffer.from(encodedPath, 'base64url').toString(
       'utf-8',
@@ -516,7 +533,7 @@ fileRoutes.get('/:jid/files/download/:path', authMiddleware, (c) => {
 
     if (!fs.existsSync(absolutePath)) {
       // Fallback: try user-global directory (e.g. shared expression images)
-      const globalFallback = tryUserGlobalFallback(group, relativePath);
+      const globalFallback = tryUserGlobalFallback(ownerKey, relativePath);
       if (globalFallback) {
         absolutePath = globalFallback;
       } else {
@@ -698,6 +715,7 @@ fileRoutes.get('/:jid/files/content/:path', authMiddleware, (c) => {
 
   try {
     const rootOverride = getFileRootOverride(group, session);
+    const ownerKey = resolveFileOwnerKey(group, session);
     const relativePath = Buffer.from(encodedPath, 'base64url').toString(
       'utf-8',
     );
@@ -764,6 +782,7 @@ fileRoutes.put('/:jid/files/content/:path', authMiddleware, async (c) => {
 
   try {
     const rootOverride = getFileRootOverride(group, session);
+    const ownerKey = resolveFileOwnerKey(group, session);
     const relativePath = Buffer.from(encodedPath, 'base64url').toString(
       'utf-8',
     );
@@ -804,13 +823,13 @@ fileRoutes.put('/:jid/files/content/:path', authMiddleware, async (c) => {
       return c.json({ error: 'Content too large (max 10MB)' }, 400);
     }
 
-    if (isBillingEnabled() && group.created_by) {
+    if (isBillingEnabled() && ownerKey) {
       const nextSize = Buffer.byteLength(body.content, 'utf-8');
       const additionalBytes = Math.max(0, nextSize - stats.size);
       if (additionalBytes > 0) {
         const currentUsage = getGroupStorageUsage(group.folder, rootOverride);
         const storageCheck = checkStorageLimit(
-          group.created_by,
+          ownerKey,
           authUser.role,
           currentUsage,
           additionalBytes,
