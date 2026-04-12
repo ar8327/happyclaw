@@ -118,6 +118,35 @@ import {
 const configRoutes = new Hono<{ Variables: Variables }>();
 
 /**
+ * Resolve IM chat owner from session binding or its default main session.
+ * Legacy created_by remains as a last-resort compatibility fallback.
+ */
+function resolveImGroupOwnerKey(
+  jid: string,
+  group?: Pick<RegisteredGroup, 'folder' | 'created_by'>,
+): string | undefined {
+  const resolvedGroup = group ?? getRegisteredGroup(jid);
+  if (!resolvedGroup) return undefined;
+
+  const binding = getSessionBinding(jid);
+  if (binding) {
+    const session = getSessionRecord(binding.session_id);
+    if (session?.owner_key) return session.owner_key;
+    if (session?.parent_session_id) {
+      const parentSession = getSessionRecord(session.parent_session_id);
+      if (parentSession?.owner_key) return parentSession.owner_key;
+    }
+  }
+
+  if (resolvedGroup.folder) {
+    const mainSession = getSessionRecord(`main:${resolvedGroup.folder}`);
+    if (mainSession?.owner_key) return mainSession.owner_key;
+  }
+
+  return resolvedGroup.created_by ?? undefined;
+}
+
+/**
  * Count how many IM channels are currently enabled for a user, excluding the given channel.
  * Used for billing limit checks when enabling a new channel.
  */
@@ -2177,11 +2206,14 @@ configRoutes.get('/user-im/telegram/paired-chats', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
   const groups = (deps?.getRegisteredGroups() ?? {}) as Record<
     string,
-    { name: string; added_at: string; created_by?: string }
+    RegisteredGroup
   >;
   const chats: Array<{ jid: string; name: string; addedAt: string }> = [];
   for (const [jid, group] of Object.entries(groups)) {
-    if (jid.startsWith('telegram:') && group.created_by === user.id) {
+    if (
+      jid.startsWith('telegram:')
+      && resolveImGroupOwnerKey(jid, group) === user.id
+    ) {
       chats.push({ jid, name: group.name, addedAt: group.added_at });
     }
   }
@@ -2205,7 +2237,7 @@ configRoutes.delete(
     if (!group) {
       return c.json({ error: 'Chat not found' }, 404);
     }
-    if (group.created_by !== user.id) {
+    if (resolveImGroupOwnerKey(jid, group) !== user.id) {
       return c.json({ error: 'Not authorized to remove this chat' }, 403);
     }
 
@@ -2435,11 +2467,11 @@ configRoutes.get('/user-im/qq/paired-chats', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
   const groups = (deps?.getRegisteredGroups() ?? {}) as Record<
     string,
-    { name: string; added_at: string; created_by?: string }
+    RegisteredGroup
   >;
   const chats: Array<{ jid: string; name: string; addedAt: string }> = [];
   for (const [jid, group] of Object.entries(groups)) {
-    if (jid.startsWith('qq:') && group.created_by === user.id) {
+    if (jid.startsWith('qq:') && resolveImGroupOwnerKey(jid, group) === user.id) {
       chats.push({ jid, name: group.name, addedAt: group.added_at });
     }
   }
@@ -2460,7 +2492,7 @@ configRoutes.delete('/user-im/qq/paired-chats/:jid', authMiddleware, (c) => {
   if (!group) {
     return c.json({ error: 'Chat not found' }, 404);
   }
-  if (group.created_by !== user.id) {
+  if (resolveImGroupOwnerKey(jid, group) !== user.id) {
     return c.json({ error: 'Not authorized to remove this chat' }, 403);
   }
 

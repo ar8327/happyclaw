@@ -3889,7 +3889,7 @@ async function processTaskIpc(
         break;
       }
       if (data.jid && data.name && data.folder) {
-        // Inherit created_by from the source group so onNewChat won't re-route
+        // Keep legacy owner metadata aligned with the target session owner when possible.
         const sourceEntry = Object.values(registeredGroups).find(
           (g) => g.folder === sourceGroup,
         );
@@ -3898,7 +3898,7 @@ async function processTaskIpc(
           folder: data.folder,
           added_at: new Date().toISOString(),
           containerConfig: data.containerConfig,
-          created_by: sourceEntry?.created_by,
+          created_by: resolveSessionOwnerKey(data.folder) || sourceEntry?.created_by,
         });
       } else {
         logger.warn(
@@ -4367,18 +4367,19 @@ async function startMessageLoop(): Promise<void> {
           if (group.target_agent_id) continue;
 
           // Billing quota check before processing
-          if (group.created_by) {
-            const owner = getUserById(group.created_by);
+          const ownerUserId = resolveChatOwnerKey(chatJid, group);
+          if (ownerUserId) {
+            const owner = getUserById(ownerUserId);
             if (owner && owner.role !== 'admin') {
               const accessResult = checkBillingAccessFresh(
-                group.created_by,
+                ownerUserId,
                 owner.role,
               );
               if (!accessResult.allowed) {
                 logger.info(
                   {
                     chatJid,
-                    userId: group.created_by,
+                    userId: ownerUserId,
                     reason: accessResult.reason,
                     blockType: accessResult.blockType,
                     exceededWindow: accessResult.exceededWindow,
@@ -4735,8 +4736,9 @@ function buildOnNewChat(
     const existing = registeredGroups[chatJid];
     if (existing) {
       const binding = getExplicitSessionBinding(chatJid, existing);
+      const existingOwnerKey = resolveChatOwnerKey(chatJid, existing);
       // Already owned by this user — update names if we now have a better name
-      if (existing.created_by === userId) {
+      if (existingOwnerKey === userId) {
         if (chatName && chatName !== '飞书群聊' && chatName !== '飞书私聊') {
           // Update the IM chat name (chats table)
           updateChatName(chatJid, chatName);
@@ -4773,9 +4775,8 @@ function buildOnNewChat(
       // are moved from one user to another (e.g., admin → member for testing).
       if (!existing.is_home) {
         const previousFolder = existing.folder;
-        const previousOwner = existing.created_by;
+        const previousOwnerKey = existingOwnerKey;
         existing.folder = homeFolder;
-        existing.created_by = userId;
         existing.target_main_jid = undefined;
         setRegisteredGroup(chatJid, existing);
         applyExplicitChatBinding(chatJid, existing, `main:${homeFolder}`);
@@ -4787,7 +4788,7 @@ function buildOnNewChat(
             userId,
             homeFolder,
             previousFolder,
-            previousOwner,
+            previousOwnerKey,
           },
           'Re-routed IM chat to new user (IM credentials transferred)',
         );
@@ -4824,7 +4825,6 @@ function buildOnNewChat(
         name: chatName,
         folder: homeFolder,
         added_at: now,
-        created_by: userId,
         target_main_jid: newJid,
         reply_policy: 'source_only',
       });
@@ -4861,7 +4861,6 @@ function buildOnNewChat(
         name: chatName,
         folder: homeFolder,
         added_at: new Date().toISOString(),
-        created_by: userId,
       });
       applyExplicitChatBinding(
         chatJid,
