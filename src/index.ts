@@ -1922,13 +1922,56 @@ function resolveChannel(messages: NewMessage[]): string {
   return last.source_jid || last.chat_jid;
 }
 
+function splitRuntimeJid(chatJid: string): {
+  baseJid: string;
+  agentId: string | null;
+} {
+  const agentSep = chatJid.indexOf('#agent:');
+  if (agentSep < 0) {
+    return { baseJid: chatJid, agentId: null };
+  }
+  const agentId = chatJid.slice(agentSep + 7).trim();
+  return {
+    baseJid: chatJid.slice(0, agentSep),
+    agentId: agentId || null,
+  };
+}
+
 /**
  * Resolve the effective folder for a group JID (via serialization key).
  * This mirrors the logic in GroupQueue.getSerializationKey.
  */
 function resolveGroupFolder(chatJid: string): string {
-  const group = registeredGroups[chatJid];
-  return group?.folder || chatJid;
+  const { baseJid } = splitRuntimeJid(chatJid);
+  const group = registeredGroups[baseJid];
+  return group?.folder || baseJid;
+}
+
+function resolveRuntimeOwnerContext(chatJid: string): {
+  folder: string;
+  userId: string;
+} | null {
+  const { baseJid, agentId } = splitRuntimeJid(chatJid);
+  const group = registeredGroups[baseJid] ?? getRegisteredGroup(baseJid);
+  if (agentId) {
+    const workerSession = getSessionRecord(buildWorkerSessionRecordId(agentId));
+    const parentSession = workerSession?.parent_session_id
+      ? getSessionRecord(workerSession.parent_session_id)
+      : null;
+    const folder = group?.folder
+      || (parentSession?.id.startsWith('main:')
+        ? parentSession.id.slice('main:'.length)
+        : '');
+    if (!folder) return null;
+    const userId = workerSession?.owner_key
+      || parentSession?.owner_key
+      || resolveSessionOwnerKey(folder)
+      || group?.created_by;
+    return userId ? { folder, userId } : null;
+  }
+  if (!group?.folder) return null;
+  const userId = resolveSessionOwnerKey(group.folder) || group.created_by;
+  return userId ? { folder: group.folder, userId } : null;
 }
 
 function syncPendingTurnObservability(folder: string): void {
@@ -4647,26 +4690,37 @@ function buildOnNewChat(
   return (chatJid, chatName, chatType) => {
     const existing = registeredGroups[chatJid];
     if (existing) {
+      let binding = getSessionBinding(chatJid);
       // Already owned by this user — update names if we now have a better name
       if (existing.created_by === userId) {
-        if (!getSessionBinding(chatJid)) {
+        if (!binding) {
           const defaultSessionId = resolveDefaultSessionBinding(chatJid, existing);
           if (defaultSessionId) {
             applyExplicitChatBinding(chatJid, existing, defaultSessionId);
+            binding = getSessionBinding(chatJid);
           }
         }
         if (chatName && chatName !== '飞书群聊' && chatName !== '飞书私聊') {
           // Update the IM chat name (chats table)
           updateChatName(chatJid, chatName);
           // Update the bound workspace name if it still has the generic name
-          if (existing.target_main_jid && existing.target_main_jid !== `web:${homeFolder}`) {
-            const targetGroup = registeredGroups[existing.target_main_jid];
+          const boundSession = binding ? getSessionRecord(binding.session_id) : null;
+          const targetFolder = boundSession?.kind === 'main'
+            ? boundSession.id.slice('main:'.length)
+            : boundSession?.parent_session_id?.startsWith('main:')
+              ? boundSession.parent_session_id.slice('main:'.length)
+              : null;
+          const targetJid = targetFolder
+            ? (findWebJidForFolder(targetFolder) || `web:${targetFolder}`)
+            : null;
+          if (targetJid && targetJid !== `web:${homeFolder}`) {
+            const targetGroup = registeredGroups[targetJid] ?? getRegisteredGroup(targetJid);
             if (targetGroup && (!targetGroup.name || targetGroup.name === '飞书群聊')) {
               // Update registered_groups name (used by /api/groups)
               targetGroup.name = chatName;
-              setRegisteredGroup(existing.target_main_jid, targetGroup);
+              setRegisteredGroup(targetJid, targetGroup);
               // Update chats table name (used by some UI paths)
-              updateChatName(existing.target_main_jid, chatName);
+              updateChatName(targetJid, chatName);
             }
           }
         }
@@ -4674,7 +4728,7 @@ function buildOnNewChat(
       }
 
       // Don't override groups with explicit agent routing configured.
-      if (existing.target_agent_id) return;
+      if (binding?.session_id.startsWith('worker:')) return;
 
       // Different user's connection now owns this IM app.
       // Re-route the chat to the current user's home folder.
@@ -5244,16 +5298,13 @@ async function main(): Promise<void> {
 
   // --- Memory Agent: transcript export on container exit ---
   queue.addOnRuntimeExitListener((groupJid: string) => {
-    const group = registeredGroups[groupJid] ?? getRegisteredGroup(groupJid);
-    if (!group?.folder) return;
+    const ownerContext = resolveRuntimeOwnerContext(groupJid);
+    if (!ownerContext) return;
 
-    const userId = resolveSessionOwnerKey(group.folder);
-    if (!userId) return;
-
-    const allJids = getJidsByFolder(group.folder);
+    const allJids = getJidsByFolder(ownerContext.folder);
     memoryOrchestrator.exportTranscripts(
-      userId,
-      group.folder,
+      ownerContext.userId,
+      ownerContext.folder,
       allJids,
     ).catch((err) => {
       logger.warn(
@@ -5792,16 +5843,17 @@ async function main(): Promise<void> {
   // Billing: user-level concurrent container limit
   queue.setUserConcurrentLimitChecker((groupJid: string) => {
     if (!isBillingEnabled()) return { allowed: true };
-    const group = registeredGroups[groupJid];
-    if (!group?.created_by) return { allowed: true };
-    const owner = getUserById(group.created_by);
+    const ownerContext = resolveRuntimeOwnerContext(groupJid);
+    if (!ownerContext) return { allowed: true };
+    const owner = getUserById(ownerContext.userId);
     if (!owner || owner.role === 'admin') return { allowed: true };
     const limit = getUserConcurrentContainerLimit(owner.id, owner.role);
     if (limit == null) return { allowed: true };
-    // Count active containers for this user
+    // Count active runtimes for this user, including conversation workers.
     let userActive = 0;
-    for (const [jid, g] of Object.entries(registeredGroups)) {
-      if (g.created_by === owner.id && queue.hasDirectActiveRunner(jid)) {
+    for (const runtime of queue.getRuntimeStatus().groups) {
+      if (!runtime.active) continue;
+      if (resolveRuntimeOwnerContext(runtime.jid)?.userId === owner.id) {
         userActive++;
       }
     }

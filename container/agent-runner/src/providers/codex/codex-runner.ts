@@ -12,6 +12,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import type { ThreadEvent, ThreadItem } from '@openai/codex-sdk';
 import type { ContextManager } from 'happyclaw-agent-runner-core';
 import {
   buildChannelRoutingReminder,
@@ -74,6 +75,7 @@ export class CodexRunner implements AgentRunner {
   private archiveMgr = new CodexArchiveManager();
   private startFreshOnNextTurn = false;
   private pendingRoutingReminder: string | null = null;
+  private activeToolCalls = new Map<string, number>();
   private readonly opts: CodexRunnerOptions;
 
   constructor(opts: CodexRunnerOptions) {
@@ -185,9 +187,11 @@ export class CodexRunner implements AgentRunner {
     let usage: UsageInfo | undefined;
     let finalText: string | null = null;
     let threadId: string | null = null;
+    this.activeToolCalls.clear();
 
     try {
       for await (const event of this.session.runTurn(composedPrompt, imagePaths)) {
+        this.trackActivityEvent(event);
         // Convert to StreamEvents
         const streamEvents = convertThreadEvent(event);
         for (const se of streamEvents) {
@@ -302,8 +306,19 @@ export class CodexRunner implements AgentRunner {
     this.session.interrupt();
   }
 
-  // Codex turns are short, no need for custom activity report
-  // query-loop uses default values
+  getActivityReport(): ActivityReport {
+    let oldestStartedAt = 0;
+    for (const startedAt of this.activeToolCalls.values()) {
+      if (oldestStartedAt === 0 || startedAt < oldestStartedAt) {
+        oldestStartedAt = startedAt;
+      }
+    }
+    return {
+      hasActiveToolCall: oldestStartedAt > 0,
+      activeToolDurationMs: oldestStartedAt > 0 ? Date.now() - oldestStartedAt : 0,
+      hasPendingBackgroundTasks: false,
+    };
+  }
 
   async cleanup(): Promise<void> {
     await this.archiveMgr.forceArchive(
@@ -317,5 +332,26 @@ export class CodexRunner implements AgentRunner {
     try {
       fs.rmSync(this.tmpDir, { recursive: true, force: true });
     } catch { /* ignore */ }
+  }
+
+  private trackActivityEvent(event: ThreadEvent): void {
+    if (event.type === 'item.started' && this.isToolLikeItem(event.item.type)) {
+      this.activeToolCalls.set(event.item.id, Date.now());
+      return;
+    }
+    if (event.type === 'item.completed' && this.isToolLikeItem(event.item.type)) {
+      this.activeToolCalls.delete(event.item.id);
+      return;
+    }
+    if (event.type === 'turn.completed' || event.type === 'turn.failed' || event.type === 'error') {
+      this.activeToolCalls.clear();
+    }
+  }
+
+  private isToolLikeItem(itemType: ThreadItem['type']): boolean {
+    return itemType === 'command_execution'
+      || itemType === 'mcp_tool_call'
+      || itemType === 'file_change'
+      || itemType === 'web_search';
   }
 }

@@ -13,6 +13,7 @@ import {
   cleanupOldTaskRunLogs,
   ensureChatExists,
   getDueTasks,
+  getSessionRecord,
   getTaskById,
   getUserById,
   logTaskRun,
@@ -58,6 +59,11 @@ function computeNextRun(task: ScheduledTask): string | null {
   }
   // 'once' tasks have no next run
   return null;
+}
+
+function resolveScheduledTaskOwnerId(group: RegisteredGroup | undefined): string | null {
+  if (!group?.folder) return group?.created_by || null;
+  return getSessionRecord(`main:${group.folder}`)?.owner_key || group.created_by || null;
 }
 
 /**
@@ -131,11 +137,12 @@ async function runScriptTask(
   if (isBillingEnabled() && task.group_folder) {
     const groups = deps.registeredGroups();
     const group = groups[groupJid];
-    if (group?.created_by) {
-      const owner = getUserById(group.created_by);
+    const ownerId = resolveScheduledTaskOwnerId(group);
+    if (ownerId) {
+      const owner = getUserById(ownerId);
       if (owner && owner.role !== 'admin') {
         const accessResult = checkBillingAccessFresh(
-          group.created_by,
+          ownerId,
           owner.role,
         );
         if (!accessResult.allowed) {
@@ -143,7 +150,7 @@ async function runScriptTask(
           logger.info(
             {
               taskId: task.id,
-              userId: group.created_by,
+              userId: ownerId,
               reason,
               blockType: accessResult.blockType,
             },
