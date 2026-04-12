@@ -577,7 +577,7 @@ function resolveChatOwnerKey(
 
   const group = fallbackGroup ?? registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   if (!group) return undefined;
-  return resolveSessionOwnerKey(group.folder) || group.created_by;
+  return resolveSessionOwnerKey(group.folder);
 }
 
 function clearIpcDeliveryTracker(chatJid: string): void {
@@ -1200,7 +1200,7 @@ function handleListCommand(chatJid: string): string {
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   if (!group) return '当前 IM 未绑定工作区';
 
-  const userId = group.created_by;
+  const userId = resolveChatOwnerKey(chatJid, group);
   if (!userId) return '无法确定用户身份';
 
   const workspaces = collectWorkspaces(userId);
@@ -1286,7 +1286,7 @@ function handleUnbindCommand(chatJid: string): string {
 function handleBindCommand(chatJid: string, rawSpec: string): string {
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   if (!group) return '当前 IM 未绑定工作区';
-  const userId = group.created_by;
+  const userId = resolveChatOwnerKey(chatJid, group);
   if (!userId) return '无法确定当前聊天所属用户';
 
   // Helper: build location info + workspace list block (shared by no-args and not-found cases)
@@ -1344,7 +1344,7 @@ function handleBindCommand(chatJid: string, rawSpec: string): string {
 function handleNewCommand(chatJid: string, rawName: string): string {
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   if (!group) return '当前 IM 未绑定工作区';
-  const userId = group.created_by;
+  const userId = resolveChatOwnerKey(chatJid, group);
   if (!userId) return '无法确定当前聊天所属用户';
 
   const name = rawName.trim();
@@ -2004,12 +2004,11 @@ function resolveRuntimeOwnerContext(chatJid: string): {
     if (!folder) return null;
     const userId = workerSession?.owner_key
       || parentSession?.owner_key
-      || resolveSessionOwnerKey(folder)
-      || group?.created_by;
+      || resolveSessionOwnerKey(folder);
     return userId ? { folder, userId } : null;
   }
   if (!group?.folder) return null;
-  const userId = resolveSessionOwnerKey(group.folder) || group.created_by;
+  const userId = resolveSessionOwnerKey(group.folder);
   return userId ? { folder: group.folder, userId } : null;
 }
 
@@ -2049,7 +2048,7 @@ function broadcastInterruptedTurn(
  * to the Memory Agent if enabled.
  */
 function buildCompressOptions(group: RegisteredGroup): CompressOptions | undefined {
-  const userId = resolveSessionOwnerKey(group.folder) || group.created_by;
+  const userId = resolveSessionOwnerKey(group.folder);
   if (!group.knowledge_extraction || !userId) return undefined;
   return {
     extractKnowledge: true,
@@ -2115,7 +2114,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const shared = isGroupShared(group.folder);
   // Check if this user has Feishu agent-reply mode enabled
-  const ownerUserId = effectiveGroup.created_by;
+  const ownerUserId =
+    ((chatJid === 'web:main' && effectiveGroup.is_home)
+      ? effectiveGroup.created_by
+      : undefined)
+    || resolveSessionOwnerKey(effectiveGroup.folder)
+    || effectiveGroup.created_by;
   const feishuAgentReply = ownerUserId
     ? getUserFeishuConfig(ownerUserId)?.replyThreadingMode === 'agent'
     : false;
@@ -2297,11 +2301,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     resetTurnCommentaryTimer(group.folder);
   };
 
-  if (effectiveGroup.created_by) {
-    const owner = getUserById(effectiveGroup.created_by);
+  if (ownerUserId) {
+    const owner = getUserById(ownerUserId);
     if (owner && owner.role !== 'admin') {
       const accessResult = checkBillingAccessFresh(
-        effectiveGroup.created_by,
+        ownerUserId,
         owner.role,
       );
       if (!accessResult.allowed) {
@@ -2312,7 +2316,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         logger.info(
           {
             chatJid,
-            userId: effectiveGroup.created_by,
+            userId: ownerUserId,
             reason: accessResult.reason,
             blockType: accessResult.blockType,
           },
@@ -2565,7 +2569,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
               // Write to usage_records + usage_daily_summary
               writeUsageRecords({
-                userId: effectiveGroup.created_by || 'system',
+                userId: ownerUserId || 'system',
                 groupFolder: effectiveGroup.folder,
                 messageId: lastReplyMsgId,
                 usage: se.usage,
@@ -2583,29 +2587,31 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
               // Update billing monthly usage
               const ownerGroup = registeredGroups[chatJid];
-              if (ownerGroup?.created_by && se.usage.costUSD) {
+              const billingOwnerUserId =
+                ownerGroup ? resolveChatOwnerKey(chatJid, ownerGroup) : undefined;
+              if (billingOwnerUserId && se.usage.costUSD) {
                 try {
                   const effective = updateUsage(
-                    ownerGroup.created_by,
+                    billingOwnerUserId,
                     se.usage.costUSD,
                     se.usage.inputTokens || 0,
                     se.usage.outputTokens || 0,
                   );
                   deductUsageCost(
-                    ownerGroup.created_by,
+                    billingOwnerUserId,
                     se.usage.costUSD,
                     lastReplyMsgId || chatJid,
                     effective,
                   );
                   // Broadcast real-time billing update to the user
-                  const owner = getUserById(ownerGroup.created_by);
+                  const owner = getUserById(billingOwnerUserId);
                   if (owner && owner.role !== 'admin') {
                     const freshAccess = checkBillingAccessFresh(
-                      ownerGroup.created_by,
+                      billingOwnerUserId,
                       owner.role,
                     );
                     if (freshAccess.usage) {
-                      broadcastBillingUpdate(ownerGroup.created_by, {
+                      broadcastBillingUpdate(billingOwnerUserId, {
                         ...freshAccess,
                       });
                     }
@@ -3360,13 +3366,13 @@ function startIpcWatcher(): void {
                       const localImagePaths = extractLocalImImagePaths(
                         data.text,
                         sourceGroup,
-                        sourceGroupEntry?.created_by,
+                        resolveSessionOwnerKey(sourceGroup),
                       );
                       // Resolve reply target: in 'agent' mode, prefer agent-supplied replyToMsgId;
                       // in 'auto' mode (or fallback), use trigger map → DB lookup.
                       // Agent reply mode only applies to Feishu channels.
                       const isFeishuTarget = data.targetChannel.startsWith('feishu:');
-                      const ownerUserId = sourceGroupEntry?.created_by;
+                      const ownerUserId = resolveSessionOwnerKey(sourceGroup);
                       const agentReplyMode = isFeishuTarget && ownerUserId
                         ? getUserFeishuConfig(ownerUserId)?.replyThreadingMode === 'agent'
                         : false;
@@ -3468,7 +3474,7 @@ function startIpcWatcher(): void {
                         let imageReplyToMsgId: string | undefined;
                         const isFeishuTarget = data.targetChannel.startsWith('feishu:');
                         if (isFeishuTarget) {
-                          const ownerUserId = sourceGroupEntry?.created_by;
+                          const ownerUserId = resolveSessionOwnerKey(sourceGroup);
                           const agentReplyMode = ownerUserId
                             ? getUserFeishuConfig(ownerUserId)?.replyThreadingMode === 'agent'
                             : false;
@@ -4126,11 +4132,10 @@ async function processAgentConversation(
           );
 
           // Write to usage_records + usage_daily_summary
-          // Sub-Agent 的 effectiveGroup 可能没有 created_by，从父群组继承
           writeUsageRecords({
             userId:
-              effectiveGroup.created_by ||
-              registeredGroups[chatJid]?.created_by ||
+              sessionRecord?.owner_key ||
+              resolveStableSessionOwnerKey(effectiveGroup.folder, agentId) ||
               'system',
             groupFolder: effectiveGroup.folder,
             agentId,
@@ -4560,7 +4565,9 @@ async function startMessageLoop(): Promise<void> {
                 !hasActiveProgressSession(channel)
               ) {
                 const resolved = resolveEffectiveGroup(group);
-                const ownerId = resolved.effectiveGroup.created_by;
+                const ownerId =
+                  resolveSessionOwnerKey(resolved.effectiveGroup.folder)
+                  || resolved.effectiveGroup.created_by;
                 const fc = ownerId ? getUserFeishuConfig(ownerId) : null;
                 if (fc?.streamingCard) {
                   const card = imManager.createProgressCard(channel);
