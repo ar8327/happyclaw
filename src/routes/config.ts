@@ -104,11 +104,6 @@ import type { AuthUser, RegisteredGroup } from '../types.js';
 import { hasPermission } from '../permissions.js';
 import { logger } from '../logger.js';
 import {
-  checkImChannelLimit,
-  isBillingEnabled,
-  clearBillingEnabledCache,
-} from '../billing.js';
-import {
   createOAuthState,
   consumeOAuthState,
   buildOAuthUrl,
@@ -144,25 +139,6 @@ function resolveImGroupOwnerKey(
   }
 
   return resolvedGroup.created_by ?? undefined;
-}
-
-/**
- * Count how many IM channels are currently enabled for a user, excluding the given channel.
- * Used for billing limit checks when enabling a new channel.
- */
-function countOtherEnabledImChannels(
-  userId: string,
-  excludeChannel: 'feishu' | 'telegram' | 'qq' | 'wechat',
-): number {
-  let count = 0;
-  if (excludeChannel !== 'feishu' && getUserFeishuConfig(userId)?.enabled)
-    count++;
-  if (excludeChannel !== 'telegram' && getUserTelegramConfig(userId)?.enabled)
-    count++;
-  if (excludeChannel !== 'wechat' && getUserWeChatConfig(userId)?.enabled)
-    count++;
-  if (excludeChannel !== 'qq' && getUserQQConfig(userId)?.enabled) count++;
-  return count;
 }
 
 // Inject deps at runtime
@@ -1712,7 +1688,6 @@ configRoutes.put(
 
     try {
       const saved = saveSystemSettings(validation.data);
-      clearBillingEnabledCache();
       return c.json(saved);
     } catch (err) {
       const message =
@@ -1777,21 +1752,6 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
       { error: 'Invalid request body', details: validation.error.format() },
       400,
     );
-  }
-
-  // Billing: check IM channel limit when enabling
-  if (validation.data.enabled === true && isBillingEnabled()) {
-    const currentFeishu = getUserFeishuConfig(user.id);
-    if (!currentFeishu?.enabled) {
-      const limit = checkImChannelLimit(
-        user.id,
-        user.role,
-        countOtherEnabledImChannels(user.id, 'feishu'),
-      );
-      if (!limit.allowed) {
-        return c.json({ error: limit.reason }, 403);
-      }
-    }
   }
 
   const current = getUserFeishuConfig(user.id);
@@ -2063,21 +2023,6 @@ configRoutes.put('/user-im/telegram', authMiddleware, async (c) => {
     );
   }
 
-  // Billing: check IM channel limit when enabling
-  if (validation.data.enabled === true && isBillingEnabled()) {
-    const currentTg = getUserTelegramConfig(user.id);
-    if (!currentTg?.enabled) {
-      const limit = checkImChannelLimit(
-        user.id,
-        user.role,
-        countOtherEnabledImChannels(user.id, 'telegram'),
-      );
-      if (!limit.allowed) {
-        return c.json({ error: limit.reason }, 403);
-      }
-    }
-  }
-
   const current = getUserTelegramConfig(user.id);
   const next = {
     botToken: current?.botToken || '',
@@ -2295,21 +2240,6 @@ configRoutes.put('/user-im/qq', authMiddleware, async (c) => {
     );
   }
 
-  // Billing: check IM channel limit when enabling
-  if (validation.data.enabled === true && isBillingEnabled()) {
-    const currentQQ = getUserQQConfig(user.id);
-    if (!currentQQ?.enabled) {
-      const limit = checkImChannelLimit(
-        user.id,
-        user.role,
-        countOtherEnabledImChannels(user.id, 'qq'),
-      );
-      if (!limit.allowed) {
-        return c.json({ error: limit.reason }, 403);
-      }
-    }
-  }
-
   const current = getUserQQConfig(user.id);
   const next = {
     appId: current?.appId || '',
@@ -2514,8 +2444,7 @@ configRoutes.put('/user-im/preferences', authMiddleware, async (c) => {
   const body = UserIMPreferencesSchema.parse(await c.req.json());
   const saved = saveUserIMPreferences(user.id, {
     ...body,
-    autoCreateExecutionMode:
-      body.autoCreateExecutionMode !== undefined ? 'local' : undefined,
+    autoCreateExecutionMode: body.autoCreateExecutionMode,
   });
   return c.json(saved);
 });
@@ -2597,21 +2526,6 @@ configRoutes.put('/user-im/wechat', authMiddleware, async (c) => {
       { error: 'Invalid request body', details: validation.error.format() },
       400,
     );
-  }
-
-  // Billing: check IM channel limit when enabling
-  if (validation.data.enabled === true && isBillingEnabled()) {
-    const currentWc = getUserWeChatConfig(user.id);
-    if (!currentWc?.enabled) {
-      const limit = checkImChannelLimit(
-        user.id,
-        user.role,
-        countOtherEnabledImChannels(user.id, 'wechat'),
-      );
-      if (!limit.allowed) {
-        return c.json({ error: limit.reason }, 403);
-      }
-    }
   }
 
   const current = getUserWeChatConfig(user.id);

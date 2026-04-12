@@ -339,7 +339,6 @@ function pickSdkTaskAliasTarget(
 }
 
 function isTerminalSystemMessage(message: Pick<Message, 'sender' | 'content'>): boolean {
-  if (message.sender === '__billing__') return true;
   return message.sender === '__system__' && (
     message.content.startsWith('agent_error:') ||
     message.content.startsWith('agent_max_retries:') ||

@@ -1163,20 +1163,6 @@ export function broadcastTurnEvent(chatJid: string, event: StreamEvent): void {
   safeBroadcast(msg, isHostGroupJid(chatJid), allowedUserIds);
 }
 
-export function broadcastBillingUpdate(
-  userId: string,
-  usage: import('./types.js').BillingAccessResult,
-): void {
-  const msg: WsMessageOut = {
-    type: 'billing_update',
-    userId,
-    usage,
-  };
-  // Send only to the specific user
-  const allowedUserIds = new Set([userId]);
-  safeBroadcast(msg, false, allowedUserIds);
-}
-
 export function broadcastAgentStatus(
   chatJid: string,
   agentId: string,

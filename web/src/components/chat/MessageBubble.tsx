@@ -329,43 +329,6 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
     );
   }
 
-  // Legacy billing/system message retained for compatibility during migration.
-  if (message.sender === '__billing__') {
-    const displayMsg = message.content.replace(/^⚠️\s*/, '');
-    const isExecutionLimit = displayMsg.includes('配额') || displayMsg.includes('余额');
-    const resetMatch = displayMsg.match(/约\s*(\d+)\s*(小时|天)后重置/);
-    return (
-      <div className="mb-6">
-        {showTime && (
-          <div className="flex items-center gap-2 mb-2">
-            <span className="text-xs text-slate-500">{time}</span>
-            <span className="text-xs font-medium text-amber-600">
-              {isExecutionLimit ? '运行限制提醒' : '系统提醒'}
-            </span>
-          </div>
-        )}
-        <div className="relative bg-amber-50 dark:bg-amber-950/30 rounded-xl border border-amber-200 dark:border-amber-800 border-l-[3px] border-l-amber-500 px-5 py-4">
-          <div className="flex items-start gap-3">
-            <div className="flex-shrink-0 w-6 h-6 bg-amber-500 rounded-full flex items-center justify-center text-white font-bold text-sm">
-              !
-            </div>
-            <div className="flex-1">
-              <h3 className="text-sm font-semibold text-amber-900 dark:text-amber-200 mb-1">
-                {isExecutionLimit ? '执行限制触发' : '系统兼容提醒'}
-              </h3>
-              <p className="text-sm text-amber-800 dark:text-amber-300 leading-relaxed">{displayMsg}</p>
-              {resetMatch && (
-                <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
-                  预计 {resetMatch[1]} {resetMatch[2]}后自动重置
-                </p>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   // Scheduled task trigger message
   if (message.sender === '__task__') {
     const taskMatch = message.content.match(/^\[task:[^\]]+\]\s*([\s\S]*)/);

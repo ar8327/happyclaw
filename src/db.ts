@@ -2307,9 +2307,6 @@ function resolveLegacySessionKey(
 }
 
 function parseSessionRecord(row: Record<string, unknown>): SessionRecord {
-  const rawRuntimeMode = typeof row.runtime_mode === 'string'
-    ? row.runtime_mode
-    : 'local';
   return {
     id: String(row.id),
     name: String(row.name),
@@ -2320,12 +2317,7 @@ function parseSessionRecord(row: Record<string, unknown>): SessionRecord {
     runner_id: normalizeStoredRunnerId(row.runner_id),
     runner_profile_id:
       typeof row.runner_profile_id === 'string' ? row.runner_profile_id : null,
-    runtime_mode:
-      rawRuntimeMode === 'host' ||
-      rawRuntimeMode === 'container' ||
-      rawRuntimeMode === 'local'
-        ? rawRuntimeMode
-        : 'local',
+    runtime_mode: 'local',
     model: typeof row.model === 'string' ? row.model : null,
     thinking_effort:
       row.thinking_effort === 'low' ||

@@ -15,7 +15,6 @@ import {
   getDueTasks,
   getSessionRecord,
   getTaskById,
-  getUserById,
   logTaskRun,
   storeMessageDirect,
   updateTaskAfterRun,
@@ -23,7 +22,6 @@ import {
 import { logger } from './logger.js';
 import { hasScriptCapacity, runScript } from './script-runner.js';
 import { NewMessage, RegisteredGroup, ScheduledTask } from './types.js';
-import { checkBillingAccessFresh, isBillingEnabled } from './billing.js';
 
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
@@ -59,11 +57,6 @@ function computeNextRun(task: ScheduledTask): string | null {
   }
   // 'once' tasks have no next run
   return null;
-}
-
-function resolveScheduledTaskOwnerId(group: RegisteredGroup | undefined): string | null {
-  if (!group?.folder) return group?.created_by || null;
-  return getSessionRecord(`main:${group.folder}`)?.owner_key || group.created_by || null;
 }
 
 /**
@@ -132,45 +125,6 @@ async function runScriptTask(
     { taskId: task.id, group: task.group_folder, executionType: 'script' },
     'Running script task',
   );
-
-  // Billing quota check before running script task
-  if (isBillingEnabled() && task.group_folder) {
-    const groups = deps.registeredGroups();
-    const group = groups[groupJid];
-    const ownerId = resolveScheduledTaskOwnerId(group);
-    if (ownerId) {
-      const owner = getUserById(ownerId);
-      if (owner && owner.role !== 'admin') {
-        const accessResult = checkBillingAccessFresh(
-          ownerId,
-          owner.role,
-        );
-        if (!accessResult.allowed) {
-          const reason = accessResult.reason || '当前账户不可用';
-          logger.info(
-            {
-              taskId: task.id,
-              userId: ownerId,
-              reason,
-              blockType: accessResult.blockType,
-            },
-            'Billing access denied, blocking script task',
-          );
-          logTaskRun({
-            task_id: task.id,
-            run_at: new Date().toISOString(),
-            duration_ms: Date.now() - startTime,
-            status: 'error',
-            result: null,
-            error: `计费限制: ${reason}`,
-          });
-          const nextRun = computeNextRun(task);
-          updateTaskAfterRun(task.id, nextRun, `Error: 计费限制: ${reason}`);
-          return;
-        }
-      }
-    }
-  }
 
   const groupDir = path.join(GROUPS_DIR, task.group_folder);
   fs.mkdirSync(groupDir, { recursive: true });

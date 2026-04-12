@@ -230,54 +230,29 @@ export const RegistrationConfigSchema = z.object({
   requireInviteCode: z.boolean(),
 });
 
-export const SystemSettingsSchema = z
-  .object({
-    runtimeTimeout: z.number().int().min(60000).max(86400000).optional(),
-    idleTimeout: z.number().int().min(60000).max(86400000).optional(),
-    runtimeMaxOutputSize: z
-      .number()
-      .int()
-      .min(1048576)
-      .max(104857600)
-      .optional(),
-    maxConcurrentRuntimes: z.number().int().min(1).max(100).optional(),
-    maxConcurrentScripts: z.number().int().min(1).max(50).optional(),
-    scriptTimeout: z.number().int().min(5000).max(600000).optional(),
-    memoryQueryTimeout: z.number().int().min(10000).max(600000).optional(),
-    memoryGlobalSleepTimeout: z.number().int().min(60000).max(3600000).optional(),
-    memorySendTimeout: z.number().int().min(30000).max(3600000).optional(),
-    turnBatchWindowMs: z.number().int().min(1000).max(60000).optional(),
-    turnMaxBatchMs: z.number().int().min(5000).max(300000).optional(),
-    traceRetentionDays: z.number().int().min(1).max(90).optional(),
-    feishuApiDomain: z.string().min(1).max(100).optional(),
-    feishuDocDomain: z.string().min(1).max(100).optional(),
-    webPublicUrl: z.string().max(200).optional(),
-    defaultClaudeModel: z.string().max(100).optional(),
-    containerTimeout: z.number().int().min(60000).max(86400000).optional(),
-    containerMaxOutputSize: z
-      .number()
-      .int()
-      .min(1048576)
-      .max(104857600)
-      .optional(),
-    maxConcurrentContainers: z.number().int().min(1).max(100).optional(),
-  })
-  .transform((data) => {
-    const {
-      containerTimeout,
-      containerMaxOutputSize,
-      maxConcurrentContainers,
-      ...rest
-    } = data;
-    return {
-      ...rest,
-      runtimeTimeout: rest.runtimeTimeout ?? containerTimeout,
-      runtimeMaxOutputSize:
-        rest.runtimeMaxOutputSize ?? containerMaxOutputSize,
-      maxConcurrentRuntimes:
-        rest.maxConcurrentRuntimes ?? maxConcurrentContainers,
-    };
-  });
+export const SystemSettingsSchema = z.object({
+  runtimeTimeout: z.number().int().min(60000).max(86400000).optional(),
+  idleTimeout: z.number().int().min(60000).max(86400000).optional(),
+  runtimeMaxOutputSize: z
+    .number()
+    .int()
+    .min(1048576)
+    .max(104857600)
+    .optional(),
+  maxConcurrentRuntimes: z.number().int().min(1).max(100).optional(),
+  maxConcurrentScripts: z.number().int().min(1).max(50).optional(),
+  scriptTimeout: z.number().int().min(5000).max(600000).optional(),
+  memoryQueryTimeout: z.number().int().min(10000).max(600000).optional(),
+  memoryGlobalSleepTimeout: z.number().int().min(60000).max(3600000).optional(),
+  memorySendTimeout: z.number().int().min(30000).max(3600000).optional(),
+  turnBatchWindowMs: z.number().int().min(1000).max(60000).optional(),
+  turnMaxBatchMs: z.number().int().min(5000).max(300000).optional(),
+  traceRetentionDays: z.number().int().min(1).max(90).optional(),
+  feishuApiDomain: z.string().min(1).max(100).optional(),
+  feishuDocDomain: z.string().min(1).max(100).optional(),
+  webPublicUrl: z.string().max(200).optional(),
+  defaultClaudeModel: z.string().max(100).optional(),
+});
 
 export const AppearanceConfigSchema = z.object({
   appName: z.string().max(32).optional(),
@@ -644,7 +619,7 @@ export interface MemorySearchHit extends MemorySource {
 
 export const UserIMPreferencesSchema = z.object({
   autoCreateWorkspaceForGroups: z.boolean().optional(),
-  autoCreateExecutionMode: z.enum(['local', 'host', 'container']).optional(),
+  autoCreateExecutionMode: z.literal('local').optional(),
 });
 
 export const WeChatConfigSchema = z.object({

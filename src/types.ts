@@ -282,7 +282,7 @@ export interface SubAgent {
 // --- Session workbench types ---
 
 export type SessionKind = 'main' | 'workspace' | 'worker' | 'memory';
-export type SessionRuntimeMode = 'local' | 'container' | 'host';
+export type SessionRuntimeMode = 'local';
 export type SessionBindingMode = 'direct' | 'source_only' | 'mirror';
 export type RunnerId = string;
 export type ResumeStrength = 'none' | 'weak' | 'strong';
@@ -500,12 +500,7 @@ export type WsMessageOut =
   | { type: 'terminal_output'; chatJid: string; data: string }
   | { type: 'terminal_started'; chatJid: string }
   | { type: 'terminal_stopped'; chatJid: string; reason?: string }
-  | { type: 'terminal_error'; chatJid: string; error: string }
-  | {
-      type: 'billing_update';
-      userId: string;
-      usage: BillingAccessResult;
-    };
+  | { type: 'terminal_error'; chatJid: string; error: string };
 
 export type WsMessageIn =
   | {
