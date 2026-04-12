@@ -412,13 +412,36 @@ function resolveStableSessionOwnerKey(
   return resolveSessionOwnerKey(groupFolder);
 }
 
+function isImplicitDefaultSessionBinding(
+  chatJid: string,
+  group: RegisteredGroup | undefined,
+  binding: ReturnType<typeof getSessionBinding> | undefined,
+): boolean {
+  if (!group || !binding) return false;
+  if (group.target_agent_id || group.target_main_jid) return false;
+  return binding.session_id === resolveDefaultSessionBinding(chatJid, group);
+}
+
+function getExplicitSessionBinding(
+  chatJid: string,
+  fallbackGroup?: RegisteredGroup,
+): ReturnType<typeof getSessionBinding> | undefined {
+  const group =
+    fallbackGroup ?? registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  const binding = getSessionBinding(chatJid);
+  return isImplicitDefaultSessionBinding(chatJid, group, binding)
+    ? undefined
+    : binding;
+}
+
 function getChatBindingPolicy(chatJid: string): {
   activationMode: 'auto' | 'always' | 'when_mentioned' | 'disabled';
   requireMention: boolean;
   replyPolicy: 'source_only' | 'mirror';
   sessionId: string | null;
 } {
-  const binding = getSessionBinding(chatJid);
+  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  const binding = getExplicitSessionBinding(chatJid, group);
   if (binding) {
     return {
       activationMode: binding.activation_mode,
@@ -428,12 +451,11 @@ function getChatBindingPolicy(chatJid: string): {
     };
   }
 
-  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   return {
     activationMode: group?.activation_mode ?? 'auto',
     requireMention: group?.require_mention === true,
     replyPolicy: group?.reply_policy === 'mirror' ? 'mirror' : 'source_only',
-    sessionId: null,
+    sessionId: group ? resolveDefaultSessionBinding(chatJid, group) : null,
   };
 }
 
@@ -454,9 +476,10 @@ function resolveBoundSessionTarget(
   const defaultFolder = group?.folder || MAIN_GROUP_FOLDER;
   const defaultCompression = group?.context_compression ?? 'off';
   const defaultLocationLine = `${findGroupNameByFolder(defaultFolder)} / 主会话`;
-  const binding = getSessionBinding(chatJid);
+  const policy = getChatBindingPolicy(chatJid);
+  const bindingSessionId = policy.sessionId;
 
-  if (!binding) {
+  if (!bindingSessionId) {
     return {
       sessionId: null,
       boundAgentId: null,
@@ -468,15 +491,15 @@ function resolveBoundSessionTarget(
     };
   }
 
-  const boundSession = getSessionRecord(binding.session_id);
+  const boundSession = getSessionRecord(bindingSessionId);
   if (!boundSession) {
     return {
-      sessionId: binding.session_id,
+      sessionId: bindingSessionId,
       boundAgentId: null,
       effectiveJid: null,
       folder: defaultFolder,
       locationLine: defaultLocationLine,
-      replyPolicy: binding.reply_policy,
+      replyPolicy: policy.replyPolicy,
       contextCompression: defaultCompression,
     };
   }
@@ -509,7 +532,7 @@ function resolveBoundSessionTarget(
           : null,
       folder,
       locationLine: `${workspaceName} / ${worker?.name || boundAgentId || boundSession.name}`,
-      replyPolicy: binding.reply_policy,
+      replyPolicy: policy.replyPolicy,
       contextCompression:
         parentSession?.context_compression || defaultCompression,
     };
@@ -527,7 +550,7 @@ function resolveBoundSessionTarget(
     effectiveJid: findWebJidForFolder(folder) || `web:${folder}`,
     folder,
     locationLine: `${boundSession.name} / 主会话`,
-    replyPolicy: binding.reply_policy,
+    replyPolicy: policy.replyPolicy,
     contextCompression: boundSession.context_compression,
   };
 }
@@ -537,9 +560,9 @@ function resolveChatOwnerKey(
   fallbackGroup?: RegisteredGroup,
   agentId?: string,
 ): string | undefined {
-  const binding = getSessionBinding(chatJid);
-  if (binding) {
-    const boundSession = getSessionRecord(binding.session_id);
+  const policy = getChatBindingPolicy(chatJid);
+  if (policy.sessionId) {
+    const boundSession = getSessionRecord(policy.sessionId);
     if (boundSession?.owner_key) return boundSession.owner_key;
     if (boundSession?.parent_session_id) {
       const parentSession = getSessionRecord(boundSession.parent_session_id);
@@ -573,7 +596,11 @@ function applyExplicitChatBinding(
 ): void {
   const current = getSessionBinding(chatJid);
   const now = new Date().toISOString();
-  if (!sessionId) {
+  const implicitDefaultSessionId =
+    !group.target_agent_id && !group.target_main_jid
+      ? resolveDefaultSessionBinding(chatJid, group)
+      : null;
+  if (!sessionId || sessionId === implicitDefaultSessionId) {
     deleteSessionBinding(chatJid);
     return;
   }
@@ -631,14 +658,18 @@ const RELATIVE_IMAGE_EXTENSIONS = new Set([
 /** Unbind an IM group from its conversation agent or main conversation, syncing DB + in-memory cache + failure counters. */
 function unbindImGroup(jid: string, reason: string): void {
   const group = registeredGroups[jid] ?? getRegisteredGroup(jid);
-  const binding = getSessionBinding(jid);
-  if (!binding && !group?.target_agent_id && !group?.target_main_jid) return;
+  const storedBinding = getSessionBinding(jid);
+  const binding = getExplicitSessionBinding(jid, group);
+  if (!binding && !group?.target_agent_id && !group?.target_main_jid) {
+    if (storedBinding) deleteSessionBinding(jid);
+    return;
+  }
   const agentId = group?.target_agent_id;
   const targetMainJid = group?.target_main_jid;
   if (!group) {
     deleteSessionBinding(jid);
     logger.info(
-      { jid, sessionId: binding?.session_id || null },
+      { jid, sessionId: binding?.session_id || storedBinding?.session_id || null },
       `${reason} but backing IM group is already gone`,
     );
     return;
@@ -1246,7 +1277,7 @@ function handleWhereCommand(chatJid: string): string {
 function handleUnbindCommand(chatJid: string): string {
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   if (!group) return '当前 IM 未绑定工作区';
-  if (!getSessionBinding(chatJid))
+  if (!getExplicitSessionBinding(chatJid, group))
     return '当前聊天没有额外绑定，已在默认工作区。';
   unbindImGroup(chatJid, 'IM slash command unbind');
   return '已解绑，后续消息将回到该聊天自己的默认工作区。';
@@ -1292,8 +1323,14 @@ function handleBindCommand(chatJid: string, rawSpec: string): string {
 
   const updated: RegisteredGroup = {
     ...group,
-    target_agent_id: resolved.target_agent_id,
-    target_main_jid: resolved.target_main_jid,
+    target_agent_id:
+      resolved.sessionId === `main:${group.folder}`
+        ? undefined
+        : resolved.target_agent_id,
+    target_main_jid:
+      resolved.sessionId === `main:${group.folder}`
+        ? undefined
+        : resolved.target_main_jid,
     reply_policy: 'source_only',
   };
   setRegisteredGroup(chatJid, updated);
@@ -1357,22 +1394,24 @@ function handleRequireMentionCommand(chatJid: string, rawArgs: string): string {
   if (action === 'true') {
     const updated: RegisteredGroup = { ...group, require_mention: true };
     setRegisteredGroup(chatJid, updated);
+    const policy = getChatBindingPolicy(chatJid);
     applyExplicitChatBinding(
       chatJid,
       updated,
-      getSessionBinding(chatJid)?.session_id || `main:${group.folder}`,
-      getSessionBinding(chatJid)?.reply_policy || 'source_only',
+      policy.sessionId,
+      policy.replyPolicy,
     );
     registeredGroups[chatJid] = updated;
     return '已开启：群聊中需要 @机器人 才会响应';
   } else if (action === 'false') {
     const updated: RegisteredGroup = { ...group, require_mention: false };
     setRegisteredGroup(chatJid, updated);
+    const policy = getChatBindingPolicy(chatJid);
     applyExplicitChatBinding(
       chatJid,
       updated,
-      getSessionBinding(chatJid)?.session_id || `main:${group.folder}`,
-      getSessionBinding(chatJid)?.reply_policy || 'source_only',
+      policy.sessionId,
+      policy.replyPolicy,
     );
     registeredGroups[chatJid] = updated;
     return '已关闭：群聊中所有消息都会响应，无需 @机器人';
@@ -2158,9 +2197,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // For IM groups with target_main_jid, inherit compression setting from target group.
   const tryAutoCompress = (): void => {
     const ownCompression = group.context_compression;
-    const boundTarget = getSessionBinding(chatJid)
-      ? resolveBoundSessionTarget(chatJid, group)
-      : null;
+    const boundTarget = resolveBoundSessionTarget(chatJid, group);
     const effectiveCompression =
       (ownCompression && ownCompression !== 'off')
         ? ownCompression
@@ -4690,16 +4727,9 @@ function buildOnNewChat(
   return (chatJid, chatName, chatType) => {
     const existing = registeredGroups[chatJid];
     if (existing) {
-      let binding = getSessionBinding(chatJid);
+      const binding = getExplicitSessionBinding(chatJid, existing);
       // Already owned by this user — update names if we now have a better name
       if (existing.created_by === userId) {
-        if (!binding) {
-          const defaultSessionId = resolveDefaultSessionBinding(chatJid, existing);
-          if (defaultSessionId) {
-            applyExplicitChatBinding(chatJid, existing, defaultSessionId);
-            binding = getSessionBinding(chatJid);
-          }
-        }
         if (chatName && chatName !== '飞书群聊' && chatName !== '飞书私聊') {
           // Update the IM chat name (chats table)
           updateChatName(chatJid, chatName);
@@ -4739,7 +4769,7 @@ function buildOnNewChat(
         const previousOwner = existing.created_by;
         existing.folder = homeFolder;
         existing.created_by = userId;
-        existing.target_main_jid = `web:${homeFolder}`;
+        existing.target_main_jid = undefined;
         setRegisteredGroup(chatJid, existing);
         applyExplicitChatBinding(chatJid, existing, `main:${homeFolder}`);
         registeredGroups[chatJid] = existing;
@@ -4825,7 +4855,6 @@ function buildOnNewChat(
         folder: homeFolder,
         added_at: new Date().toISOString(),
         created_by: userId,
-        target_main_jid: `web:${homeFolder}`,
       });
       applyExplicitChatBinding(
         chatJid,
@@ -4913,31 +4942,12 @@ function buildResolveEffectiveChatJid(): (
   chatJid: string,
 ) => { effectiveJid: string; agentId: string | null } | null {
   return (chatJid: string) => {
-    const binding = getSessionBinding(chatJid);
-    if (binding) {
-      const session = getSessionRecord(binding.session_id);
-      if (session) {
-        if (session.kind === 'worker') {
-          const worker = getWorkerSessionRecord(session.id);
-          const agentId = session.id.startsWith('worker:')
-            ? session.id.slice('worker:'.length)
-            : null;
-          if (worker && agentId) {
-            return {
-              effectiveJid: `${worker.source_chat_jid}#agent:${agentId}`,
-              agentId,
-            };
-          }
-        }
-
-        if (session.id.startsWith('main:')) {
-          const folder = session.id.slice('main:'.length);
-          const effectiveJid =
-            getJidsByFolder(folder).find((jid) => jid.startsWith('web:')) ||
-            `web:${folder}`;
-          return { effectiveJid, agentId: null };
-        }
-      }
+    const target = resolveBoundSessionTarget(chatJid);
+    if (target.sessionId && target.effectiveJid) {
+      return {
+        effectiveJid: target.effectiveJid,
+        agentId: target.boundAgentId,
+      };
     }
     return null;
   };
@@ -6048,6 +6058,10 @@ async function checkImBindingsHealth(): Promise<void> {
       const group =
         registeredGroups[binding.channel_jid] ??
         getRegisteredGroup(binding.channel_jid);
+      if (isImplicitDefaultSessionBinding(binding.channel_jid, group, binding)) {
+        deleteSessionBinding(binding.channel_jid);
+        return null;
+      }
       return group
         ? { jid: binding.channel_jid, group, sessionId: binding.session_id }
         : null;
