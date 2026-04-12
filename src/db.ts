@@ -2676,8 +2676,18 @@ export function deleteSession(
 export function deleteAllSessionsForFolder(groupFolder: string): void {
   const mainSessionId = buildMainSessionId(groupFolder);
   db.prepare(
+    'DELETE FROM session_bindings WHERE session_id = ? OR session_id IN (SELECT session_id FROM worker_sessions WHERE parent_session_id = ?)',
+  ).run(mainSessionId, mainSessionId);
+  db.prepare(
     'DELETE FROM session_state WHERE session_id = ? OR session_id IN (SELECT session_id FROM worker_sessions WHERE parent_session_id = ?)',
   ).run(mainSessionId, mainSessionId);
+  db.prepare('DELETE FROM worker_sessions WHERE parent_session_id = ?').run(
+    mainSessionId,
+  );
+  db.prepare('DELETE FROM sessions WHERE id = ? OR parent_session_id = ?').run(
+    mainSessionId,
+    mainSessionId,
+  );
 }
 
 export function getAllSessions(): Record<string, string> {
