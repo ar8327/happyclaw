@@ -24,6 +24,7 @@ import {
   deleteGroupData,
   deleteRegisteredGroup,
   deleteRunnerProfile,
+  deleteSessionBinding,
   deleteSession,
   ensureChatExists,
   getAllChats,
@@ -45,6 +46,7 @@ import {
   listRunnerProfiles,
   listSessionRecords,
   saveRunnerProfile,
+  saveSessionBinding,
   saveSessionRecord,
   searchMessages,
   countSearchResults,
@@ -431,6 +433,67 @@ function buildUpdatedImGroupForSessionBinding(
   throw new Error('Memory session does not support IM binding');
 }
 
+function isImplicitDefaultSessionBinding(
+  imGroup: RegisteredGroup,
+  binding: ReturnType<typeof getSessionBinding> | undefined,
+): boolean {
+  return !!binding
+    && !imGroup.target_agent_id
+    && !imGroup.target_main_jid
+    && binding.session_id === `main:${imGroup.folder}`;
+}
+
+function getExplicitSessionBinding(
+  channelJid: string,
+  imGroup: RegisteredGroup,
+): ReturnType<typeof getSessionBinding> | undefined {
+  const binding = getSessionBinding(channelJid);
+  return isImplicitDefaultSessionBinding(imGroup, binding) ? undefined : binding;
+}
+
+function syncExplicitSessionBinding(
+  channelJid: string,
+  imGroup: RegisteredGroup,
+  sessionId: string | null,
+  options: {
+    replyPolicy?: 'source_only' | 'mirror';
+    activationMode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+    requireMention?: boolean;
+  },
+): void {
+  const now = new Date().toISOString();
+  const current = getSessionBinding(channelJid);
+  const nextReplyPolicy = options.replyPolicy ?? imGroup.reply_policy ?? 'source_only';
+  const nextActivationMode = options.activationMode ?? imGroup.activation_mode ?? 'auto';
+  const nextRequireMention =
+    options.requireMention !== undefined
+      ? options.requireMention
+      : imGroup.require_mention === true;
+
+  if (!sessionId) {
+    deleteSessionBinding(channelJid);
+    return;
+  }
+
+  const session = getSessionRecord(sessionId);
+  saveSessionBinding({
+    channel_jid: channelJid,
+    session_id: sessionId,
+    binding_mode:
+      nextReplyPolicy === 'mirror'
+        ? 'mirror'
+        : session?.kind === 'worker'
+          ? 'direct'
+          : 'source_only',
+    activation_mode: nextActivationMode,
+    require_mention: nextRequireMention,
+    display_name: imGroup.name,
+    reply_policy: nextReplyPolicy,
+    created_at: current?.created_at || imGroup.added_at || now,
+    updated_at: now,
+  });
+}
+
 function buildSessionPayload(
   user: AuthUser,
   session: SessionRecord,
@@ -648,7 +711,7 @@ sessionRoutes.put('/bindings/:channelJid', authMiddleware, async (c) => {
     typeof body.require_mention === 'boolean'
       ? body.require_mention
       : undefined;
-  const currentBinding = getSessionBinding(channelJid);
+  const currentBinding = getExplicitSessionBinding(channelJid, imGroup);
 
   let targetSession: SessionRecord | null = null;
   if (body.unbind !== true) {
@@ -670,9 +733,21 @@ sessionRoutes.put('/bindings/:channelJid', authMiddleware, async (c) => {
     });
     setRegisteredGroup(channelJid, updated);
     syncRegisteredGroupCache(channelJid, updated);
+    const explicitSessionId =
+      targetSession
+      && (targetSession.id !== `main:${updated.folder}`
+        || !!updated.target_agent_id
+        || !!updated.target_main_jid)
+        ? targetSession.id
+        : null;
+    syncExplicitSessionBinding(channelJid, updated, explicitSessionId, {
+      replyPolicy,
+      activationMode,
+      requireMention,
+    });
     return c.json({
       success: true,
-      binding: getSessionBinding(channelJid),
+      binding: getExplicitSessionBinding(channelJid, updated) || null,
     });
   } catch (err) {
     return c.json(

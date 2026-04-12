@@ -66,6 +66,24 @@ function upsertImBinding(
   });
 }
 
+function isImplicitDefaultSessionBinding(
+  imGroup: RegisteredGroup,
+  binding: ReturnType<typeof getSessionBinding> | undefined,
+): boolean {
+  return !!binding
+    && !imGroup.target_agent_id
+    && !imGroup.target_main_jid
+    && binding.session_id === `main:${imGroup.folder}`;
+}
+
+function getExplicitSessionBinding(
+  imJid: string,
+  imGroup: RegisteredGroup,
+): ReturnType<typeof getSessionBinding> | undefined {
+  const binding = getSessionBinding(imJid);
+  return isImplicitDefaultSessionBinding(imGroup, binding) ? undefined : binding;
+}
+
 function resolveRouteGroup(
   id: string,
   options?: { allowImGroupAlias?: boolean },
@@ -388,7 +406,7 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
   const candidates: ImGroupCandidate[] = [];
   for (const j of imJids) {
     const g = allGroups[j];
-    const binding = getSessionBinding(j);
+    const binding = getExplicitSessionBinding(j, g);
 
     // Resolve bound target name for display
     let boundTargetName: string | null = null;
@@ -527,7 +545,7 @@ router.put('/:jid/agents/:agentId/im-binding', authMiddleware, async (c) => {
   }
   const force = body.force === true;
   const replyPolicy = body.reply_policy === 'mirror' ? 'mirror' : 'source_only';
-  const currentBinding = getSessionBinding(imJid);
+  const currentBinding = getExplicitSessionBinding(imJid, imGroup);
   const targetSessionId = `worker:${agentId}`;
   const hasConflict =
     !!currentBinding && currentBinding.session_id !== targetSessionId;
@@ -584,7 +602,7 @@ router.delete(
     if (!canAccessGroup(user, { ...imGroup, jid: imJid })) {
       return c.json({ error: 'Forbidden' }, 403);
     }
-    const currentBinding = getSessionBinding(imJid);
+    const currentBinding = getExplicitSessionBinding(imJid, imGroup);
     if (currentBinding?.session_id !== `worker:${agentId}`) {
       return c.json({ error: 'IM group is not bound to this agent' }, 400);
     }
@@ -644,7 +662,7 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
   const targetMainJid = accessJid; // Use actual registered JID (not folder-based)
   const force = body.force === true;
   const replyPolicy = body.reply_policy === 'mirror' ? 'mirror' : 'source_only';
-  const currentBinding = getSessionBinding(imJid);
+  const currentBinding = getExplicitSessionBinding(imJid, imGroup);
   const targetSessionId = `main:${group.folder}`;
   const hasConflict =
     !!currentBinding && currentBinding.session_id !== targetSessionId;
@@ -696,7 +714,7 @@ router.delete('/:jid/im-binding/:imJid', authMiddleware, async (c) => {
     return c.json({ error: 'Forbidden' }, 403);
   }
   const targetMainJid = accessJid; // Use actual registered JID (not folder-based)
-  const currentBinding = getSessionBinding(imJid);
+  const currentBinding = getExplicitSessionBinding(imJid, imGroup);
   if (currentBinding?.session_id !== `main:${group.folder}`) {
     return c.json({ error: 'IM group is not bound to this workspace' }, 400);
   }
