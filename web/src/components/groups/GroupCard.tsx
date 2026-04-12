@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronUp, Users } from 'lucide-react';
+import { ChevronDown, ChevronUp } from 'lucide-react';
 import { GroupInfo } from '../../stores/groups';
 import { GroupDetail } from './GroupDetail';
 
@@ -35,12 +35,6 @@ export function GroupCard({ group }: GroupCardProps) {
               <h3 className="text-lg font-semibold text-foreground truncate">
                 {group.name}
               </h3>
-              {group.is_shared && (
-                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-brand-100 text-primary text-[10px] font-medium flex-shrink-0">
-                  <Users className="w-3 h-3" />
-                  {group.member_count ?? 0}
-                </span>
-              )}
             </div>
 
             {/* Session ID / JID */}

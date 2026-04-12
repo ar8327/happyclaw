@@ -459,8 +459,6 @@ function buildSessionPayload(
   const descriptor = getRunnerDescriptor(session.runner_id);
   const summary = backingJid ? getContextSummary(getFolderForSession(session), backingJid) : null;
   const backingGroup = backingJid ? getRegisteredGroup(backingJid) : undefined;
-  const memberCount = 1;
-  const memberRole = 'owner';
   const uniformActivationMode =
     sessionBindings.length > 0 &&
     sessionBindings.every(
@@ -486,7 +484,6 @@ function buildSessionPayload(
     cwd: session.cwd,
     backing_jid: backingJid,
     owner_key: session.owner_key,
-    created_by: backingGroup?.created_by,
     runner_id: session.runner_id,
     runner_profile_id: session.runner_profile_id,
     llm_provider: mapLegacyLlmProvider(session.runner_id, backingGroup?.llm_provider),
@@ -511,11 +508,6 @@ function buildSessionPayload(
     has_summary: !!summary,
     summary_created_at: summary?.created_at ?? null,
     pinned_at: session.is_pinned ? session.updated_at : undefined,
-    is_home: session.kind === 'main',
-    is_my_home: session.kind === 'main',
-    is_shared: false,
-    member_count: memberCount,
-    member_role: memberRole,
     selected_skills: backingGroup?.selected_skills ?? null,
     activation_mode:
       uniformActivationMode || backingGroup?.activation_mode || 'auto',

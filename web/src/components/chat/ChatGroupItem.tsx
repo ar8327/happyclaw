@@ -13,9 +13,6 @@ export interface ChatGroupItemProps {
   name: string;
   sessionSlug: string;
   lastMessage?: string;
-  isShared?: boolean;
-  memberRole?: 'owner' | 'member';
-  memberCount?: number;
   isActive: boolean;
   isHome: boolean;
   isPinned?: boolean;
@@ -35,9 +32,6 @@ export function ChatGroupItem({
   name,
   sessionSlug,
   lastMessage,
-  isShared,
-  memberRole,
-  memberCount,
   isActive,
   isHome,
   isPinned,
@@ -89,16 +83,6 @@ export function ChatGroupItem({
           >
             {displayName}
           </span>
-          {isShared && memberRole === 'owner' && (memberCount ?? 0) >= 2 && (
-            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-100 text-purple-700">
-              所有者
-            </span>
-          )}
-          {isShared && memberRole !== 'owner' && (memberCount ?? 0) >= 2 && (
-            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-100 text-violet-700">
-              {memberCount} 人协作
-            </span>
-          )}
           {(model || runnerLabel) && (
             <span className={cn(
               'inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium',

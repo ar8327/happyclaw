@@ -53,7 +53,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
   const thinkingCache = useChatStore(s => s.thinkingCache ?? {});
   const highlightMessageId = useChatStore(s => s.highlightMessageId[groupJid ?? ''] ?? null);
   const clearHighlight = useChatStore(s => s.clearHighlight);
-  const isShared = useChatStore(s => !!s.groups[groupJid ?? '']?.is_shared);
+  const isShared = false;
   const currentUser = useAuthStore(s => s.user);
   const appearance = useAuthStore(s => s.appearance);
   const aiName = currentUser?.ai_name || appearance?.aiName || 'AI 助手';

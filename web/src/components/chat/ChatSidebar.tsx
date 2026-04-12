@@ -93,30 +93,26 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
     return { mainGroup: main, otherGroups: others };
   }, [groups]);
 
-  // Split non-main groups into pinned / private / collaborative, then sub-group by date
-  const { pinnedGroups, mySections, collabSections } = useMemo(() => {
+  const { pinnedGroups, workspaceSections } = useMemo(() => {
     const filtered = searchQuery.trim()
       ? otherGroups.filter((g) => g.name.toLowerCase().includes(searchQuery.toLowerCase()))
       : otherGroups;
 
     const pinned: typeof otherGroups = [];
-    const my: typeof otherGroups = [];
-    const collab: typeof otherGroups = [];
+    const workspaces: typeof otherGroups = [];
 
     filtered.forEach((g) => {
       if (g.pinned_at) {
         pinned.push(g);
-      } else if (g.is_shared && (g.member_count ?? 0) >= 2) {
-        collab.push(g);
       } else {
-        my.push(g);
+        workspaces.push(g);
       }
     });
 
     // Sort pinned by pinned_at ascending (earliest pinned first = stable top)
     pinned.sort((a, b) => (a.pinned_at || '').localeCompare(b.pinned_at || ''));
 
-    return { pinnedGroups: pinned, mySections: groupByDate(my), collabSections: groupByDate(collab) };
+    return { pinnedGroups: pinned, workspaceSections: groupByDate(workspaces) };
   }, [otherGroups, searchQuery]);
 
   const handleSessionSelect = (jid: string, sessionSlug: string) => {
@@ -170,7 +166,7 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
 
   const allGroups = mainGroup ? [mainGroup, ...otherGroups] : otherGroups;
 
-  const renderSections = (sections: DateSection[], showCollabBadge: boolean) =>
+  const renderSections = (sections: DateSection[]) =>
     sections.map((section) => (
       <div key={section.label} className="mb-1">
         <div className="px-2 pt-2 pb-1">
@@ -185,9 +181,6 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
             name={g.name}
             sessionSlug={g.folder}
             lastMessage={g.lastMessage}
-            isShared={showCollabBadge ? g.is_shared : undefined}
-            memberRole={showCollabBadge ? g.member_role : undefined}
-            memberCount={showCollabBadge ? g.member_count : undefined}
             isActive={currentGroup === g.jid}
             isHome={false}
             runnerLabel={g.runner_label}
@@ -290,9 +283,6 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
                     name={g.name}
                     sessionSlug={g.folder}
                     lastMessage={g.lastMessage}
-                    isShared={g.is_shared}
-                    memberRole={g.member_role}
-                    memberCount={g.member_count}
                     isActive={currentGroup === g.jid}
                     isHome={false}
                     isPinned
@@ -311,7 +301,7 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
             )}
 
             {/* Section: My workspaces + Collaborative workspaces */}
-            {mySections.length === 0 && collabSections.length === 0 && pinnedGroups.length === 0 && !mainGroup ? (
+            {workspaceSections.length === 0 && pinnedGroups.length === 0 && !mainGroup ? (
               <div className="flex flex-col items-center justify-center h-32 px-4">
                 <p className="text-sm text-muted-foreground text-center">
                   {searchQuery ? '未找到匹配的会话' : '暂无会话'}
@@ -319,25 +309,14 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
               </div>
             ) : (
               <>
-                {mySections.length > 0 && (
+                {workspaceSections.length > 0 && (
                   <div>
                     <div className="px-2 pt-3 pb-1.5">
                       <span className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">
-                        我的会话
+                        其他会话
                       </span>
                     </div>
-                    {renderSections(mySections, false)}
-                  </div>
-                )}
-
-                {collabSections.length > 0 && (
-                  <div>
-                    <div className="px-2 pt-3 pb-1.5">
-                      <span className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">
-                        协作会话
-                      </span>
-                    </div>
-                    {renderSections(collabSections, true)}
+                    {renderSections(workspaceSections)}
                   </div>
                 )}
               </>

@@ -15,8 +15,6 @@ interface GroupsState {
   loadGroups: () => Promise<void>;
   updateGroup: (jid: string, updates: Record<string, unknown>) => Promise<void>;
   loadMembers: (jid: string) => Promise<void>;
-  addMember: (jid: string, userId: string) => Promise<void>;
-  removeMember: (jid: string, userId: string) => Promise<void>;
 }
 
 export const useGroupsStore = create<GroupsState>((set, get) => ({
@@ -64,30 +62,5 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
       set({ membersLoading: false });
       throw err;
     }
-  },
-
-  addMember: async (jid: string, userId: string) => {
-    const data = await api.post<{ members: SessionMember[] }>(
-      `/api/sessions/${encodeURIComponent(jid)}/members`,
-      { user_id: userId },
-    );
-    set((state) => ({
-      members: { ...state.members, [jid]: data.members },
-    }));
-    // Refresh group lists to update member_count (both stores)
-    get().loadGroups();
-    useChatStore.getState().loadGroups();
-  },
-
-  removeMember: async (jid: string, userId: string) => {
-    const data = await api.delete<{ members: SessionMember[] }>(
-      `/api/sessions/${encodeURIComponent(jid)}/members/${encodeURIComponent(userId)}`,
-    );
-    set((state) => ({
-      members: { ...state.members, [jid]: data.members },
-    }));
-    // Refresh group lists (both stores) — removed member loses access
-    get().loadGroups();
-    useChatStore.getState().loadGroups();
   },
 }));

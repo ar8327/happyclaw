@@ -4,17 +4,11 @@ export interface SessionInfo {
   folder: string;
   added_at: string;
   kind?: 'home' | 'main' | 'workspace' | 'worker' | 'memory' | 'feishu' | 'web';
-  is_home?: boolean;
-  is_my_home?: boolean;
-  is_shared?: boolean;
-  member_role?: 'owner' | 'member';
-  member_count?: number;
   editable?: boolean;
   deletable?: boolean;
   lastMessage?: string;
   lastMessageTime?: string;
   custom_cwd?: string;
-  created_by?: string;
   selected_skills?: string[] | null;
   pinned_at?: string;
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
