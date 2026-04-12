@@ -61,7 +61,12 @@ function StatusBadge({ exitCode }: { exitCode: number | null }) {
 }
 
 function TypeBadge({ prefix }: { prefix: string }) {
-  const label = prefix === 'host' ? '本地 Runtime' : prefix === 'memory' ? '记忆' : 'Runtime';
+  const label =
+    prefix === 'memory'
+      ? '记忆'
+      : prefix === 'local' || prefix === 'host' || prefix === 'container'
+        ? '本地 Runtime'
+        : 'Runtime';
   const color = prefix === 'memory'
     ? 'bg-purple-100 text-purple-700'
     : 'bg-blue-100 text-blue-700';

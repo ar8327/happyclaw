@@ -176,7 +176,7 @@ export interface AvailableGroup {
 }
 
 /**
- * Write available groups snapshot for the container to read.
+ * Write available groups snapshot for the runtime to read.
  * Only admin home can see all available groups (for activation).
  * Other groups see nothing (they can't activate groups).
  */
@@ -397,7 +397,7 @@ export async function runHostAgent(
   fs.mkdirSync(groupSessionsDir, { recursive: true });
 
   // 3. 写入 settings.json（合并模式，不覆盖已有用户配置）
-  // Resolve MCP servers based on group's mcp_mode (same logic as Docker mode).
+  // Resolve MCP servers based on group's mcp_mode for the unified local runtime.
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
   const hostMcpServers = resolveGroupMcpServers(group, sessionOwnerKey || undefined);
   ensureSettingsJson(settingsFile, hostMcpServers);
@@ -569,7 +569,7 @@ export async function runHostAgent(
     } catch (err) {
       logger.warn(
         { folder: group.folder, err },
-        'Failed to write .credentials.json for host agent',
+        'Failed to write .credentials.json for local runtime agent',
       );
     }
     // Also write to home session dir for cross-provider invoke_agent
@@ -711,7 +711,7 @@ export async function runHostAgent(
       workingDir: groupDir,
       isAdminHome: input.isAdminHome,
     },
-    'Spawning host agent',
+    'Spawning local runtime agent',
   );
 
   const logsDir = path.join(groupDir, 'logs');
@@ -732,7 +732,7 @@ export async function runHostAgent(
       detached: true,
     });
 
-    const processId = `host-${group.folder}-${Date.now()}`;
+    const processId = `local-${group.folder}-${Date.now()}`;
     onProcess(proc, processId);
 
     const stdoutState = createStdoutParserState();
@@ -740,7 +740,7 @@ export async function runHostAgent(
 
     // 8. stdin 输入
     proc.stdin.on('error', (err) => {
-      logger.error({ group: group.name, err }, 'Host agent stdin write failed');
+      logger.error({ group: group.name, err }, 'Local runtime stdin write failed');
       killProcessTree(proc);
     });
     proc.stdin.write(JSON.stringify(input));
@@ -757,7 +757,7 @@ export async function runHostAgent(
       timedOut = true;
       logger.error(
         { group: group.name, processId },
-        'Host agent timeout, killing',
+        'Local runtime timeout, killing',
       );
       killProcessTree(proc, 'SIGTERM');
       killTimer = setTimeout(() => {
@@ -777,7 +777,7 @@ export async function runHostAgent(
     // 10. stdout/stderr 解析
     attachStdoutHandler(proc.stdout, stdoutState, {
       groupName: group.name,
-      label: 'Host agent',
+      label: 'Local runtime',
       onOutput,
       resetTimeout,
     });
@@ -793,8 +793,8 @@ export async function runHostAgent(
 
       const closeCtx: CloseHandlerContext = {
         groupName: group.name,
-        label: 'Host Agent',
-        filePrefix: 'host',
+        label: 'Local Runtime',
+        filePrefix: 'local',
         identifier: processId,
         logsDir,
         input,
@@ -814,7 +814,7 @@ export async function runHostAgent(
             : null;
           return {
             result: userFacingError,
-            error: `Host agent exited with ${exitLabel}: ${stderrContent.slice(-200)}`,
+            error: `Local runtime exited with ${exitLabel}: ${stderrContent.slice(-200)}`,
           };
         },
       };
@@ -829,12 +829,12 @@ export async function runHostAgent(
       clearTimeout(timeout);
       logger.error(
         { group: group.name, processId, error: err },
-        'Host agent spawn error',
+        'Local runtime spawn error',
       );
       resolveOnce({
         status: 'error',
         result: null,
-        error: `Host agent spawn error: ${err.message}`,
+        error: `Local runtime spawn error: ${err.message}`,
       });
     });
   });

@@ -110,7 +110,9 @@ function resolveRuntimeAccess(
 
 function normalizeRuntimeLabel(raw: string | null | undefined): string | null {
   if (!raw) return null;
-  return raw.startsWith('host-') ? `local-${raw.slice('host-'.length)}` : raw;
+  if (raw.startsWith('host-')) return `local-${raw.slice('host-'.length)}`;
+  if (raw.startsWith('container-')) return `local-${raw.slice('container-'.length)}`;
+  return raw;
 }
 
 const monitorRoutes = new Hono<{ Variables: Variables }>();

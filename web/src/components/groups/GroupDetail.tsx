@@ -56,7 +56,6 @@ export function GroupDetail({ group }: GroupDetailProps) {
   const [runnerId, setRunnerId] = useState<'claude' | 'codex'>(
     group.runner_id || 'claude',
   );
-  const [runtimeMode, setRuntimeMode] = useState<'local'>('local');
   const [runnerProfileId, setRunnerProfileId] = useState<string>(
     group.runner_profile_id || '',
   );
@@ -79,7 +78,6 @@ export function GroupDetail({ group }: GroupDetailProps) {
     setRunnerId(
       group.runner_id || 'claude',
     );
-    setRuntimeMode('local');
     setRunnerProfileId(group.runner_profile_id || '');
     setModel(group.model || '');
     setThinkingEffort(group.thinking_effort || '');
@@ -104,7 +102,6 @@ export function GroupDetail({ group }: GroupDetailProps) {
   const runnerDirty =
     runnerId !==
     (group.runner_id || 'claude');
-  const runtimeDirty = runtimeMode !== 'local';
   const runnerProfileDirty = runnerProfileId !== (group.runner_profile_id || '');
   const modelDirty = model !== (group.model || '');
   const thinkingDirty = thinkingEffort !== (group.thinking_effort || '');
@@ -113,7 +110,6 @@ export function GroupDetail({ group }: GroupDetailProps) {
   const knowledgeDirty = knowledgeExtraction !== (group.knowledge_extraction ?? false);
   const dirty =
     runnerDirty ||
-    runtimeDirty ||
     runnerProfileDirty ||
     modelDirty ||
     thinkingDirty ||
@@ -171,9 +167,6 @@ export function GroupDetail({ group }: GroupDetailProps) {
       const updates: Record<string, unknown> = {};
       if (runnerDirty) {
         updates.runner_id = runnerId;
-      }
-      if (runtimeDirty) {
-        updates.runtime_mode = runtimeMode;
       }
       if (runnerProfileDirty) {
         updates.runner_profile_id = runnerProfileId || null;

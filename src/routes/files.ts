@@ -291,7 +291,7 @@ fileRoutes.get('/:jid/files', authMiddleware, (c) => {
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
+      { error: 'Insufficient permissions for local runtime workspace access' },
       403,
     );
   }
@@ -327,7 +327,7 @@ fileRoutes.post('/:jid/files', authMiddleware, async (c) => {
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
+      { error: 'Insufficient permissions for local runtime workspace access' },
       403,
     );
   }
@@ -498,7 +498,7 @@ fileRoutes.get('/:jid/files/download/:path', authMiddleware, (c) => {
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
+      { error: 'Insufficient permissions for local runtime workspace access' },
       403,
     );
   }
@@ -615,7 +615,7 @@ fileRoutes.get('/:jid/files/preview/:path', authMiddleware, (c) => {
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
+      { error: 'Insufficient permissions for local runtime workspace access' },
       403,
     );
   }
@@ -691,7 +691,7 @@ fileRoutes.get('/:jid/files/content/:path', authMiddleware, (c) => {
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
+      { error: 'Insufficient permissions for local runtime workspace access' },
       403,
     );
   }
@@ -757,7 +757,7 @@ fileRoutes.put('/:jid/files/content/:path', authMiddleware, async (c) => {
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
+      { error: 'Insufficient permissions for local runtime workspace access' },
       403,
     );
   }
@@ -853,7 +853,7 @@ fileRoutes.delete('/:jid/files/:path', authMiddleware, (c) => {
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
+      { error: 'Insufficient permissions for local runtime workspace access' },
       403,
     );
   }
@@ -904,7 +904,7 @@ fileRoutes.post('/:jid/directories', authMiddleware, async (c) => {
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
+      { error: 'Insufficient permissions for local runtime workspace access' },
       403,
     );
   }

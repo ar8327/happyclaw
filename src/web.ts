@@ -226,7 +226,7 @@ app.post('/api/messages', authMiddleware, async (c) => {
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
+      { error: 'Insufficient permissions for local runtime workspace access' },
       403,
     );
   }

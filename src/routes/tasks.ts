@@ -78,7 +78,7 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
+      { error: 'Insufficient permissions for local runtime workspace access' },
       403,
     );
   }
@@ -140,7 +140,7 @@ tasksRoutes.patch('/:id', authMiddleware, async (c) => {
     }
     if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
       return c.json(
-        { error: 'Insufficient permissions for host execution mode' },
+        { error: 'Insufficient permissions for local runtime workspace access' },
         403,
       );
     }
@@ -184,7 +184,7 @@ tasksRoutes.delete('/:id', authMiddleware, (c) => {
     }
     if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
       return c.json(
-        { error: 'Insufficient permissions for host execution mode' },
+        { error: 'Insufficient permissions for local runtime workspace access' },
         403,
       );
     }
@@ -208,7 +208,7 @@ tasksRoutes.get('/:id/logs', authMiddleware, (c) => {
     }
     if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
       return c.json(
-        { error: 'Insufficient permissions for host execution mode' },
+        { error: 'Insufficient permissions for local runtime workspace access' },
         403,
       );
     }
