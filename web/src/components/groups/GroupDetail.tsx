@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Check, Loader2, Archive } from 'lucide-react';
 import { GroupInfo, useGroupsStore } from '../../stores/groups';
 import {
@@ -67,6 +67,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
   const { updateGroup } = useGroupsStore();
   const isSessionView = !!group.session_kind;
   const backingJid = group.backing_jid || group.jid;
+  const runnerTouchedRef = useRef(false);
   const [runnerId, setRunnerId] = useState<string>(
     resolveRunnerValue(group.runner_id),
   );
@@ -90,6 +91,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
 
   // Sync local state when group prop changes
   useEffect(() => {
+    runnerTouchedRef.current = false;
     setRunnerId(
       resolveRunnerValue(group.runner_id, runnerOptions),
     );
@@ -165,14 +167,22 @@ export function GroupDetail({ group }: GroupDetailProps) {
       .get<{ runners: Array<{ id: string; label: string }> }>('/api/sessions/runners')
       .then((res) => {
         if (!cancelled) {
-          setRunnerOptions(
+          const nextOptions =
             res.runners.length > 0
               ? res.runners.map((runner) => ({
                   value: runner.id,
                   label: runner.label,
                 }))
-              : DEFAULT_RUNNER_OPTIONS,
+              : DEFAULT_RUNNER_OPTIONS;
+          setRunnerOptions(
+            nextOptions,
           );
+          setRunnerId((current) => {
+            if (group.runner_id || runnerTouchedRef.current) return current;
+            const previousFallback = resolveRunnerValue(group.runner_id);
+            if (current !== previousFallback) return current;
+            return resolveRunnerValue(group.runner_id, nextOptions);
+          });
         }
       })
       .catch(() => {
@@ -327,7 +337,13 @@ export function GroupDetail({ group }: GroupDetailProps) {
         <div className="space-y-3">
           <div>
             <div className="text-xs text-slate-500 mb-1">运行引擎</div>
-            <Select value={runnerId} onValueChange={setRunnerId}>
+            <Select
+              value={runnerId}
+              onValueChange={(value) => {
+                runnerTouchedRef.current = true;
+                setRunnerId(value);
+              }}
+            >
               <SelectTrigger className="h-8 text-sm">
                 <SelectValue />
               </SelectTrigger>
