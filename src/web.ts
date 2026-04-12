@@ -36,7 +36,6 @@ import { authMiddleware } from './middleware/auth.js';
 
 // Route modules
 import authRoutes from './routes/auth.js';
-import groupRoutes from './routes/groups.js';
 import sessionRoutes from './routes/sessions.js';
 import memoryRoutes from './routes/memory.js';
 import configRoutes, { injectConfigDeps } from './routes/config.js';
@@ -182,8 +181,6 @@ let deps: WebDeps | null = null;
 // --- Route Mounting ---
 
 app.route('/api/auth', authRoutes);
-app.route('/api/groups', groupRoutes);
-app.route('/api/groups', fileRoutes); // File routes also under /api/groups
 app.route('/api/sessions', fileRoutes);
 app.route('/api/memory', memoryRoutes);
 app.route('/api/config', configRoutes);
@@ -191,10 +188,8 @@ app.route('/api/tasks', tasksRoutes);
 app.route('/api/skills', skillsRoutes);
 app.route('/api/browse', browseRoutes);
 app.route('/api/mcp-servers', mcpServersRoutes);
-app.route('/api/groups', agentRoutes); // Agent routes under /api/groups/:jid/agents
 app.route('/api/sessions', agentRoutes);
 app.route('/api/logs', logsRoutes);
-app.route('/api/groups', turnsRoutes); // Turn routes under /api/groups/:jid/turns
 app.route('/api/sessions', turnsRoutes);
 app.route('/api/sessions', sessionRoutes);
 app.route('/api/agent-definitions', agentDefinitionsRoutes);

@@ -28,7 +28,7 @@ HappyClaw 是一个自托管的多用户 AI Agent 系统：
 | `src/index.ts` | 入口：管理员引导、消息轮询（10s）、IPC 监听（1s）、容器生命周期、Memory Agent 初始化 |
 | `src/web.ts` | Hono 框架：路由挂载、WebSocket 升级、HMAC Cookie 认证、静态文件托管 |
 | `src/routes/auth.ts` | 认证：登录 / 登出 / 注册、`GET /api/auth/me`（含 `setupStatus`）、设置向导、RBAC、邀请码 |
-| `src/routes/groups.ts` | 群组 CRUD、消息分页、会话重置（重建工作区）、群组级容器环境变量 |
+| `src/routes/sessions.ts` | Session CRUD、消息分页、会话重置、绑定与 runner profile 管理 |
 | `src/routes/files.ts` | 文件上传（50MB 限制）/ 下载 / 删除、目录管理、路径遍历防护 |
 | `src/routes/config.ts` | Claude / 飞书配置（AES-256-GCM 加密存储）、连通性测试、批量应用到所有容器、per-user IM 通道配置（`/api/config/user-im/feishu`、`/api/config/user-im/telegram`、`/api/config/user-im/qq`） |
 | `src/routes/monitor.ts` | 系统状态：容器列表、队列状态、健康检查（`GET /api/health` 无需认证） |
@@ -39,7 +39,7 @@ HappyClaw 是一个自托管的多用户 AI Agent 系统：
 | `src/routes/skills.ts` | Skills 文件系统发现（项目级 + 用户级）、启用/禁用、主机同步 |
 | `src/routes/admin.ts` | 用户管理、邀请码、审计日志、注册设置 |
 | `src/routes/browse.ts` | 目录浏览 API（`GET/POST /api/browse/directories`，受挂载白名单约束） |
-| `src/routes/agents.ts` | Sub-Agent CRUD（`GET/POST/DELETE /api/groups/:jid/agents`） |
+| `src/routes/agents.ts` | Sub-Agent CRUD（`GET/POST/DELETE /api/sessions/:id/agents`） |
 | `src/routes/mcp-servers.ts` | MCP Servers 管理（CRUD + `POST /api/mcp-servers/sync-host`，per-user） |
 | `src/routes/logs.ts` | Agent 执行日志：列表（分页）、详情（分段解析）、原始文件下载，基于 folder 的权限检查 |
 | `src/feishu.ts` | 飞书连接工厂（`createFeishuConnection`）：WebSocket 长连接、消息去重（LRU 1000 条 / 30min TTL）、富文本卡片、Reaction；`file` 消息下载到工作区；`post` 图文消息仅提取文字 |
@@ -475,17 +475,17 @@ scripts/                      # 构建辅助脚本
 - `POST /api/auth/login` · `POST /api/auth/logout` · `GET /api/auth/me`（含 `setupStatus`）
 - `POST /api/auth/register` · `PUT /api/auth/profile` · `PUT /api/auth/change-password`
 
-### 群组
-- `GET /api/groups` · `POST /api/groups`（创建 Web 会话）
-- `PATCH /api/groups/:jid`（重命名） · `DELETE /api/groups/:jid`
-- `POST /api/groups/:jid/reset-session`（重建工作区）
-- `GET /api/groups/:jid/messages`（分页 + 轮询，支持多 JID 查询）
-- `GET|PUT /api/groups/:jid/env`（群组级容器环境变量）
+### 会话
+- `GET /api/sessions` · `POST /api/sessions`（创建 Web 会话）
+- `PATCH /api/sessions/:id` · `DELETE /api/sessions/:id`
+- `POST /api/sessions/:id/reset-session`
+- `GET /api/sessions/:id/messages`
+- `GET|PUT /api/sessions/:id/env`
 
 ### 文件
-- `GET /api/groups/:jid/files` · `POST /api/groups/:jid/files`（上传，50MB 限制）
-- `GET /api/groups/:jid/files/download/:path` · `DELETE /api/groups/:jid/files/:path`
-- `POST /api/groups/:jid/directories`
+- `GET /api/sessions/:id/files` · `POST /api/sessions/:id/files`（上传，50MB 限制）
+- `GET /api/sessions/:id/files/download/:path` · `DELETE /api/sessions/:id/files/:path`
+- `POST /api/sessions/:id/directories`
 
 ### 记忆
 - `GET /api/memory/sources` · `GET /api/memory/search`（全文检索）
@@ -527,8 +527,8 @@ scripts/                      # 构建辅助脚本
 - `GET|PUT /api/admin/settings/registration`
 
 ### Sub-Agent
-- `GET /api/groups/:jid/agents` · `POST /api/groups/:jid/agents`（创建 Sub-Agent）
-- `DELETE /api/groups/:jid/agents/:agentId`
+- `GET /api/sessions/:id/agents` · `POST /api/sessions/:id/agents`（创建 Sub-Agent）
+- `DELETE /api/sessions/:id/agents/:agentId`
 
 ### 目录浏览
 - `GET /api/browse/directories`（列出可选目录，受挂载白名单约束）
