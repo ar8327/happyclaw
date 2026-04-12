@@ -21,7 +21,7 @@ export interface SessionInfo {
   pinned_at?: string;
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
   llm_provider?: 'claude' | 'openai';
-  runner_id?: 'claude' | 'codex';
+  runner_id?: string;
   runner_profile_id?: string | null;
   runner_label?: string;
   model?: string;

@@ -165,12 +165,22 @@ function normalizeRuntimeMode(
   return undefined;
 }
 
+function normalizeRegisteredRunnerId(
+  raw: unknown,
+): SessionRecord['runner_id'] | null {
+  if (typeof raw !== 'string') return null;
+  const runnerId = raw.trim();
+  if (!runnerId) return null;
+  return getRunnerDescriptor(runnerId)?.id ?? null;
+}
+
 function normalizeRunnerId(
   runnerId: unknown,
   llmProvider: unknown,
   fallback: SessionRecord['runner_id'],
 ): SessionRecord['runner_id'] {
-  if (runnerId === 'claude' || runnerId === 'codex') return runnerId;
+  const normalizedRunnerId = normalizeRegisteredRunnerId(runnerId);
+  if (normalizedRunnerId) return normalizedRunnerId;
   if (llmProvider === 'openai') return 'codex';
   if (llmProvider === 'claude') return 'claude';
   return fallback;
@@ -695,9 +705,9 @@ sessionRoutes.get('/runners', authMiddleware, (c) => {
 });
 
 sessionRoutes.get('/runner-profiles', authMiddleware, (c) => {
-  const runnerId = c.req.query('runner_id');
+  const runnerId = normalizeRegisteredRunnerId(c.req.query('runner_id'));
   const profiles = listRunnerProfiles(
-    runnerId === 'claude' || runnerId === 'codex' ? runnerId : undefined,
+    runnerId || undefined,
   ).map((profile) => ({
     id: profile.id,
     runner_id: profile.runner_id,
@@ -716,11 +726,9 @@ sessionRoutes.post('/runner-profiles', authMiddleware, async (c) => {
     return c.json({ error: 'Forbidden' }, 403);
   }
   const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
-  const runnerId = body.runner_id === 'codex' ? 'codex'
-    : body.runner_id === 'claude' ? 'claude'
-    : null;
+  const runnerId = normalizeRegisteredRunnerId(body.runner_id);
   if (!runnerId) {
-    return c.json({ error: 'runner_id 必须是 claude 或 codex' }, 400);
+    return c.json({ error: 'runner_id 必须是已注册 runner id' }, 400);
   }
   const rawName = typeof body.name === 'string' ? body.name.trim() : '';
   if (!rawName) {
@@ -759,9 +767,7 @@ sessionRoutes.patch('/runner-profiles/:id', authMiddleware, async (c) => {
   if (!existing) return c.json({ error: 'Profile not found' }, 404);
 
   const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
-  const runnerId = body.runner_id === 'codex' ? 'codex'
-    : body.runner_id === 'claude' ? 'claude'
-    : existing.runner_id;
+  const runnerId = normalizeRegisteredRunnerId(body.runner_id) || existing.runner_id;
   const nextName =
     typeof body.name === 'string' && body.name.trim()
       ? body.name.trim().slice(0, 100)

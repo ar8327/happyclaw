@@ -39,9 +39,14 @@ type RuntimeEnvSession = {
 
 interface RunnerProfileOption {
   id: string;
-  runner_id: 'claude' | 'codex';
+  runner_id: string;
   name: string;
   is_default: boolean;
+}
+
+interface RunnerOption {
+  id: string;
+  label: string;
 }
 
 const CLAUDE_MODEL_OPTIONS = [
@@ -77,8 +82,9 @@ export function RuntimeEnvPanel({
   const sessionFromChat = useChatStore((s) => s.groups[sessionId]);
   const reloadChatSessions = useChatStore((s) => s.loadGroups);
   const session = sessionProp ?? sessionFromChat;
+  const [runnerOptions, setRunnerOptions] = useState<RunnerOption[]>([]);
 
-  const currentRunnerId = session?.runner_id || 'claude';
+  const currentRunnerId = session?.runner_id || runnerOptions[0]?.id || 'claude';
   const isCodex = currentRunnerId === 'codex';
   const { models: codexModelOptions, loading: codexModelsLoading } = useCodexModels(isCodex);
 
@@ -136,6 +142,21 @@ export function RuntimeEnvPanel({
     session?.runner_profile_id,
     session?.thinking_effort,
   ]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .get<{ runners: RunnerOption[] }>('/api/sessions/runners')
+      .then((res) => {
+        if (!cancelled) setRunnerOptions(res.runners);
+      })
+      .catch(() => {
+        if (!cancelled) setRunnerOptions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -351,8 +372,11 @@ export function RuntimeEnvPanel({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="claude">Claude (Anthropic)</SelectItem>
-                <SelectItem value="codex">OpenAI (Codex)</SelectItem>
+                {runnerOptions.map((runner) => (
+                  <SelectItem key={runner.id} value={runner.id}>
+                    {runner.label}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
             {/* Context warning */}

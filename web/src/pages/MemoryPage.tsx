@@ -34,7 +34,7 @@ interface MemorySearchHit {
 }
 
 interface MemoryRunnerOption {
-  id: 'claude' | 'codex';
+  id: string;
   label: string;
   memory_compatibility: 'full' | 'synthetic' | 'unsupported';
   can_serve_memory: boolean;
@@ -44,7 +44,7 @@ interface MemoryRunnerOption {
 interface MemorySessionConfig {
   id: string;
   name: string;
-  runner_id: 'claude' | 'codex';
+  runner_id: string;
   runner_profile_id: string | null;
   model: string | null;
   thinking_effort: 'low' | 'medium' | 'high' | null;
@@ -59,7 +59,7 @@ interface MemorySessionConfig {
 
 interface RunnerProfileOption {
   id: string;
-  runner_id: 'claude' | 'codex';
+  runner_id: string;
   name: string;
   is_default: boolean;
 }
@@ -535,7 +535,7 @@ export function MemoryPage() {
                           value={memoryConfig.runner_id}
                           onChange={(e) => setMemoryConfig((prev) => prev ? {
                             ...prev,
-                            runner_id: e.target.value as 'claude' | 'codex',
+                            runner_id: e.target.value,
                           } : prev)}
                           className="w-full h-9 rounded-md border border-border bg-background px-3 text-sm"
                         >

@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 
 interface RunnerInfo {
-  id: 'claude' | 'codex';
+  id: string;
   label: string;
   can_serve_memory: boolean;
   compatibility: {
@@ -28,12 +28,16 @@ interface RunnerInfo {
     contextShrinkTrigger: string;
     hookStreaming: string;
   };
+  prompt_contract: {
+    mode: string;
+    dynamicContextReload: string;
+  };
   degradation_reasons: string[];
 }
 
 interface RunnerProfileItem {
   id: string;
-  runner_id: 'claude' | 'codex';
+  runner_id: string;
   name: string;
   config_json: string;
   is_default: boolean;
@@ -51,7 +55,7 @@ const EMPTY_PROFILE_FORM = {
 export function RunnersPage() {
   const [runners, setRunners] = useState<RunnerInfo[]>([]);
   const [profiles, setProfiles] = useState<RunnerProfileItem[]>([]);
-  const [selectedRunnerId, setSelectedRunnerId] = useState<'claude' | 'codex'>('claude');
+  const [selectedRunnerId, setSelectedRunnerId] = useState<string>('');
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
   const [profileForm, setProfileForm] = useState(EMPTY_PROFILE_FORM);
   const [loading, setLoading] = useState(true);
@@ -63,9 +67,18 @@ export function RunnersPage() {
   const loadRunners = async () => {
     const data = await api.get<{ runners: RunnerInfo[] }>('/api/sessions/runners');
     setRunners(data.runners);
+    setSelectedRunnerId((prev) =>
+      data.runners.some((runner) => runner.id === prev)
+        ? prev
+        : (data.runners[0]?.id || ''),
+    );
   };
 
-  const loadProfiles = async (runnerId: 'claude' | 'codex') => {
+  const loadProfiles = async (runnerId: string) => {
+    if (!runnerId) {
+      setProfiles([]);
+      return;
+    }
     setProfilesLoading(true);
     try {
       const data = await api.get<{ profiles: RunnerProfileItem[] }>(
@@ -80,7 +93,7 @@ export function RunnersPage() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    Promise.all([loadRunners(), loadProfiles(selectedRunnerId)])
+    Promise.all([loadRunners()])
       .then(() => {
         if (cancelled) return;
         setError(null);
@@ -98,6 +111,10 @@ export function RunnersPage() {
   }, []);
 
   useEffect(() => {
+    if (!selectedRunnerId) {
+      setProfiles([]);
+      return;
+    }
     loadProfiles(selectedRunnerId).catch((err) => {
       setError(err instanceof Error ? err.message : '加载 runner profile 失败');
     });
@@ -258,6 +275,8 @@ export function RunnersPage() {
                     <div>归档触发: {runner.lifecycle.archivalTrigger.join(' / ') || 'none'}</div>
                     <div>上下文收缩: {runner.lifecycle.contextShrinkTrigger}</div>
                     <div>Hook 可观测性: {runner.lifecycle.hookStreaming}</div>
+                    <div>Prompt 模式: {runner.prompt_contract.mode}</div>
+                    <div>上下文刷新: {runner.prompt_contract.dynamicContextReload}</div>
                     <div>中途注入: {runner.capabilities.midQueryPush ? '支持' : '不支持'}</div>
                     <div>后台任务: {runner.capabilities.backgroundTasks ? '支持' : '不支持'}</div>
                   </div>
@@ -289,7 +308,7 @@ export function RunnersPage() {
                     <select
                       value={selectedRunnerId}
                       onChange={(e) => {
-                        setSelectedRunnerId(e.target.value as 'claude' | 'codex');
+                        setSelectedRunnerId(e.target.value);
                         resetForm();
                       }}
                       className="h-9 rounded-md border border-border bg-background px-3 text-sm"

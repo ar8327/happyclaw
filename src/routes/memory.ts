@@ -93,6 +93,13 @@ function getMemorySessionForOwner(ownerKey: string) {
   return getSessionRecord(`memory:${ownerKey}`);
 }
 
+function normalizeRegisteredRunnerId(raw: unknown) {
+  if (typeof raw !== 'string') return null;
+  const runnerId = raw.trim();
+  if (!runnerId) return null;
+  return getRunnerDescriptor(runnerId)?.id ?? null;
+}
+
 function serializeMemoryConfig(user: AuthUser) {
   const session = getMemorySessionForOwner(user.id);
   const primaryFolder = resolvePrimarySessionFolderForOwner(user.id);
@@ -803,11 +810,9 @@ memoryRoutes.put('/config', authMiddleware, async (c) => {
   }
 
   const body = await c.req.json().catch(() => null);
-  const runnerId = body?.runner_id === 'codex' ? 'codex'
-    : body?.runner_id === 'claude' ? 'claude'
-    : null;
+  const runnerId = normalizeRegisteredRunnerId(body?.runner_id);
   if (!runnerId) {
-    return c.json({ error: 'runner_id 必须是 claude 或 codex' }, 400);
+    return c.json({ error: 'runner_id 必须是已注册 runner id' }, 400);
   }
 
   const descriptor = getRunnerDescriptor(runnerId);

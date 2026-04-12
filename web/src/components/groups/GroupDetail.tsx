@@ -17,7 +17,7 @@ const COMPRESSION_OPTIONS = [
   { value: 'auto', label: '自动压缩' },
 ];
 
-const RUNNER_OPTIONS = [
+const DEFAULT_RUNNER_OPTIONS = [
   { value: 'claude', label: 'Claude' },
   { value: 'codex', label: 'Codex' },
 ];
@@ -40,9 +40,14 @@ interface ContextSummary {
 
 interface RunnerProfileOption {
   id: string;
-  runner_id: 'claude' | 'codex';
+  runner_id: string;
   name: string;
   is_default: boolean;
+}
+
+interface RunnerOption {
+  value: string;
+  label: string;
 }
 
 interface GroupDetailProps {
@@ -53,12 +58,13 @@ export function GroupDetail({ group }: GroupDetailProps) {
   const { updateGroup } = useGroupsStore();
   const isSessionView = !!group.session_kind;
   const backingJid = group.backing_jid || group.jid;
-  const [runnerId, setRunnerId] = useState<'claude' | 'codex'>(
+  const [runnerId, setRunnerId] = useState<string>(
     group.runner_id || 'claude',
   );
   const [runnerProfileId, setRunnerProfileId] = useState<string>(
     group.runner_profile_id || '',
   );
+  const [runnerOptions, setRunnerOptions] = useState<RunnerOption[]>(DEFAULT_RUNNER_OPTIONS);
   const [runnerProfiles, setRunnerProfiles] = useState<RunnerProfileOption[]>([]);
   const [model, setModel] = useState(group.model || '');
   const [thinkingEffort, setThinkingEffort] = useState<string>(
@@ -143,6 +149,30 @@ export function GroupDetail({ group }: GroupDetailProps) {
       loadSummary();
     }
   }, [group.context_compression, loadSummary]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .get<{ runners: Array<{ id: string; label: string }> }>('/api/sessions/runners')
+      .then((res) => {
+        if (!cancelled) {
+          setRunnerOptions(
+            res.runners.length > 0
+              ? res.runners.map((runner) => ({
+                  value: runner.id,
+                  label: runner.label,
+                }))
+              : DEFAULT_RUNNER_OPTIONS,
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setRunnerOptions(DEFAULT_RUNNER_OPTIONS);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -288,12 +318,12 @@ export function GroupDetail({ group }: GroupDetailProps) {
         <div className="space-y-3">
           <div>
             <div className="text-xs text-slate-500 mb-1">运行引擎</div>
-            <Select value={runnerId} onValueChange={(value) => setRunnerId(value as 'claude' | 'codex')}>
+            <Select value={runnerId} onValueChange={setRunnerId}>
               <SelectTrigger className="h-8 text-sm">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {RUNNER_OPTIONS.map((opt) => (
+                {runnerOptions.map((opt) => (
                   <SelectItem key={opt.value} value={opt.value}>
                     {opt.label}
                   </SelectItem>
