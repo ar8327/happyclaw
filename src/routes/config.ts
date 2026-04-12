@@ -12,6 +12,7 @@ import {
   deleteSessionBinding,
   deleteRegisteredGroup,
   deleteChatHistory,
+  getJidsByFolder,
   getRegisteredGroup,
   getSessionBinding,
   getSessionRecord,
@@ -1394,6 +1395,30 @@ function applyExplicitSessionBinding(
     created_at: currentBinding?.created_at || imGroup.added_at || now,
     updated_at: now,
   });
+}
+
+function getSessionFolder(sessionId: string): string | null {
+  if (sessionId.startsWith('main:')) return sessionId.slice('main:'.length);
+  const session = getSessionRecord(sessionId);
+  if (session?.parent_session_id?.startsWith('main:')) {
+    return session.parent_session_id.slice('main:'.length);
+  }
+  return null;
+}
+
+function resolveSessionBindingAccessTarget(sessionId: string): {
+  session: NonNullable<ReturnType<typeof getSessionRecord>>;
+  accessJid: string;
+  group: RegisteredGroup;
+} | null {
+  const session = getSessionRecord(sessionId);
+  if (!session) return null;
+  const folder = getSessionFolder(sessionId);
+  if (!folder) return null;
+  const accessJid =
+    getJidsByFolder(folder).find((jid) => jid.startsWith('web:')) || `web:${folder}`;
+  const group = getRegisteredGroup(accessJid);
+  return group ? { session, accessJid, group } : null;
 }
 
 configRoutes.get('/feishu', authMiddleware, systemConfigMiddleware, (c) => {
@@ -2795,11 +2820,45 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
     typeof body.require_mention === 'boolean'
       ? body.require_mention
       : undefined;
+  const requestedSessionId =
+    typeof body.session_id === 'string' && body.session_id.trim()
+      ? body.session_id.trim()
+      : null;
+  const requestedAgentId =
+    typeof body.target_agent_id === 'string' && body.target_agent_id.trim()
+      ? body.target_agent_id.trim()
+      : null;
+  const requestedMainJid =
+    typeof body.target_main_jid === 'string' && body.target_main_jid.trim()
+      ? body.target_main_jid.trim()
+      : null;
+  const legacySessionId =
+    requestedAgentId
+      ? `worker:${requestedAgentId}`
+      : (() => {
+          if (!requestedMainJid) return null;
+          const targetGroup = getRegisteredGroup(requestedMainJid);
+          return targetGroup ? `main:${targetGroup.folder}` : null;
+        })();
+
+  if (
+    requestedSessionId &&
+    legacySessionId &&
+    requestedSessionId !== legacySessionId
+  ) {
+    return c.json(
+      {
+        error:
+          'session_id does not match legacy target_main_jid/target_agent_id',
+      },
+      400,
+    );
+  }
+  const targetSessionId = requestedSessionId || legacySessionId;
 
   if (
     body.unbind !== true &&
-    !body.target_agent_id &&
-    !body.target_main_jid &&
+    !targetSessionId &&
     (activationMode !== undefined ||
       requireMention !== undefined ||
       body.reply_policy !== undefined)
@@ -2843,9 +2902,23 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
     return c.json({ success: true });
   }
 
-  // Bind to agent
-  if (typeof body.target_agent_id === 'string' && body.target_agent_id.trim()) {
-    const agentId = body.target_agent_id.trim();
+  if (!targetSessionId) {
+    return c.json(
+      { error: 'Must provide session_id or unbind' },
+      400,
+    );
+  }
+
+  const target = resolveSessionBindingAccessTarget(targetSessionId);
+  if (!target) {
+    return c.json({ error: 'Target session not found' }, 404);
+  }
+  if (!canAccessGroup(user, { ...target.group, jid: target.accessJid })) {
+    return c.json({ error: 'Forbidden' }, 403);
+  }
+
+  if (targetSessionId.startsWith('worker:')) {
+    const agentId = targetSessionId.slice('worker:'.length);
     const agent = getAgent(agentId);
     if (!agent) {
       return c.json({ error: 'Agent not found' }, 404);
@@ -2856,18 +2929,9 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
         400,
       );
     }
-    // Check user can access the workspace that owns this agent
-    const ownerGroup = getRegisteredGroup(agent.chat_jid);
-    if (
-      !ownerGroup ||
-      !canAccessGroup(user, { ...ownerGroup, jid: agent.chat_jid })
-    ) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
 
     const force = body.force === true;
     const currentBinding = getExplicitSessionBinding(imJid, imGroup);
-    const targetSessionId = `worker:${agentId}`;
     const hasConflict =
       !!currentBinding && currentBinding.session_id !== targetSessionId;
     if (hasConflict && !force) {
@@ -2896,58 +2960,41 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
     return c.json({ success: true });
   }
 
-  // Bind to workspace main conversation
-  if (typeof body.target_main_jid === 'string' && body.target_main_jid.trim()) {
-    const targetMainJid = body.target_main_jid.trim();
-    const targetGroup = getRegisteredGroup(targetMainJid);
-    if (!targetGroup) {
-      return c.json({ error: 'Target workspace not found' }, 404);
-    }
-    if (!canAccessGroup(user, { ...targetGroup, jid: targetMainJid })) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-    if (targetGroup.is_home) {
+  if (target.group.is_home) {
       return c.json(
         { error: 'Home workspace main conversation uses default IM routing' },
         400,
       );
-    }
-
-    const force = body.force === true;
-    const currentBinding = getExplicitSessionBinding(imJid, imGroup);
-    const targetSessionId = `main:${targetGroup.folder}`;
-    const hasConflict =
-      !!currentBinding && currentBinding.session_id !== targetSessionId;
-    if (hasConflict && !force) {
-      return c.json({ error: 'IM group is already bound elsewhere' }, 409);
-    }
-
-    const updated: RegisteredGroup = {
-      ...imGroup,
-      target_main_jid: undefined,
-      target_agent_id: undefined,
-      reply_policy: replyPolicy ?? imGroup.reply_policy,
-      activation_mode:
-        activationMode
-        ?? (imGroup.activation_mode === 'disabled' ? 'auto' : imGroup.activation_mode),
-      require_mention:
-        requireMention !== undefined
-          ? requireMention
-          : imGroup.require_mention,
-    };
-    applyBindingUpdate(imJid, updated);
-    applyExplicitSessionBinding(imJid, targetSessionId, updated, {});
-    logger.info(
-      { imJid, targetMainJid, userId: user.id },
-      'IM group bound to workspace (bindings page)',
-    );
-    return c.json({ success: true });
   }
 
-  return c.json(
-    { error: 'Must provide target_main_jid, target_agent_id, or unbind' },
-    400,
+  const force = body.force === true;
+  const currentBinding = getExplicitSessionBinding(imJid, imGroup);
+  const hasConflict =
+    !!currentBinding && currentBinding.session_id !== targetSessionId;
+  if (hasConflict && !force) {
+    return c.json({ error: 'IM group is already bound elsewhere' }, 409);
+  }
+
+  const updated: RegisteredGroup = {
+    ...imGroup,
+    target_main_jid: undefined,
+    target_agent_id: undefined,
+    reply_policy: replyPolicy ?? imGroup.reply_policy,
+    activation_mode:
+      activationMode
+      ?? (imGroup.activation_mode === 'disabled' ? 'auto' : imGroup.activation_mode),
+    require_mention:
+      requireMention !== undefined
+        ? requireMention
+        : imGroup.require_mention,
+  };
+  applyBindingUpdate(imJid, updated);
+  applyExplicitSessionBinding(imJid, targetSessionId, updated, {});
+  logger.info(
+    { imJid, sessionId: targetSessionId, userId: user.id },
+    'IM group bound to session (bindings page)',
   );
+  return c.json({ success: true });
 });
 
 // ─── Local Claude Code detection ──────────────────────────────────
