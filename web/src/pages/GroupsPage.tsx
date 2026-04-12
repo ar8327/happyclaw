@@ -6,7 +6,7 @@ import { PageHeader } from '@/components/common/PageHeader';
 import { SkeletonCardGrid } from '@/components/common/Skeletons';
 import { EmptyState } from '@/components/common/EmptyState';
 
-export function GroupsPage() {
+export function SessionsPage() {
   const { groups, loading, loadGroups } = useGroupsStore();
 
   useEffect(() => {
@@ -50,3 +50,5 @@ export function GroupsPage() {
     </div>
   );
 }
+
+export const GroupsPage = SessionsPage;

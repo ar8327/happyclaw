@@ -97,7 +97,7 @@ export type SettingsTab =
   | 'system'
   | 'profile'
   | 'my-channels'
-  | 'groups'
+  | 'sessions'
   | 'memory'
   | 'skills'
   | 'mcp-servers'

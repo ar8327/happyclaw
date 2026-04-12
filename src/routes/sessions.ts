@@ -58,6 +58,7 @@ import {
 import {
   canServeAsMemoryRunner,
   explainRunnerDegradation,
+  getDefaultRunnerId,
   getRunnerDescriptor,
   listRunnerDescriptors,
 } from '../runner-registry.js';
@@ -373,6 +374,51 @@ function syncRegisteredGroupCache(jid: string, group: RegisteredGroup): void {
   if (!deps) return;
   const groups = deps.getRegisteredGroups();
   if (groups[jid]) groups[jid] = group;
+}
+
+function buildCompatibilityGroupForSession(
+  session: SessionRecord,
+  options: {
+    folder: string;
+    addedAt: string;
+    ownerKey: string | null;
+    initSourcePath?: string;
+    initGitUrl?: string;
+    existing?: RegisteredGroup | null;
+    selectedSkills?: string[] | null;
+    activationMode?: RegisteredGroup['activation_mode'];
+  },
+): RegisteredGroup {
+  const existing = options.existing ?? undefined;
+  const defaultCwd = path.join(GROUPS_DIR, options.folder);
+  return {
+    ...existing,
+    name: session.name,
+    folder: options.folder,
+    added_at: existing?.added_at || options.addedAt,
+    executionMode: 'local',
+    initSourcePath: options.initSourcePath ?? existing?.initSourcePath,
+    initGitUrl: options.initGitUrl ?? existing?.initGitUrl,
+    created_by: options.ownerKey ?? existing?.created_by,
+    is_home: session.kind === 'main' ? true : existing?.is_home,
+    llm_provider: mapLegacyLlmProvider(session.runner_id, existing?.llm_provider),
+    model: session.model ?? undefined,
+    thinking_effort: session.thinking_effort ?? undefined,
+    context_compression: session.context_compression,
+    knowledge_extraction: session.knowledge_extraction,
+    customCwd:
+      path.resolve(session.cwd) === path.resolve(defaultCwd)
+        ? undefined
+        : session.cwd,
+    selected_skills:
+      options.selectedSkills !== undefined
+        ? options.selectedSkills
+        : existing?.selected_skills,
+    activation_mode:
+      options.activationMode !== undefined
+        ? options.activationMode
+        : existing?.activation_mode,
+  };
 }
 
 function buildUpdatedImGroupForSessionBinding(
@@ -1009,20 +1055,6 @@ sessionRoutes.post('/', authMiddleware, async (c) => {
   const backingJid = `web:${crypto.randomUUID()}`;
   const folder = `flow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const now = new Date().toISOString();
-  const backingGroup: RegisteredGroup = {
-    name,
-    folder,
-    added_at: now,
-    executionMode: 'local',
-    initSourcePath,
-    initGitUrl,
-    created_by: user.id,
-  };
-
-  setRegisteredGroup(backingJid, backingGroup);
-  updateChatName(backingJid, name);
-  deps.getRegisteredGroups()[backingJid] = backingGroup;
-
   const sessionDir = path.join(GROUPS_DIR, folder);
   try {
     if (initSourcePath) {
@@ -1046,10 +1078,37 @@ sessionRoutes.post('/', authMiddleware, async (c) => {
     );
   }
 
-  const createdSession = getSessionRecord(`main:${folder}`);
-  if (!createdSession) {
-    return c.json({ error: 'Failed to create session projection' }, 500);
-  }
+  const createdSession: SessionRecord = {
+    id: `main:${folder}`,
+    name,
+    kind: 'workspace',
+    parent_session_id: null,
+    cwd: sessionDir,
+    runner_id: getDefaultRunnerId(),
+    runner_profile_id: null,
+    runtime_mode: 'local',
+    model: null,
+    thinking_effort: null,
+    context_compression: 'off',
+    knowledge_extraction: false,
+    is_pinned: false,
+    archived: false,
+    owner_key: user.id,
+    created_at: now,
+    updated_at: now,
+  };
+  saveSessionRecord(createdSession);
+
+  const backingGroup = buildCompatibilityGroupForSession(createdSession, {
+    folder,
+    addedAt: now,
+    ownerKey: user.id,
+    initSourcePath,
+    initGitUrl,
+  });
+  setRegisteredGroup(backingJid, backingGroup);
+  updateChatName(backingJid, name);
+  deps.getRegisteredGroups()[backingJid] = backingGroup;
 
   const payload = buildSessionPayload(
     user,
@@ -1269,38 +1328,7 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
       }
     }
 
-    const updatedGroup = {
-      ...backingGroup,
-      name: nextName,
-      llm_provider: mapLegacyLlmProvider(nextRunnerId, backingGroup.llm_provider),
-      model: nextModel ?? undefined,
-      thinking_effort: nextThinkingEffort ?? undefined,
-      context_compression: nextContextCompression,
-      knowledge_extraction: nextKnowledgeExtraction,
-      executionMode: 'local' as const,
-      customCwd:
-        path.resolve(nextCwd) === path.resolve(defaultCwd)
-          ? undefined
-          : nextCwd,
-      selected_skills:
-        nextSelectedSkills !== undefined
-          ? nextSelectedSkills
-          : backingGroup.selected_skills,
-      activation_mode:
-        nextActivationMode !== undefined
-          ? nextActivationMode
-          : backingGroup.activation_mode,
-    };
-    setRegisteredGroup(backingJid, updatedGroup);
-    deps.getRegisteredGroups()[backingJid] = updatedGroup;
-    if (nextActivationMode !== undefined) {
-      updateSessionBindingPolicies(existing.id, {
-        activation_mode: nextActivationMode,
-      });
-    }
-    updateChatName(backingJid, nextName);
-
-    saveSessionRecord({
+    const updatedSession: SessionRecord = {
       ...existing,
       name: nextName,
       cwd: nextCwd,
@@ -1312,7 +1340,31 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
       knowledge_extraction: nextKnowledgeExtraction,
       is_pinned: nextPinned,
       updated_at: now,
+    };
+    saveSessionRecord(updatedSession);
+
+    const updatedGroup = buildCompatibilityGroupForSession(updatedSession, {
+      folder: backingGroup.folder,
+      addedAt: backingGroup.added_at,
+      ownerKey: updatedSession.owner_key,
+      existing: backingGroup,
+      selectedSkills:
+        nextSelectedSkills !== undefined
+          ? nextSelectedSkills
+          : backingGroup.selected_skills,
+      activationMode:
+        nextActivationMode !== undefined
+          ? nextActivationMode
+          : backingGroup.activation_mode,
     });
+    setRegisteredGroup(backingJid, updatedGroup);
+    deps.getRegisteredGroups()[backingJid] = updatedGroup;
+    if (nextActivationMode !== undefined) {
+      updateSessionBindingPolicies(existing.id, {
+        activation_mode: nextActivationMode,
+      });
+    }
+    updateChatName(backingJid, nextName);
   }
 
   const session = getSessionById(id);

@@ -11,7 +11,7 @@ import { AboutSection } from '../components/settings/AboutSection';
 import { AppearanceSection } from '../components/settings/AppearanceSection';
 import { SystemSettingsSection } from '../components/settings/SystemSettingsSection';
 import { UserChannelsSection } from '../components/settings/UserChannelsSection';
-import { GroupsPage } from './GroupsPage';
+import { SessionsPage } from './GroupsPage';
 import { MemoryPage } from './MemoryPage';
 import { RunnersPage } from './RunnersPage';
 import { SkillsPage } from './SkillsPage';
@@ -20,9 +20,9 @@ import { BindingsSection } from '../components/settings/BindingsSection';
 import { AgentDefinitionsPage } from './AgentDefinitionsPage';
 import type { SettingsTab } from '../components/settings/types';
 
-const VALID_TABS: SettingsTab[] = ['claude', 'codex', 'runners', 'appearance', 'system', 'profile', 'my-channels', 'groups', 'memory', 'skills', 'mcp-servers', 'agent-definitions', 'about', 'bindings'];
+const VALID_TABS: SettingsTab[] = ['claude', 'codex', 'runners', 'appearance', 'system', 'profile', 'my-channels', 'sessions', 'memory', 'skills', 'mcp-servers', 'agent-definitions', 'about', 'bindings'];
 const SYSTEM_TABS: SettingsTab[] = ['claude', 'codex', 'runners', 'appearance', 'system'];
-const FULLPAGE_TABS: SettingsTab[] = ['groups', 'memory', 'runners', 'skills', 'mcp-servers', 'agent-definitions', 'bindings'];
+const FULLPAGE_TABS: SettingsTab[] = ['sessions', 'memory', 'runners', 'skills', 'mcp-servers', 'agent-definitions', 'bindings'];
 
 export function SettingsPage() {
   const { user: currentUser } = useAuthStore();
@@ -40,10 +40,12 @@ export function SettingsPage() {
 
   const activeTab = useMemo((): SettingsTab => {
     if (mustChangePassword) return 'profile';
-    const raw = searchParams.get('tab') as SettingsTab | null;
-    if (raw && VALID_TABS.includes(raw)) {
-      if (SYSTEM_TABS.includes(raw) && !canManageSystemConfig) return defaultTab;
-      return raw;
+    const rawParam = searchParams.get('tab');
+    const normalized = rawParam === 'groups' ? 'sessions' : rawParam;
+    if (normalized && (VALID_TABS as string[]).includes(normalized)) {
+      const tab = normalized as SettingsTab;
+      if (SYSTEM_TABS.includes(tab) && !canManageSystemConfig) return defaultTab;
+      return tab;
     }
     return defaultTab;
   }, [searchParams, canManageSystemConfig, mustChangePassword, defaultTab]);
@@ -67,7 +69,7 @@ export function SettingsPage() {
       tabs.push({ key: 'appearance', label: '外观' });
       tabs.push({ key: 'system', label: '系统' });
     }
-    tabs.push({ key: 'groups', label: '会话' });
+    tabs.push({ key: 'sessions', label: '会话' });
     tabs.push({ key: 'memory', label: '记忆' });
     tabs.push({ key: 'skills', label: '技能' });
     tabs.push({ key: 'mcp-servers', label: 'MCP' });
@@ -96,7 +98,7 @@ export function SettingsPage() {
     system: '系统参数',
     profile: '个人资料',
     'my-channels': '消息渠道',
-    groups: '会话管理',
+    sessions: '会话管理',
     memory: '记忆管理',
     skills: '技能管理',
     'mcp-servers': 'MCP 服务器',
@@ -162,7 +164,7 @@ export function SettingsPage() {
       <div className="flex-1 min-w-0 overflow-visible lg:overflow-y-auto">
         {FULLPAGE_TABS.includes(activeTab) ? (
           <>
-            {activeTab === 'groups' && <GroupsPage />}
+            {activeTab === 'sessions' && <SessionsPage />}
             {activeTab === 'memory' && <MemoryPage />}
             {activeTab === 'runners' && <RunnersPage />}
             {activeTab === 'skills' && <SkillsPage />}
