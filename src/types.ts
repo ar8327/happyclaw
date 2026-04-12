@@ -52,7 +52,7 @@ export interface RegisteredGroup {
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled'; // 消息门控模式（默认 'auto'，兼容 require_mention）
   mcp_mode?: 'inherit' | 'custom'; // MCP 模式：继承全局或自定义（默认 'inherit'）
   selected_mcps?: string[] | null; // 自定义模式下选中的 MCP 列表（null = 使用全局全部）
-  llm_provider?: 'claude' | 'openai'; // LLM 提供商（默认 'claude'）
+  llm_provider?: 'claude' | 'openai'; // Legacy LLM 提供商兼容字段
   model?: string; // 模型标识符覆盖（如 'opus', 'sonnet', 'haiku'），空=使用全局配置
   thinking_effort?: 'low' | 'medium' | 'high'; // Thinking effort 级别（默认 null=provider 默认）
   context_compression?: 'off' | 'auto' | 'manual'; // 上下文压缩模式（默认 'off'）

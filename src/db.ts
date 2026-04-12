@@ -3067,7 +3067,12 @@ function parseGroupRow(
     activation_mode: parseActivationMode(row.activation_mode),
     mcp_mode: row.mcp_mode === 'custom' ? 'custom' : 'inherit',
     selected_mcps: row.selected_mcps ? JSON.parse(row.selected_mcps) : null,
-    llm_provider: row.llm_provider === 'openai' ? 'openai' : 'claude',
+    llm_provider:
+      row.llm_provider === 'openai'
+        ? 'openai'
+        : row.llm_provider === 'claude'
+          ? 'claude'
+          : undefined,
     model: row.model ?? undefined,
     thinking_effort: parseThinkingEffort(row.thinking_effort),
     context_compression: parseCompressionMode(row.context_compression),
@@ -3139,7 +3144,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.activation_mode ?? 'auto',
     group.mcp_mode ?? 'inherit',
     group.selected_mcps ? JSON.stringify(group.selected_mcps) : null,
-    group.llm_provider ?? 'claude',
+    group.llm_provider ?? null,
     group.model ?? null,
     group.thinking_effort ?? null,
     group.context_compression ?? 'off',

@@ -87,6 +87,7 @@ import {
 } from '../web.js';
 import { loadTurnTrace } from '../turn-trace.js';
 import { turnObservabilityManager } from '../turn-observability.js';
+import { getDefaultRunnerId } from '../runner-registry.js';
 
 /** Annotate AI reply messages with has_trace flag based on turns table */
 function annotateMessagesWithTrace(
@@ -102,6 +103,26 @@ function annotateMessagesWithTrace(
       msg.has_trace = true;
     }
   }
+}
+
+function mapRunnerIdToLegacyLlmProvider(
+  runnerId: string | null | undefined,
+): RegisteredGroup['llm_provider'] | undefined {
+  if (runnerId === 'claude') return 'claude';
+  if (runnerId === 'codex') return 'openai';
+  return undefined;
+}
+
+function resolveLegacyLlmProvider(
+  jid: string,
+  group: RegisteredGroup,
+): RegisteredGroup['llm_provider'] | undefined {
+  if (group.llm_provider) return group.llm_provider;
+  const projectedSession =
+    getSessionRecord(jid) || getSessionRecord(`main:${group.folder}`);
+  return mapRunnerIdToLegacyLlmProvider(
+    projectedSession?.runner_id || getDefaultRunnerId(),
+  );
 }
 
 const execFileAsync = promisify(execFile);
@@ -312,7 +333,7 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       selected_skills: group.selected_skills ?? null,
       pinned_at: pins[jid] || undefined,
       activation_mode: group.activation_mode ?? 'auto',
-      llm_provider: group.llm_provider ?? 'claude',
+      llm_provider: resolveLegacyLlmProvider(jid, group),
       model: group.model ?? undefined,
       thinking_effort: group.thinking_effort ?? null,
       context_compression: group.context_compression ?? 'off',

@@ -60,7 +60,7 @@
 上游会定期选择性合并。上游的完整功能介绍请参考 [原项目 README](https://github.com/riba2534/happyclaw)。
 
 > 当前主线已经切换到单用户多 Session workbench。
-> 运行时以本地统一 runtime 和 Session 语义为主，`group`、多用户、Docker 双执行模式等旧描述正在迁移清理中。
+> 运行时以本地统一 runtime 和 Session 语义为主，旧 `group`、多用户、Docker 双执行模式只保留少量兼容痕迹。
 > 如果 README 下面某些章节和当前行为不一致，以 `docs/single-user-session-runner-migration-plan.md` 与实际代码为准。
 
 ### 关键特性
@@ -124,14 +124,14 @@ Agent 在运行时可通过内置 MCP Server 与主进程通信：
 | `schedule_task` | 创建定时/周期/一次性任务（cron / interval / once） |
 | `list_tasks` | 列出定时任务 |
 | `pause_task` / `resume_task` / `cancel_task` | 暂停、恢复、取消任务 |
-| `register_group` | 注册新群组（仅 admin 主工作区） |
+| `register_group` | 创建新工作区 Session 的兼容入口 |
 | `memory_query` | 查询 Memory Agent 记忆（同步，返回结果） |
 | `memory_remember` | 存储信息到 Memory Agent（异步） |
 
 ### 定时任务
 
 - 三种调度模式：**Cron 表达式** / **固定间隔** / **一次性执行**
-- 两种上下文模式：`group`（在指定会话中执行）/ `isolated`（独立隔离环境）
+- 两种上下文模式：`group` 表示在指定 Session 中执行，`isolated` 表示独立隔离环境
 - 完整的执行日志（耗时、状态、结果），Web 界面管理
 
 
@@ -439,7 +439,7 @@ happyclaw/
 │   └── check-stream-event-sync.sh#   校验类型副本一致性
 │
 ├── config/                       # 项目配置
-│   ├── default-groups.json       #   预注册群组
+│   ├── default-groups.json       #   预注册 Session 兼容记录
 │   └── mount-allowlist.json      #   本地 runtime 路径白名单
 │
 ├── data/                         # 运行时数据（启动时自动创建）
@@ -533,7 +533,7 @@ npm run reset:admin -- <用户名> <新密码>
 make reset-init
 
 # 或手动：
-rm -rf data store groups
+rm -rf data store
 ```
 
 ## 贡献
