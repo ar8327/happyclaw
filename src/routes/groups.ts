@@ -981,6 +981,7 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
   deleteGroupData(accessJid, existing.folder);
   removeFlowArtifacts(existing.folder);
 
+  deps.queue.removeGroupState(accessJid);
   delete deps.getRegisteredGroups()[accessJid];
   delete deps.getSessions()[existing.folder];
   deps.setLastAgentTimestamp(accessJid, { rowid: 0 });

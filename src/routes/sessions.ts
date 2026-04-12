@@ -1022,7 +1022,10 @@ sessionRoutes.get('/', authMiddleware, (c) => {
     );
   }
 
-  return c.json({ groups: payload });
+  return c.json({
+    sessions: payload,
+    groups: payload,
+  });
 });
 
 sessionRoutes.get('/:id', authMiddleware, (c) => {
@@ -1942,6 +1945,7 @@ sessionRoutes.delete('/:id', authMiddleware, async (c) => {
 
   deleteGroupData(backingJid, backingGroup.folder);
   removeSessionArtifacts(backingGroup.folder);
+  deps.queue.removeGroupState(backingJid);
   delete deps.getRegisteredGroups()[backingJid];
   delete deps.getSessions()[backingGroup.folder];
   deps.setLastAgentTimestamp(backingJid, { rowid: 0 });
