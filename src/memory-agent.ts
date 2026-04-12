@@ -19,6 +19,7 @@ import {
   listAgentsByFolder,
   listSessionRecords,
   getTranscriptMessagesSince,
+  saveSessionRecord,
   getUserById,
   upsertSessionRuntimeState,
 } from './db.js';
@@ -26,7 +27,7 @@ import { SessionRuntimeManager } from './session-runtime-manager.js';
 import { logger } from './logger.js';
 import { getDefaultRunnerId } from './runner-registry.js';
 import { getSystemSettings } from './runtime-config.js';
-import type { MessageCursor } from './types.js';
+import type { MessageCursor, SessionRecord } from './types.js';
 import { runSessionAgent } from './session-launcher.js';
 
 // Limits
@@ -581,6 +582,37 @@ function getMemorySessionConfig(userId: string) {
   return getSessionRecord(buildMemorySessionId(userId));
 }
 
+function ensureMemorySessionProjection(
+  userId: string,
+  memDir: string,
+  primarySession: SessionRecord | undefined,
+  existing: SessionRecord | undefined,
+): SessionRecord {
+  if (existing) return existing;
+  const now = new Date().toISOString();
+  const session: SessionRecord = {
+    id: buildMemorySessionId(userId),
+    name: `memory:${userId}`,
+    kind: 'memory',
+    parent_session_id: primarySession?.id ?? null,
+    cwd: memDir,
+    runner_id: primarySession?.runner_id || getDefaultRunnerId(),
+    runner_profile_id: null,
+    runtime_mode: 'local',
+    model: primarySession?.model ?? null,
+    thinking_effort: primarySession?.thinking_effort ?? null,
+    context_compression: primarySession?.context_compression ?? 'off',
+    knowledge_extraction: primarySession?.knowledge_extraction ?? false,
+    is_pinned: false,
+    archived: false,
+    owner_key: userId,
+    created_at: now,
+    updated_at: now,
+  };
+  saveSessionRecord(session);
+  return session;
+}
+
 function parseJsonText<T>(raw: string | null | undefined, fallback: T): T {
   if (!raw) return fallback;
   try {
@@ -831,8 +863,13 @@ export class MemoryAgentManager {
     fs.mkdirSync(ipcInputDir, { recursive: true });
 
     const user = getUserById(userId);
-    const runnerId =
-      memorySession?.runner_id || primarySession?.runner_id || getDefaultRunnerId();
+    const effectiveMemorySession = ensureMemorySessionProjection(
+      userId,
+      memDir,
+      primarySession,
+      memorySession,
+    );
+    const runnerId = effectiveMemorySession.runner_id;
     const input = {
       prompt: buildMemoryPrompt(request, memDir),
       sessionId: runtimeState?.provider_session_id || undefined,
@@ -870,22 +907,22 @@ export class MemoryAgentManager {
     try {
       const output = await runSessionAgent(
         {
-          name: memorySession?.name || `memory:${userId}`,
+          name: effectiveMemorySession.name,
           folder: primaryFolder,
-          added_at: memorySession?.created_at || new Date().toISOString(),
+          added_at: effectiveMemorySession.created_at,
           created_by: userId,
           is_home: false,
           customCwd: groupDir,
           containerConfig: { timeout: timeoutMs },
           executionMode: 'local',
-          llm_provider: runnerId === 'codex' ? 'openai' : 'claude',
-          model: memorySession?.model || primarySession?.model || undefined,
-          thinking_effort:
-            memorySession?.thinking_effort ||
-            primarySession?.thinking_effort ||
-            undefined,
-          context_compression: memorySession?.context_compression || 'off',
-          knowledge_extraction: memorySession?.knowledge_extraction || false,
+          llm_provider:
+            runnerId === 'codex'
+              ? 'openai'
+              : (runnerId === 'claude' ? 'claude' : undefined),
+          model: effectiveMemorySession.model || undefined,
+          thinking_effort: effectiveMemorySession.thinking_effort || undefined,
+          context_compression: effectiveMemorySession.context_compression,
+          knowledge_extraction: effectiveMemorySession.knowledge_extraction,
         },
         input,
         () => {},

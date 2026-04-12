@@ -17,18 +17,33 @@ const COMPRESSION_OPTIONS = [
   { value: 'auto', label: '自动压缩' },
 ];
 
-const DEFAULT_RUNNER_OPTIONS = [
-  { value: 'claude', label: 'Claude' },
-  { value: 'codex', label: 'Codex' },
-];
-
 function resolveRunnerValue(
   runnerId: string | null | undefined,
-  options: RunnerOption[] = DEFAULT_RUNNER_OPTIONS,
+  options: RunnerOption[] = [],
 ): string {
   const normalized = typeof runnerId === 'string' ? runnerId.trim() : '';
   if (normalized) return normalized;
   return options[0]?.value || '';
+}
+
+function withCurrentRunnerOption(
+  options: RunnerOption[],
+  runnerId: string | null | undefined,
+  runnerLabel?: string | null,
+): RunnerOption[] {
+  const normalized = typeof runnerId === 'string' ? runnerId.trim() : '';
+  if (!normalized) return options;
+  if (options.some((option) => option.value === normalized)) return options;
+  return [
+    {
+      value: normalized,
+      label:
+        typeof runnerLabel === 'string' && runnerLabel.trim()
+          ? runnerLabel.trim()
+          : normalized,
+    },
+    ...options,
+  ];
 }
 
 const THINKING_OPTIONS = [
@@ -74,7 +89,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
   const [runnerProfileId, setRunnerProfileId] = useState<string>(
     group.runner_profile_id || '',
   );
-  const [runnerOptions, setRunnerOptions] = useState<RunnerOption[]>(DEFAULT_RUNNER_OPTIONS);
+  const [runnerOptions, setRunnerOptions] = useState<RunnerOption[]>([]);
   const [runnerProfiles, setRunnerProfiles] = useState<RunnerProfileOption[]>([]);
   const [model, setModel] = useState(group.model || '');
   const [thinkingEffort, setThinkingEffort] = useState<string>(
@@ -133,6 +148,11 @@ export function GroupDetail({ group }: GroupDetailProps) {
     cwdDirty ||
     compressionDirty ||
     knowledgeDirty;
+  const runnerSelectOptions = withCurrentRunnerOption(
+    runnerOptions,
+    runnerId || group.runner_id,
+    group.runner_label,
+  );
 
   const formatDate = (timestamp: string | number) => {
     return new Date(timestamp).toLocaleString('zh-CN', {
@@ -173,10 +193,8 @@ export function GroupDetail({ group }: GroupDetailProps) {
                   value: runner.id,
                   label: runner.label,
                 }))
-              : DEFAULT_RUNNER_OPTIONS;
-          setRunnerOptions(
-            nextOptions,
-          );
+              : [];
+          setRunnerOptions(nextOptions);
           setRunnerId((current) => {
             if (group.runner_id || runnerTouchedRef.current) return current;
             const previousFallback = resolveRunnerValue(group.runner_id);
@@ -186,7 +204,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
         }
       })
       .catch(() => {
-        if (!cancelled) setRunnerOptions(DEFAULT_RUNNER_OPTIONS);
+        if (!cancelled) setRunnerOptions([]);
       });
     return () => {
       cancelled = true;
@@ -194,6 +212,10 @@ export function GroupDetail({ group }: GroupDetailProps) {
   }, []);
 
   useEffect(() => {
+    if (!runnerId) {
+      setRunnerProfiles([]);
+      return () => {};
+    }
     let cancelled = false;
     api
       .get<{ profiles: RunnerProfileOption[] }>(
@@ -338,30 +360,23 @@ export function GroupDetail({ group }: GroupDetailProps) {
           <div>
             <div className="text-xs text-slate-500 mb-1">运行引擎</div>
             <Select
-              value={runnerId}
+              value={runnerId || undefined}
               onValueChange={(value) => {
                 runnerTouchedRef.current = true;
                 setRunnerId(value);
               }}
             >
               <SelectTrigger className="h-8 text-sm">
-                <SelectValue />
+                <SelectValue placeholder="选择运行引擎" />
               </SelectTrigger>
               <SelectContent>
-                {runnerOptions.map((opt) => (
+                {runnerSelectOptions.map((opt) => (
                   <SelectItem key={opt.value} value={opt.value}>
                     {opt.label}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
-          </div>
-
-          <div>
-            <div className="text-xs text-slate-500 mb-1">运行模式</div>
-            <div className="h-8 px-3 rounded-md border border-border bg-muted/40 text-sm text-foreground flex items-center">
-              本地 Runtime
-            </div>
           </div>
 
           <div>
