@@ -19,6 +19,7 @@ import {
 } from '../web-context.js';
 import { ContainerEnvSchema, GroupCreateSchema } from '../schemas.js';
 import {
+  clearWorkerArtifactsForFolder,
   deleteChatHistory,
   deleteMessage,
   deleteGroupData,
@@ -654,6 +655,20 @@ function getRelevantChatJids(
   }
 
   return sessionBindings;
+}
+
+function getWorkerRuntimeJids(parentSessionId: string): string[] {
+  const queueJids = listSessionRecords()
+    .filter((candidate) => candidate.parent_session_id === parentSessionId)
+    .flatMap((candidate) => {
+      const worker = getWorkerSessionRecord(candidate.id);
+      const agentId = candidate.id.startsWith('worker:')
+        ? candidate.id.slice('worker:'.length)
+        : '';
+      if (!worker || !agentId) return [];
+      return [`${worker.source_chat_jid}#agent:${agentId}`];
+    });
+  return Array.from(new Set(queueJids));
 }
 
 function buildBindingTargets(user: AuthUser) {
@@ -1629,10 +1644,14 @@ sessionRoutes.post('/:id/clear-history', authMiddleware, async (c) => {
   }
 
   const siblingJids = getJidsByFolder(backingGroup.folder);
+  const workerRuntimeJids = getWorkerRuntimeJids(session.id);
   try {
     await Promise.all(
-      siblingJids.map((jid) => deps.queue.stopSession(jid, { force: true })),
+      [...siblingJids, ...workerRuntimeJids].map((jid) =>
+        deps.queue.stopSession(jid, { force: true })
+      ),
     );
+    clearWorkerArtifactsForFolder(backingGroup.folder);
     resetWorkspaceForSession(backingGroup.folder);
     deleteSession(backingGroup.folder);
     delete deps.getSessions()[backingGroup.folder];
@@ -1640,6 +1659,10 @@ sessionRoutes.post('/:id/clear-history', authMiddleware, async (c) => {
       deleteChatHistory(siblingJid);
       ensureChatExists(siblingJid);
       deps.setLastAgentTimestamp(siblingJid, { rowid: 0 });
+    }
+    for (const workerRuntimeJid of workerRuntimeJids) {
+      deps.queue.removeGroupState(workerRuntimeJid);
+      deps.setLastAgentTimestamp(workerRuntimeJid, { rowid: 0 });
     }
   } catch (err) {
     return c.json(
@@ -2074,9 +2097,13 @@ sessionRoutes.delete('/:id', authMiddleware, async (c) => {
 
   const deps = getWebDeps();
   if (!deps) return c.json({ error: 'Server not initialized' }, 500);
+  const workerRuntimeJids = getWorkerRuntimeJids(session.id);
 
   try {
-    await deps.queue.stopSession(backingJid);
+    await Promise.all([
+      deps.queue.stopSession(backingJid),
+      ...workerRuntimeJids.map((jid) => deps.queue.stopSession(jid)),
+    ]);
   } catch (err) {
     return c.json(
       {
@@ -2089,6 +2116,10 @@ sessionRoutes.delete('/:id', authMiddleware, async (c) => {
   deleteGroupData(backingJid, backingGroup.folder);
   removeSessionArtifacts(backingGroup.folder);
   deps.queue.removeGroupState(backingJid);
+  for (const workerRuntimeJid of workerRuntimeJids) {
+    deps.queue.removeGroupState(workerRuntimeJid);
+    deps.setLastAgentTimestamp(workerRuntimeJid, { rowid: 0 });
+  }
   delete deps.getRegisteredGroups()[backingJid];
   delete deps.getSessions()[backingGroup.folder];
   deps.setLastAgentTimestamp(backingJid, { rowid: 0 });

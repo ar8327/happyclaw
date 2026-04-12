@@ -2749,17 +2749,99 @@ export function deleteSession(
   );
 }
 
+function deleteWorkerArtifactsForFolderRows(groupFolder: string): void {
+  const mainSessionId = buildMainSessionId(groupFolder);
+  const workerRows = db
+    .prepare(
+      `SELECT session_id, source_chat_jid
+       FROM worker_sessions
+       WHERE parent_session_id = ?`,
+    )
+    .all(mainSessionId) as Array<{
+      session_id: string;
+      source_chat_jid: string;
+    }>;
+  const legacyRows = db
+    .prepare(
+      'SELECT id, chat_jid FROM agents WHERE group_folder = ?',
+    )
+    .all(groupFolder) as Array<{
+      id: string;
+      chat_jid: string;
+    }>;
+
+  const sessionIds = new Set<string>();
+  const agentIds = new Set<string>();
+  const virtualChatJids = new Set<string>();
+
+  for (const row of workerRows) {
+    const sessionId = String(row.session_id);
+    const agentId = extractAgentIdFromWorkerSessionId(sessionId);
+    sessionIds.add(sessionId);
+    agentIds.add(agentId);
+    if (row.source_chat_jid) {
+      virtualChatJids.add(`${row.source_chat_jid}#agent:${agentId}`);
+    }
+  }
+
+  for (const row of legacyRows) {
+    const agentId = String(row.id);
+    sessionIds.add(buildWorkerSessionId(agentId));
+    agentIds.add(agentId);
+    if (row.chat_jid) {
+      virtualChatJids.add(`${row.chat_jid}#agent:${agentId}`);
+    }
+  }
+
+  const sessionIdList = Array.from(sessionIds);
+  if (sessionIdList.length > 0) {
+    const placeholders = sessionIdList.map(() => '?').join(', ');
+    db.prepare(
+      `DELETE FROM session_bindings WHERE session_id IN (${placeholders})`,
+    ).run(...sessionIdList);
+    db.prepare(
+      `DELETE FROM session_state WHERE session_id IN (${placeholders})`,
+    ).run(...sessionIdList);
+    db.prepare(
+      `DELETE FROM worker_sessions WHERE session_id IN (${placeholders})`,
+    ).run(...sessionIdList);
+    db.prepare(
+      `DELETE FROM sessions WHERE id IN (${placeholders})`,
+    ).run(...sessionIdList);
+  }
+
+  const agentIdList = Array.from(agentIds);
+  if (agentIdList.length > 0) {
+    const placeholders = agentIdList.map(() => '?').join(', ');
+    db.prepare(`DELETE FROM agents WHERE id IN (${placeholders})`).run(
+      ...agentIdList,
+    );
+  }
+
+  const virtualChatJidList = Array.from(virtualChatJids);
+  if (virtualChatJidList.length > 0) {
+    const placeholders = virtualChatJidList.map(() => '?').join(', ');
+    db.prepare(`DELETE FROM messages WHERE chat_jid IN (${placeholders})`).run(
+      ...virtualChatJidList,
+    );
+    db.prepare(`DELETE FROM chats WHERE jid IN (${placeholders})`).run(
+      ...virtualChatJidList,
+    );
+  }
+}
+
+export function clearWorkerArtifactsForFolder(groupFolder: string): void {
+  const tx = db.transaction((folder: string) => {
+    deleteWorkerArtifactsForFolderRows(folder);
+  });
+  tx(groupFolder);
+}
+
 export function deleteAllSessionsForFolder(groupFolder: string): void {
   const mainSessionId = buildMainSessionId(groupFolder);
-  db.prepare(
-    'DELETE FROM session_bindings WHERE session_id = ? OR session_id IN (SELECT session_id FROM worker_sessions WHERE parent_session_id = ?)',
-  ).run(mainSessionId, mainSessionId);
-  db.prepare(
-    'DELETE FROM session_state WHERE session_id = ? OR session_id IN (SELECT session_id FROM worker_sessions WHERE parent_session_id = ?)',
-  ).run(mainSessionId, mainSessionId);
-  db.prepare('DELETE FROM worker_sessions WHERE parent_session_id = ?').run(
-    mainSessionId,
-  );
+  deleteWorkerArtifactsForFolderRows(groupFolder);
+  db.prepare('DELETE FROM session_bindings WHERE session_id = ?').run(mainSessionId);
+  db.prepare('DELETE FROM session_state WHERE session_id = ?').run(mainSessionId);
   db.prepare('DELETE FROM sessions WHERE id = ? OR parent_session_id = ?').run(
     mainSessionId,
     mainSessionId,
