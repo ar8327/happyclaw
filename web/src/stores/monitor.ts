@@ -13,7 +13,6 @@ export interface SystemStatus {
     active: boolean;
     pendingMessages: boolean;
     pendingTasks: number;
-    runtime_mode?: 'local';
     runner_id?: string;
     runtime_identifier?: string | null;
   }>;
@@ -23,7 +22,6 @@ export interface SystemStatus {
     active: boolean;
     pendingMessages: boolean;
     pendingTasks: number;
-    runtime_mode?: 'local';
     runner_id?: string;
     runtime_identifier?: string | null;
   }>;

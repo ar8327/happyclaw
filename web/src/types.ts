@@ -13,8 +13,6 @@ export interface SessionInfo {
   deletable?: boolean;
   lastMessage?: string;
   lastMessageTime?: string;
-  runtime_mode?: 'local';
-  execution_mode?: 'local';
   custom_cwd?: string;
   created_by?: string;
   selected_skills?: string[] | null;

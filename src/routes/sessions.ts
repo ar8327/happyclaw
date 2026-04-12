@@ -158,13 +158,6 @@ function resolveSessionOrThrow(user: AuthUser, id: string): SessionRecord | null
   return canAccessSession(user, session) ? session : null;
 }
 
-function normalizeRuntimeMode(
-  raw: unknown,
-): SessionRecord['runtime_mode'] | undefined {
-  if (raw === 'host' || raw === 'container' || raw === 'local') return 'local';
-  return undefined;
-}
-
 function normalizeRegisteredRunnerId(
   raw: unknown,
 ): SessionRecord['runner_id'] | null {
@@ -489,8 +482,6 @@ function buildSessionPayload(
       !!backingJid &&
       !!backingGroup &&
       canDeleteGroup(user, { ...backingGroup, jid: backingJid }),
-    runtime_mode: session.runtime_mode,
-    execution_mode: session.runtime_mode,
     custom_cwd: session.cwd,
     cwd: session.cwd,
     backing_jid: backingJid,
@@ -842,11 +833,15 @@ sessionRoutes.post('/', authMiddleware, async (c) => {
     );
   }
 
-  if (validation.data.execution_mode) {
+  if (
+    body &&
+    typeof body === 'object' &&
+    Object.prototype.hasOwnProperty.call(body, 'execution_mode')
+  ) {
     return c.json(
       {
         error:
-          'runtime_mode has been unified. New sessions always use the local runtime.',
+          'execution_mode has been removed. New sessions always use the unified local runtime.',
       },
       400,
     );
@@ -1090,6 +1085,15 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
   }
 
   const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(body, 'runtime_mode')) {
+    return c.json(
+      {
+        error:
+          'runtime_mode has been removed. Sessions always use the unified local runtime.',
+      },
+      400,
+    );
+  }
   const now = new Date().toISOString();
 
   const nextName =
@@ -1151,8 +1155,6 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
       : existing.knowledge_extraction;
   const nextPinned =
     typeof body.is_pinned === 'boolean' ? body.is_pinned : existing.is_pinned;
-  const requestedRuntimeMode = normalizeRuntimeMode(body.runtime_mode);
-  const nextRuntimeMode = requestedRuntimeMode || 'local';
   const requestedCwd =
     typeof body.cwd === 'string' && body.cwd.trim()
       ? body.cwd.trim()
@@ -1237,7 +1239,6 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
       cwd: nextCwd,
       runner_id: nextRunnerId,
       runner_profile_id: validatedRunnerProfileId,
-      runtime_mode: nextRuntimeMode,
       model: nextModel,
       thinking_effort: nextThinkingEffort,
       context_compression: nextContextCompression,

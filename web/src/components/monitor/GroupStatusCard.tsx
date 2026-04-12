@@ -7,7 +7,6 @@ interface GroupStatusCardProps {
     active: boolean;
     pendingMessages: boolean;
     pendingTasks: number;
-    runtime_mode?: 'local';
     runner_id?: string;
     runtime_identifier?: string | null;
   };
@@ -41,7 +40,7 @@ export function GroupStatusCard({ group }: GroupStatusCardProps) {
         <div className="flex items-center justify-between">
           <span>Runner</span>
           <span className="text-foreground">
-            {group.runner_id || '-'} / {group.runtime_mode || '-'}
+            {group.runner_id || '-'}
           </span>
         </div>
         <div className="flex items-center justify-between">

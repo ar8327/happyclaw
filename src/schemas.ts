@@ -111,7 +111,6 @@ export const MessageCreateSchema = z
 
 export const GroupCreateSchema = z.object({
   name: z.string().min(1).max(MAX_GROUP_NAME_LEN),
-  execution_mode: z.enum(['local', 'container', 'host']).optional(),
   custom_cwd: z
     .string()
     .optional()

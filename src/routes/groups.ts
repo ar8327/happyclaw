@@ -196,7 +196,6 @@ interface GroupPayloadItem {
   deletable: boolean;
   lastMessage?: string;
   lastMessageTime?: string;
-  execution_mode: 'local';
   custom_cwd?: string;
   is_home?: boolean;
   is_my_home?: boolean;
@@ -304,7 +303,6 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
         latest?.timestamp ||
         chats.get(jid)?.last_message_time ||
         group.added_at,
-      execution_mode: 'local',
       custom_cwd: isAdmin ? group.customCwd : undefined,
       is_home: isHome || undefined,
       is_my_home: (isHome && group.created_by === user.id) || undefined,
@@ -431,7 +429,6 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     return c.json({ error: 'Group name is required' }, 400);
   }
 
-  const executionMode = validation.data.execution_mode;
   const customCwd = validation.data.custom_cwd;
   const initSourcePath = validation.data.init_source_path;
   const initGitUrl = validation.data.init_git_url;
@@ -451,7 +448,11 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     );
   }
 
-  if (executionMode) {
+  if (
+    body &&
+    typeof body === 'object' &&
+    Object.prototype.hasOwnProperty.call(body, 'execution_mode')
+  ) {
     return c.json(
       {
         error:
@@ -643,7 +644,6 @@ groupRoutes.post('/', authMiddleware, async (c) => {
       name: group.name,
       folder: group.folder,
       added_at: group.added_at,
-      execution_mode: 'local' as const,
       custom_cwd: undefined,
       kind: 'web',
       editable: true,

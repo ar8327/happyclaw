@@ -78,7 +78,6 @@ function resolveRuntimeAccess(
   accessJid: string;
   sessionId: string | null;
   runnerId: string;
-  runtimeMode: 'local';
 } | null {
   const defaultRunnerId = getDefaultRunnerId();
   const agentSep = runtimeJid.indexOf('#agent:');
@@ -95,7 +94,6 @@ function resolveRuntimeAccess(
       accessJid,
       sessionId: workerSession.id,
       runnerId: workerSession.runner_id || parentSession?.runner_id || defaultRunnerId,
-      runtimeMode: 'local',
     };
   }
 
@@ -106,7 +104,6 @@ function resolveRuntimeAccess(
     accessJid: runtimeJid,
     sessionId: session?.id || null,
     runnerId: session?.runner_id || (group.llm_provider === 'openai' ? 'codex' : defaultRunnerId),
-    runtimeMode: 'local',
   };
 }
 
@@ -189,7 +186,6 @@ monitorRoutes.get('/status', authMiddleware, async (c) => {
     return {
       ...runtime,
       session_id: resolved?.sessionId || null,
-      runtime_mode: resolved?.runtimeMode || 'local',
       runner_id: resolved?.runnerId || defaultRunnerId,
       runtime_identifier: normalizeRuntimeLabel(runtime.runtimeIdentifier),
       runtime_label: normalizeRuntimeLabel(runtime.runtimeLabel),

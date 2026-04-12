@@ -93,7 +93,7 @@ export function MonitorPage() {
                             {group.session_id || group.jid}
                           </td>
                           <td className="px-4 py-3 text-sm text-slate-600">
-                            {group.runner_id || '-'} / {group.runtime_mode || '-'}
+                            {group.runner_id || '-'}
                           </td>
                           <td className="px-4 py-3 text-sm text-slate-600">
                             {group.pendingTasks} 个任务 / {group.pendingMessages ? '有新消息' : '无新消息'}
