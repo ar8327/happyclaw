@@ -59,6 +59,10 @@
 
 上游会定期选择性合并。上游的完整功能介绍请参考 [原项目 README](https://github.com/riba2534/happyclaw)。
 
+> 当前主线已经切换到单用户多 Session workbench。
+> 运行时以本地统一 runtime 和 Session 语义为主，`group`、多用户、Docker 双执行模式等旧描述正在迁移清理中。
+> 如果 README 下面某些章节和当前行为不一致，以 `docs/single-user-session-runner-migration-plan.md` 与实际代码为准。
+
 ### 关键特性
 
 - **原生 Claude Code 驱动** — 主 Agent 基于 Claude Code CLI `claude -p` runner，保留完整工具链和流式事件能力
