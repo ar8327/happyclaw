@@ -3,10 +3,7 @@ import { api, apiFetch } from '../api/client';
 
 export type Permission =
   | 'manage_system_config'
-  | 'manage_group_env'
-  | 'manage_users'
-  | 'manage_invites'
-  | 'view_audit_log';
+  | 'manage_group_env';
 
 export interface UserPublic {
   id: string;

@@ -141,11 +141,7 @@ export interface AuthUser {
 
 export type Permission =
   | 'manage_system_config'
-  | 'manage_group_env'
-  | 'manage_users'
-  | 'manage_invites'
-  | 'view_audit_log'
-  | 'manage_billing';
+  | 'manage_group_env';
 
 export type PermissionTemplateKey =
   | 'admin_full'

@@ -3,13 +3,9 @@ import { Permission, PermissionTemplateKey, UserRole } from './types.js';
 export const ALL_PERMISSIONS: Permission[] = [
   'manage_system_config',
   'manage_group_env',
-  'manage_users',
-  'manage_invites',
-  'view_audit_log',
-  'manage_billing',
 ];
 
-export const PERMISSION_TEMPLATES: Record<
+export const PERMISSION_TEMPLATES: Partial<Record<
   PermissionTemplateKey,
   {
     key: PermissionTemplateKey;
@@ -17,30 +13,18 @@ export const PERMISSION_TEMPLATES: Record<
     role: UserRole;
     permissions: Permission[];
   }
-> = {
+>> = {
   admin_full: {
     key: 'admin_full',
-    label: '管理员（全权限）',
+    label: '单用户 Operator',
     role: 'admin',
     permissions: [...ALL_PERMISSIONS],
   },
-  member_basic: {
-    key: 'member_basic',
-    label: '普通成员（基础权限）',
-    role: 'member',
-    permissions: [],
-  },
   ops_manager: {
     key: 'ops_manager',
-    label: '运维管理员（配置+工作区环境）',
+    label: '配置与环境维护',
     role: 'member',
     permissions: ['manage_system_config', 'manage_group_env'],
-  },
-  user_admin: {
-    key: 'user_admin',
-    label: '用户管理员（用户+邀请码+审计）',
-    role: 'member',
-    permissions: ['manage_users', 'manage_invites', 'view_audit_log'],
   },
 };
 

@@ -354,7 +354,7 @@ export const AdminPatchUserSchema = z.object({
 export const InviteCreateSchema = z.object({
   role: z.enum(['admin', 'member']).optional(),
   permission_template: z
-    .enum(['admin_full', 'member_basic', 'ops_manager', 'user_admin'])
+    .enum(['admin_full', 'ops_manager'])
     .optional(),
   permissions: z
     .array(PermissionValueSchema)
