@@ -22,7 +22,12 @@ import type { QQConnectionConfig } from './qq.js';
 import type { WeChatConnectionConfig } from './wechat.js';
 import type { StreamingCardController } from './feishu-streaming-card.js';
 import { ProgressCardController } from './feishu-progress-card.js';
-import { getRegisteredGroup, getJidsByFolder } from './db.js';
+import {
+  getRegisteredGroup,
+  getJidsByFolder,
+  getSessionBinding,
+  getSessionRecord,
+} from './db.js';
 import { logger } from './logger.js';
 
 export interface UserIMConnection {
@@ -280,12 +285,36 @@ class IMConnectionManager {
     jid: string,
     channelType: string,
   ): IMChannel | undefined {
+    const binding = getSessionBinding(jid);
+    if (binding) {
+      const boundSession = getSessionRecord(binding.session_id);
+      const ownerKey =
+        boundSession?.owner_key
+        || (boundSession?.parent_session_id
+          ? getSessionRecord(boundSession.parent_session_id)?.owner_key
+          : undefined);
+      if (ownerKey) {
+        const conn = this.connections.get(ownerKey);
+        const ch = conn?.channels.get(channelType);
+        if (ch?.isConnected()) return ch;
+      }
+    }
+
     // Direct lookup via group ownership
     const group = getRegisteredGroup(jid);
     if (group?.created_by) {
       const conn = this.connections.get(group.created_by);
       const ch = conn?.channels.get(channelType);
       if (ch?.isConnected()) return ch;
+    }
+
+    if (group) {
+      const sessionOwner = getSessionRecord(`main:${group.folder}`)?.owner_key;
+      if (sessionOwner) {
+        const conn = this.connections.get(sessionOwner);
+        const ch = conn?.channels.get(channelType);
+        if (ch?.isConnected()) return ch;
+      }
     }
 
     // Fallback: find owner via sibling groups sharing the same folder

@@ -34,8 +34,8 @@ export function GroupsPage() {
         {!loading && groupsArray.length === 0 && (
           <EmptyState
             icon={Users}
-            title="暂无群组"
-            description="当前没有已注册的群组"
+            title="暂无会话"
+            description="当前还没有可展示的会话"
           />
         )}
 

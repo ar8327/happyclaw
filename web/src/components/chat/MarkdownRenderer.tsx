@@ -26,7 +26,7 @@ function resolveImageSrc(src: string, groupJid?: string): string {
   // Strip #agent:xxx suffix — files belong to the group, not individual agents
   const baseJid = groupJid.replace(/#agent:.*$/, '');
   const encoded = toBase64Url(src);
-  return withBasePath(`/api/groups/${encodeURIComponent(baseJid)}/files/download/${encoded}`);
+  return withBasePath(`/api/sessions/${encodeURIComponent(baseJid)}/files/download/${encoded}`);
 }
 
 /** Image lightbox for markdown images */

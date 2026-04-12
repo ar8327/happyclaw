@@ -461,7 +461,7 @@ export function McpServerDetail({ server, onDeleted }: McpServerDetailProps) {
             <p className="text-sm text-muted-foreground">
               {server.syncedFromHost
                 ? '从宿主机同步的 MCP 服务器，可编辑、启停和删除。重新同步时会恢复'
-                : 'MCP 服务器配置会在容器启动时注入，修改后新启动的容器将使用新配置'}
+                : 'MCP 服务器配置会在 Runtime 启动时注入，修改后新启动的 Runtime 将使用新配置'}
             </p>
           </div>
         </>

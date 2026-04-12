@@ -1,46 +1,32 @@
 /**
- * MemoryAgentManager — per-user Memory Agent process management.
+ * MemoryAgentManager — per-user Memory Agent orchestration.
  *
- * Each user gets at most one Memory Agent child process. The manager handles:
- *   - Lazy process startup on first query
- *   - stdin/stdout JSON-line communication with Promise routing
- *   - Idle timeout cleanup (10 minutes)
- *   - Crash recovery (auto-restart on next query)
- *   - Concurrency limiting (MAX_CONCURRENT_MEMORY_AGENTS)
+ * Memory turns run through the shared session launcher so they share the same
+ * runtime contract, state persistence, and runner selection as normal sessions.
  */
 
-import { ChildProcess, spawn } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import readline from 'readline';
 
 import { DATA_DIR, GROUPS_DIR } from './config.js';
+import type { RuntimeOutput } from './runtime-runner.js';
 import {
   getChatNamesByJids,
-  getGroupsByOwner,
+  getPrimarySessionForOwner,
+  getSessionRecord,
+  getSessionRuntimeState,
+  listAgentsByFolder,
+  listSessionRecords,
   getTranscriptMessagesSince,
-  getUserHomeGroup,
-  listUsers,
+  getUserById,
+  upsertSessionRuntimeState,
 } from './db.js';
-import { GroupQueue } from './group-queue.js';
+import { SessionRuntimeManager } from './session-runtime-manager.js';
 import { logger } from './logger.js';
-import {
-  buildContainerEnvLines,
-  getClaudeProviderConfig,
-  getContainerEnvConfig,
-  getSystemSettings,
-} from './runtime-config.js';
+import { getSystemSettings } from './runtime-config.js';
 import type { MessageCursor } from './types.js';
-
-// Memory Agent binary location (compiled TypeScript)
-const MEMORY_AGENT_DIST = path.join(
-  process.cwd(),
-  'container',
-  'memory-agent',
-  'dist',
-  'index.js',
-);
+import { runSessionAgent } from './session-launcher.js';
 
 // Limits
 const MAX_CONCURRENT_MEMORY_AGENTS = 3;
@@ -48,17 +34,10 @@ const IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 const DEFAULT_QUERY_TIMEOUT_MS = 60_000; // 60 seconds per query (configurable via Web UI)
 const IDLE_CHECK_INTERVAL_MS = 60_000; // Check idle agents every minute
 
-interface PendingQuery {
-  resolve: (value: MemoryAgentResponse) => void;
-  reject: (reason: Error) => void;
-  timeout: ReturnType<typeof setTimeout>;
-}
-
 interface AgentEntry {
-  proc: ChildProcess;
-  pendingQueries: Map<string, PendingQuery>;
   lastActivity: number;
-  stderrBuffer: string[];
+  inFlight: number;
+  tail: Promise<void>;
 }
 
 export interface MemoryAgentResponse {
@@ -66,6 +45,20 @@ export interface MemoryAgentResponse {
   success: boolean;
   response?: string;
   error?: string;
+}
+
+interface MemoryExecutionRequest {
+  type: 'query' | 'remember' | 'session_wrapup' | 'global_sleep';
+  query?: string;
+  context?: string;
+  content?: string;
+  importance?: 'high' | 'normal';
+  transcriptFile?: string;
+  groupFolder?: string;
+  chatJids?: string[];
+  chatJid?: string;
+  channelLabel?: string;
+  source?: string;
 }
 
 // --- Storage directory initialization ---
@@ -378,9 +371,17 @@ export async function exportTranscriptsForUser(
     }
     const defaultCursor: MessageCursor = { rowid: 0 };
 
-    // Collect all messages from all associated chatJids
+    const transcriptChatJids = new Set(chatJids);
+    for (const agent of listAgentsByFolder(folder)) {
+      if (agent.kind === 'conversation') {
+        transcriptChatJids.add(`${agent.chat_jid}#agent:${agent.id}`);
+      }
+    }
+
+    // Collect all messages from all associated chatJids, including virtual
+    // conversation-agent channels that are not registered_groups rows.
     const allMessages: TranscriptMessage[] = [];
-    for (const jid of chatJids) {
+    for (const jid of transcriptChatJids) {
       const cursor = wrapups[jid] || defaultCursor;
       const msgs = getTranscriptMessagesSince(jid, cursor);
       allMessages.push(
@@ -434,7 +435,7 @@ export async function exportTranscriptsForUser(
     );
 
     // Update cursors per-jid: only update jids that had messages
-    for (const jid of chatJids) {
+    for (const jid of transcriptChatJids) {
       const jidMsgs = allMessages.filter((m) => m.chat_jid === jid);
       if (jidMsgs.length > 0) {
         const last = jidMsgs[jidMsgs.length - 1];
@@ -453,11 +454,11 @@ export async function exportTranscriptsForUser(
 
     // Trigger session_wrapup and return the result
     return await memoryAgentManager.send(userId, {
-      type: 'session_wrapup',
-      transcriptFile: transcriptRelPath,
-      groupFolder: folder,
-      chatJids,
-    });
+        type: 'session_wrapup',
+        transcriptFile: transcriptRelPath,
+        groupFolder: folder,
+        chatJids: Array.from(transcriptChatJids),
+      });
   } catch (err) {
     logger.error(
       { userId, folder, err },
@@ -468,7 +469,7 @@ export async function exportTranscriptsForUser(
 }
 
 /**
- * Write a memory agent execution log to the user's home group logs directory.
+ * Write a memory agent execution log to the primary session logs directory.
  */
 function writeMemoryLog(
   userId: string,
@@ -483,13 +484,7 @@ function writeMemoryLog(
   },
 ): void {
   try {
-    const homeGroup = getUserHomeGroup(userId);
-    if (!homeGroup) {
-      logger.warn({ userId }, 'Cannot write memory log: no home group found');
-      return;
-    }
-
-    const logsDir = path.join(GROUPS_DIR, homeGroup.folder, 'logs');
+    const logsDir = path.join(GROUPS_DIR, resolvePrimarySessionFolder(userId), 'logs');
     fs.mkdirSync(logsDir, { recursive: true });
 
     const duration = Date.now() - opts.startTime;
@@ -527,162 +522,442 @@ function writeMemoryLog(
   }
 }
 
+const MEMORY_SESSION_ID_PREFIX = 'memory:';
+
+const MEMORY_CORE_INSTRUCTIONS = `你现在以 HappyClaw memory agent 的身份工作。
+
+边界要求：
+- 只允许读写 memory 目录里的文件
+- 不要修改 memory 目录外的任何文件
+- 不要调用 remember/query 之类的 memory 工具，也不要 invoke_agent
+- 优先使用 rg、read、apply_patch、shell 这类本地工具
+- 只在确有必要时创建新文件
+- 除非任务明确要求，否则不要改动 state.json
+
+目录约定：
+- index.md: 随身索引，只放索引条目，不放长正文
+- meta.json: 记忆元数据
+- knowledge/: 详细知识
+- impressions/: 语义索引
+- impressions/archived/: 六个月前归档索引
+- transcripts/: 原始对话记录
+- personality.md: 用户交互风格观察
+
+输出要求：
+- 最终回答必须是单个 JSON 对象，不能带额外解释
+- JSON 结构固定为 {"success":true|false,"response":"...","touchedFiles":["..."]}
+- response 用自然语言简短总结结果
+- touchedFiles 只放相对 memory 根目录的路径`;
+
+function buildMemorySessionId(userId: string): string {
+  return `${MEMORY_SESSION_ID_PREFIX}${userId}`;
+}
+
+function resolvePrimarySessionFolder(userId: string): string {
+  const primary = getPrimarySessionForOwner(userId);
+  if (primary?.id.startsWith('main:')) {
+    return primary.id.slice('main:'.length);
+  }
+  throw new Error(`No primary session found for memory user ${userId}`);
+}
+
+function listOwnedPrimaryFolders(userId: string): string[] {
+  return Array.from(
+    new Set(
+      listSessionRecords()
+        .filter(
+          (session) =>
+            session.owner_key === userId &&
+            session.id.startsWith('main:') &&
+            (session.kind === 'main' || session.kind === 'workspace'),
+        )
+        .map((session) => session.id.slice('main:'.length)),
+    ),
+  );
+}
+
+function getMemorySessionConfig(userId: string) {
+  return getSessionRecord(buildMemorySessionId(userId));
+}
+
+function parseJsonText<T>(raw: string | null | undefined, fallback: T): T {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function buildMemoryPrompt(
+  request: MemoryExecutionRequest,
+  memDir: string,
+): string {
+  const lines: string[] = [
+    MEMORY_CORE_INSTRUCTIONS,
+    '',
+    `memory 根目录: ${memDir}`,
+    `请求类型: ${request.type}`,
+  ];
+
+  if (request.type === 'query') {
+    lines.push(
+      '',
+      '处理要求：',
+      '- 先查 index.md',
+      '- 没命中再查 impressions/，必要时查 archived',
+      '- 命中后按需读 knowledge/ 或 transcripts/',
+      '- 找到答案后，顺手做 1 到 3 处轻量索引修复',
+      '- 回答里尽量包含来源、时间、渠道',
+      '',
+      `查询内容: ${request.query || ''}`,
+    );
+    if (request.context) lines.push(`补充上下文: ${request.context}`);
+    if (request.groupFolder) lines.push(`来源会话: ${request.groupFolder}`);
+    if (request.chatJid) lines.push(`来源渠道 JID: ${request.chatJid}`);
+    if (request.channelLabel) lines.push(`来源渠道名: ${request.channelLabel}`);
+  } else if (request.type === 'remember') {
+    lines.push(
+      '',
+      '处理要求：',
+      '- 判断内容属于用户信息、偏好、项目知识还是临时提醒',
+      '- 写入 knowledge/ 或其他合适文件',
+      '- 更新 index.md，保证后续可检索',
+      '- 如果存在冲突，保留更可信的新自述并在 response 里说明',
+      '',
+      `记忆内容: ${request.content || ''}`,
+      `重要性: ${request.importance || 'normal'}`,
+    );
+    if (request.source) lines.push(`来源: ${request.source}`);
+    if (request.groupFolder) lines.push(`来源会话: ${request.groupFolder}`);
+    if (request.chatJid) lines.push(`来源渠道 JID: ${request.chatJid}`);
+    if (request.channelLabel) lines.push(`来源渠道名: ${request.channelLabel}`);
+  } else if (request.type === 'session_wrapup') {
+    lines.push(
+      '',
+      '处理要求：',
+      '- 读取 transcriptFile 指向的对话记录',
+      '- 生成 impressions/ 语义索引',
+      '- 提炼 knowledge/，合并而不是粗暴覆盖',
+      '- 更新 index.md 的近期上下文和必要索引',
+      '- 更新 meta.json 里的 totalImpressions 和 totalKnowledgeFiles',
+      '- 不要修改 state.json',
+      '',
+      `转录文件: ${request.transcriptFile || ''}`,
+      `所属会话: ${request.groupFolder || ''}`,
+    );
+    if (request.chatJids?.length) {
+      lines.push(`涉及渠道: ${request.chatJids.join(', ')}`);
+    }
+  } else if (request.type === 'global_sleep') {
+    lines.push(
+      '',
+      '处理要求：',
+      '- 备份并 compact index.md',
+      '- 清理过期提醒与过旧 impressions 归档',
+      '- 维护 knowledge/ 的拆分、合并与 See Also',
+      '- 自审索引结构',
+      '- 更新 personality.md',
+      '- 更新 meta.json 的 indexVersion、计数和 pendingMaintenance',
+      '- 不要修改 state.json',
+    );
+  }
+
+  return lines.join('\n');
+}
+
+function parseMemoryAgentResponseText(
+  raw: string | null | undefined,
+): { success: boolean; response?: string; error?: string } {
+  const text = raw?.trim();
+  if (!text) {
+    return { success: false, error: 'Memory runner returned empty response' };
+  }
+  try {
+    const parsed = JSON.parse(text) as {
+      success?: boolean;
+      response?: string;
+      error?: string;
+    };
+    if (typeof parsed.success === 'boolean') {
+      return {
+        success: parsed.success,
+        response: parsed.response,
+        error: parsed.error,
+      };
+    }
+  } catch {
+    // Fall through to plain text response
+  }
+  return { success: true, response: text };
+}
+
+function persistMemoryRuntimeSnapshot(
+  userId: string,
+  output: RuntimeOutput,
+): void {
+  if (!output.runtimeState && !output.newSessionId) return;
+  const sessionId = buildMemorySessionId(userId);
+  const current = getSessionRuntimeState(sessionId);
+  upsertSessionRuntimeState(sessionId, {
+    providerSessionId:
+      output.runtimeState?.providerSessionId ||
+      output.newSessionId ||
+      current?.provider_session_id ||
+      undefined,
+    resumeAnchor:
+      output.runtimeState?.resumeAnchor || current?.resume_anchor || undefined,
+    providerState:
+      output.runtimeState?.providerState ||
+      parseJsonText<Record<string, unknown>>(
+        current?.provider_state_json,
+        {},
+      ),
+    recentImChannels:
+      output.runtimeState?.recentImChannels ||
+      parseJsonText<string[]>(current?.recent_im_channels_json, []),
+    imChannelLastSeen:
+      output.runtimeState?.imChannelLastSeen ||
+      parseJsonText<Record<string, number>>(
+        current?.im_channel_last_seen_json,
+        {},
+      ),
+    currentPermissionMode:
+      output.runtimeState?.currentPermissionMode ||
+      current?.current_permission_mode ||
+      'default',
+    lastMessageCursor:
+      output.runtimeState?.lastMessageCursor ??
+      current?.last_message_cursor ??
+      null,
+  });
+}
+
 export class MemoryAgentManager {
   private agents: Map<string, AgentEntry> = new Map();
   private idleCheckTimer: ReturnType<typeof setInterval> | null = null;
 
-  /** Start periodic idle checks. Call once at startup. */
   startIdleChecks(): void {
     if (this.idleCheckTimer) return;
     this.idleCheckTimer = setInterval(() => {
       this.checkIdleAgents();
     }, IDLE_CHECK_INTERVAL_MS);
-    // Don't prevent process exit
     this.idleCheckTimer.unref();
   }
 
-  /** Stop periodic idle checks. */
   stopIdleChecks(): void {
-    if (this.idleCheckTimer) {
-      clearInterval(this.idleCheckTimer);
-      this.idleCheckTimer = null;
-    }
+    if (!this.idleCheckTimer) return;
+    clearInterval(this.idleCheckTimer);
+    this.idleCheckTimer = null;
   }
 
-  /** Get or start a Memory Agent for the given user. */
   private ensureAgent(userId: string): AgentEntry {
     const existing = this.agents.get(userId);
     if (existing) {
       existing.lastActivity = Date.now();
       return existing;
     }
-
-    // Enforce concurrency limit — reject if at capacity
     if (this.agents.size >= MAX_CONCURRENT_MEMORY_AGENTS) {
       throw new Error(
         `Memory Agent concurrency limit reached (${MAX_CONCURRENT_MEMORY_AGENTS})`,
       );
     }
-
-    return this.startAgent(userId);
-  }
-
-  private startAgent(userId: string): AgentEntry {
-    const memDir = ensureMemoryDir(userId);
-
-    // Ensure the memory-agent dist exists
-    if (!fs.existsSync(MEMORY_AGENT_DIST)) {
-      throw new Error(
-        `Memory Agent not compiled. Run: npm --prefix container/memory-agent install && npm --prefix container/memory-agent run build`,
-      );
-    }
-
-    logger.info({ userId, memDir }, 'Starting Memory Agent process');
-
-    // Build Claude auth env vars (same as host-mode agent)
-    const globalConfig = getClaudeProviderConfig();
-    const containerOverride = getContainerEnvConfig('memory-agent');
-    const envLines = buildContainerEnvLines(globalConfig, containerOverride);
-    const claudeEnv: Record<string, string> = {};
-    for (const line of envLines) {
-      const eqIdx = line.indexOf('=');
-      if (eqIdx > 0) {
-        claudeEnv[line.slice(0, eqIdx)] = line.slice(eqIdx + 1);
-      }
-    }
-
-    // Share the user's home agent session dir so OAuth credentials (auto-refreshed
-    // by the SDK) are shared between the main agent and the memory agent.
-    // This avoids stale refresh tokens — the main agent refreshes on startup and
-    // the memory agent picks up the fresh credentials from the same file.
-    const homeGroup = getUserHomeGroup(userId);
-    const homeFolder = homeGroup?.folder ?? 'main';
-    const configDir = path.join(DATA_DIR, 'sessions', homeFolder, '.claude');
-    fs.mkdirSync(configDir, { recursive: true });
-
-    // Remove CLAUDECODE to avoid "cannot be launched inside another Claude Code session" error
-    const { CLAUDECODE: _, ...baseEnv } = process.env;
-
-    const proc = spawn('node', [MEMORY_AGENT_DIST], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: {
-        ...baseEnv,
-        ...claudeEnv,
-        HAPPYCLAW_MEMORY_DIR: memDir,
-        HAPPYCLAW_MODEL: 'opus',
-        CLAUDE_CONFIG_DIR: configDir,
-      },
-      cwd: memDir,
-    });
-
     const entry: AgentEntry = {
-      proc,
-      pendingQueries: new Map(),
       lastActivity: Date.now(),
-      stderrBuffer: [],
+      inFlight: 0,
+      tail: Promise.resolve(),
     };
-
     this.agents.set(userId, entry);
-
-    // Parse stdout line by line → route responses to pending promises
-    const rl = readline.createInterface({ input: proc.stdout! });
-    rl.on('line', (line) => {
-      try {
-        const msg = JSON.parse(line) as MemoryAgentResponse;
-        const pending = entry.pendingQueries.get(msg.requestId);
-        if (pending) {
-          clearTimeout(pending.timeout);
-          pending.resolve(msg);
-          entry.pendingQueries.delete(msg.requestId);
-        }
-      } catch (err) {
-        logger.warn(
-          { userId, line: line.slice(0, 200) },
-          'Memory Agent stdout parse error',
-        );
-      }
-    });
-
-    // Log stderr and buffer for log files
-    proc.stderr?.on('data', (chunk: Buffer) => {
-      const text = chunk.toString().trim();
-      if (text) {
-        logger.debug({ userId }, `[memory-agent:${userId}] ${text}`);
-        entry.stderrBuffer.push(text);
-        if (entry.stderrBuffer.length > 2000) {
-          entry.stderrBuffer.splice(0, entry.stderrBuffer.length - 2000);
-        }
-      }
-    });
-
-    // Process exit → reject all pending queries, clean up
-    proc.on('exit', (code, signal) => {
-      logger.info({ userId, code, signal }, 'Memory Agent process exited');
-
-      const currentEntry = this.agents.get(userId);
-      if (currentEntry === entry) {
-        // Reject all pending queries
-        for (const [id, pending] of currentEntry.pendingQueries) {
-          clearTimeout(pending.timeout);
-          pending.reject(
-            new Error(`Memory Agent exited (code ${code}, signal ${signal})`),
-          );
-        }
-        this.agents.delete(userId);
-      }
-    });
-
-    proc.on('error', (err) => {
-      logger.error({ userId, err }, 'Memory Agent process error');
-    });
-
     return entry;
   }
 
-  /**
-   * Send a synchronous query to the user's Memory Agent.
-   * Returns a Promise that resolves when the agent responds.
-   */
+  private async runSerialized<T>(
+    userId: string,
+    task: () => Promise<T>,
+  ): Promise<T> {
+    const entry = this.ensureAgent(userId);
+    entry.inFlight += 1;
+    entry.lastActivity = Date.now();
+
+    const previous = entry.tail;
+    let release!: () => void;
+    entry.tail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    try {
+      await previous;
+      return await task();
+    } finally {
+      entry.inFlight = Math.max(0, entry.inFlight - 1);
+      entry.lastActivity = Date.now();
+      release();
+    }
+  }
+
+  private async execute(
+    userId: string,
+    requestId: string,
+    request: MemoryExecutionRequest,
+    timeoutMs: number,
+  ): Promise<MemoryAgentResponse> {
+    const primaryFolder = resolvePrimarySessionFolder(userId);
+    const memorySession = getMemorySessionConfig(userId);
+    const primarySession = getPrimarySessionForOwner(userId);
+    if (!memorySession && !primarySession) {
+      throw new Error(`No memory session found for ${userId}`);
+    }
+
+    const memDir = ensureMemoryDir(userId);
+    const groupDir = memorySession?.cwd || memDir;
+    fs.mkdirSync(groupDir, { recursive: true });
+    fs.mkdirSync(path.join(GROUPS_DIR, 'user-global', userId), {
+      recursive: true,
+    });
+    fs.mkdirSync(path.join(DATA_DIR, 'skills', userId), { recursive: true });
+
+    const runtimeKey = buildMemorySessionId(userId);
+    const memoryAgentId = `memory-${userId}`;
+    const runtimeState = getSessionRuntimeState(runtimeKey);
+    const ipcInputDir = path.join(
+      DATA_DIR,
+      'ipc',
+      primaryFolder,
+      'agents',
+      memoryAgentId,
+      'input',
+    );
+    fs.mkdirSync(ipcInputDir, { recursive: true });
+
+    const user = getUserById(userId);
+    const runnerId = memorySession?.runner_id || primarySession?.runner_id || 'claude';
+    const input = {
+      prompt: buildMemoryPrompt(request, memDir),
+      sessionId: runtimeState?.provider_session_id || undefined,
+      resumeAnchor: runtimeState?.resume_anchor || undefined,
+      sessionRecordId: runtimeKey,
+      groupFolder: primaryFolder,
+      chatJid: runtimeKey,
+      isHome: false,
+      isAdminHome: user?.role === 'admin' && primaryFolder === 'main',
+      agentId: memoryAgentId,
+      bootstrapState: runtimeState
+        ? {
+            providerState: parseJsonText<Record<string, unknown>>(
+              runtimeState.provider_state_json,
+              {},
+            ),
+            recentImChannels: parseJsonText<string[]>(
+              runtimeState.recent_im_channels_json,
+              [],
+            ),
+            imChannelLastSeen: parseJsonText<Record<string, number>>(
+              runtimeState.im_channel_last_seen_json,
+              {},
+            ),
+            currentPermissionMode: runtimeState.current_permission_mode,
+            lastMessageCursor: runtimeState.last_message_cursor,
+          }
+        : undefined,
+    };
+
+    const startTime = Date.now();
+    let responseText = '';
+    let finalOutput: RuntimeOutput | null = null;
+    let closeRequested = false;
+    try {
+      const output = await runSessionAgent(
+        {
+          name: memorySession?.name || `memory:${userId}`,
+          folder: primaryFolder,
+          added_at: memorySession?.created_at || new Date().toISOString(),
+          created_by: userId,
+          is_home: false,
+          customCwd: groupDir,
+          containerConfig: { timeout: timeoutMs },
+          executionMode: 'local',
+          llm_provider: runnerId === 'codex' ? 'openai' : 'claude',
+          model: memorySession?.model || primarySession?.model || undefined,
+          thinking_effort:
+            memorySession?.thinking_effort ||
+            primarySession?.thinking_effort ||
+            undefined,
+          context_compression: memorySession?.context_compression || 'off',
+          knowledge_extraction: memorySession?.knowledge_extraction || false,
+        },
+        input,
+        () => {},
+        async (output) => {
+          persistMemoryRuntimeSnapshot(userId, output);
+          if (
+            output.status === 'success' ||
+            output.status === 'error' ||
+            output.status === 'closed' ||
+            output.status === 'drained'
+          ) {
+            finalOutput = output;
+          }
+          if (
+            !closeRequested &&
+            (output.status === 'success' || output.status === 'error')
+          ) {
+            closeRequested = true;
+            fs.mkdirSync(ipcInputDir, { recursive: true });
+            fs.writeFileSync(path.join(ipcInputDir, '_close'), '');
+          }
+          if (
+            output.status === 'stream' &&
+            output.streamEvent?.eventType === 'text_delta' &&
+            output.streamEvent.text
+          ) {
+            responseText += output.streamEvent.text;
+          }
+        },
+        primaryFolder,
+      );
+
+      persistMemoryRuntimeSnapshot(userId, output);
+      const finalResultText = (finalOutput as RuntimeOutput | null)?.result ?? null;
+      const outputResultText = output.result ?? null;
+      let parsed = parseMemoryAgentResponseText(
+        responseText || finalResultText || outputResultText || null,
+      );
+      if (output.status === 'error') {
+        parsed = {
+          success: false,
+          response: parsed.response,
+          error: parsed.error || output.error || 'Memory runner exited with error',
+        };
+      }
+      writeMemoryLog(userId, {
+        type: request.type,
+        startTime,
+        status: parsed.success ? 'success' : 'error',
+        exitCode: parsed.success ? 0 : 1,
+        response: parsed.response,
+        stderr: [],
+        error: parsed.error,
+      });
+      return {
+        requestId,
+        success: parsed.success,
+        response: parsed.response,
+        error: parsed.error,
+      };
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      writeMemoryLog(userId, {
+        type: request.type,
+        startTime,
+        status: /timed out/i.test(error.message) ? 'timeout' : 'error',
+        exitCode: 1,
+        stderr: [],
+        error: error.message,
+      });
+      throw error;
+    }
+  }
+
   async query(
     userId: string,
     options: {
@@ -693,239 +968,76 @@ export class MemoryAgentManager {
       channelLabel?: string;
     },
   ): Promise<MemoryAgentResponse> {
-    const entry = this.ensureAgent(userId);
     const requestId = crypto.randomUUID();
-    const startTime = Date.now();
-    const stderrStart = entry.stderrBuffer.length;
-
-    return new Promise((resolve, reject) => {
-      const queryTimeoutMs =
-        getSystemSettings().memoryQueryTimeout || DEFAULT_QUERY_TIMEOUT_MS;
-      const timeout = setTimeout(() => {
-        entry.pendingQueries.delete(requestId);
-        const err = new Error('Memory query timeout');
-        writeMemoryLog(userId, {
-          type: 'query',
-          startTime,
-          status: 'timeout',
-          exitCode: -1,
-          stderr: entry.stderrBuffer.slice(stderrStart),
-          error: err.message,
-        });
-        if (entry.pendingQueries.size === 0) entry.stderrBuffer.length = 0;
-        reject(err);
-      }, queryTimeoutMs);
-
-      const wrappedResolve = (resp: MemoryAgentResponse) => {
-        writeMemoryLog(userId, {
-          type: 'query',
-          startTime,
-          status: resp.success ? 'success' : 'error',
-          exitCode: resp.success ? 0 : 1,
-          response: resp.response,
-          stderr: entry.stderrBuffer.slice(stderrStart),
-          error: resp.error,
-        });
-        if (entry.pendingQueries.size === 0) entry.stderrBuffer.length = 0;
-        resolve(resp);
-      };
-
-      const wrappedReject = (reason: Error) => {
-        writeMemoryLog(userId, {
-          type: 'query',
-          startTime,
-          status: 'error',
-          exitCode: 1,
-          stderr: entry.stderrBuffer.slice(stderrStart),
-          error: reason.message,
-        });
-        if (entry.pendingQueries.size === 0) entry.stderrBuffer.length = 0;
-        reject(reason);
-      };
-
-      entry.pendingQueries.set(requestId, {
-        resolve: wrappedResolve,
-        reject: wrappedReject,
-        timeout,
-      });
-
-      const message = JSON.stringify({
-        requestId,
+    const timeoutMs =
+      getSystemSettings().memoryQueryTimeout || DEFAULT_QUERY_TIMEOUT_MS;
+    return this.runSerialized(userId, () =>
+      this.execute(userId, requestId, {
         type: 'query',
         query: options.query,
         context: options.context,
         chatJid: options.chatJid,
         groupFolder: options.groupFolder,
         channelLabel: options.channelLabel,
-      });
-
-      entry.proc.stdin!.write(message + '\n', (err) => {
-        if (err) {
-          clearTimeout(timeout);
-          entry.pendingQueries.delete(requestId);
-          wrappedReject(
-            new Error(`Failed to write to Memory Agent stdin: ${err.message}`),
-          );
-        }
-      });
-    });
+      }, timeoutMs),
+    );
   }
 
-  /**
-   * Send a fire-and-forget message to the user's Memory Agent.
-   * Used for remember, session_wrapup, global_sleep.
-   */
   async send(
     userId: string,
     message: Record<string, unknown>,
   ): Promise<MemoryAgentResponse> {
-    const entry = this.ensureAgent(userId);
     const requestId = crypto.randomUUID();
-
-    // Even fire-and-forget gets a requestId for tracking
-    const payload = { ...message, requestId };
-
+    const msgType = String(message.type || 'unknown');
+    if (
+      msgType !== 'remember' &&
+      msgType !== 'session_wrapup' &&
+      msgType !== 'global_sleep'
+    ) {
+      throw new Error(`Unsupported memory message type: ${msgType}`);
+    }
     const settings = getSystemSettings();
     const timeoutMs =
-      message.type === 'global_sleep'
+      msgType === 'global_sleep'
         ? settings.memoryGlobalSleepTimeout
         : settings.memorySendTimeout;
-
-    const msgType = String(message.type || 'unknown');
-    const startTime = Date.now();
-    const stderrStart = entry.stderrBuffer.length;
-
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        entry.pendingQueries.delete(requestId);
-        const err = new Error('Memory Agent send timeout');
-        writeMemoryLog(userId, {
-          type: msgType,
-          startTime,
-          status: 'timeout',
-          exitCode: -1,
-          stderr: entry.stderrBuffer.slice(stderrStart),
-          error: err.message,
-        });
-        if (entry.pendingQueries.size === 0) entry.stderrBuffer.length = 0;
-        reject(err);
-      }, timeoutMs);
-
-      const wrappedResolve = (resp: MemoryAgentResponse) => {
-        writeMemoryLog(userId, {
-          type: msgType,
-          startTime,
-          status: resp.success ? 'success' : 'error',
-          exitCode: resp.success ? 0 : 1,
-          response: resp.response,
-          stderr: entry.stderrBuffer.slice(stderrStart),
-          error: resp.error,
-        });
-        if (entry.pendingQueries.size === 0) entry.stderrBuffer.length = 0;
-        resolve(resp);
-      };
-
-      const wrappedReject = (reason: Error) => {
-        writeMemoryLog(userId, {
-          type: msgType,
-          startTime,
-          status: 'error',
-          exitCode: 1,
-          stderr: entry.stderrBuffer.slice(stderrStart),
-          error: reason.message,
-        });
-        if (entry.pendingQueries.size === 0) entry.stderrBuffer.length = 0;
-        reject(reason);
-      };
-
-      entry.pendingQueries.set(requestId, {
-        resolve: wrappedResolve,
-        reject: wrappedReject,
-        timeout,
-      });
-
-      entry.proc.stdin!.write(JSON.stringify(payload) + '\n', (err) => {
-        if (err) {
-          clearTimeout(timeout);
-          entry.pendingQueries.delete(requestId);
-          wrappedReject(
-            new Error(`Failed to write to Memory Agent stdin: ${err.message}`),
-          );
-        }
-      });
-
-      entry.lastActivity = Date.now();
-    });
+    return this.runSerialized(userId, () =>
+      this.execute(
+        userId,
+        requestId,
+        { ...(message as Record<string, unknown>), type: msgType } as unknown as MemoryExecutionRequest,
+        timeoutMs,
+      ),
+    );
   }
 
-  /** Close idle agents that haven't been active for IDLE_TIMEOUT_MS. */
   checkIdleAgents(): void {
     const now = Date.now();
     for (const [userId, entry] of this.agents) {
-      if (
-        now - entry.lastActivity > IDLE_TIMEOUT_MS &&
-        entry.pendingQueries.size === 0
-      ) {
-        logger.info({ userId }, 'Closing idle Memory Agent');
-        try {
-          entry.proc.stdin!.end(); // Graceful close
-        } catch {
-          entry.proc.kill();
-        }
+      if (entry.inFlight === 0 && now - entry.lastActivity > IDLE_TIMEOUT_MS) {
+        logger.info({ userId }, 'Pruning idle memory session coordinator');
         this.agents.delete(userId);
       }
     }
   }
 
-  /** Gracefully shut down all Memory Agent processes. */
   async shutdownAll(): Promise<void> {
     this.stopIdleChecks();
-
-    const promises: Promise<void>[] = [];
-
-    for (const [userId, entry] of this.agents) {
-      promises.push(
-        new Promise<void>((resolve) => {
-          const timer = setTimeout(() => {
-            entry.proc.kill();
-            resolve();
-          }, 5000);
-
-          entry.proc.on('exit', () => {
-            clearTimeout(timer);
-            resolve();
-          });
-
-          // Reject all pending queries
-          for (const [, pending] of entry.pendingQueries) {
-            clearTimeout(pending.timeout);
-            pending.reject(new Error('Memory Agent shutting down'));
-          }
-          entry.pendingQueries.clear();
-
-          try {
-            entry.proc.stdin!.end();
-          } catch {
-            entry.proc.kill();
-            clearTimeout(timer);
-            resolve();
-          }
-
-          logger.info({ userId }, 'Shutting down Memory Agent');
-        }),
-      );
+    for (const entry of this.agents.values()) {
+      try {
+        await entry.tail;
+      } catch {
+        // Ignore tail failures during shutdown
+      }
     }
-
-    await Promise.all(promises);
     this.agents.clear();
   }
 
-  /** Get the number of active Memory Agent processes. */
   get activeCount(): number {
-    return this.agents.size;
+    return Array.from(this.agents.values()).filter((entry) => entry.inFlight > 0)
+      .length;
   }
 
-  /** Check if a specific user has an active Memory Agent. */
   hasAgent(userId: string): boolean {
     return this.agents.has(userId);
   }
@@ -935,7 +1047,7 @@ export class MemoryAgentManager {
 
 export interface GlobalSleepDeps {
   manager: MemoryAgentManager;
-  queue: GroupQueue;
+  queue: SessionRuntimeManager;
 }
 
 let lastGlobalSleepCheck = 0;
@@ -961,18 +1073,22 @@ export function runMemoryGlobalSleepIfNeeded(deps: GlobalSleepDeps): void {
   logger.info('Memory global_sleep: checking eligible users');
 
   // Build set of active group JIDs for quick lookup
-  const queueStatus = deps.queue.getStatus();
-  const activeJids = new Set(
-    queueStatus.groups.filter((g) => g.active).map((g) => g.jid),
+  const queueStatus = deps.queue.getRuntimeStatus();
+  const activeRuntimeFolders = new Set(
+    queueStatus.groups
+      .filter((g) => g.active && g.groupFolder)
+      .map((g) => g.groupFolder as string),
   );
 
-  // Iterate all active users
-  let page = 1;
+  const memoryOwners = new Set(
+    listSessionRecords()
+      .filter((session) => session.kind === 'memory' && session.owner_key)
+      .map((session) => session.owner_key!)
+  );
+
   let triggered = 0;
-  while (true) {
-    const result = listUsers({ status: 'active', page, pageSize: 200 });
-    for (const user of result.users) {
-      const state = readMemoryState(user.id);
+  for (const ownerKey of memoryOwners) {
+      const state = readMemoryState(ownerKey);
 
       // 2. lastGlobalSleep > 6 hours ago (or never run)
       const lastSleep = state.lastGlobalSleep as string | null;
@@ -982,9 +1098,11 @@ export function runMemoryGlobalSleepIfNeeded(deps: GlobalSleepDeps): void {
         if (hoursSince < 6) continue;
       }
 
-      // 3. No active sessions for this user
-      const userGroups = getGroupsByOwner(user.id);
-      const hasActiveSession = userGroups.some((g) => activeJids.has(g.jid));
+      // 3. No active sessions for this user's explicit session folders
+      const ownedFolders = new Set(listOwnedPrimaryFolders(ownerKey));
+      const hasActiveSession = Array.from(activeRuntimeFolders).some((folder) =>
+        ownedFolders.has(folder),
+      );
       if (hasActiveSession) continue;
 
       // 4. Has pending wrapups
@@ -992,36 +1110,28 @@ export function runMemoryGlobalSleepIfNeeded(deps: GlobalSleepDeps): void {
       if (pendingWrapups.length === 0) continue;
 
       // All conditions met — trigger global_sleep
-      logger.info({ userId: user.id }, 'Triggering Memory Agent global_sleep');
+      logger.info({ ownerKey }, 'Triggering Memory Agent global_sleep');
       deps.manager
-        .send(user.id, { type: 'global_sleep' })
+        .send(ownerKey, { type: 'global_sleep' })
         .then(() => {
           // Main process updates state.json after successful global_sleep
           // (LLM no longer touches state.json — it only manages meta.json)
-          const updatedState = readMemoryState(user.id);
+          const updatedState = readMemoryState(ownerKey);
           updatedState.lastGlobalSleep = new Date().toISOString();
           updatedState.pendingWrapups = [];
-          writeMemoryState(user.id, updatedState);
+          writeMemoryState(ownerKey, updatedState);
           logger.info(
-            { userId: user.id },
+            { ownerKey },
             'Memory Agent global_sleep completed, state updated',
           );
         })
         .catch((err) => {
           logger.warn(
-            { userId: user.id, err },
+            { ownerKey, err },
             'Memory Agent global_sleep failed',
           );
         });
       triggered++;
-    }
-
-    if (
-      result.users.length < result.pageSize ||
-      page * result.pageSize >= result.total
-    )
-      break;
-    page++;
   }
 
   if (triggered > 0) {

@@ -8,7 +8,6 @@ import { CronExpressionParser } from 'cron-parser';
 
 import {
   ASSISTANT_NAME,
-  CONTAINER_IMAGE,
   DATA_DIR,
   GROUPS_DIR,
   STORE_DIR,
@@ -19,13 +18,12 @@ import {
 } from './config.js';
 import {
   AvailableGroup,
-  ContainerInput,
-  ContainerOutput,
-  runContainerAgent,
-  runHostAgent,
+  RuntimeInput,
+  RuntimeOutput,
+  runSessionAgent,
   writeGroupsSnapshot,
   writeTasksSnapshot,
-} from './container-runner.js';
+} from './session-launcher.js';
 import {
   closeDatabase,
   createTask,
@@ -36,23 +34,28 @@ import {
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
-  hasContainerModeGroups,
   getAllTasks,
   getJidsByFolder,
   getLastGroupSync,
   getRegisteredGroup,
+  getPrimarySessionForOwner,
   getUserById,
   getMessagesSince,
   getNewMessages,
   getRouterState,
   getRowidByCursor,
   getTaskById,
-  getHomeGroupByFolder,
   getUserHomeGroup,
   getLastInboundMessage,
   initDatabase,
   isGroupShared,
+  getSessionBinding,
+  getSessionRecord,
+  getSessionRuntimeState,
+  getWorkerSessionRecord,
+  listSessionBindings,
   listUsers,
+  listSessionRecords,
   setLastGroupSync,
   setRegisteredGroup,
   setRouterState,
@@ -83,6 +86,9 @@ import {
   cleanupOldTurns,
   getMessageById,
   getContextSummary,
+  deleteSessionBinding,
+  saveSessionBinding,
+  upsertSessionRuntimeState,
 } from './db.js';
 // feishu.js deprecated exports are no longer needed; imManager handles all connections
 import { imManager } from './im-manager.js';
@@ -128,7 +134,7 @@ import type {
   QQConnectConfig,
   WeChatConnectConfig,
 } from './im-manager.js';
-import { GroupQueue } from './group-queue.js';
+import { SessionRuntimeManager } from './session-runtime-manager.js';
 import { TurnManager } from './turn-manager.js';
 import { saveTurnTrace, cleanupOldTraces } from './turn-trace.js';
 import { startSchedulerLoop } from './task-scheduler.js';
@@ -176,6 +182,7 @@ import {
   MemoryAgentManager,
   exportTranscriptsForUser,
 } from './memory-agent.js';
+import { MemoryOrchestrator } from './memory-orchestrator.js';
 import { injectMemoryAgentDeps } from './routes/memory-agent.js';
 import { injectFeishuApiDeps } from './routes/feishu-api.js';
 import { injectMemoryDeps } from './routes/memory.js';
@@ -194,7 +201,7 @@ let messageLoopRunning = false;
 let ipcWatcherRunning = false;
 let shuttingDown = false;
 
-const queue = new GroupQueue();
+const queue = new SessionRuntimeManager();
 const turnManager = new TurnManager();
 const EMPTY_CURSOR: MessageCursor = { rowid: 0 };
 const terminalWarmupInFlight = new Set<string>();
@@ -273,12 +280,335 @@ function ackIpcDelivery(chatJid: string): void {
     if (entry.count <= 0) pendingIpcDeliveries.delete(chatJid);
   }
 }
+
+function trackIpcDeliveries(chatJids: Iterable<string>): void {
+  for (const chatJid of new Set(chatJids)) {
+    if (chatJid) trackIpcDelivery(chatJid);
+  }
+}
+
+function ackIpcDeliveries(chatJids: Iterable<string>): void {
+  for (const chatJid of new Set(chatJids)) {
+    if (chatJid) ackIpcDelivery(chatJid);
+  }
+}
+
+function collectIpcDeliveryKeys(
+  chatJid: string,
+  messages: Array<Pick<DbMessage, 'chat_jid' | 'source_jid'>>,
+): string[] {
+  const keys = new Set<string>([chatJid]);
+  for (const message of messages) {
+    const sourceJid = message.source_jid || message.chat_jid;
+    if (sourceJid) keys.add(sourceJid);
+  }
+  return Array.from(keys);
+}
+
+function collectIpcAckKeys(
+  fallbackJids: string[],
+  streamEvent: NonNullable<RuntimeOutput['streamEvent']> & {
+    ipcAckTargets?: string[];
+    ipcAckSources?: string[];
+  },
+): string[] {
+  const keys = new Set<string>(fallbackJids);
+  for (const jid of streamEvent.ipcAckTargets || []) {
+    if (jid) keys.add(jid);
+  }
+  for (const jid of streamEvent.ipcAckSources || []) {
+    if (jid) keys.add(jid);
+  }
+  return Array.from(keys);
+}
+
+function persistRuntimeStateForSession(
+  groupFolder: string,
+  runtimeState: NonNullable<RuntimeOutput['runtimeState']>,
+  agentId?: string,
+): void {
+  const sessionId = agentId ? `worker:${agentId}` : `main:${groupFolder}`;
+  upsertSessionRuntimeState(sessionId, {
+    providerSessionId: runtimeState.providerSessionId,
+    resumeAnchor: runtimeState.resumeAnchor,
+    providerState: runtimeState.providerState,
+    recentImChannels: runtimeState.recentImChannels,
+    imChannelLastSeen: runtimeState.imChannelLastSeen,
+    currentPermissionMode: runtimeState.currentPermissionMode,
+    lastMessageCursor: runtimeState.lastMessageCursor ?? null,
+  });
+}
+
+function parseRuntimeStateJson<T>(
+  value: string | null | undefined,
+  fallback: T,
+): T {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function getRuntimeBootstrapState(
+  groupFolder: string,
+  agentId?: string,
+): {
+  providerSessionId?: string;
+  resumeAnchor?: string;
+  bootstrapState?: RuntimeInput['bootstrapState'];
+} {
+  const sessionKey = agentId ? `worker:${agentId}` : `main:${groupFolder}`;
+  const runtimeState = getSessionRuntimeState(sessionKey);
+  const providerSessionId =
+    runtimeState?.provider_session_id || getSession(groupFolder, agentId) || undefined;
+  if (!runtimeState) {
+    return { providerSessionId };
+  }
+
+  return {
+    providerSessionId,
+    resumeAnchor: runtimeState.resume_anchor || undefined,
+    bootstrapState: {
+      providerState: parseRuntimeStateJson<Record<string, unknown>>(
+        runtimeState.provider_state_json,
+        {},
+      ),
+      recentImChannels: parseRuntimeStateJson<string[]>(
+        runtimeState.recent_im_channels_json,
+        [],
+      ),
+      imChannelLastSeen: parseRuntimeStateJson<Record<string, number>>(
+        runtimeState.im_channel_last_seen_json,
+        {},
+      ),
+      currentPermissionMode: runtimeState.current_permission_mode,
+      lastMessageCursor: runtimeState.last_message_cursor ?? null,
+    },
+  };
+}
+
+function resolveSessionOwnerKey(groupFolder: string): string | undefined {
+  return getSessionRecord(`main:${groupFolder}`)?.owner_key || undefined;
+}
+
+function buildMainSessionRecordId(groupFolder: string): string {
+  return `main:${groupFolder}`;
+}
+
+function buildWorkerSessionRecordId(agentId: string): string {
+  return `worker:${agentId}`;
+}
+
+function resolveStableSessionOwnerKey(
+  groupFolder: string,
+  agentId?: string,
+): string | undefined {
+  if (agentId) {
+    return getSessionRecord(buildWorkerSessionRecordId(agentId))?.owner_key
+      || resolveSessionOwnerKey(groupFolder);
+  }
+  return resolveSessionOwnerKey(groupFolder);
+}
+
+function getChatBindingPolicy(chatJid: string): {
+  activationMode: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+  requireMention: boolean;
+  replyPolicy: 'source_only' | 'mirror';
+  sessionId: string | null;
+} {
+  const binding = getSessionBinding(chatJid);
+  if (binding) {
+    return {
+      activationMode: binding.activation_mode,
+      requireMention: binding.require_mention === true,
+      replyPolicy: binding.reply_policy === 'mirror' ? 'mirror' : 'source_only',
+      sessionId: binding.session_id,
+    };
+  }
+
+  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  return {
+    activationMode: group?.activation_mode ?? 'auto',
+    requireMention: group?.require_mention === true,
+    replyPolicy: group?.reply_policy === 'mirror' ? 'mirror' : 'source_only',
+    sessionId: null,
+  };
+}
+
+function resolveBoundSessionTarget(
+  chatJid: string,
+  fallbackGroup?: RegisteredGroup,
+): {
+  sessionId: string | null;
+  boundAgentId: string | null;
+  effectiveJid: string | null;
+  folder: string;
+  locationLine: string;
+  replyPolicy: 'source_only' | 'mirror' | null;
+  contextCompression: 'off' | 'auto' | 'manual';
+} {
+  const group =
+    fallbackGroup ?? registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  const defaultFolder = group?.folder || MAIN_GROUP_FOLDER;
+  const defaultCompression = group?.context_compression ?? 'off';
+  const defaultLocationLine = `${findGroupNameByFolder(defaultFolder)} / 主会话`;
+  const binding = getSessionBinding(chatJid);
+
+  if (!binding) {
+    return {
+      sessionId: null,
+      boundAgentId: null,
+      effectiveJid: group ? findWebJidForFolder(group.folder) : null,
+      folder: defaultFolder,
+      locationLine: defaultLocationLine,
+      replyPolicy: null,
+      contextCompression: defaultCompression,
+    };
+  }
+
+  const boundSession = getSessionRecord(binding.session_id);
+  if (!boundSession) {
+    return {
+      sessionId: binding.session_id,
+      boundAgentId: null,
+      effectiveJid: null,
+      folder: defaultFolder,
+      locationLine: defaultLocationLine,
+      replyPolicy: binding.reply_policy,
+      contextCompression: defaultCompression,
+    };
+  }
+
+  if (boundSession.kind === 'worker') {
+    const worker = getWorkerSessionRecord(boundSession.id);
+    const boundAgentId = boundSession.id.startsWith('worker:')
+      ? boundSession.id.slice('worker:'.length)
+      : null;
+    const parentSession = boundSession.parent_session_id
+      ? getSessionRecord(boundSession.parent_session_id)
+      : null;
+    const sourceGroup = worker
+      ? (registeredGroups[worker.source_chat_jid] ??
+        getRegisteredGroup(worker.source_chat_jid))
+      : null;
+    const folder =
+      sourceGroup?.folder ||
+      (parentSession?.id.startsWith('main:')
+        ? parentSession.id.slice('main:'.length)
+        : defaultFolder);
+    const workspaceName =
+      parentSession?.name || sourceGroup?.name || findGroupNameByFolder(folder);
+    return {
+      sessionId: boundSession.id,
+      boundAgentId,
+      effectiveJid:
+        worker && boundAgentId
+          ? `${worker.source_chat_jid}#agent:${boundAgentId}`
+          : null,
+      folder,
+      locationLine: `${workspaceName} / ${worker?.name || boundAgentId || boundSession.name}`,
+      replyPolicy: binding.reply_policy,
+      contextCompression:
+        parentSession?.context_compression || defaultCompression,
+    };
+  }
+
+  const folder = boundSession.id.startsWith('main:')
+    ? boundSession.id.slice('main:'.length)
+    : boundSession.parent_session_id?.startsWith('main:')
+      ? boundSession.parent_session_id.slice('main:'.length)
+      : defaultFolder;
+
+  return {
+    sessionId: boundSession.id,
+    boundAgentId: null,
+    effectiveJid: findWebJidForFolder(folder) || `web:${folder}`,
+    folder,
+    locationLine: `${boundSession.name} / 主会话`,
+    replyPolicy: binding.reply_policy,
+    contextCompression: boundSession.context_compression,
+  };
+}
+
+function resolveChatOwnerKey(
+  chatJid: string,
+  fallbackGroup?: RegisteredGroup,
+  agentId?: string,
+): string | undefined {
+  const binding = getSessionBinding(chatJid);
+  if (binding) {
+    const boundSession = getSessionRecord(binding.session_id);
+    if (boundSession?.owner_key) return boundSession.owner_key;
+    if (boundSession?.parent_session_id) {
+      const parentSession = getSessionRecord(boundSession.parent_session_id);
+      if (parentSession?.owner_key) return parentSession.owner_key;
+    }
+  }
+
+  if (agentId) {
+    const workerSession = getSessionRecord(buildWorkerSessionRecordId(agentId));
+    if (workerSession?.owner_key) return workerSession.owner_key;
+  }
+
+  const group = fallbackGroup ?? registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  if (!group) return undefined;
+  return resolveSessionOwnerKey(group.folder) || group.created_by;
+}
+
 function clearIpcDeliveryTracker(chatJid: string): void {
   const entry = pendingIpcDeliveries.get(chatJid);
   if (entry) {
     for (const t of entry.timers) clearTimeout(t);
     pendingIpcDeliveries.delete(chatJid);
   }
+}
+
+function applyExplicitChatBinding(
+  chatJid: string,
+  group: RegisteredGroup,
+  sessionId: string | null,
+  replyPolicy: 'source_only' | 'mirror' = 'source_only',
+): void {
+  const current = getSessionBinding(chatJid);
+  const now = new Date().toISOString();
+  if (!sessionId) {
+    deleteSessionBinding(chatJid);
+    return;
+  }
+  const session = getSessionRecord(sessionId);
+  saveSessionBinding({
+    channel_jid: chatJid,
+    session_id: sessionId,
+    binding_mode:
+      replyPolicy === 'mirror'
+        ? 'mirror'
+        : session?.kind === 'worker'
+          ? 'direct'
+          : 'source_only',
+    activation_mode: group.activation_mode ?? 'auto',
+    require_mention: group.require_mention === true,
+    display_name: group.name,
+    reply_policy: replyPolicy,
+    created_at: current?.created_at || group.added_at || now,
+    updated_at: now,
+  });
+}
+
+function resolveDefaultSessionBinding(
+  chatJid: string,
+  group: RegisteredGroup,
+): string | null {
+  if (group.activation_mode === 'disabled') return null;
+  if (group.target_agent_id) return `worker:${group.target_agent_id}`;
+  if (group.target_main_jid) {
+    const targetGroup = registeredGroups[group.target_main_jid]
+      ?? getRegisteredGroup(group.target_main_jid);
+    if (targetGroup) return `main:${targetGroup.folder}`;
+  }
+  if (chatJid.startsWith('web:')) return null;
+  return `main:${group.folder}`;
 }
 
 // Track consecutive IM send failures per JID for auto-unbind
@@ -301,16 +631,27 @@ const RELATIVE_IMAGE_EXTENSIONS = new Set([
 /** Unbind an IM group from its conversation agent or main conversation, syncing DB + in-memory cache + failure counters. */
 function unbindImGroup(jid: string, reason: string): void {
   const group = registeredGroups[jid] ?? getRegisteredGroup(jid);
-  if (!group?.target_agent_id && !group?.target_main_jid) return;
-  const agentId = group.target_agent_id;
-  const targetMainJid = group.target_main_jid;
+  const binding = getSessionBinding(jid);
+  if (!binding && !group?.target_agent_id && !group?.target_main_jid) return;
+  const agentId = group?.target_agent_id;
+  const targetMainJid = group?.target_main_jid;
+  if (!group) {
+    deleteSessionBinding(jid);
+    logger.info(
+      { jid, sessionId: binding?.session_id || null },
+      `${reason} but backing IM group is already gone`,
+    );
+    return;
+  }
   const updated = {
     ...group,
     target_agent_id: undefined,
     target_main_jid: undefined,
     reply_policy: 'source_only' as const,
+    activation_mode: 'disabled' as const,
   };
   setRegisteredGroup(jid, updated);
+  deleteSessionBinding(jid);
   registeredGroups[jid] = updated;
   imSendFailCounts.delete(jid);
   imHealthCheckFailCounts.delete(jid);
@@ -320,8 +661,9 @@ function unbindImGroup(jid: string, reason: string): void {
 /** Check per-user IM setting to decide whether auto-unbind on failure is enabled. */
 function shouldAutoUnbindOnFailure(jid: string): boolean {
   const group = registeredGroups[jid] ?? getRegisteredGroup(jid);
-  if (!group?.created_by) return true;
-  return getUserImGeneralConfig(group.created_by).autoUnbindOnSendFailure;
+  const ownerKey = resolveChatOwnerKey(jid, group);
+  if (!ownerKey) return true;
+  return getUserImGeneralConfig(ownerKey).autoUnbindOnSendFailure;
 }
 
 /**
@@ -331,28 +673,12 @@ function shouldAutoUnbindOnFailure(jid: string): boolean {
 function resolveEffectiveFolder(chatJid: string): string | undefined {
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   if (!group) return undefined;
-
-  if (group.target_agent_id) {
-    const agent = getAgent(group.target_agent_id);
-    const agentParent = agent
-      ? (registeredGroups[agent.chat_jid] ?? getRegisteredGroup(agent.chat_jid))
-      : null;
-    return agentParent?.folder || group.folder;
-  }
-
-  if (group.target_main_jid) {
-    const targetGroup =
-      registeredGroups[group.target_main_jid] ??
-      getRegisteredGroup(group.target_main_jid);
-    return targetGroup?.folder || group.target_main_jid.replace(/^web:/, '');
-  }
-
-  return group.folder;
+  return resolveBoundSessionTarget(chatJid, group).folder || group.folder;
 }
 
 /**
  * Resolve the effective group for a non-home group by finding its sibling home group.
- * Non-home groups use their own executionMode/customCwd — no owner fallback.
+ * Non-home groups use their own local runtime metadata and customCwd.
  * Populates registeredGroups cache as a side-effect.
  */
 function resolveEffectiveGroup(group: RegisteredGroup): {
@@ -382,10 +708,15 @@ function resolveEffectiveGroup(group: RegisteredGroup): {
   return { effectiveGroup: group, isHome: false };
 }
 
-/** Resolve the owner's home folder for memory mounting. Non-home groups read owner's home memory. */
+/** Resolve the owner's primary session folder for shared runtime credentials. */
 function resolveOwnerHomeFolder(group: RegisteredGroup): string {
-  if (group.created_by) {
-    return getUserHomeGroup(group.created_by)?.folder || group.folder;
+  const ownerKey = resolveSessionOwnerKey(group.folder);
+  if (!ownerKey) {
+    return group.folder;
+  }
+  const primarySession = getPrimarySessionForOwner(ownerKey);
+  if (primarySession?.id.startsWith('main:')) {
+    return primarySession.id.slice('main:'.length);
   }
   return group.folder;
 }
@@ -652,39 +983,16 @@ async function clearSessionRuntimeFiles(
   const claudeDir = getSessionClaudeDir(folder, agentId);
   if (!fs.existsSync(claudeDir)) return;
 
-  let cleared = false;
   try {
     for (const entry of fs.readdirSync(claudeDir)) {
       if (entry === 'settings.json') continue;
       fs.rmSync(path.join(claudeDir, entry), { recursive: true, force: true });
     }
-    cleared = true;
-  } catch {
-    logger.info(
-      { folder, agentId },
-      'Direct session cleanup failed, trying Docker fallback',
+  } catch (err) {
+    logger.error(
+      { folder, agentId, err },
+      'Failed to clear session runtime files directly',
     );
-  }
-
-  if (!cleared) {
-    try {
-      await execFileAsync(
-        'docker',
-        [
-          'run',
-          '--rm',
-          '-v',
-          `${claudeDir}:/target`,
-          CONTAINER_IMAGE,
-          'sh',
-          '-c',
-          'find /target -mindepth 1 -not -name settings.json -exec rm -rf {} + 2>/dev/null; exit 0',
-        ],
-        { timeout: 15_000 },
-      );
-    } catch (err) {
-      logger.error({ folder, agentId, err }, 'Docker fallback cleanup failed');
-    }
   }
 }
 
@@ -767,6 +1075,7 @@ function resolveBindingTarget(
   userId: string,
   rawSpec: string,
 ): {
+  sessionId: string;
   target_agent_id?: string;
   target_main_jid?: string;
   display: string;
@@ -789,6 +1098,7 @@ function resolveBindingTarget(
     const mainJid = findWebJidForFolder(workspace.folder);
     if (!mainJid) return null;
     return {
+      sessionId: `main:${workspace.folder}`,
       target_main_jid: mainJid,
       display: `${workspace.name} / 主会话`,
     };
@@ -802,6 +1112,7 @@ function resolveBindingTarget(
   if (!agent) return null;
 
   return {
+    sessionId: `worker:${agent.id}`,
     target_agent_id: agent.id,
     display: `${workspace.name} / ${agent.name}`,
   };
@@ -874,9 +1185,9 @@ function handleStatusCommand(chatJid: string): string {
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   if (!group) return '当前 IM 未绑定工作区';
 
-  const location = getLocationForGroup(group);
+  const location = getLocationForGroup(chatJid, group);
 
-  const queueStatus = queue.getStatus();
+  const queueStatus = queue.getRuntimeStatus();
   const settings = getSystemSettings();
 
   // Check if the current group's folder is active or queued
@@ -895,10 +1206,8 @@ function handleStatusCommand(chatJid: string): string {
   return formatSystemStatus(
     location,
     {
-      activeContainerCount: queueStatus.activeContainerCount,
-      activeHostProcessCount: queueStatus.activeHostProcessCount,
-      maxContainers: settings.maxConcurrentContainers,
-      maxHostProcesses: settings.maxConcurrentHostProcesses,
+      activeRuntimes: queueStatus.activeCount,
+      maxRuntimes: settings.maxConcurrentRuntimes,
       waitingCount: queueStatus.waitingCount,
       waitingGroupJids: queueStatus.waitingGroupJids,
     },
@@ -911,22 +1220,21 @@ function handleStatusCommand(chatJid: string): string {
  * Resolve location info for a registered group (shared helper to avoid
  * duplicating the lookupGroup closure + resolveLocationInfo call).
  */
-function getLocationForGroup(group: RegisteredGroup) {
-  const lookupGroup = (jid: string) =>
-    registeredGroups[jid] ?? getRegisteredGroup(jid);
-  return resolveLocationInfo(
-    group,
-    lookupGroup,
-    getAgent,
-    findGroupNameByFolder,
-  );
+function getLocationForGroup(chatJid: string, group: RegisteredGroup) {
+  const resolved = resolveBoundSessionTarget(chatJid, group);
+  return {
+    locationLine: resolved.locationLine,
+    folder: resolved.folder,
+    replyPolicy: resolved.replyPolicy,
+    boundAgentId: resolved.boundAgentId,
+  };
 }
 
 function handleWhereCommand(chatJid: string): string {
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   if (!group) return '当前 IM 未绑定工作区';
 
-  const location = getLocationForGroup(group);
+  const location = getLocationForGroup(chatJid, group);
 
   const lines = [`📍 当前绑定: ${location.locationLine}`];
   if (location.replyPolicy) {
@@ -938,7 +1246,7 @@ function handleWhereCommand(chatJid: string): string {
 function handleUnbindCommand(chatJid: string): string {
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   if (!group) return '当前 IM 未绑定工作区';
-  if (!group.target_agent_id && !group.target_main_jid)
+  if (!getSessionBinding(chatJid))
     return '当前聊天没有额外绑定，已在默认工作区。';
   unbindImGroup(chatJid, 'IM slash command unbind');
   return '已解绑，后续消息将回到该聊天自己的默认工作区。';
@@ -952,7 +1260,7 @@ function handleBindCommand(chatJid: string, rawSpec: string): string {
 
   // Helper: build location info + workspace list block (shared by no-args and not-found cases)
   const buildBindHelpLines = (prefix: string[]): string => {
-    const location = getLocationForGroup(group);
+    const location = getLocationForGroup(chatJid, group);
     const lines = [...prefix, `📍 当前绑定: ${location.locationLine}`];
     if (location.replyPolicy) {
       lines.push(`🔁 回复策略: ${location.replyPolicy}`);
@@ -964,7 +1272,7 @@ function handleBindCommand(chatJid: string, rawSpec: string): string {
         formatWorkspaceList(
           workspaces,
           location.folder,
-          group.target_agent_id || null,
+          location.boundAgentId,
         ),
       );
     }
@@ -989,6 +1297,7 @@ function handleBindCommand(chatJid: string, rawSpec: string): string {
     reply_policy: 'source_only',
   };
   setRegisteredGroup(chatJid, updated);
+  applyExplicitChatBinding(chatJid, updated, resolved.sessionId, 'source_only');
   registeredGroups[chatJid] = updated;
   imSendFailCounts.delete(chatJid);
   imHealthCheckFailCounts.delete(chatJid);
@@ -1014,7 +1323,7 @@ function handleNewCommand(chatJid: string, rawName: string): string {
     name,
     folder,
     added_at: now,
-    executionMode: 'container',
+    executionMode: 'local',
     created_by: userId,
   };
 
@@ -1032,6 +1341,7 @@ function handleNewCommand(chatJid: string, rawName: string): string {
     reply_policy: 'source_only',
   };
   setRegisteredGroup(chatJid, updated);
+  applyExplicitChatBinding(chatJid, updated, `main:${folder}`, 'source_only');
   registeredGroups[chatJid] = updated;
   imSendFailCounts.delete(chatJid);
   imHealthCheckFailCounts.delete(chatJid);
@@ -1047,11 +1357,23 @@ function handleRequireMentionCommand(chatJid: string, rawArgs: string): string {
   if (action === 'true') {
     const updated: RegisteredGroup = { ...group, require_mention: true };
     setRegisteredGroup(chatJid, updated);
+    applyExplicitChatBinding(
+      chatJid,
+      updated,
+      getSessionBinding(chatJid)?.session_id || `main:${group.folder}`,
+      getSessionBinding(chatJid)?.reply_policy || 'source_only',
+    );
     registeredGroups[chatJid] = updated;
     return '已开启：群聊中需要 @机器人 才会响应';
   } else if (action === 'false') {
     const updated: RegisteredGroup = { ...group, require_mention: false };
     setRegisteredGroup(chatJid, updated);
+    applyExplicitChatBinding(
+      chatJid,
+      updated,
+      getSessionBinding(chatJid)?.session_id || `main:${group.folder}`,
+      getSessionBinding(chatJid)?.reply_policy || 'source_only',
+    );
     registeredGroups[chatJid] = updated;
     return '已关闭：群聊中所有消息都会响应，无需 @机器人';
   } else if (!action) {
@@ -1079,38 +1401,11 @@ async function handleRecallCommand(chatJid: string): Promise<string> {
     return '当前 IM 未绑定工作区';
   }
 
-  // Resolve binding target — use bound workspace/agent if present
-  let targetJid: string | undefined;
-  let targetFolder: string;
-  let targetAgentId: string | null = null;
-  let headerName: string;
-
-  if (group.target_agent_id) {
-    const agent = getAgent(group.target_agent_id);
-    const parent = agent
-      ? (registeredGroups[agent.chat_jid] ?? getRegisteredGroup(agent.chat_jid))
-      : null;
-    const workspaceName = parent?.name || parent?.folder || group.folder;
-    headerName = `${workspaceName} / ${agent?.name || group.target_agent_id}`;
-    targetFolder = parent?.folder || group.folder;
-    targetAgentId = group.target_agent_id;
-    targetJid = agent
-      ? `${agent.chat_jid}#agent:${group.target_agent_id}`
-      : undefined;
-  } else if (group.target_main_jid) {
-    const target =
-      registeredGroups[group.target_main_jid] ??
-      getRegisteredGroup(group.target_main_jid);
-    headerName = `${target?.name || group.target_main_jid} / 主会话`;
-    targetFolder = target?.folder || group.folder;
-    targetJid = group.target_main_jid;
-  } else {
-    headerName = `${findGroupNameByFolder(group.folder)} / 主会话`;
-    targetFolder = group.folder;
-    targetJid = findWebJidForFolder(group.folder) ?? undefined;
-  }
-
-  const header = `🧠 ${headerName}`;
+  const resolvedTarget = resolveBoundSessionTarget(chatJid, group);
+  const targetJid = resolvedTarget.effectiveJid || undefined;
+  const targetFolder = resolvedTarget.folder;
+  const targetAgentId = resolvedTarget.boundAgentId;
+  const header = `🧠 ${resolvedTarget.locationLine}`;
 
   if (!targetJid) {
     logger.warn({ chatJid, targetFolder }, '/recall: no JID found for target');
@@ -1374,8 +1669,8 @@ function loadState(): void {
   }
 
   // Ensure every active user has a home group (is_home=true).
-  // Admin → folder='main', executionMode='host'
-  // Member → folder='home-{userId}', executionMode='container'
+  // Admin → folder='main'
+  // Member → folder='home-{userId}'
   try {
     // Paginate through all active users
     const activeUsers: Array<{ id: string; role: string; username: string }> =
@@ -1395,7 +1690,7 @@ function loadState(): void {
         user.role as 'admin' | 'member',
         user.username,
       );
-      // Always refresh this entry from DB to pick up any patches (is_home, executionMode, etc.)
+      // Always refresh this entry from DB to pick up any patches.
       const freshGroup = getRegisteredGroup(homeJid);
       if (freshGroup) {
         registeredGroups[homeJid] = freshGroup;
@@ -1407,16 +1702,11 @@ function loadState(): void {
     logger.warn({ err }, 'Failed to ensure user home groups');
   }
 
-  // Enforce execution mode on all is_home groups:
-  // - admin home → host mode
-  // - member home → container mode
+  // Normalize legacy home groups onto the single local-runtime compatibility shape.
   for (const [jid, group] of Object.entries(registeredGroups)) {
     if (!group.is_home) continue;
 
-    // Determine expected mode based on the owner's role
-    // Admin home groups use host mode, member home groups use container mode
-    const isAdminHome = group.folder === MAIN_GROUP_FOLDER;
-    const expectedMode = isAdminHome ? 'host' : 'container';
+    const expectedMode = 'local';
 
     if (group.executionMode !== expectedMode) {
       group.executionMode = expectedMode;
@@ -1677,8 +1967,8 @@ function broadcastInterruptedTurn(
  * to the Memory Agent if enabled.
  */
 function buildCompressOptions(group: RegisteredGroup): CompressOptions | undefined {
-  if (!group.knowledge_extraction || !group.created_by) return undefined;
-  const userId = group.created_by;
+  const userId = resolveSessionOwnerKey(group.folder) || group.created_by;
+  if (!group.knowledge_extraction || !userId) return undefined;
   return {
     extractKnowledge: true,
     onKnowledgeEntry: async (content: string, importance: string) => {
@@ -1824,16 +2114,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Called from both 'drained' and normal-exit paths.
   // For IM groups with target_main_jid, inherit compression setting from target group.
   const tryAutoCompress = (): void => {
-    // IM groups default to 'off' — when bound via target_main_jid, inherit
-    // the target group's setting instead of using their own default.
     const ownCompression = group.context_compression;
+    const boundTarget = getSessionBinding(chatJid)
+      ? resolveBoundSessionTarget(chatJid, group)
+      : null;
     const effectiveCompression =
       (ownCompression && ownCompression !== 'off')
         ? ownCompression
-        : (group.target_main_jid
-            ? (registeredGroups[group.target_main_jid] ?? getRegisteredGroup(group.target_main_jid))
-                ?.context_compression
-            : undefined) ?? ownCompression ?? 'off';
+        : boundTarget?.contextCompression ?? ownCompression ?? 'off';
     if (
       effectiveCompression !== 'auto' ||
       !shouldAutoCompress(effectiveGroup.folder, chatJid)
@@ -2035,7 +2323,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             se.eventType === 'status' &&
             se.statusText === 'ipc_message_received'
           ) {
-            ackIpcDelivery(chatJid);
+            ackIpcDeliveries(collectIpcAckKeys([chatJid], se));
           }
           if (se.eventType === 'status' && se.statusText === 'interrupted') {
             wasInterrupted = true;
@@ -2566,32 +2854,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // Forward agent errors to IM so users aren't left waiting in silence
     const isRateLimit = /overloaded|limit|rate.?limit|quota|resets/i.test(errorDetail);
     if (errorImChannel) {
-      // Build card button for rate-limit errors linking to the usage page
-      const webPublicUrl = getSystemSettings().webPublicUrl || process.env.WEB_PUBLIC_URL;
       const sendOpts: IMSendOptions = {};
-      if (isRateLimit && webPublicUrl) {
-        sendOpts.cardExtraElements = [
-          {
-            tag: 'action',
-            actions: [
-              {
-                tag: 'button',
-                text: { tag: 'plain_text', content: '📊 查看用量详情' },
-                type: 'primary',
-                multi_url: {
-                  url: `${webPublicUrl.replace(/\/$/, '')}/usage`,
-                  pc_url: '',
-                  android_url: '',
-                  ios_url: '',
-                },
-              },
-            ],
-          },
-        ];
-      }
       sendImWithFailTracking(
         errorImChannel,
-        `⚠️ Agent 错误：${errorDetail}${isRateLimit && !webPublicUrl ? '\n\n> 💡 可在 Web 端 /usage 页面查看用量详情' : ''}`,
+        `⚠️ Agent 错误：${errorDetail}${isRateLimit ? '\n\n> 💡 请检查当前 runner 的凭据、额度或上游限流状态。' : ''}`,
         [],
         Object.keys(sendOpts).length > 0 ? sendOpts : undefined,
       );
@@ -2615,7 +2881,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 async function runTerminalWarmup(chatJid: string): Promise<void> {
   const group = registeredGroups[chatJid];
   if (!group) return;
-  if ((group.executionMode || 'container') === 'host') return;
 
   logger.info({ chatJid, group: group.name }, 'Starting terminal warmup run');
 
@@ -2690,12 +2955,11 @@ async function runTerminalWarmup(chatJid: string): Promise<void> {
   }
 }
 
-function ensureTerminalContainerStarted(chatJid: string): boolean {
+function ensureTerminalRuntimeStarted(chatJid: string): boolean {
   const group = registeredGroups[chatJid];
   if (!group) return false;
-  if ((group.executionMode || 'container') === 'host') return false;
 
-  const status = queue.getStatus();
+  const status = queue.getRuntimeStatus();
   const groupStatus = status.groups.find((g) => g.jid === chatJid);
   if (groupStatus?.active) return true;
   if (terminalWarmupInFlight.has(chatJid)) return true;
@@ -2716,7 +2980,7 @@ async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
-  onOutput?: (output: ContainerOutput) => Promise<void>,
+  onOutput?: (output: RuntimeOutput) => Promise<void>,
   images?: Array<{ data: string; mimeType?: string }>,
 ): Promise<{
   status: 'success' | 'error' | 'closed' | 'drained';
@@ -2724,7 +2988,10 @@ async function runAgent(
 }> {
   const isHome = !!group.is_home;
   const isAdminHome = isHome && group.folder === MAIN_GROUP_FOLDER;
-  const sessionId = sessions[group.folder];
+  const sessionRecordId = buildMainSessionRecordId(group.folder);
+  const sessionRecord = getSessionRecord(sessionRecordId);
+  const runtimeBootstrap = getRuntimeBootstrapState(group.folder);
+  const sessionId = runtimeBootstrap.providerSessionId;
 
   // Load context summary if session was compressed (no active session)
   let contextSummary: string | undefined;
@@ -2762,7 +3029,10 @@ async function runAgent(
 
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput
-    ? async (output: ContainerOutput) => {
+    ? async (output: RuntimeOutput) => {
+        if (output.runtimeState) {
+          persistRuntimeStateForSession(group.folder, output.runtimeState);
+        }
         // 仅从成功的输出中更新 session ID；
         // error 输出可能携带 stale ID，会覆盖流式传递的有效 session
         if (output.newSessionId && output.status !== 'error') {
@@ -2774,67 +3044,40 @@ async function runAgent(
     : undefined;
 
   try {
-    const executionMode = group.executionMode || 'container';
-
     const onProcessCb = (proc: ChildProcess, identifier: string) => {
-      // 宿主机模式：containerName 传 null，走 process.kill() 路径
-      const containerName = executionMode === 'container' ? identifier : null;
-      queue.registerProcess(
-        chatJid,
-        proc,
-        containerName,
-        group.folder,
-        identifier,
-      );
+      queue.registerProcess(chatJid, proc, null, group.folder, identifier);
     };
 
     const ownerHomeFolder = resolveOwnerHomeFolder(group);
     const activeTurnId = turnManager.getActiveTurn(group.folder)?.id;
 
-    let output: ContainerOutput;
-
-    if (executionMode === 'host') {
-      output = await runHostAgent(
-        group,
-        {
-          prompt,
-          sessionId,
-          groupFolder: group.folder,
-          chatJid,
-          isHome,
-          isAdminHome,
-          images,
-          userId: group.created_by,
-          turnId: activeTurnId,
-          contextSummary,
-        },
-        onProcessCb,
-        wrappedOnOutput,
-        ownerHomeFolder,
-      );
-    } else {
-      output = await runContainerAgent(
-        group,
-        {
-          prompt,
-          sessionId,
-          groupFolder: group.folder,
-          chatJid,
-          isHome,
-          isAdminHome,
-          images,
-          userId: group.created_by,
-          turnId: activeTurnId,
-          contextSummary,
-        },
-        onProcessCb,
-        wrappedOnOutput,
-        ownerHomeFolder,
-      );
-    }
+    const output = await runSessionAgent(
+      group,
+      {
+        prompt,
+        sessionId,
+        resumeAnchor: runtimeBootstrap.resumeAnchor,
+        sessionRecordId,
+        groupFolder: group.folder,
+        chatJid,
+        isHome,
+        isAdminHome,
+        images,
+        userId: sessionRecord?.owner_key || resolveStableSessionOwnerKey(group.folder),
+        turnId: activeTurnId,
+        contextSummary,
+        bootstrapState: runtimeBootstrap.bootstrapState,
+      },
+      onProcessCb,
+      wrappedOnOutput,
+      ownerHomeFolder,
+    );
 
     // 仅从成功的最终输出中更新 session ID；
     // error 状态的输出可能携带 stale ID，覆盖流式阶段已写入的有效 session
+    if (output.runtimeState) {
+      persistRuntimeStateForSession(group.folder, output.runtimeState);
+    }
     if (output.newSessionId && output.status !== 'error') {
       sessions[group.folder] = output.newSessionId;
       setSession(group.folder, output.newSessionId);
@@ -3324,6 +3567,7 @@ function startIpcWatcher(): void {
 
 // Module-level reference set after MemoryAgentManager creation, used by processTaskIpc.
 let memoryAgentManagerRef: MemoryAgentManager | null = null;
+let memoryOrchestratorRef: MemoryOrchestrator | null = null;
 
 async function processTaskIpc(
   data: {
@@ -3657,16 +3901,17 @@ async function processTaskIpc(
       break;
 
     case 'session_wrapup':
-      // Allow session_wrapup from home groups OR from any group owned by the same user
-      // (flow workspaces are not home groups but should still trigger wrapup)
-      if (data.userId && data.groupFolder && memoryAgentManagerRef &&
-          (isHome || sourceGroupEntry?.created_by === data.userId)) {
+      if (
+        data.userId &&
+        data.groupFolder &&
+        memoryOrchestratorRef &&
+        resolveSessionOwnerKey(data.groupFolder) === data.userId
+      ) {
         const allJids = getJidsByFolder(data.groupFolder);
-        exportTranscriptsForUser(
+        memoryOrchestratorRef.exportTranscripts(
           data.userId,
           data.groupFolder,
           allJids,
-          memoryAgentManagerRef,
         ).catch((err) => {
           logger.warn(
             { groupFolder: data.groupFolder, err },
@@ -3752,7 +3997,13 @@ async function processAgentConversation(
   };
 
   // Get or use agent-specific session
-  const sessionId = getSession(effectiveGroup.folder, agentId) || undefined;
+  const runtimeBootstrap = getRuntimeBootstrapState(
+    effectiveGroup.folder,
+    agentId,
+  );
+  const sessionId = runtimeBootstrap.providerSessionId;
+  const sessionRecordId = buildWorkerSessionRecordId(agentId);
+  const sessionRecord = getSessionRecord(sessionRecordId);
 
   // Load context summary if session was compressed (no active session)
   let contextSummary: string | undefined;
@@ -3763,7 +4014,10 @@ async function processAgentConversation(
     }
   }
 
-  const wrappedOnOutput = async (output: ContainerOutput) => {
+  const wrappedOnOutput = async (output: RuntimeOutput) => {
+    if (output.runtimeState) {
+      persistRuntimeStateForSession(effectiveGroup.folder, output.runtimeState, agentId);
+    }
     // Track session
     if (output.newSessionId && output.status !== 'error') {
       setSession(effectiveGroup.folder, output.newSessionId, agentId);
@@ -3772,6 +4026,12 @@ async function processAgentConversation(
     // Stream events
     if (output.status === 'stream' && output.streamEvent) {
       broadcastStreamEvent(chatJid, output.streamEvent, agentId);
+      if (
+        output.streamEvent.eventType === 'status' &&
+        output.streamEvent.statusText === 'ipc_message_received'
+      ) {
+        ackIpcDeliveries(collectIpcAckKeys([virtualJid], output.streamEvent));
+      }
 
       // Persist token usage for agent conversations
       if (
@@ -3854,22 +4114,22 @@ async function processAgentConversation(
   };
 
   try {
-    const executionMode = effectiveGroup.executionMode || 'container';
     const onProcessCb = (proc: ChildProcess, identifier: string) => {
-      const containerName = executionMode === 'container' ? identifier : null;
       queue.registerProcess(
         virtualJid,
         proc,
-        containerName,
+        null,
         effectiveGroup.folder,
         identifier,
         agentId,
       );
     };
 
-    const containerInput: ContainerInput = {
+    const runtimeInput: RuntimeInput = {
       prompt,
       sessionId,
+      resumeAnchor: runtimeBootstrap.resumeAnchor,
+      sessionRecordId,
       groupFolder: effectiveGroup.folder,
       chatJid,
       isHome,
@@ -3877,8 +4137,11 @@ async function processAgentConversation(
       agentId,
       agentName: agent.name,
       images: imagesForAgent,
-      userId: effectiveGroup.created_by,
+      userId:
+        sessionRecord?.owner_key
+        || resolveStableSessionOwnerKey(effectiveGroup.folder, agentId),
       contextSummary,
+      bootstrapState: runtimeBootstrap.bootstrapState,
     };
 
     // Write tasks/groups snapshots
@@ -3906,26 +4169,22 @@ async function processAgentConversation(
 
     const ownerHomeFolder = resolveOwnerHomeFolder(effectiveGroup);
 
-    let output: ContainerOutput;
-    if (executionMode === 'host') {
-      output = await runHostAgent(
-        effectiveGroup,
-        containerInput,
-        onProcessCb,
-        wrappedOnOutput,
-        ownerHomeFolder,
-      );
-    } else {
-      output = await runContainerAgent(
-        effectiveGroup,
-        containerInput,
-        onProcessCb,
-        wrappedOnOutput,
-        ownerHomeFolder,
-      );
-    }
+    const output = await runSessionAgent(
+      effectiveGroup,
+      runtimeInput,
+      onProcessCb,
+      wrappedOnOutput,
+      ownerHomeFolder,
+    );
 
     // Finalize session
+    if (output.runtimeState) {
+      persistRuntimeStateForSession(
+        effectiveGroup.folder,
+        output.runtimeState,
+        agentId,
+      );
+    }
     if (output.newSessionId && output.status !== 'error') {
       setSession(effectiveGroup.folder, output.newSessionId, agentId);
     }
@@ -4156,7 +4415,9 @@ async function startMessageLoop(): Promise<void> {
                 },
                 'Turn: injected messages into active turn via IPC',
               );
-              trackIpcDelivery(chatJid);
+              trackIpcDeliveries(
+                collectIpcDeliveryKeys(chatJid, messagesToSend),
+              );
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
               lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
               saveState();
@@ -4228,7 +4489,9 @@ async function startMessageLoop(): Promise<void> {
                   }
                 }
               }
-              trackIpcDelivery(chatJid);
+              trackIpcDeliveries(
+                collectIpcDeliveryKeys(chatJid, messagesToSend),
+              );
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
               lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
               saveState();
@@ -4310,7 +4573,7 @@ function recoverPendingMessages(): void {
   // Phase 1: recover groups that had active agents before restart
   const activeEntries = loadActiveGroupsStore();
   if (activeEntries.length > 0) {
-    const maxAge = getSystemSettings().containerTimeout * 2; // 2x timeout = stale
+    const maxAge = getSystemSettings().runtimeTimeout * 2; // 2x timeout = stale
     const now = Date.now();
     // Deduplicate by folder — multiple JIDs can map to the same folder
     const seenFolders = new Set<string>();
@@ -4369,73 +4632,6 @@ function recoverPendingMessages(): void {
   }
 }
 
-async function ensureDockerRunning(): Promise<void> {
-  // Skip all Docker checks when no groups use container mode
-  if (!hasContainerModeGroups()) {
-    logger.info('All groups use host execution mode, skipping Docker checks');
-    return;
-  }
-
-  try {
-    await execFileAsync('docker', ['info'], { timeout: 10000 });
-    logger.debug('Docker daemon is running');
-  } catch {
-    logger.warn(
-      'Docker daemon is not running — container-mode groups will not work until Docker is available',
-    );
-    console.error(
-      '\n╔════════════════════════════════════════════════════════════════╗',
-    );
-    console.error(
-      '║  WARNING: Docker is not running                                ║',
-    );
-    console.error(
-      '║                                                                ║',
-    );
-    console.error(
-      '║  Container-mode groups will fail until Docker is started.      ║',
-    );
-    console.error(
-      '║  Host-mode groups will continue to work normally.              ║',
-    );
-    console.error(
-      '║                                                                ║',
-    );
-    console.error(
-      '║  To fix: sudo systemctl start docker                          ║',
-    );
-    console.error(
-      '╚════════════════════════════════════════════════════════════════╝\n',
-    );
-  }
-
-  // Kill and clean up orphaned happyclaw containers from previous runs
-  try {
-    const { stdout } = await execFileAsync(
-      'docker',
-      ['ps', '--filter', 'name=happyclaw-', '--format', '{{.Names}}'],
-      { timeout: 10000 },
-    );
-    const output = typeof stdout === 'string' ? stdout : String(stdout);
-    const orphans = output.trim().split('\n').filter(Boolean);
-    for (const name of orphans) {
-      try {
-        await execFileAsync('docker', ['stop', name], { timeout: 10000 });
-      } catch {
-        /* already stopped */
-      }
-    }
-    if (orphans.length > 0) {
-      logger.info(
-        { count: orphans.length, names: orphans },
-        'Stopped orphaned containers',
-      );
-    }
-  } catch (err) {
-    logger.warn({ err }, 'Failed to clean up orphaned containers');
-  }
-}
-
 /**
  * Build the onNewChat callback for IM connections.
  * Feishu/Telegram chats auto-register to the user's home group folder.
@@ -4453,6 +4649,12 @@ function buildOnNewChat(
     if (existing) {
       // Already owned by this user — update names if we now have a better name
       if (existing.created_by === userId) {
+        if (!getSessionBinding(chatJid)) {
+          const defaultSessionId = resolveDefaultSessionBinding(chatJid, existing);
+          if (defaultSessionId) {
+            applyExplicitChatBinding(chatJid, existing, defaultSessionId);
+          }
+        }
         if (chatName && chatName !== '飞书群聊' && chatName !== '飞书私聊') {
           // Update the IM chat name (chats table)
           updateChatName(chatJid, chatName);
@@ -4485,6 +4687,7 @@ function buildOnNewChat(
         existing.created_by = userId;
         existing.target_main_jid = `web:${homeFolder}`;
         setRegisteredGroup(chatJid, existing);
+        applyExplicitChatBinding(chatJid, existing, `main:${homeFolder}`);
         registeredGroups[chatJid] = existing;
         logger.info(
           {
@@ -4512,13 +4715,12 @@ function buildOnNewChat(
       const newJid = `web:${crypto.randomUUID()}`;
       const folder = `flow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
       const now = new Date().toISOString();
-      const execMode = prefs.autoCreateExecutionMode || 'host';
 
       const newGroup: RegisteredGroup = {
         name: chatName,
         folder,
         added_at: now,
-        executionMode: execMode,
+        executionMode: 'local',
         created_by: userId,
       };
       registerGroup(newJid, newGroup);
@@ -4535,6 +4737,12 @@ function buildOnNewChat(
         target_main_jid: newJid,
         reply_policy: 'source_only',
       });
+      applyExplicitChatBinding(
+        chatJid,
+        registeredGroups[chatJid] ?? getRegisteredGroup(chatJid)!,
+        `main:${folder}`,
+        'source_only',
+      );
 
       logger.info(
         { chatJid, chatName, userId, newFolder: folder, newJid },
@@ -4565,6 +4773,12 @@ function buildOnNewChat(
         created_by: userId,
         target_main_jid: `web:${homeFolder}`,
       });
+      applyExplicitChatBinding(
+        chatJid,
+        registeredGroups[chatJid] ?? getRegisteredGroup(chatJid)!,
+        `main:${homeFolder}`,
+        'source_only',
+      );
       logger.info(
         { chatJid, chatName, userId, homeFolder },
         'Auto-registered IM chat',
@@ -4619,7 +4833,7 @@ function buildTelegramBotAddedHandler(
 function buildIsChatAuthorized(userId: string): (jid: string) => boolean {
   return (jid) => {
     const group = registeredGroups[jid];
-    return !!group && group.created_by === userId;
+    return !!group && resolveChatOwnerKey(jid, group) === userId;
   };
 }
 
@@ -4639,50 +4853,38 @@ function buildOnPairAttempt(
 
 /**
  * Build callback that resolves an IM chatJid to a bound target JID.
- * Supports both conversation agent binding (target_agent_id) and
- * workspace main conversation binding (target_main_jid).
- * Returns null if the chatJid has no binding configured.
+ * Returns null if the chatJid has no session binding configured.
  */
 function buildResolveEffectiveChatJid(): (
   chatJid: string,
 ) => { effectiveJid: string; agentId: string | null } | null {
   return (chatJid: string) => {
-    const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
-    if (!group) return null;
-
-    // Agent binding takes priority
-    if (group.target_agent_id) {
-      const agent = getAgent(group.target_agent_id);
-      if (!agent) return null;
-      // Use the agent's actual chat_jid (the workspace's registered JID) as the
-      // base for the virtual JID.  Previously we constructed web:${folder} which
-      // doesn't match any registered group for non-main workspaces (folder ≠ JID).
-      const effectiveJid = `${agent.chat_jid}#agent:${group.target_agent_id}`;
-      return { effectiveJid, agentId: group.target_agent_id };
-    }
-
-    // Main conversation binding
-    if (group.target_main_jid) {
-      let effectiveJid = group.target_main_jid;
-      // Legacy fallback: old bindings stored web:${folder} instead of actual JID.
-      // Resolve to the real registered JID so messages are stored correctly.
-      if (
-        !registeredGroups[effectiveJid] &&
-        !getRegisteredGroup(effectiveJid) &&
-        effectiveJid.startsWith('web:')
-      ) {
-        const folder = effectiveJid.slice(4);
-        const jids = getJidsByFolder(folder);
-        for (const j of jids) {
-          if (j.startsWith('web:')) {
-            effectiveJid = j;
-            break;
+    const binding = getSessionBinding(chatJid);
+    if (binding) {
+      const session = getSessionRecord(binding.session_id);
+      if (session) {
+        if (session.kind === 'worker') {
+          const worker = getWorkerSessionRecord(session.id);
+          const agentId = session.id.startsWith('worker:')
+            ? session.id.slice('worker:'.length)
+            : null;
+          if (worker && agentId) {
+            return {
+              effectiveJid: `${worker.source_chat_jid}#agent:${agentId}`,
+              agentId,
+            };
           }
         }
-      }
-      return { effectiveJid, agentId: null };
-    }
 
+        if (session.id.startsWith('main:')) {
+          const folder = session.id.slice('main:'.length);
+          const effectiveJid =
+            getJidsByFolder(folder).find((jid) => jid.startsWith('web:')) ||
+            `web:${folder}`;
+          return { effectiveJid, agentId: null };
+        }
+      }
+    }
     return null;
   };
 }
@@ -4762,11 +4964,10 @@ function buildOnAgentMessage(): (baseChatJid: string, agentId: string) => void {
  * return true to process the message anyway, false to drop it.
  */
 function shouldProcessGroupMessage(chatJid: string): boolean {
-  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
-  if (!group) return false;
+  const policy = getChatBindingPolicy(chatJid);
 
   // activation_mode 优先于 require_mention
-  const mode = group.activation_mode ?? 'auto';
+  const mode = policy.activationMode;
   switch (mode) {
     case 'always':
       return true; // 群聊不需要 @bot
@@ -4777,7 +4978,7 @@ function shouldProcessGroupMessage(chatJid: string): boolean {
     case 'auto':
     default:
       // 兼容旧行为：require_mention defaults to false; if true → only process @mentions
-      return group.require_mention !== true;
+      return policy.requireMention !== true;
   }
 }
 
@@ -5028,41 +5229,32 @@ async function main(): Promise<void> {
 
   // --- Memory Agent Manager ---
   const memoryAgentManager = new MemoryAgentManager();
+  const memoryOrchestrator = new MemoryOrchestrator(memoryAgentManager);
   memoryAgentManagerRef = memoryAgentManager;
+  memoryOrchestratorRef = memoryOrchestrator;
   const memoryAgentToken = crypto.randomBytes(32).toString('hex');
   injectMemoryAgentDeps({
     manager: memoryAgentManager,
     token: memoryAgentToken,
   });
   injectFeishuApiDeps({ token: memoryAgentToken }); // Reuse same internal token
-  injectMemoryDeps({ manager: memoryAgentManager, queue });
-  memoryAgentManager.startIdleChecks();
-  logger.info('Memory Agent Manager initialized');
+  injectMemoryDeps({ orchestrator: memoryOrchestrator, queue });
+  memoryOrchestrator.start();
+  logger.info('Memory orchestrator initialized');
 
   // --- Memory Agent: transcript export on container exit ---
-  queue.addOnContainerExitListener((groupJid: string) => {
+  queue.addOnRuntimeExitListener((groupJid: string) => {
     const group = registeredGroups[groupJid] ?? getRegisteredGroup(groupJid);
     if (!group?.folder) return;
 
-    // Resolve the user who owns this group for memory wrapup.
-    // Priority: home group owner (for IM channels sharing a folder) > group.created_by
-    let userId = group.created_by;
-    if (!group.is_home) {
-      const homeGroup = getHomeGroupByFolder(group.folder);
-      if (homeGroup?.created_by) {
-        userId = homeGroup.created_by;
-      }
-      // If no home group found (e.g. flow workspaces with their own folder),
-      // fall through to use group.created_by directly
-    }
+    const userId = resolveSessionOwnerKey(group.folder);
     if (!userId) return;
 
     const allJids = getJidsByFolder(group.folder);
-    exportTranscriptsForUser(
+    memoryOrchestrator.exportTranscripts(
       userId,
       group.folder,
       allJids,
-      memoryAgentManager,
     ).catch((err) => {
       logger.warn(
         { groupJid, err },
@@ -5117,7 +5309,7 @@ async function main(): Promise<void> {
       logger.warn({ err }, 'Error shutting down web server');
     }
     try {
-      await memoryAgentManager.shutdownAll();
+      await memoryOrchestrator.shutdownAll();
     } catch (err) {
       logger.warn({ err }, 'Error shutting down Memory Agents');
     }
@@ -5415,7 +5607,7 @@ async function main(): Promise<void> {
     getRegisteredGroups: () => registeredGroups,
     getSessions: () => sessions,
     processGroupMessages,
-    ensureTerminalContainerStarted,
+    ensureTerminalRuntimeStarted,
     formatMessages,
     getLastAgentTimestamp: () => lastAgentTimestamp,
     setLastAgentTimestamp: (jid: string, cursor: MessageCursor) => {
@@ -5428,6 +5620,7 @@ async function main(): Promise<void> {
         saveState();
       }
     },
+    trackIpcDelivery,
     reloadFeishuConnection,
     reloadTelegramConnection,
     reloadUserIMConfig,
@@ -5447,17 +5640,13 @@ async function main(): Promise<void> {
       imHealthCheckFailCounts.delete(jid);
     },
     triggerSessionWrapup: async (folder: string) => {
-      // Find the home group for this folder to get userId
-      const homeGroup = Object.values(registeredGroups).find(
-        (g) => g.folder === folder && g.is_home && g.created_by,
-      );
-      if (!homeGroup?.created_by || !memoryAgentManager) return;
+      const ownerKey = resolveSessionOwnerKey(folder);
+      if (!ownerKey) return;
       const allJids = getJidsByFolder(folder);
-      await exportTranscriptsForUser(
-        homeGroup.created_by,
+      await memoryOrchestrator.exportTranscripts(
+        ownerKey,
         folder,
         allJids,
-        memoryAgentManager,
       );
     },
     getActiveTurnRuntime: (folder: string) => turnManager.getActiveTurn(folder),
@@ -5548,8 +5737,6 @@ async function main(): Promise<void> {
     24 * 60 * 60 * 1000,
   );
 
-  await ensureDockerRunning();
-
   queue.setProcessMessagesFn(processGroupMessages);
   queue.setLifecycleEmitter((groupJid, state, detail) => {
     broadcastRunnerState(groupJid, state, detail);
@@ -5575,23 +5762,10 @@ async function main(): Promise<void> {
       addActiveGroup(groupJid, folder);
     }
   });
-  queue.addOnContainerExitListener((groupJid) => {
+  queue.addOnRuntimeExitListener((groupJid) => {
     removeActiveGroup(groupJid);
   });
-  queue.setHostModeChecker((groupJid: string) => {
-    let group = registeredGroups[groupJid];
-    if (!group) {
-      const dbGroup = getRegisteredGroup(groupJid);
-      if (dbGroup) {
-        registeredGroups[groupJid] = dbGroup;
-        group = dbGroup;
-      }
-    }
-    if (!group) return false;
-
-    const { effectiveGroup } = resolveEffectiveGroup(group);
-    return effectiveGroup.executionMode === 'host';
-  });
+  queue.setHostModeChecker(() => false);
   queue.setSerializationKeyResolver((groupJid: string) => {
     // Agent virtual JIDs: {chatJid}#agent:{agentId} → separate serialization key
     const agentSep = groupJid.indexOf('#agent:');
@@ -5817,12 +5991,24 @@ async function main(): Promise<void> {
 }
 
 async function checkImBindingsHealth(): Promise<void> {
-  const boundEntries: Array<{ jid: string; group: RegisteredGroup }> = [];
-  for (const [jid, group] of Object.entries(registeredGroups)) {
-    if (group.target_agent_id || group.target_main_jid) {
-      boundEntries.push({ jid, group });
-    }
-  }
+  const boundEntries = listSessionBindings()
+    .map((binding) => {
+      const group =
+        registeredGroups[binding.channel_jid] ??
+        getRegisteredGroup(binding.channel_jid);
+      return group
+        ? { jid: binding.channel_jid, group, sessionId: binding.session_id }
+        : null;
+    })
+    .filter(
+      (
+        entry,
+      ): entry is {
+        jid: string;
+        group: RegisteredGroup;
+        sessionId: string;
+      } => entry !== null,
+    );
 
   if (boundEntries.length === 0) return;
   logger.debug(
@@ -5830,31 +6016,20 @@ async function checkImBindingsHealth(): Promise<void> {
     'Running IM binding health check',
   );
 
-  for (const { jid, group } of boundEntries) {
-    // Check for orphaned target_main_jid — target workspace no longer exists
-    if (group.target_main_jid) {
-      const targetGroup =
-        registeredGroups[group.target_main_jid] ??
-        getRegisteredGroup(group.target_main_jid);
-      if (!targetGroup) {
-        unbindImGroup(
-          jid,
-          `Orphaned main conversation binding: target ${group.target_main_jid} no longer exists`,
-        );
-        continue;
-      }
+  for (const { jid, group, sessionId } of boundEntries) {
+    const boundSession = getSessionRecord(sessionId);
+    if (!boundSession) {
+      unbindImGroup(jid, `Orphaned session binding: session ${sessionId} no longer exists`);
+      continue;
     }
 
-    // Check for orphaned target_agent_id — agent no longer exists
-    if (group.target_agent_id) {
-      const agent = getAgent(group.target_agent_id);
-      if (!agent) {
-        unbindImGroup(
-          jid,
-          `Orphaned agent binding: agent ${group.target_agent_id} no longer exists`,
-        );
-        continue;
-      }
+    const resolvedTarget = resolveBoundSessionTarget(jid, group);
+    if (!resolvedTarget.effectiveJid) {
+      unbindImGroup(
+        jid,
+        `Broken session binding: session ${sessionId} has no reachable target`,
+      );
+      continue;
     }
 
     try {

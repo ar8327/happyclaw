@@ -30,10 +30,9 @@ export function convertThreadEvent(event: ThreadEvent): StreamEvent[] {
       return handleItemStarted(event);
 
     case 'item.updated':
-      // Codex item.updated carries the latest snapshot; extract text delta if agent_message
-      if (event.item.type === 'agent_message') {
-        return [{ eventType: 'text_delta', text: event.item.text }];
-      }
+      // Codex item.updated carries the latest full snapshot instead of a true
+      // delta. Downstream consumers append text_delta payloads, so emitting the
+      // snapshot here would duplicate content in streaming views.
       return [];
 
     case 'item.completed':
@@ -85,7 +84,7 @@ function handleItemStarted(event: ItemStartedEvent): StreamEvent[] {
       }];
 
     case 'reasoning':
-      return [{ eventType: 'thinking_delta', text: item.text }];
+      return [];
 
     case 'todo_list':
       // Emit as a status update

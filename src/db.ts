@@ -3,7 +3,7 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 
-import { STORE_DIR, GROUPS_DIR } from './config.js';
+import { DATA_DIR, STORE_DIR, GROUPS_DIR } from './config.js';
 import { logger } from './logger.js';
 import {
   AgentKind,
@@ -19,7 +19,6 @@ import {
   BillingAuditLog,
   BillingPlan,
   DailyUsage,
-  ExecutionMode,
   GroupMember,
   InviteCode,
   InviteCodeWithCreator,
@@ -27,11 +26,21 @@ import {
   NewMessage,
   DbMessage,
   MessageCursor,
+  Permission,
+  PermissionTemplateKey,
   RedeemCode,
   RegisteredGroup,
+  RuntimeStateSnapshot,
   ScheduledTask,
+  SessionBindingMode,
+  SessionBindingRecord,
+  SessionKind,
+  SessionRecord,
+  SessionRuntimeStateRecord,
+  RunnerProfileRecord,
   SubAgent,
   TaskRunLog,
+  WorkerSessionRecord,
   User,
   UserBalance,
   UserPublic,
@@ -40,12 +49,23 @@ import {
   UserSubscription,
   UserSession,
   UserSessionWithUser,
-  Permission,
-  PermissionTemplateKey,
 } from './types.js';
 import { getDefaultPermissions, normalizePermissions } from './permissions.js';
 
 let db: Database.Database;
+
+const MAIN_SESSION_ID_PREFIX = 'main:';
+const WORKER_SESSION_ID_PREFIX = 'worker:';
+const MEMORY_SESSION_ID_PREFIX = 'memory:';
+
+function tableExists(tableName: string): boolean {
+  const row = db
+    .prepare(
+      "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?",
+    )
+    .get(tableName) as { ok: number } | undefined;
+  return row?.ok === 1;
+}
 
 function hasColumn(tableName: string, columnName: string): boolean {
   const columns = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{
@@ -187,12 +207,6 @@ export function initDatabase(): void {
     CREATE TABLE IF NOT EXISTS router_state (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS sessions (
-      group_folder TEXT NOT NULL,
-      session_id TEXT NOT NULL,
-      agent_id TEXT NOT NULL DEFAULT '',
-      PRIMARY KEY (group_folder, agent_id)
     );
     CREATE TABLE IF NOT EXISTS registered_groups (
       jid TEXT PRIMARY KEY,
@@ -503,6 +517,90 @@ export function initDatabase(): void {
     );
   `);
 
+  const hasLegacyProviderSessions =
+    tableExists('sessions') &&
+    hasColumn('sessions', 'group_folder') &&
+    hasColumn('sessions', 'session_id') &&
+    !hasColumn('sessions', 'id');
+  if (hasLegacyProviderSessions && !tableExists('provider_sessions_legacy')) {
+    db.exec('ALTER TABLE sessions RENAME TO provider_sessions_legacy');
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      parent_session_id TEXT,
+      cwd TEXT NOT NULL,
+      runner_id TEXT NOT NULL,
+      runner_profile_id TEXT,
+      runtime_mode TEXT NOT NULL DEFAULT 'local',
+      model TEXT,
+      thinking_effort TEXT,
+      context_compression TEXT NOT NULL DEFAULT 'off',
+      knowledge_extraction INTEGER NOT NULL DEFAULT 0,
+      is_pinned INTEGER NOT NULL DEFAULT 0,
+      archived INTEGER NOT NULL DEFAULT 0,
+      owner_key TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS session_bindings (
+      channel_jid TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      binding_mode TEXT NOT NULL,
+      activation_mode TEXT NOT NULL DEFAULT 'auto',
+      require_mention INTEGER NOT NULL DEFAULT 0,
+      display_name TEXT,
+      reply_policy TEXT NOT NULL DEFAULT 'source_only',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS session_state (
+      session_id TEXT PRIMARY KEY,
+      provider_session_id TEXT,
+      resume_anchor TEXT,
+      provider_state_json TEXT,
+      recent_im_channels_json TEXT,
+      im_channel_last_seen_json TEXT,
+      current_permission_mode TEXT,
+      last_message_cursor TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS worker_sessions (
+      session_id TEXT PRIMARY KEY,
+      parent_session_id TEXT NOT NULL,
+      source_chat_jid TEXT NOT NULL,
+      name TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      completed_at TEXT,
+      result_summary TEXT
+    );
+    CREATE TABLE IF NOT EXISTS runner_profiles (
+      id TEXT PRIMARY KEY,
+      runner_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      config_json TEXT NOT NULL,
+      is_default INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS app_state (
+      key TEXT PRIMARY KEY,
+      value_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_sessions_kind ON sessions(kind);
+    CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
+    CREATE INDEX IF NOT EXISTS idx_bindings_session ON session_bindings(session_id);
+    CREATE INDEX IF NOT EXISTS idx_worker_parent ON worker_sessions(parent_session_id);
+    CREATE INDEX IF NOT EXISTS idx_profiles_runner ON runner_profiles(runner_id);
+  `);
+
   // Lightweight migrations for existing DBs
   ensureColumn('users', 'permissions', "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn('users', 'must_change_password', 'INTEGER NOT NULL DEFAULT 0');
@@ -516,7 +614,7 @@ export function initDatabase(): void {
   ensureColumn(
     'registered_groups',
     'execution_mode',
-    "TEXT DEFAULT 'container'",
+    "TEXT DEFAULT 'local'",
   );
   ensureColumn('registered_groups', 'custom_cwd', 'TEXT');
   ensureColumn('registered_groups', 'init_source_path', 'TEXT');
@@ -533,7 +631,6 @@ export function initDatabase(): void {
   ensureColumn('scheduled_tasks', 'execution_type', "TEXT DEFAULT 'agent'");
   ensureColumn('scheduled_tasks', 'script_command', 'TEXT');
   ensureColumn('registered_groups', 'selected_skills', 'TEXT');
-  ensureColumn('sessions', 'agent_id', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('agents', 'kind', "TEXT NOT NULL DEFAULT 'task'");
   ensureColumn('registered_groups', 'target_agent_id', 'TEXT');
   ensureColumn('registered_groups', 'target_main_jid', 'TEXT');
@@ -598,7 +695,7 @@ export function initDatabase(): void {
           folder TEXT NOT NULL,
           added_at TEXT NOT NULL,
           container_config TEXT,
-          execution_mode TEXT DEFAULT 'container',
+          execution_mode TEXT DEFAULT 'local',
           custom_cwd TEXT,
           init_source_path TEXT,
           init_git_url TEXT,
@@ -611,6 +708,15 @@ export function initDatabase(): void {
       `);
     })();
   }
+
+  // Collapse legacy execution modes onto the single local runtime model.
+  db.prepare(
+    `UPDATE registered_groups
+     SET execution_mode = 'local'
+     WHERE execution_mode IS NOT NULL
+       AND execution_mode != ''
+       AND execution_mode != 'local'`,
+  ).run();
 
   // v19→v20 migration: add token_usage column to messages
   ensureColumn('messages', 'token_usage', 'TEXT');
@@ -777,36 +883,7 @@ export function initDatabase(): void {
     })();
   }
 
-  // v16→v17 migration: rebuild sessions table with composite primary key
-  // Old PK was (group_folder), which cannot store multiple agent sessions per folder.
-  // New PK is (group_folder, COALESCE(agent_id, '')) to support per-agent sessions.
   const curVer = getRouterStateInternal('schema_version');
-  if (curVer && parseInt(curVer, 10) < 17) {
-    db.transaction(() => {
-      // Check if the old table has single-column PK by inspecting table_info
-      const pkCols = (
-        db.prepare("PRAGMA table_info('sessions')").all() as Array<{
-          name: string;
-          pk: number;
-        }>
-      ).filter((c) => c.pk > 0);
-      // Old schema: single PK column 'group_folder'. New schema: composite PK needs rebuild.
-      if (pkCols.length === 1 && pkCols[0].name === 'group_folder') {
-        db.exec(`
-          CREATE TABLE sessions_new (
-            group_folder TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            agent_id TEXT NOT NULL DEFAULT '',
-            PRIMARY KEY (group_folder, agent_id)
-          );
-          INSERT OR IGNORE INTO sessions_new (group_folder, session_id, agent_id)
-            SELECT group_folder, session_id, COALESCE(agent_id, '') FROM sessions;
-          DROP TABLE sessions;
-          ALTER TABLE sessions_new RENAME TO sessions;
-        `);
-      }
-    })();
-  }
 
   // v22: Fix target_main_jid that used folder-based JID (web:${folder})
   // instead of actual registered group JID (web:${uuid}).
@@ -1152,6 +1229,8 @@ export function initDatabase(): void {
     db.exec("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')");
     logger.info('FTS5 rebuild complete');
   }
+
+  syncSessionWorkbenchProjection();
 
   const SCHEMA_VERSION = '34';
   db.prepare(
@@ -2204,17 +2283,370 @@ export function setRouterState(key: string, value: string): void {
 
 // --- Session accessors ---
 
+function buildMainSessionId(groupFolder: string): string {
+  return `${MAIN_SESSION_ID_PREFIX}${groupFolder}`;
+}
+
+function buildWorkerSessionId(agentId: string): string {
+  return `${WORKER_SESSION_ID_PREFIX}${agentId}`;
+}
+
+function buildMemorySessionId(ownerKey: string): string {
+  return `${MEMORY_SESSION_ID_PREFIX}${ownerKey}`;
+}
+
+function resolveLegacySessionKey(
+  groupFolder: string,
+  agentId?: string | null,
+): string {
+  const effectiveAgentId = agentId?.trim();
+  return effectiveAgentId
+    ? buildWorkerSessionId(effectiveAgentId)
+    : buildMainSessionId(groupFolder);
+}
+
+function parseSessionRecord(row: Record<string, unknown>): SessionRecord {
+  const rawRuntimeMode = typeof row.runtime_mode === 'string'
+    ? row.runtime_mode
+    : 'local';
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    kind: row.kind as SessionKind,
+    parent_session_id:
+      typeof row.parent_session_id === 'string' ? row.parent_session_id : null,
+    cwd: String(row.cwd),
+    runner_id: (row.runner_id === 'codex' ? 'codex' : 'claude'),
+    runner_profile_id:
+      typeof row.runner_profile_id === 'string' ? row.runner_profile_id : null,
+    runtime_mode:
+      rawRuntimeMode === 'host' ||
+      rawRuntimeMode === 'container' ||
+      rawRuntimeMode === 'local'
+        ? rawRuntimeMode
+        : 'local',
+    model: typeof row.model === 'string' ? row.model : null,
+    thinking_effort:
+      row.thinking_effort === 'low' ||
+      row.thinking_effort === 'medium' ||
+      row.thinking_effort === 'high'
+        ? row.thinking_effort
+        : null,
+    context_compression:
+      row.context_compression === 'auto' || row.context_compression === 'manual'
+        ? (row.context_compression as 'auto' | 'manual')
+        : 'off',
+    knowledge_extraction: Number(row.knowledge_extraction || 0) === 1,
+    is_pinned: Number(row.is_pinned || 0) === 1,
+    archived: Number(row.archived || 0) === 1,
+    owner_key: typeof row.owner_key === 'string' ? row.owner_key : null,
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  };
+}
+
+function parseRunnerProfileRecord(
+  row: Record<string, unknown>,
+): RunnerProfileRecord {
+  return {
+    id: String(row.id),
+    runner_id: row.runner_id === 'codex' ? 'codex' : 'claude',
+    name: String(row.name),
+    config_json:
+      typeof row.config_json === 'string' ? row.config_json : '{}',
+    is_default: Number(row.is_default || 0) === 1,
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  };
+}
+
+function parseSessionBindingRecord(
+  row: Record<string, unknown>,
+): SessionBindingRecord {
+  return {
+    channel_jid: String(row.channel_jid),
+    session_id: String(row.session_id),
+    binding_mode: (row.binding_mode || 'source_only') as SessionBindingMode,
+    activation_mode: parseActivationMode(
+      typeof row.activation_mode === 'string' ? row.activation_mode : null,
+    ),
+    require_mention: Number(row.require_mention || 0) === 1,
+    display_name:
+      typeof row.display_name === 'string' ? row.display_name : null,
+    reply_policy: row.reply_policy === 'mirror' ? 'mirror' : 'source_only',
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  };
+}
+
+function parseSessionStateRow(
+  row: Record<string, unknown>,
+): SessionRuntimeStateRecord {
+  return {
+    session_id: String(row.session_id),
+    provider_session_id:
+      typeof row.provider_session_id === 'string'
+        ? row.provider_session_id
+        : null,
+    resume_anchor:
+      typeof row.resume_anchor === 'string' ? row.resume_anchor : null,
+    provider_state_json:
+      typeof row.provider_state_json === 'string'
+        ? row.provider_state_json
+        : null,
+    recent_im_channels_json:
+      typeof row.recent_im_channels_json === 'string'
+        ? row.recent_im_channels_json
+        : null,
+    im_channel_last_seen_json:
+      typeof row.im_channel_last_seen_json === 'string'
+        ? row.im_channel_last_seen_json
+        : null,
+    current_permission_mode:
+      typeof row.current_permission_mode === 'string'
+        ? row.current_permission_mode
+        : null,
+    last_message_cursor:
+      typeof row.last_message_cursor === 'string' ? row.last_message_cursor : null,
+    updated_at: String(row.updated_at),
+  };
+}
+
+function parseWorkerSessionRow(
+  row: Record<string, unknown>,
+): WorkerSessionRecord {
+  return {
+    session_id: String(row.session_id),
+    parent_session_id: String(row.parent_session_id),
+    source_chat_jid: String(row.source_chat_jid),
+    name: String(row.name),
+    kind: (row.kind as AgentKind) || 'task',
+    prompt: String(row.prompt),
+    status: (row.status as AgentStatus) || 'idle',
+    created_at: String(row.created_at),
+    completed_at:
+      typeof row.completed_at === 'string' ? row.completed_at : null,
+    result_summary:
+      typeof row.result_summary === 'string' ? row.result_summary : null,
+  };
+}
+
+function deriveRunnerId(
+  group: Pick<RegisteredGroup, 'llm_provider'> | null | undefined,
+): 'claude' | 'codex' {
+  return group?.llm_provider === 'openai' ? 'codex' : 'claude';
+}
+
+function deriveRuntimeMode(
+  group: Pick<RegisteredGroup, 'executionMode'> | null | undefined,
+): SessionRecord['runtime_mode'] {
+  return 'local';
+}
+
+function deriveSessionKind(group: RegisteredGroup): SessionKind {
+  if (group.is_home || group.folder === 'main') return 'main';
+  return 'workspace';
+}
+
+function deriveSessionCwd(group: RegisteredGroup): string {
+  if (group.customCwd && path.isAbsolute(group.customCwd)) return group.customCwd;
+  return path.join(GROUPS_DIR, group.folder);
+}
+
+function findPrimaryGroupForFolder(groupFolder: string): RegisteredGroup | undefined {
+  const candidates = getJidsByFolder(groupFolder)
+    .map((jid) => getRegisteredGroup(jid))
+    .filter((group): group is RegisteredGroup & { jid: string } => group != null);
+  return candidates.find((group) => group.is_home)
+    || candidates.find((group) => group.name.length > 0)
+    || candidates[0];
+}
+
+function deriveBindingMode(group: RegisteredGroup): SessionBindingMode {
+  if (group.reply_policy === 'mirror') return 'mirror';
+  if (group.target_agent_id || group.target_main_jid) return 'direct';
+  return 'source_only';
+}
+
+function resolveBindingSessionId(
+  group: RegisteredGroup & { jid: string },
+): string | null {
+  if (group.jid.startsWith('web:')) return null;
+  if (group.target_agent_id) return buildWorkerSessionId(group.target_agent_id);
+  if (group.target_main_jid?.startsWith('web:')) {
+    const target = getRegisteredGroup(group.target_main_jid);
+    return buildMainSessionId(target?.folder || group.target_main_jid.slice(4));
+  }
+  return buildMainSessionId(group.folder);
+}
+
+function ensureSessionRecordFromGroup(
+  jid: string,
+  group: RegisteredGroup,
+): string | null {
+  if (!jid.startsWith('web:')) return null;
+  const now = group.added_at || new Date().toISOString();
+  const sessionId = buildMainSessionId(group.folder);
+  db.prepare(
+    `INSERT INTO sessions (
+      id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
+      runtime_mode, model, thinking_effort, context_compression,
+      knowledge_extraction, is_pinned, archived, owner_key, created_at, updated_at
+    ) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      kind = excluded.kind,
+      cwd = excluded.cwd,
+      runner_id = excluded.runner_id,
+      runtime_mode = excluded.runtime_mode,
+      model = excluded.model,
+      thinking_effort = excluded.thinking_effort,
+      context_compression = excluded.context_compression,
+      knowledge_extraction = excluded.knowledge_extraction,
+      owner_key = excluded.owner_key,
+      updated_at = excluded.updated_at`,
+  ).run(
+    sessionId,
+    group.name,
+    deriveSessionKind(group),
+    deriveSessionCwd(group),
+    deriveRunnerId(group),
+    deriveRuntimeMode(group),
+    group.model ?? null,
+    group.thinking_effort ?? null,
+    group.context_compression ?? 'off',
+    group.knowledge_extraction ? 1 : 0,
+    group.created_by ?? null,
+    now,
+    new Date().toISOString(),
+  );
+  return sessionId;
+}
+
+function ensureSessionRecordForLegacyKey(
+  groupFolder: string,
+  agentId?: string | null,
+): string {
+  const now = new Date().toISOString();
+  const sessionId = resolveLegacySessionKey(groupFolder, agentId);
+  const folderGroup = groupFolder ? findPrimaryGroupForFolder(groupFolder) : undefined;
+  if (agentId?.trim()) {
+    const parentSession = getSessionRecord(buildMainSessionId(groupFolder));
+    db.prepare(
+      `INSERT OR IGNORE INTO sessions (
+        id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
+        runtime_mode, model, thinking_effort, context_compression,
+        knowledge_extraction, is_pinned, archived, owner_key, created_at, updated_at
+      ) VALUES (?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?)`,
+    ).run(
+      sessionId,
+      agentId,
+      buildMainSessionId(groupFolder),
+      parentSession?.cwd || path.join(GROUPS_DIR, groupFolder),
+      parentSession?.runner_id || deriveRunnerId(folderGroup || null),
+      parentSession?.runner_profile_id || null,
+      parentSession?.runtime_mode || deriveRuntimeMode(folderGroup),
+      parentSession?.model || null,
+      parentSession?.thinking_effort || null,
+      parentSession?.context_compression || 'off',
+      parentSession?.owner_key || folderGroup?.created_by || null,
+      now,
+      now,
+    );
+    return sessionId;
+  }
+  db.prepare(
+    `INSERT OR IGNORE INTO sessions (
+      id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
+      runtime_mode, model, thinking_effort, context_compression,
+      knowledge_extraction, is_pinned, archived, owner_key, created_at, updated_at
+    ) VALUES (?, ?, 'workspace', NULL, ?, ?, NULL, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?)`,
+  ).run(
+    sessionId,
+    groupFolder,
+    folderGroup ? deriveSessionCwd(folderGroup) : path.join(GROUPS_DIR, groupFolder),
+    deriveRunnerId(folderGroup || null),
+    deriveRuntimeMode(folderGroup),
+    folderGroup?.model ?? null,
+    folderGroup?.thinking_effort ?? null,
+    folderGroup?.context_compression ?? 'off',
+    folderGroup?.created_by ?? null,
+    now,
+    now,
+  );
+  return sessionId;
+}
+
+function syncSessionBindingFromGroup(
+  jid: string,
+  group: RegisteredGroup,
+): void {
+  if (jid.startsWith('web:')) {
+    db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(jid);
+    return;
+  }
+  const sessionId = resolveBindingSessionId({ ...group, jid });
+  if (!sessionId) {
+    db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(jid);
+    return;
+  }
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO session_bindings (
+      channel_jid, session_id, binding_mode, activation_mode, require_mention,
+      display_name, reply_policy, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(channel_jid) DO UPDATE SET
+      session_id = excluded.session_id,
+      binding_mode = excluded.binding_mode,
+      activation_mode = excluded.activation_mode,
+      require_mention = excluded.require_mention,
+      display_name = excluded.display_name,
+      reply_policy = excluded.reply_policy,
+      updated_at = excluded.updated_at`,
+  ).run(
+    jid,
+    sessionId,
+    deriveBindingMode(group),
+    group.activation_mode ?? 'auto',
+    group.require_mention ? 1 : 0,
+    group.name,
+    group.reply_policy ?? 'source_only',
+    group.added_at || now,
+    now,
+  );
+}
+
+function syncSessionProjectionForGroup(
+  jid: string,
+  group: RegisteredGroup,
+): void {
+  ensureSessionRecordFromGroup(jid, group);
+  syncSessionBindingFromGroup(jid, group);
+}
+
+function deleteSessionProjectionForGroup(jid: string): void {
+  const group = getRegisteredGroup(jid);
+  if (jid.startsWith('web:') && group) {
+    const sessionId = buildMainSessionId(group.folder);
+    db.prepare('DELETE FROM session_bindings WHERE session_id = ?').run(sessionId);
+    db.prepare('DELETE FROM session_state WHERE session_id = ?').run(sessionId);
+    db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+  }
+  db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(jid);
+}
+
 export function getSession(
   groupFolder: string,
   agentId?: string | null,
 ): string | undefined {
-  const effectiveAgentId = agentId || '';
+  const sessionKey = resolveLegacySessionKey(groupFolder, agentId);
   const row = db
     .prepare(
-      'SELECT session_id FROM sessions WHERE group_folder = ? AND agent_id = ?',
+      'SELECT provider_session_id FROM session_state WHERE session_id = ?',
     )
-    .get(groupFolder, effectiveAgentId) as { session_id: string } | undefined;
-  return row?.session_id;
+    .get(sessionKey) as { provider_session_id: string } | undefined;
+  return row?.provider_session_id;
 }
 
 export function setSession(
@@ -2222,38 +2654,325 @@ export function setSession(
   sessionId: string,
   agentId?: string | null,
 ): void {
-  const effectiveAgentId = agentId || '';
+  const sessionKey = ensureSessionRecordForLegacyKey(groupFolder, agentId);
   db.prepare(
-    `INSERT INTO sessions (group_folder, session_id, agent_id) VALUES (?, ?, ?)
-     ON CONFLICT(group_folder, agent_id) DO UPDATE SET session_id = excluded.session_id`,
-  ).run(groupFolder, sessionId, effectiveAgentId);
+    `INSERT INTO session_state (session_id, provider_session_id, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(session_id) DO UPDATE SET
+       provider_session_id = excluded.provider_session_id,
+       updated_at = excluded.updated_at`,
+  ).run(sessionKey, sessionId, new Date().toISOString());
 }
 
 export function deleteSession(
   groupFolder: string,
   agentId?: string | null,
 ): void {
-  const effectiveAgentId = agentId || '';
-  db.prepare(
-    'DELETE FROM sessions WHERE group_folder = ? AND agent_id = ?',
-  ).run(groupFolder, effectiveAgentId);
+  db.prepare('DELETE FROM session_state WHERE session_id = ?').run(
+    resolveLegacySessionKey(groupFolder, agentId),
+  );
 }
 
 export function deleteAllSessionsForFolder(groupFolder: string): void {
-  db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(groupFolder);
+  const mainSessionId = buildMainSessionId(groupFolder);
+  db.prepare(
+    'DELETE FROM session_state WHERE session_id = ? OR session_id IN (SELECT session_id FROM worker_sessions WHERE parent_session_id = ?)',
+  ).run(mainSessionId, mainSessionId);
 }
 
 export function getAllSessions(): Record<string, string> {
   const rows = db
     .prepare(
-      "SELECT group_folder, session_id FROM sessions WHERE agent_id = ''",
+      'SELECT session_id, provider_session_id FROM session_state WHERE session_id LIKE ? AND provider_session_id IS NOT NULL',
     )
-    .all() as Array<{ group_folder: string; session_id: string }>;
+    .all(`${MAIN_SESSION_ID_PREFIX}%`) as Array<{
+      session_id: string;
+      provider_session_id: string;
+    }>;
   const result: Record<string, string> = {};
   for (const row of rows) {
-    result[row.group_folder] = row.session_id;
+    result[row.session_id.slice(MAIN_SESSION_ID_PREFIX.length)] =
+      row.provider_session_id;
   }
   return result;
+}
+
+export function getSessionRecord(id: string): SessionRecord | undefined {
+  const row = db
+    .prepare('SELECT * FROM sessions WHERE id = ?')
+    .get(id) as Record<string, unknown> | undefined;
+  return row ? parseSessionRecord(row) : undefined;
+}
+
+export function getPrimarySessionForOwner(
+  ownerKey: string,
+): SessionRecord | undefined {
+  const rows = db
+    .prepare(
+      `SELECT * FROM sessions
+       WHERE archived = 0
+         AND owner_key = ?
+         AND kind IN ('main', 'workspace')
+       ORDER BY CASE kind WHEN 'main' THEN 0 ELSE 1 END, updated_at DESC, id ASC`,
+    )
+    .all(ownerKey) as Array<Record<string, unknown>>;
+  return rows[0] ? parseSessionRecord(rows[0]) : undefined;
+}
+
+export function saveSessionRecord(session: SessionRecord): void {
+  db.prepare(
+    `INSERT INTO sessions (
+      id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
+      runtime_mode, model, thinking_effort, context_compression,
+      knowledge_extraction, is_pinned, archived, owner_key, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      kind = excluded.kind,
+      parent_session_id = excluded.parent_session_id,
+      cwd = excluded.cwd,
+      runner_id = excluded.runner_id,
+      runner_profile_id = excluded.runner_profile_id,
+      runtime_mode = excluded.runtime_mode,
+      model = excluded.model,
+      thinking_effort = excluded.thinking_effort,
+      context_compression = excluded.context_compression,
+      knowledge_extraction = excluded.knowledge_extraction,
+      is_pinned = excluded.is_pinned,
+      archived = excluded.archived,
+      owner_key = excluded.owner_key,
+      updated_at = excluded.updated_at`,
+  ).run(
+    session.id,
+    session.name,
+    session.kind,
+    session.parent_session_id,
+    session.cwd,
+    session.runner_id,
+    session.runner_profile_id,
+    session.runtime_mode,
+    session.model,
+    session.thinking_effort,
+    session.context_compression,
+    session.knowledge_extraction ? 1 : 0,
+    session.is_pinned ? 1 : 0,
+    session.archived ? 1 : 0,
+    session.owner_key,
+    session.created_at,
+    session.updated_at,
+  );
+}
+
+export function listSessionRecords(): SessionRecord[] {
+  const rows = db
+    .prepare('SELECT * FROM sessions WHERE archived = 0 ORDER BY kind, name, id')
+    .all() as Array<Record<string, unknown>>;
+  return rows.map(parseSessionRecord);
+}
+
+export function listRunnerProfiles(
+  runnerId?: RunnerProfileRecord['runner_id'],
+): RunnerProfileRecord[] {
+  const rows = runnerId
+    ? db
+        .prepare(
+          'SELECT * FROM runner_profiles WHERE runner_id = ? ORDER BY is_default DESC, updated_at DESC, name ASC',
+        )
+        .all(runnerId)
+    : db
+        .prepare(
+          'SELECT * FROM runner_profiles ORDER BY runner_id ASC, is_default DESC, updated_at DESC, name ASC',
+        )
+        .all();
+  return (rows as Array<Record<string, unknown>>).map(parseRunnerProfileRecord);
+}
+
+export function getRunnerProfile(id: string): RunnerProfileRecord | undefined {
+  const row = db
+    .prepare('SELECT * FROM runner_profiles WHERE id = ?')
+    .get(id) as Record<string, unknown> | undefined;
+  return row ? parseRunnerProfileRecord(row) : undefined;
+}
+
+export function saveRunnerProfile(profile: RunnerProfileRecord): void {
+  const now = profile.updated_at || new Date().toISOString();
+  const createdAt = profile.created_at || now;
+  const tx = db.transaction(() => {
+    if (profile.is_default) {
+      db.prepare(
+        'UPDATE runner_profiles SET is_default = 0, updated_at = ? WHERE runner_id = ? AND id != ?',
+      ).run(now, profile.runner_id, profile.id);
+    }
+    db.prepare(
+      `INSERT INTO runner_profiles (
+        id, runner_id, name, config_json, is_default, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        runner_id = excluded.runner_id,
+        name = excluded.name,
+        config_json = excluded.config_json,
+        is_default = excluded.is_default,
+        updated_at = excluded.updated_at`,
+    ).run(
+      profile.id,
+      profile.runner_id,
+      profile.name,
+      profile.config_json,
+      profile.is_default ? 1 : 0,
+      createdAt,
+      now,
+    );
+  });
+  tx();
+}
+
+export function deleteRunnerProfile(id: string): void {
+  db.prepare('DELETE FROM runner_profiles WHERE id = ?').run(id);
+}
+
+export function listSessionBindings(): SessionBindingRecord[] {
+  const rows = db
+    .prepare('SELECT * FROM session_bindings ORDER BY updated_at DESC')
+    .all() as Array<Record<string, unknown>>;
+  return rows.map(parseSessionBindingRecord);
+}
+
+export function saveSessionBinding(binding: SessionBindingRecord): void {
+  db.prepare(
+    `INSERT INTO session_bindings (
+      channel_jid, session_id, binding_mode, activation_mode, require_mention,
+      display_name, reply_policy, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(channel_jid) DO UPDATE SET
+      session_id = excluded.session_id,
+      binding_mode = excluded.binding_mode,
+      activation_mode = excluded.activation_mode,
+      require_mention = excluded.require_mention,
+      display_name = excluded.display_name,
+      reply_policy = excluded.reply_policy,
+      updated_at = excluded.updated_at`,
+  ).run(
+    binding.channel_jid,
+    binding.session_id,
+    binding.binding_mode,
+    binding.activation_mode,
+    binding.require_mention ? 1 : 0,
+    binding.display_name,
+    binding.reply_policy,
+    binding.created_at,
+    binding.updated_at,
+  );
+}
+
+export function deleteSessionBinding(channelJid: string): void {
+  db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(channelJid);
+}
+
+export function updateSessionBindingPolicies(
+  sessionId: string,
+  updates: {
+    activation_mode?: SessionBindingRecord['activation_mode'];
+    require_mention?: boolean;
+    reply_policy?: SessionBindingRecord['reply_policy'];
+  },
+): number {
+  const sets: string[] = [];
+  const params: unknown[] = [];
+
+  if (updates.activation_mode !== undefined) {
+    sets.push('activation_mode = ?');
+    params.push(updates.activation_mode);
+  }
+  if (updates.require_mention !== undefined) {
+    sets.push('require_mention = ?');
+    params.push(updates.require_mention ? 1 : 0);
+  }
+  if (updates.reply_policy !== undefined) {
+    sets.push('reply_policy = ?');
+    params.push(updates.reply_policy);
+  }
+  if (sets.length === 0) return 0;
+
+  sets.push('updated_at = ?');
+  params.push(new Date().toISOString(), sessionId);
+
+  const result = db
+    .prepare(
+      `UPDATE session_bindings
+       SET ${sets.join(', ')}
+       WHERE session_id = ?`,
+    )
+    .run(...params);
+  return result.changes;
+}
+
+export function getSessionBinding(
+  channelJid: string,
+): SessionBindingRecord | undefined {
+  const row = db
+    .prepare('SELECT * FROM session_bindings WHERE channel_jid = ?')
+    .get(channelJid) as Record<string, unknown> | undefined;
+  return row ? parseSessionBindingRecord(row) : undefined;
+}
+
+export function getWorkerSessionRecord(
+  sessionId: string,
+): WorkerSessionRecord | undefined {
+  const row = db
+    .prepare('SELECT * FROM worker_sessions WHERE session_id = ?')
+    .get(sessionId) as Record<string, unknown> | undefined;
+  return row ? parseWorkerSessionRow(row) : undefined;
+}
+
+export function getSessionRuntimeState(
+  sessionId: string,
+): SessionRuntimeStateRecord | undefined {
+  const row = db
+    .prepare('SELECT * FROM session_state WHERE session_id = ?')
+    .get(sessionId) as Record<string, unknown> | undefined;
+  return row ? parseSessionStateRow(row) : undefined;
+}
+
+export function upsertSessionRuntimeState(
+  sessionId: string,
+  snapshot: RuntimeStateSnapshot,
+): void {
+  if (sessionId.startsWith(MAIN_SESSION_ID_PREFIX)) {
+    ensureSessionRecordForLegacyKey(
+      sessionId.slice(MAIN_SESSION_ID_PREFIX.length),
+    );
+  } else if (sessionId.startsWith(WORKER_SESSION_ID_PREFIX)) {
+    ensureSessionRecordForLegacyKey(
+      '',
+      sessionId.slice(WORKER_SESSION_ID_PREFIX.length),
+    );
+  }
+  db.prepare(
+    `INSERT INTO session_state (
+      session_id, provider_session_id, resume_anchor, provider_state_json,
+      recent_im_channels_json, im_channel_last_seen_json, current_permission_mode,
+      last_message_cursor, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(session_id) DO UPDATE SET
+      provider_session_id = excluded.provider_session_id,
+      resume_anchor = excluded.resume_anchor,
+      provider_state_json = excluded.provider_state_json,
+      recent_im_channels_json = excluded.recent_im_channels_json,
+      im_channel_last_seen_json = excluded.im_channel_last_seen_json,
+      current_permission_mode = excluded.current_permission_mode,
+      last_message_cursor = excluded.last_message_cursor,
+      updated_at = excluded.updated_at`,
+  ).run(
+    sessionId,
+    snapshot.providerSessionId ?? null,
+    snapshot.resumeAnchor ?? null,
+    snapshot.providerState ? JSON.stringify(snapshot.providerState) : null,
+    JSON.stringify(snapshot.recentImChannels ?? []),
+    JSON.stringify(snapshot.imChannelLastSeen ?? {}),
+    snapshot.currentPermissionMode ?? null,
+    snapshot.lastMessageCursor ?? null,
+    new Date().toISOString(),
+  );
 }
 
 // --- Registered group accessors ---
@@ -2261,14 +2980,13 @@ export function getAllSessions(): Record<string, string> {
 function parseExecutionMode(
   raw: string | null,
   context: string,
-): ExecutionMode {
-  if (raw === 'container' || raw === 'host') return raw;
-  if (raw !== null && raw !== '') {
+): 'local' {
+  if (raw !== null && raw !== '' && raw !== 'local') {
     console.warn(
-      `Invalid execution_mode "${raw}" for ${context}, falling back to "container"`,
+      `Legacy execution_mode "${raw}" for ${context} normalized to "local"`,
     );
   }
-  return 'container';
+  return 'local';
 }
 
 /** Raw row shape from registered_groups table — single source of truth for column mapping. */
@@ -2385,7 +3103,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.folder,
     group.added_at,
     group.containerConfig ? JSON.stringify(group.containerConfig) : null,
-    group.executionMode ?? 'container',
+    'local',
     group.customCwd ?? null,
     group.initSourcePath ?? null,
     group.initGitUrl ?? null,
@@ -2405,9 +3123,14 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.context_compression ?? 'off',
     group.knowledge_extraction ? 1 : 0,
   );
+  syncSessionProjectionForGroup(jid, group);
+  if (group.created_by) {
+    syncMemorySessionProjectionForOwner(group.created_by);
+  }
 }
 
 export function deleteRegisteredGroup(jid: string): void {
+  deleteSessionProjectionForGroup(jid);
   db.prepare('DELETE FROM registered_groups WHERE jid = ?').run(jid);
 }
 
@@ -2417,16 +3140,6 @@ export function getJidsByFolder(folder: string): string[] {
     .prepare('SELECT jid FROM registered_groups WHERE folder = ?')
     .all(folder) as Array<{ jid: string }>;
   return rows.map((r) => r.jid);
-}
-
-/** Check if any registered group uses container execution mode (efficient targeted query). */
-export function hasContainerModeGroups(): boolean {
-  const row = db
-    .prepare(
-      "SELECT 1 FROM registered_groups WHERE execution_mode = 'container' OR execution_mode IS NULL LIMIT 1",
-    )
-    .get();
-  return row !== undefined;
 }
 
 export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
@@ -2440,6 +3153,99 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
   return result;
 }
 
+function syncSessionWorkbenchProjection(): void {
+  const groups = getAllRegisteredGroups();
+  for (const [jid, group] of Object.entries(groups)) {
+    syncSessionProjectionForGroup(jid, group);
+  }
+
+  if (tableExists('provider_sessions_legacy')) {
+    const legacyHasAgentId = hasColumn('provider_sessions_legacy', 'agent_id');
+    const rows = db
+      .prepare(
+        legacyHasAgentId
+          ? 'SELECT group_folder, session_id, COALESCE(agent_id, \'\') AS agent_id FROM provider_sessions_legacy'
+          : "SELECT group_folder, session_id, '' AS agent_id FROM provider_sessions_legacy",
+      )
+      .all() as Array<{
+      group_folder: string;
+      session_id: string;
+      agent_id: string;
+    }>;
+    for (const row of rows) {
+      const stableSessionId = ensureSessionRecordForLegacyKey(
+        row.group_folder,
+        row.agent_id || undefined,
+      );
+      db.prepare(
+        `INSERT INTO session_state (session_id, provider_session_id, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET
+           provider_session_id = excluded.provider_session_id,
+           updated_at = excluded.updated_at`,
+      ).run(stableSessionId, row.session_id, new Date().toISOString());
+    }
+  }
+
+  if (tableExists('agents')) {
+    const agents = db.prepare('SELECT * FROM agents').all() as Array<
+      Record<string, unknown>
+    >;
+    for (const agentRow of agents) {
+      syncWorkerSession(mapAgentRow(agentRow));
+    }
+  }
+
+  const memoryOwners = new Set<string>();
+  for (const group of Object.values(groups)) {
+    if (group.created_by) memoryOwners.add(group.created_by);
+  }
+  for (const ownerKey of memoryOwners) {
+    syncMemorySessionProjectionForOwner(ownerKey);
+  }
+}
+
+function syncMemorySessionProjectionForOwner(ownerKey: string): void {
+  const sessionId = buildMemorySessionId(ownerKey);
+  const primarySession = getPrimarySessionForOwner(ownerKey);
+  const homeGroup = getUserHomeGroup(ownerKey);
+  const existing = getSessionRecord(sessionId);
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO sessions (
+      id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
+      runtime_mode, model, thinking_effort, context_compression,
+      knowledge_extraction, is_pinned, archived, owner_key, created_at, updated_at
+    ) VALUES (?, ?, 'memory', ?, ?, ?, NULL, 'local', ?, ?, ?, ?, 0, 0, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      parent_session_id = excluded.parent_session_id,
+      cwd = excluded.cwd,
+      runner_id = excluded.runner_id,
+      model = excluded.model,
+      thinking_effort = excluded.thinking_effort,
+      context_compression = excluded.context_compression,
+      knowledge_extraction = excluded.knowledge_extraction,
+      owner_key = excluded.owner_key,
+      updated_at = excluded.updated_at`,
+  ).run(
+    sessionId,
+    existing?.name || `memory:${ownerKey}`,
+    primarySession?.id ?? null,
+    path.join(DATA_DIR, 'memory', ownerKey),
+    existing?.runner_id || (homeGroup ? deriveRunnerId(homeGroup) : 'claude'),
+    existing?.model ?? homeGroup?.model ?? null,
+    existing?.thinking_effort ?? homeGroup?.thinking_effort ?? null,
+    existing?.context_compression ?? homeGroup?.context_compression ?? 'off',
+    existing?.knowledge_extraction
+      ? 1
+      : (homeGroup?.knowledge_extraction ? 1 : 0),
+    ownerKey,
+    existing?.created_at || now,
+    now,
+  );
+}
+
 /**
  * Get all registered groups that route to a specific conversation agent.
  * Returns array of { jid, group } for each IM group targeting the given agentId.
@@ -2447,9 +3253,15 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
 export function getGroupsByTargetAgent(
   agentId: string,
 ): Array<{ jid: string; group: RegisteredGroup }> {
+  const sessionId = buildWorkerSessionId(agentId);
   const rows = db
-    .prepare('SELECT * FROM registered_groups WHERE target_agent_id = ?')
-    .all(agentId) as RegisteredGroupRow[];
+    .prepare(
+      `SELECT rg.*
+       FROM session_bindings sb
+       JOIN registered_groups rg ON rg.jid = sb.channel_jid
+       WHERE sb.session_id = ?`,
+    )
+    .all(sessionId) as RegisteredGroupRow[];
   return rows.map((row) => ({ jid: row.jid, group: parseGroupRow(row) }));
 }
 
@@ -2459,9 +3271,17 @@ export function getGroupsByTargetAgent(
 export function getGroupsByTargetMainJid(
   webJid: string,
 ): Array<{ jid: string; group: RegisteredGroup }> {
+  const targetGroup = getRegisteredGroup(webJid);
+  if (!targetGroup) return [];
+  const sessionId = buildMainSessionId(targetGroup.folder);
   const rows = db
-    .prepare('SELECT * FROM registered_groups WHERE target_main_jid = ?')
-    .all(webJid) as RegisteredGroupRow[];
+    .prepare(
+      `SELECT rg.*
+       FROM session_bindings sb
+       JOIN registered_groups rg ON rg.jid = sb.channel_jid
+       WHERE sb.session_id = ?`,
+    )
+    .all(sessionId) as RegisteredGroupRow[];
   return rows.map((row) => ({ jid: row.jid, group: parseGroupRow(row) }));
 }
 
@@ -2517,8 +3337,9 @@ export function getUserHomeGroup(
 
 /**
  * Ensure a user has a home group. If not, create one.
- * Admin gets folder='main' with executionMode='host'.
- * Member gets folder='home-{userId}' with executionMode='container'.
+ * Single-user migration keeps legacy home groups as compatibility rows.
+ * The backing `execution_mode` column remains only for compatibility,
+ * but every group is normalized to the unified local runtime.
  * Returns the JID of the home group.
  */
 export function ensureUserHomeGroup(
@@ -2540,7 +3361,7 @@ export function ensureUserHomeGroup(
     const existingMain = getRegisteredGroup(jid);
     if (existingMain) {
       // web:main already exists.
-      // Ensure is_home, created_by, and executionMode are correct for owner-based routing.
+      // Ensure is_home, created_by, and local runtime metadata are correct.
       const patched = { ...existingMain };
       let changed = false;
       if (!patched.is_home) {
@@ -2551,9 +3372,8 @@ export function ensureUserHomeGroup(
         patched.created_by = userId;
         changed = true;
       }
-      // Admin home container must use host mode
-      if (patched.executionMode !== 'host') {
-        patched.executionMode = 'host';
+      if (patched.executionMode !== 'local') {
+        patched.executionMode = 'local';
         changed = true;
       }
       if (changed) {
@@ -2570,7 +3390,7 @@ export function ensureUserHomeGroup(
     name,
     folder,
     added_at: now,
-    executionMode: isAdmin ? 'host' : 'container',
+    executionMode: 'local',
     created_by: userId,
     is_home: true,
   };
@@ -2626,7 +3446,8 @@ export function deleteGroupData(jid: string, folder: string): void {
     // 3. 删除注册信息
     db.prepare('DELETE FROM registered_groups WHERE jid = ?').run(jid);
     // 4. 删除会话
-    db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(folder);
+    deleteAllSessionsForFolder(folder);
+    db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(jid);
     // 5. 删除聊天记录
     db.prepare('DELETE FROM messages WHERE chat_jid = ?').run(jid);
     db.prepare('DELETE FROM chats WHERE jid = ?').run(jid);
@@ -4002,6 +4823,73 @@ export function getUserMemberFolders(
 
 // ===================== Sub-Agent CRUD =====================
 
+function syncWorkerSession(agent: SubAgent): void {
+  const sessionId = buildWorkerSessionId(agent.id);
+  const parentSessionId = buildMainSessionId(agent.group_folder);
+  const parentSession = getSessionRecord(parentSessionId);
+  const parentGroup = findPrimaryGroupForFolder(agent.group_folder);
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO sessions (
+      id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
+      runtime_mode, model, thinking_effort, context_compression,
+      knowledge_extraction, is_pinned, archived, owner_key, created_at, updated_at
+    ) VALUES (?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      parent_session_id = excluded.parent_session_id,
+      cwd = excluded.cwd,
+      runner_id = excluded.runner_id,
+      runner_profile_id = excluded.runner_profile_id,
+      runtime_mode = excluded.runtime_mode,
+      model = excluded.model,
+      thinking_effort = excluded.thinking_effort,
+      context_compression = excluded.context_compression,
+      owner_key = excluded.owner_key,
+      updated_at = excluded.updated_at`,
+  ).run(
+    sessionId,
+    agent.name,
+    parentSessionId,
+    parentSession?.cwd || path.join(GROUPS_DIR, agent.group_folder),
+    parentSession?.runner_id || deriveRunnerId(parentGroup || null),
+    parentSession?.runner_profile_id || null,
+    parentSession?.runtime_mode || deriveRuntimeMode(parentGroup),
+    parentSession?.model || null,
+    parentSession?.thinking_effort || null,
+    parentSession?.context_compression || 'off',
+    agent.created_by ?? parentSession?.owner_key ?? parentGroup?.created_by ?? null,
+    agent.created_at || now,
+    now,
+  );
+  db.prepare(
+    `INSERT INTO worker_sessions (
+      session_id, parent_session_id, source_chat_jid, name, kind, prompt,
+      status, created_at, completed_at, result_summary
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(session_id) DO UPDATE SET
+      parent_session_id = excluded.parent_session_id,
+      source_chat_jid = excluded.source_chat_jid,
+      name = excluded.name,
+      kind = excluded.kind,
+      prompt = excluded.prompt,
+      status = excluded.status,
+      completed_at = excluded.completed_at,
+      result_summary = excluded.result_summary`,
+  ).run(
+    sessionId,
+    parentSessionId,
+    agent.chat_jid,
+    agent.name,
+    agent.kind || 'task',
+    agent.prompt,
+    agent.status,
+    agent.created_at,
+    agent.completed_at ?? null,
+    agent.result_summary ?? null,
+  );
+}
+
 export function createAgent(agent: SubAgent): void {
   db.prepare(
     `INSERT INTO agents (id, group_folder, chat_jid, name, prompt, status, kind, created_by, created_at, completed_at, result_summary)
@@ -4019,6 +4907,7 @@ export function createAgent(agent: SubAgent): void {
     agent.completed_at ?? null,
     agent.result_summary ?? null,
   );
+  syncWorkerSession(agent);
 }
 
 export function getAgent(id: string): SubAgent | undefined {
@@ -4055,6 +4944,10 @@ export function updateAgentStatus(
   db.prepare(
     'UPDATE agents SET status = ?, completed_at = ?, result_summary = ? WHERE id = ?',
   ).run(status, completedAt, resultSummary ?? null, id);
+  const sessionId = buildWorkerSessionId(id);
+  db.prepare(
+    'UPDATE worker_sessions SET status = ?, completed_at = ?, result_summary = ? WHERE session_id = ?',
+  ).run(status, completedAt, resultSummary ?? null, sessionId);
 }
 
 export function updateAgentInfo(
@@ -4066,6 +4959,17 @@ export function updateAgentInfo(
     name,
     prompt,
     id,
+  );
+  const sessionId = buildWorkerSessionId(id);
+  db.prepare('UPDATE worker_sessions SET name = ?, prompt = ? WHERE session_id = ?').run(
+    name,
+    prompt,
+    sessionId,
+  );
+  db.prepare('UPDATE sessions SET name = ?, updated_at = ? WHERE id = ?').run(
+    name,
+    new Date().toISOString(),
+    sessionId,
   );
 }
 
@@ -4110,8 +5014,10 @@ export function markAllRunningTaskAgentsAsError(
 }
 
 export function deleteAgent(id: string): void {
-  // Delete associated session
-  db.prepare('DELETE FROM sessions WHERE agent_id = ?').run(id);
+  const sessionId = buildWorkerSessionId(id);
+  db.prepare('DELETE FROM session_state WHERE session_id = ?').run(sessionId);
+  db.prepare('DELETE FROM worker_sessions WHERE session_id = ?').run(sessionId);
+  db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
   db.prepare('DELETE FROM agents WHERE id = ?').run(id);
 }
 

@@ -9,11 +9,24 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { api, type ApiError } from '@/api/client';
+import { Input } from '@/components/ui/input';
 
 const COMPRESSION_OPTIONS = [
   { value: 'off', label: '关闭' },
   { value: 'manual', label: '手动压缩' },
   { value: 'auto', label: '自动压缩' },
+];
+
+const RUNNER_OPTIONS = [
+  { value: 'claude', label: 'Claude' },
+  { value: 'codex', label: 'Codex' },
+];
+
+const THINKING_OPTIONS = [
+  { value: '__default__', label: '默认' },
+  { value: 'low', label: '低' },
+  { value: 'medium', label: '中' },
+  { value: 'high', label: '高' },
 ];
 
 interface ContextSummary {
@@ -25,12 +38,34 @@ interface ContextSummary {
   model_used: string | null;
 }
 
+interface RunnerProfileOption {
+  id: string;
+  runner_id: 'claude' | 'codex';
+  name: string;
+  is_default: boolean;
+}
+
 interface GroupDetailProps {
   group: GroupInfo & { jid: string };
 }
 
 export function GroupDetail({ group }: GroupDetailProps) {
   const { updateGroup } = useGroupsStore();
+  const isSessionView = !!group.session_kind;
+  const backingJid = group.backing_jid || group.jid;
+  const [runnerId, setRunnerId] = useState<'claude' | 'codex'>(
+    group.runner_id || 'claude',
+  );
+  const [runtimeMode, setRuntimeMode] = useState<'local'>('local');
+  const [runnerProfileId, setRunnerProfileId] = useState<string>(
+    group.runner_profile_id || '',
+  );
+  const [runnerProfiles, setRunnerProfiles] = useState<RunnerProfileOption[]>([]);
+  const [model, setModel] = useState(group.model || '');
+  const [thinkingEffort, setThinkingEffort] = useState<string>(
+    group.thinking_effort || '',
+  );
+  const [cwd, setCwd] = useState(group.cwd || group.custom_cwd || group.folder);
   const [compression, setCompression] = useState<string>(group.context_compression || 'off');
   const [knowledgeExtraction, setKnowledgeExtraction] = useState(group.knowledge_extraction ?? false);
   const [saving, setSaving] = useState(false);
@@ -41,15 +76,50 @@ export function GroupDetail({ group }: GroupDetailProps) {
 
   // Sync local state when group prop changes
   useEffect(() => {
+    setRunnerId(
+      group.runner_id || 'claude',
+    );
+    setRuntimeMode('local');
+    setRunnerProfileId(group.runner_profile_id || '');
+    setModel(group.model || '');
+    setThinkingEffort(group.thinking_effort || '');
+    setCwd(group.cwd || group.custom_cwd || group.folder);
     setCompression(group.context_compression || 'off');
     setKnowledgeExtraction(group.knowledge_extraction ?? false);
     setCompressResult(null);
     setSummaryInfo(null);
-  }, [group.jid, group.context_compression, group.knowledge_extraction]);
+  }, [
+    group.jid,
+    group.runner_id,
+    group.runner_profile_id,
+    group.model,
+    group.thinking_effort,
+    group.cwd,
+    group.custom_cwd,
+    group.folder,
+    group.context_compression,
+    group.knowledge_extraction,
+  ]);
 
+  const runnerDirty =
+    runnerId !==
+    (group.runner_id || 'claude');
+  const runtimeDirty = runtimeMode !== 'local';
+  const runnerProfileDirty = runnerProfileId !== (group.runner_profile_id || '');
+  const modelDirty = model !== (group.model || '');
+  const thinkingDirty = thinkingEffort !== (group.thinking_effort || '');
+  const cwdDirty = cwd !== (group.cwd || group.custom_cwd || group.folder);
   const compressionDirty = compression !== (group.context_compression || 'off');
   const knowledgeDirty = knowledgeExtraction !== (group.knowledge_extraction ?? false);
-  const dirty = compressionDirty || knowledgeDirty;
+  const dirty =
+    runnerDirty ||
+    runtimeDirty ||
+    runnerProfileDirty ||
+    modelDirty ||
+    thinkingDirty ||
+    cwdDirty ||
+    compressionDirty ||
+    knowledgeDirty;
 
   const formatDate = (timestamp: string | number) => {
     return new Date(timestamp).toLocaleString('zh-CN', {
@@ -64,13 +134,13 @@ export function GroupDetail({ group }: GroupDetailProps) {
   const loadSummary = useCallback(async () => {
     try {
       const res = await api.get<{ summary: ContextSummary | null }>(
-        `/api/groups/${encodeURIComponent(group.jid)}/summary`,
+        `/api/sessions/${encodeURIComponent(backingJid)}/summary`,
       );
       setSummaryInfo(res.summary);
     } catch {
       setSummaryInfo(null);
     }
-  }, [group.jid]);
+  }, [backingJid]);
 
   useEffect(() => {
     if (group.context_compression && group.context_compression !== 'off') {
@@ -78,10 +148,45 @@ export function GroupDetail({ group }: GroupDetailProps) {
     }
   }, [group.context_compression, loadSummary]);
 
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .get<{ profiles: RunnerProfileOption[] }>(
+        `/api/sessions/runner-profiles?${new URLSearchParams({ runner_id: runnerId })}`,
+      )
+      .then((res) => {
+        if (!cancelled) setRunnerProfiles(res.profiles);
+      })
+      .catch(() => {
+        if (!cancelled) setRunnerProfiles([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runnerId]);
+
   const handleSave = async () => {
     setSaving(true);
     try {
       const updates: Record<string, unknown> = {};
+      if (runnerDirty) {
+        updates.runner_id = runnerId;
+      }
+      if (runtimeDirty) {
+        updates.runtime_mode = runtimeMode;
+      }
+      if (runnerProfileDirty) {
+        updates.runner_profile_id = runnerProfileId || null;
+      }
+      if (modelDirty) {
+        updates.model = model.trim() || null;
+      }
+      if (thinkingDirty) {
+        updates.thinking_effort = thinkingEffort || null;
+      }
+      if (cwdDirty) {
+        updates.cwd = cwd.trim();
+      }
       if (compressionDirty) {
         updates.context_compression = compression;
         if (compression === 'off' && knowledgeExtraction) {
@@ -114,11 +219,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
         messageCount?: number;
         extractedKnowledge?: number;
         error?: string;
-      }>(
-        `/api/groups/${encodeURIComponent(group.jid)}/compress`,
-        undefined,
-        60000,
-      );
+      }>(`/api/sessions/${encodeURIComponent(backingJid)}/compress`, undefined, 60000);
       if (res.success) {
         const knowledgeMsg =
           res.extractedKnowledge === -1 ? '（知识萃取在后台进行中）'
@@ -137,22 +238,26 @@ export function GroupDetail({ group }: GroupDetailProps) {
     }
   };
 
-  const providerLabel = group.llm_provider === 'openai' ? 'OpenAI (Codex)' : 'Claude (Anthropic)';
-
   return (
     <div className="p-4 bg-background space-y-3">
       {/* JID */}
       <div>
-        <div className="text-xs text-slate-500 mb-1">完整 JID</div>
+        <div className="text-xs text-slate-500 mb-1">
+          {isSessionView ? '会话 ID' : '完整 JID'}
+        </div>
         <code className="block text-xs font-mono bg-card px-3 py-2 rounded border border-border break-all">
           {group.jid}
         </code>
       </div>
 
-      {/* Folder */}
+      {/* Folder / cwd */}
       <div>
-        <div className="text-xs text-slate-500 mb-1">文件夹</div>
-        <div className="text-sm text-foreground font-medium">{group.folder}</div>
+        <div className="text-xs text-slate-500 mb-1">
+          {isSessionView ? '工作目录' : '文件夹'}
+        </div>
+        <div className="text-sm text-foreground font-medium">
+          {group.cwd || group.custom_cwd || group.folder}
+        </div>
       </div>
 
       {/* Added At */}
@@ -163,14 +268,125 @@ export function GroupDetail({ group }: GroupDetailProps) {
         </div>
       </div>
 
-      {/* Provider & Model (read-only display, edit in ContainerEnvPanel) */}
+      {/* Runner & Model */}
       <div>
-        <div className="text-xs text-slate-500 mb-1">Provider / 模型</div>
+        <div className="text-xs text-slate-500 mb-1">运行引擎 / 模型</div>
         <div className="text-sm text-foreground">
-          {providerLabel}
+          {group.runner_label || runnerId}
           {group.model && <span className="text-slate-400"> / {group.model}</span>}
         </div>
+        {group.binding_summary && (
+          <div className="text-xs text-slate-400 mt-1">
+            绑定: {group.binding_summary}
+          </div>
+        )}
+        {group.degradation_reasons && group.degradation_reasons.length > 0 && (
+          <div className="mt-2 space-y-1">
+            {group.degradation_reasons.map((reason) => (
+              <div key={reason} className="text-xs text-amber-600">
+                {reason}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
+
+      {group.editable && (
+        <div className="space-y-3">
+          <div>
+            <div className="text-xs text-slate-500 mb-1">运行引擎</div>
+            <Select value={runnerId} onValueChange={(value) => setRunnerId(value as 'claude' | 'codex')}>
+              <SelectTrigger className="h-8 text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {RUNNER_OPTIONS.map((opt) => (
+                  <SelectItem key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div>
+            <div className="text-xs text-slate-500 mb-1">运行模式</div>
+            <div className="h-8 px-3 rounded-md border border-border bg-muted/40 text-sm text-foreground flex items-center">
+              本地 Runtime
+            </div>
+          </div>
+
+          <div>
+            <div className="text-xs text-slate-500 mb-1">运行配置</div>
+            <Select
+              value={runnerProfileId || '__default__'}
+              onValueChange={(value) =>
+                setRunnerProfileId(value === '__default__' ? '' : value)
+              }
+            >
+              <SelectTrigger className="h-8 text-sm">
+                <SelectValue placeholder="默认" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__default__">默认</SelectItem>
+                {runnerProfileId &&
+                  !runnerProfiles.some((profile) => profile.id === runnerProfileId) && (
+                    <SelectItem value={runnerProfileId}>
+                      当前配置 {runnerProfileId}
+                    </SelectItem>
+                  )}
+                {runnerProfiles.map((profile) => (
+                  <SelectItem key={profile.id} value={profile.id}>
+                    {profile.name}
+                    {profile.is_default ? ' · 默认' : ''}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div>
+            <div className="text-xs text-slate-500 mb-1">模型</div>
+            <Input
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder="留空表示使用默认模型"
+              className="h-8 text-sm"
+            />
+          </div>
+
+          <div>
+            <div className="text-xs text-slate-500 mb-1">思考强度</div>
+            <Select
+              value={thinkingEffort || '__default__'}
+              onValueChange={(value) =>
+                setThinkingEffort(value === '__default__' ? '' : value)
+              }
+            >
+              <SelectTrigger className="h-8 text-sm">
+                <SelectValue placeholder="默认" />
+              </SelectTrigger>
+              <SelectContent>
+                {THINKING_OPTIONS.map((opt) => (
+                  <SelectItem key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div>
+            <div className="text-xs text-slate-500 mb-1">工作目录</div>
+            <Input
+              value={cwd}
+              onChange={(e) => setCwd(e.target.value)}
+              placeholder="默认使用当前会话目录"
+              className="h-8 text-sm font-mono"
+            />
+          </div>
+        </div>
+      )}
 
       {/* Context Compression */}
       {group.editable && (
@@ -193,7 +409,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
           <p className="mt-1 text-xs text-slate-400">
             {compression === 'auto'
               ? '每轮对话结束后自动检查，消息数超过阈值时自动压缩。也可手动触发。'
-              : '使用 Sonnet 压缩历史对话，减少 token 消耗。压缩后会话将重置，摘要注入系统提示。'}
+              : '使用 Sonnet 压缩历史对话，减少 token 消耗。压缩后会重置当前会话，并把摘要注入系统提示。'}
           </p>
 
           {/* Knowledge extraction toggle */}

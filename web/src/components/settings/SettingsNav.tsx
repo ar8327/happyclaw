@@ -1,14 +1,12 @@
 import {
   ShieldCheck,
   Cpu,
-  UserPlus,
+  Orbit,
   User,
-  Shield,
   Layers,
   BookOpen,
   Puzzle,
   Server,
-  UserCog,
   Info,
   Palette,
   MessageSquare,
@@ -27,9 +25,9 @@ interface NavItem {
 }
 
 const systemItems: NavItem[] = [
-  { key: 'claude', label: 'Claude 提供商', icon: <ShieldCheck className="w-4 h-4" />, group: 'system' },
-  { key: 'codex', label: 'Codex 提供商', icon: <Cpu className="w-4 h-4" />, group: 'system' },
-  { key: 'registration', label: '注册管理', icon: <UserPlus className="w-4 h-4" />, group: 'system' },
+  { key: 'claude', label: 'Claude 兼容桥接', icon: <ShieldCheck className="w-4 h-4" />, group: 'system' },
+  { key: 'codex', label: 'Codex 兼容桥接', icon: <Cpu className="w-4 h-4" />, group: 'system' },
+  { key: 'runners', label: 'Runner 注册表', icon: <Orbit className="w-4 h-4" />, group: 'system' },
   { key: 'appearance', label: '外观（全局）', icon: <Palette className="w-4 h-4" />, group: 'system' },
   { key: 'system', label: '系统参数', icon: <SlidersHorizontal className="w-4 h-4" />, group: 'system' },
 ];
@@ -37,7 +35,6 @@ const systemItems: NavItem[] = [
 const accountItems: NavItem[] = [
   { key: 'profile', label: '个人资料', icon: <User className="w-4 h-4" />, group: 'account' },
   { key: 'my-channels', label: '消息渠道', icon: <MessageSquare className="w-4 h-4" />, group: 'account' },
-  { key: 'security', label: '安全与设备', icon: <Shield className="w-4 h-4" />, group: 'account' },
 ];
 
 const featureItems: NavItem[] = [
@@ -47,7 +44,6 @@ const featureItems: NavItem[] = [
   { key: 'mcp-servers', label: 'MCP 服务器', icon: <Server className="w-4 h-4" />, group: 'features' },
   { key: 'agent-definitions', label: 'Agent 定义', icon: <Bot className="w-4 h-4" />, group: 'features' },
   { key: 'bindings', label: 'IM 绑定', icon: <Link2 className="w-4 h-4" />, group: 'features' },
-  { key: 'users', label: '用户管理', icon: <UserCog className="w-4 h-4" />, group: 'features' },
   { key: 'about', label: '关于', icon: <Info className="w-4 h-4" />, group: 'features' },
 ];
 
@@ -55,13 +51,12 @@ interface SettingsNavProps {
   activeTab: SettingsTab;
   onTabChange: (tab: SettingsTab) => void;
   canManageSystemConfig: boolean;
-  canManageUsers: boolean;
   mustChangePassword: boolean;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
 }
 
-export function SettingsNav({ activeTab, onTabChange, canManageSystemConfig, canManageUsers, mustChangePassword, open, onOpenChange }: SettingsNavProps) {
+export function SettingsNav({ activeTab, onTabChange, canManageSystemConfig, mustChangePassword, open, onOpenChange }: SettingsNavProps) {
   const visibleItems: { group: string; items: NavItem[] }[] = [];
 
   if (canManageSystemConfig) {
@@ -69,10 +64,7 @@ export function SettingsNav({ activeTab, onTabChange, canManageSystemConfig, can
   }
   visibleItems.push({ group: '账户设置', items: accountItems });
 
-  const visibleFeatures = featureItems.filter((item) => {
-    if (item.key === 'users' && !canManageUsers) return false;
-    return true;
-  });
+  const visibleFeatures = featureItems;
   if (visibleFeatures.length > 0) {
     visibleItems.push({ group: '更多功能', items: visibleFeatures });
   }

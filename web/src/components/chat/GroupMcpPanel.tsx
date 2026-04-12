@@ -27,7 +27,7 @@ export function GroupMcpPanel({ groupJid }: GroupMcpPanelProps) {
     Promise.all([
       loadMcpServers(),
       api.get<{ mcp_mode: 'inherit' | 'custom'; selected_mcps: string[] | null }>(
-        `/api/groups/${encodeURIComponent(groupJid)}/mcp`,
+        `/api/sessions/${encodeURIComponent(groupJid)}/mcp`,
       ).catch(() => ({ mcp_mode: 'inherit' as const, selected_mcps: null })),
     ]).then(([, mcpConfig]) => {
       setMcpMode(mcpConfig.mcp_mode);
@@ -71,7 +71,7 @@ export function GroupMcpPanel({ groupJid }: GroupMcpPanelProps) {
     setError(null);
     try {
       const payload = mcpMode === 'inherit' ? null : (selectedMcps === null ? null : Array.from(selectedMcps));
-      await api.put(`/api/groups/${encodeURIComponent(groupJid)}/mcp`, {
+      await api.put(`/api/sessions/${encodeURIComponent(groupJid)}/mcp`, {
         mcp_mode: mcpMode,
         selected_mcps: payload,
       });
@@ -87,7 +87,7 @@ export function GroupMcpPanel({ groupJid }: GroupMcpPanelProps) {
     setStopping(true);
     setError(null);
     try {
-      await api.post(`/api/groups/${encodeURIComponent(groupJid)}/stop`, {});
+      await api.post(`/api/sessions/${encodeURIComponent(groupJid)}/stop`, {});
     } catch {
       setError('停止失败');
     } finally {
@@ -192,14 +192,14 @@ export function GroupMcpPanel({ groupJid }: GroupMcpPanelProps) {
             variant="outline"
             disabled={stopping}
             onClick={handleStop}
-            title="停止容器（下次发消息时自动重启）"
+            title="停止 Runtime 下次发消息时自动重启"
             className="h-7 text-xs"
           >
             {stopping ? <Loader2 className="w-3 h-3 animate-spin" /> : <Square className="w-3 h-3" />}
           </Button>
         </div>
         <p className="text-[11px] text-muted-foreground">
-          更改将在下次容器启动时生效
+          更改将在下次 Runtime 启动时生效
         </p>
       </div>
     </div>

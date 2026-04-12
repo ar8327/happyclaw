@@ -1808,11 +1808,17 @@ export function appendClaudeConfigAudit(
   );
 }
 
-// ─── Per-container environment config ───────────────────────────
+// ─── Per-runtime environment config ─────────────────────────────
 
-const CONTAINER_ENV_DIR = path.join(DATA_DIR, 'config', 'container-env');
+const RUNTIME_ENV_DIR = path.join(DATA_DIR, 'config', 'runtime-env');
+const SESSION_RUNTIME_ENV_DIR = path.join(
+  DATA_DIR,
+  'config',
+  'session-runtime-env',
+);
+const LEGACY_CONTAINER_ENV_DIR = path.join(DATA_DIR, 'config', 'container-env');
 
-export interface ContainerEnvConfig {
+export interface RuntimeEnvConfig {
   /** Claude provider overrides — empty string means "use global" */
   anthropicBaseUrl?: string;
   anthropicAuthToken?: string;
@@ -1820,11 +1826,16 @@ export interface ContainerEnvConfig {
   claudeCodeOauthToken?: string;
   claudeOAuthCredentials?: ClaudeOAuthCredentials | null;
   happyclawModel?: string;
-  /** Arbitrary extra env vars injected into the container */
+  /** Arbitrary Claude-side extra env vars injected into the runtime */
   customEnv?: Record<string, string>;
+  /** Codex provider overrides — empty string means "use global" */
+  codexBaseUrl?: string;
+  codexDefaultModel?: string;
+  /** Arbitrary Codex-side extra env vars injected into the runtime */
+  codexCustomEnv?: Record<string, string>;
 }
 
-export interface ContainerEnvPublicConfig {
+export interface RuntimeEnvPublicConfig {
   anthropicBaseUrl: string;
   anthropicAuthTokenMasked: string | null;
   anthropicApiKeyMasked: string | null;
@@ -1834,38 +1845,95 @@ export interface ContainerEnvPublicConfig {
   hasClaudeCodeOauthToken: boolean;
   happyclawModel: string;
   customEnv: Record<string, string>;
+  codexBaseUrl: string;
+  codexDefaultModel: string;
+  codexCustomEnv: Record<string, string>;
 }
 
-function containerEnvPath(folder: string): string {
+export interface RunnerProfileRuntimeOverride {
+  claudeEnv?: RuntimeEnvConfig;
+  codex?: {
+    baseUrl?: string;
+    defaultModel?: string;
+    customEnv?: Record<string, string>;
+  };
+}
+
+function runtimeEnvPath(folder: string): string {
   if (folder.includes('..') || folder.includes('/')) {
     throw new Error('Invalid folder name');
   }
-  return path.join(CONTAINER_ENV_DIR, `${folder}.json`);
+  return path.join(RUNTIME_ENV_DIR, `${folder}.json`);
 }
 
-export function getContainerEnvConfig(folder: string): ContainerEnvConfig {
-  const filePath = containerEnvPath(folder);
+function sessionRuntimeEnvPath(sessionId: string): string {
+  if (!sessionId || sessionId.includes('\0')) {
+    throw new Error('Invalid session id');
+  }
+  return path.join(
+    SESSION_RUNTIME_ENV_DIR,
+    `${encodeURIComponent(sessionId)}.json`,
+  );
+}
+
+function legacyContainerEnvPath(folder: string): string {
+  if (folder.includes('..') || folder.includes('/')) {
+    throw new Error('Invalid folder name');
+  }
+  return path.join(LEGACY_CONTAINER_ENV_DIR, `${folder}.json`);
+}
+
+export function getRuntimeEnvConfig(folder: string): RuntimeEnvConfig {
+  const filePath = runtimeEnvPath(folder);
+  const legacyPath = legacyContainerEnvPath(folder);
   try {
     if (fs.existsSync(filePath)) {
       return JSON.parse(
         fs.readFileSync(filePath, 'utf-8'),
-      ) as ContainerEnvConfig;
+      ) as RuntimeEnvConfig;
+    }
+    if (fs.existsSync(legacyPath)) {
+      const parsed = JSON.parse(
+        fs.readFileSync(legacyPath, 'utf-8'),
+      ) as RuntimeEnvConfig;
+      saveRuntimeEnvConfig(folder, parsed);
+      try {
+        fs.unlinkSync(legacyPath);
+      } catch {
+        /* ignore cleanup failure */
+      }
+      return parsed;
     }
   } catch (err) {
     logger.warn(
       { err, folder },
-      'Failed to read container env config, returning defaults',
+      'Failed to read runtime env config, returning defaults',
     );
   }
   return {};
 }
 
-export function saveContainerEnvConfig(
+export function getSessionRuntimeEnvConfig(sessionId: string): RuntimeEnvConfig {
+  const filePath = sessionRuntimeEnvPath(sessionId);
+  try {
+    if (fs.existsSync(filePath)) {
+      return JSON.parse(fs.readFileSync(filePath, 'utf-8')) as RuntimeEnvConfig;
+    }
+  } catch (err) {
+    logger.warn(
+      { err, sessionId },
+      'Failed to read session runtime env config, returning defaults',
+    );
+  }
+  return {};
+}
+
+export function saveRuntimeEnvConfig(
   folder: string,
-  config: ContainerEnvConfig,
+  config: RuntimeEnvConfig,
 ): void {
   // Sanitize all string fields to prevent env injection
-  const sanitized: ContainerEnvConfig = { ...config };
+  const sanitized: RuntimeEnvConfig = { ...config };
   if (sanitized.anthropicBaseUrl)
     sanitized.anthropicBaseUrl = sanitizeEnvValue(sanitized.anthropicBaseUrl);
   if (sanitized.anthropicAuthToken)
@@ -1886,7 +1954,7 @@ export function saveContainerEnvConfig(
       if (DANGEROUS_ENV_VARS.has(k)) {
         logger.warn(
           { key: k },
-          'Rejected dangerous env variable in saveContainerEnvConfig',
+          'Rejected dangerous env variable in saveRuntimeEnvConfig',
         );
         continue;
       }
@@ -1894,15 +1962,106 @@ export function saveContainerEnvConfig(
     }
     sanitized.customEnv = cleanEnv;
   }
+  if (sanitized.codexBaseUrl) {
+    sanitized.codexBaseUrl = sanitizeEnvValue(sanitized.codexBaseUrl);
+  }
+  if (sanitized.codexDefaultModel) {
+    sanitized.codexDefaultModel = sanitizeEnvValue(sanitized.codexDefaultModel);
+  }
+  if (sanitized.codexCustomEnv) {
+    const cleanEnv: Record<string, string> = {};
+    for (const [k, v] of Object.entries(sanitized.codexCustomEnv)) {
+      if (DANGEROUS_ENV_VARS.has(k)) {
+        logger.warn(
+          { key: k },
+          'Rejected dangerous codex env variable in saveRuntimeEnvConfig',
+        );
+        continue;
+      }
+      cleanEnv[k] = sanitizeEnvValue(v);
+    }
+    sanitized.codexCustomEnv = cleanEnv;
+  }
 
-  fs.mkdirSync(CONTAINER_ENV_DIR, { recursive: true });
-  const tmp = `${containerEnvPath(folder)}.tmp`;
+  fs.mkdirSync(RUNTIME_ENV_DIR, { recursive: true });
+  const tmp = `${runtimeEnvPath(folder)}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(sanitized, null, 2) + '\n', 'utf-8');
-  fs.renameSync(tmp, containerEnvPath(folder));
+  fs.renameSync(tmp, runtimeEnvPath(folder));
 }
 
-export function deleteContainerEnvConfig(folder: string): void {
-  const filePath = containerEnvPath(folder);
+export function saveSessionRuntimeEnvConfig(
+  sessionId: string,
+  config: RuntimeEnvConfig,
+): void {
+  const sanitized: RuntimeEnvConfig = { ...config };
+  if (sanitized.anthropicBaseUrl)
+    sanitized.anthropicBaseUrl = sanitizeEnvValue(sanitized.anthropicBaseUrl);
+  if (sanitized.anthropicAuthToken)
+    sanitized.anthropicAuthToken = sanitizeEnvValue(
+      sanitized.anthropicAuthToken,
+    );
+  if (sanitized.anthropicApiKey)
+    sanitized.anthropicApiKey = sanitizeEnvValue(sanitized.anthropicApiKey);
+  if (sanitized.claudeCodeOauthToken)
+    sanitized.claudeCodeOauthToken = sanitizeEnvValue(
+      sanitized.claudeCodeOauthToken,
+    );
+  if (sanitized.happyclawModel)
+    sanitized.happyclawModel = sanitizeEnvValue(sanitized.happyclawModel);
+  if (sanitized.customEnv) {
+    const cleanEnv: Record<string, string> = {};
+    for (const [k, v] of Object.entries(sanitized.customEnv)) {
+      if (DANGEROUS_ENV_VARS.has(k)) {
+        logger.warn(
+          { key: k },
+          'Rejected dangerous env variable in saveSessionRuntimeEnvConfig',
+        );
+        continue;
+      }
+      cleanEnv[k] = sanitizeEnvValue(v);
+    }
+    sanitized.customEnv = cleanEnv;
+  }
+  if (sanitized.codexBaseUrl) {
+    sanitized.codexBaseUrl = sanitizeEnvValue(sanitized.codexBaseUrl);
+  }
+  if (sanitized.codexDefaultModel) {
+    sanitized.codexDefaultModel = sanitizeEnvValue(sanitized.codexDefaultModel);
+  }
+  if (sanitized.codexCustomEnv) {
+    const cleanEnv: Record<string, string> = {};
+    for (const [k, v] of Object.entries(sanitized.codexCustomEnv)) {
+      if (DANGEROUS_ENV_VARS.has(k)) {
+        logger.warn(
+          { key: k },
+          'Rejected dangerous codex env variable in saveSessionRuntimeEnvConfig',
+        );
+        continue;
+      }
+      cleanEnv[k] = sanitizeEnvValue(v);
+    }
+    sanitized.codexCustomEnv = cleanEnv;
+  }
+
+  fs.mkdirSync(SESSION_RUNTIME_ENV_DIR, { recursive: true });
+  const tmp = `${sessionRuntimeEnvPath(sessionId)}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(sanitized, null, 2) + '\n', 'utf-8');
+  fs.renameSync(tmp, sessionRuntimeEnvPath(sessionId));
+}
+
+export function deleteRuntimeEnvConfig(folder: string): void {
+  const targets = [runtimeEnvPath(folder), legacyContainerEnvPath(folder)];
+  for (const filePath of targets) {
+    try {
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch {
+      // ignore
+    }
+  }
+}
+
+export function deleteSessionRuntimeEnvConfig(sessionId: string): void {
+  const filePath = sessionRuntimeEnvPath(sessionId);
   try {
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
   } catch {
@@ -1910,9 +2069,9 @@ export function deleteContainerEnvConfig(folder: string): void {
   }
 }
 
-export function toPublicContainerEnvConfig(
-  config: ContainerEnvConfig,
-): ContainerEnvPublicConfig {
+export function toPublicRuntimeEnvConfig(
+  config: RuntimeEnvConfig,
+): RuntimeEnvPublicConfig {
   return {
     anthropicBaseUrl: config.anthropicBaseUrl || '',
     hasAnthropicAuthToken: !!config.anthropicAuthToken,
@@ -1923,16 +2082,103 @@ export function toPublicContainerEnvConfig(
     claudeCodeOauthTokenMasked: maskSecret(config.claudeCodeOauthToken || ''),
     happyclawModel: config.happyclawModel || '',
     customEnv: config.customEnv || {},
+    codexBaseUrl: config.codexBaseUrl || '',
+    codexDefaultModel: config.codexDefaultModel || '',
+    codexCustomEnv: config.codexCustomEnv || {},
   };
 }
 
+export function mergeRuntimeEnvConfig(
+  base: RuntimeEnvConfig,
+  override: RuntimeEnvConfig,
+): RuntimeEnvConfig {
+  return {
+    ...base,
+    ...override,
+    customEnv: {
+      ...(base.customEnv || {}),
+      ...(override.customEnv || {}),
+    },
+    codexCustomEnv: {
+      ...(base.codexCustomEnv || {}),
+      ...(override.codexCustomEnv || {}),
+    },
+  };
+}
+
+export function parseRunnerProfileRuntimeOverride(
+  runnerId: 'claude' | 'codex',
+  configJson?: string | null,
+): RunnerProfileRuntimeOverride {
+  if (!configJson || !configJson.trim()) return {};
+
+  let parsed: Record<string, unknown>;
+  try {
+    const raw = JSON.parse(configJson) as unknown;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    parsed = raw as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+
+  if (runnerId === 'claude') {
+    const customEnv =
+      parsed.customEnv && typeof parsed.customEnv === 'object'
+        ? sanitizeCustomEnvMap(parsed.customEnv as Record<string, string>)
+        : {};
+    const happyclawModelRaw =
+      typeof parsed.happyclawModel === 'string'
+        ? parsed.happyclawModel
+        : typeof parsed.model === 'string'
+          ? parsed.model
+          : typeof parsed.anthropicModel === 'string'
+            ? parsed.anthropicModel
+            : '';
+    const claudeEnv: RuntimeEnvConfig = {
+      ...(typeof parsed.anthropicBaseUrl === 'string'
+        ? { anthropicBaseUrl: sanitizeEnvValue(parsed.anthropicBaseUrl) }
+        : {}),
+      ...(happyclawModelRaw
+        ? { happyclawModel: sanitizeEnvValue(happyclawModelRaw) }
+        : {}),
+      ...(Object.keys(customEnv).length > 0 ? { customEnv } : {}),
+    };
+    return Object.keys(claudeEnv).length > 0 ? { claudeEnv } : {};
+  }
+
+  const customEnv =
+    parsed.customEnv && typeof parsed.customEnv === 'object'
+      ? sanitizeCustomEnvMap(parsed.customEnv as Record<string, string>, {
+          skipReservedCodexKeys: true,
+        })
+      : {};
+  const baseUrlRaw =
+    typeof parsed.baseUrl === 'string'
+      ? parsed.baseUrl
+      : typeof parsed.openaiBaseUrl === 'string'
+        ? parsed.openaiBaseUrl
+        : '';
+  const defaultModelRaw =
+    typeof parsed.defaultModel === 'string'
+      ? parsed.defaultModel
+      : typeof parsed.model === 'string'
+        ? parsed.model
+        : '';
+  const codex: RunnerProfileRuntimeOverride['codex'] = {
+    ...(baseUrlRaw ? { baseUrl: normalizeBaseUrl(baseUrlRaw) } : {}),
+    ...(defaultModelRaw ? { defaultModel: normalizeModel(defaultModelRaw) } : {}),
+    ...(Object.keys(customEnv).length > 0 ? { customEnv } : {}),
+  };
+  return Object.keys(codex).length > 0 ? { codex } : {};
+}
+
 /**
- * Merge global config with per-container overrides.
- * Non-empty per-container fields override the global value.
+ * Merge global config with per-runtime overrides.
+ * Non-empty per-runtime fields override the global value.
  */
 export function mergeClaudeEnvConfig(
   global: ClaudeProviderConfig,
-  override: ContainerEnvConfig,
+  override: RuntimeEnvConfig,
 ): ClaudeProviderConfig {
   return {
     anthropicBaseUrl: override.anthropicBaseUrl || global.anthropicBaseUrl,
@@ -2013,9 +2259,9 @@ export function saveRegistrationConfig(
 /**
  * Build full env lines: merged Claude config + custom env vars.
  */
-export function buildContainerEnvLines(
+export function buildRuntimeEnvLines(
   global: ClaudeProviderConfig,
-  override: ContainerEnvConfig,
+  override: RuntimeEnvConfig,
 ): string[] {
   // If workspace specifies ANTHROPIC_MODEL in customEnv, promote it to
   // happyclawModel so it takes priority over the global default
@@ -2037,7 +2283,7 @@ export function buildContainerEnvLines(
       if (!ENV_KEY_RE.test(key)) {
         logger.warn(
           { key },
-          'Skipping invalid env key in buildContainerEnvLines',
+          'Skipping invalid env key in buildRuntimeEnvLines',
         );
         continue;
       }
@@ -2045,7 +2291,7 @@ export function buildContainerEnvLines(
       if (DANGEROUS_ENV_VARS.has(key)) {
         logger.warn(
           { key },
-          'Blocked dangerous env variable in buildContainerEnvLines',
+          'Blocked dangerous env variable in buildRuntimeEnvLines',
         );
         continue;
       }
@@ -2900,11 +3146,10 @@ const SYSTEM_SETTINGS_FILE = path.join(
 );
 
 export interface SystemSettings {
-  containerTimeout: number;
+  runtimeTimeout: number;
   idleTimeout: number;
-  containerMaxOutputSize: number;
-  maxConcurrentContainers: number;
-  maxConcurrentHostProcesses: number;
+  runtimeMaxOutputSize: number;
+  maxConcurrentRuntimes: number;
   maxLoginAttempts: number;
   loginLockoutMinutes: number;
   maxConcurrentScripts: number;
@@ -2931,11 +3176,10 @@ export interface SystemSettings {
 }
 
 const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
-  containerTimeout: 1800000,
+  runtimeTimeout: 1800000,
   idleTimeout: 1500000,
-  containerMaxOutputSize: 10485760,
-  maxConcurrentContainers: 20,
-  maxConcurrentHostProcesses: 5,
+  runtimeMaxOutputSize: 10485760,
+  maxConcurrentRuntimes: 20,
   maxLoginAttempts: 5,
   loginLockoutMinutes: 15,
   maxConcurrentScripts: 10,
@@ -2969,6 +3213,19 @@ function parseFloatEnv(envVar: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function readPositiveNumber(
+  raw: Record<string, unknown>,
+  preferredKey: string,
+  legacyKey: string,
+  fallback: number,
+): number {
+  const preferred = raw[preferredKey];
+  if (typeof preferred === 'number' && preferred > 0) return preferred;
+  const legacy = raw[legacyKey];
+  if (typeof legacy === 'number' && legacy > 0) return legacy;
+  return fallback;
+}
+
 // In-memory cache: avoid synchronous file I/O on hot paths (stdout data handler, queue capacity check)
 let _settingsCache: SystemSettings | null = null;
 let _settingsMtimeMs = 0;
@@ -2978,30 +3235,29 @@ function readSystemSettingsFromFile(): SystemSettings | null {
   const raw = JSON.parse(
     fs.readFileSync(SYSTEM_SETTINGS_FILE, 'utf-8'),
   ) as Record<string, unknown>;
-  return {
-    containerTimeout:
-      typeof raw.containerTimeout === 'number' && raw.containerTimeout > 0
-        ? raw.containerTimeout
-        : DEFAULT_SYSTEM_SETTINGS.containerTimeout,
+  const normalized: SystemSettings = {
+    runtimeTimeout: readPositiveNumber(
+      raw,
+      'runtimeTimeout',
+      'containerTimeout',
+      DEFAULT_SYSTEM_SETTINGS.runtimeTimeout,
+    ),
     idleTimeout:
       typeof raw.idleTimeout === 'number' && raw.idleTimeout > 0
         ? raw.idleTimeout
         : DEFAULT_SYSTEM_SETTINGS.idleTimeout,
-    containerMaxOutputSize:
-      typeof raw.containerMaxOutputSize === 'number' &&
-      raw.containerMaxOutputSize > 0
-        ? raw.containerMaxOutputSize
-        : DEFAULT_SYSTEM_SETTINGS.containerMaxOutputSize,
-    maxConcurrentContainers:
-      typeof raw.maxConcurrentContainers === 'number' &&
-      raw.maxConcurrentContainers > 0
-        ? raw.maxConcurrentContainers
-        : DEFAULT_SYSTEM_SETTINGS.maxConcurrentContainers,
-    maxConcurrentHostProcesses:
-      typeof raw.maxConcurrentHostProcesses === 'number' &&
-      raw.maxConcurrentHostProcesses > 0
-        ? raw.maxConcurrentHostProcesses
-        : DEFAULT_SYSTEM_SETTINGS.maxConcurrentHostProcesses,
+    runtimeMaxOutputSize: readPositiveNumber(
+      raw,
+      'runtimeMaxOutputSize',
+      'containerMaxOutputSize',
+      DEFAULT_SYSTEM_SETTINGS.runtimeMaxOutputSize,
+    ),
+    maxConcurrentRuntimes: readPositiveNumber(
+      raw,
+      'maxConcurrentRuntimes',
+      'maxConcurrentContainers',
+      DEFAULT_SYSTEM_SETTINGS.maxConcurrentRuntimes,
+    ),
     maxLoginAttempts:
       typeof raw.maxLoginAttempts === 'number' && raw.maxLoginAttempts > 0
         ? raw.maxLoginAttempts
@@ -3079,29 +3335,37 @@ function readSystemSettingsFromFile(): SystemSettings | null {
         ? raw.defaultClaudeModel.trim()
         : DEFAULT_SYSTEM_SETTINGS.defaultClaudeModel,
   };
+  if (
+    raw.containerTimeout !== undefined ||
+    raw.containerMaxOutputSize !== undefined ||
+    raw.maxConcurrentContainers !== undefined
+  ) {
+    const tmp = `${SYSTEM_SETTINGS_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(normalized, null, 2) + '\n', 'utf-8');
+    fs.renameSync(tmp, SYSTEM_SETTINGS_FILE);
+  }
+  return normalized;
 }
 
 function buildEnvFallbackSettings(): SystemSettings {
   return {
-    containerTimeout: parseIntEnv(
-      process.env.CONTAINER_TIMEOUT,
-      DEFAULT_SYSTEM_SETTINGS.containerTimeout,
+    runtimeTimeout: parseIntEnv(
+      process.env.RUNTIME_TIMEOUT ?? process.env.CONTAINER_TIMEOUT,
+      DEFAULT_SYSTEM_SETTINGS.runtimeTimeout,
     ),
     idleTimeout: parseIntEnv(
       process.env.IDLE_TIMEOUT,
       DEFAULT_SYSTEM_SETTINGS.idleTimeout,
     ),
-    containerMaxOutputSize: parseIntEnv(
-      process.env.CONTAINER_MAX_OUTPUT_SIZE,
-      DEFAULT_SYSTEM_SETTINGS.containerMaxOutputSize,
+    runtimeMaxOutputSize: parseIntEnv(
+      process.env.RUNTIME_MAX_OUTPUT_SIZE ??
+        process.env.CONTAINER_MAX_OUTPUT_SIZE,
+      DEFAULT_SYSTEM_SETTINGS.runtimeMaxOutputSize,
     ),
-    maxConcurrentContainers: parseIntEnv(
-      process.env.MAX_CONCURRENT_CONTAINERS,
-      DEFAULT_SYSTEM_SETTINGS.maxConcurrentContainers,
-    ),
-    maxConcurrentHostProcesses: parseIntEnv(
-      process.env.MAX_CONCURRENT_HOST_PROCESSES,
-      DEFAULT_SYSTEM_SETTINGS.maxConcurrentHostProcesses,
+    maxConcurrentRuntimes: parseIntEnv(
+      process.env.MAX_CONCURRENT_RUNTIMES ??
+        process.env.MAX_CONCURRENT_CONTAINERS,
+      DEFAULT_SYSTEM_SETTINGS.maxConcurrentRuntimes,
     ),
     maxLoginAttempts: parseIntEnv(
       process.env.MAX_LOGIN_ATTEMPTS,
@@ -3214,21 +3478,17 @@ export function saveSystemSettings(
   const merged: SystemSettings = { ...existing, ...partial };
 
   // Range validation
-  if (merged.containerTimeout < 60000) merged.containerTimeout = 60000; // min 1 min
-  if (merged.containerTimeout > 86400000) merged.containerTimeout = 86400000; // max 24 hours
+  if (merged.runtimeTimeout < 60000) merged.runtimeTimeout = 60000; // min 1 min
+  if (merged.runtimeTimeout > 86400000) merged.runtimeTimeout = 86400000; // max 24 hours
   if (merged.idleTimeout < 60000) merged.idleTimeout = 60000;
   if (merged.idleTimeout > 86400000) merged.idleTimeout = 86400000;
-  if (merged.containerMaxOutputSize < 1048576)
-    merged.containerMaxOutputSize = 1048576; // min 1MB
-  if (merged.containerMaxOutputSize > 104857600)
-    merged.containerMaxOutputSize = 104857600; // max 100MB
-  if (merged.maxConcurrentContainers < 1) merged.maxConcurrentContainers = 1;
-  if (merged.maxConcurrentContainers > 100)
-    merged.maxConcurrentContainers = 100;
-  if (merged.maxConcurrentHostProcesses < 1)
-    merged.maxConcurrentHostProcesses = 1;
-  if (merged.maxConcurrentHostProcesses > 50)
-    merged.maxConcurrentHostProcesses = 50;
+  if (merged.runtimeMaxOutputSize < 1048576)
+    merged.runtimeMaxOutputSize = 1048576; // min 1MB
+  if (merged.runtimeMaxOutputSize > 104857600)
+    merged.runtimeMaxOutputSize = 104857600; // max 100MB
+  if (merged.maxConcurrentRuntimes < 1) merged.maxConcurrentRuntimes = 1;
+  if (merged.maxConcurrentRuntimes > 100)
+    merged.maxConcurrentRuntimes = 100;
   if (merged.maxLoginAttempts < 1) merged.maxLoginAttempts = 1;
   if (merged.maxLoginAttempts > 100) merged.maxLoginAttempts = 100;
   if (merged.loginLockoutMinutes < 1) merged.loginLockoutMinutes = 1;
@@ -3294,7 +3554,7 @@ export function saveSystemSettings(
 
 export interface UserIMPreferences {
   autoCreateWorkspaceForGroups?: boolean;
-  autoCreateExecutionMode?: 'host' | 'container';
+  autoCreateExecutionMode?: 'local';
 }
 
 export function getUserIMPreferences(userId: string): UserIMPreferences {
@@ -3302,7 +3562,15 @@ export function getUserIMPreferences(userId: string): UserIMPreferences {
   try {
     if (!fs.existsSync(filePath)) return {};
     const content = fs.readFileSync(filePath, 'utf-8');
-    return JSON.parse(content) as UserIMPreferences;
+    const parsed = JSON.parse(content) as {
+      autoCreateWorkspaceForGroups?: boolean;
+      autoCreateExecutionMode?: string;
+    };
+    return {
+      autoCreateWorkspaceForGroups: parsed.autoCreateWorkspaceForGroups,
+      autoCreateExecutionMode:
+        parsed.autoCreateExecutionMode !== undefined ? 'local' : undefined,
+    };
   } catch (err) {
     logger.warn({ err, userId }, 'Failed to read user IM preferences');
     return {};

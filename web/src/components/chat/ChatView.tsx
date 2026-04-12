@@ -1,16 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useChatStore } from '../../stores/chat';
+import { getRouteJid, resolveStoreJid, useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
 import { StreamingDisplay } from './StreamingDisplay';
 
 import { FilePanel } from './FilePanel';
-import { ContainerEnvPanel } from './ContainerEnvPanel';
+import { RuntimeEnvPanel } from './RuntimeEnvPanel';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
-import { ArrowLeft, FolderOpen, Link, MessageSquare, Monitor, Moon, MoreHorizontal, PanelRightClose, PanelRightOpen, Search, Server, Sun, Terminal, Users, Variable, X, Zap } from 'lucide-react';
+import { ArrowLeft, FolderOpen, Link, MessageSquare, Monitor, Moon, MoreHorizontal, PanelRightClose, PanelRightOpen, Search, Server, Sun, Terminal, Variable, X, Zap } from 'lucide-react';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
 import { useTheme } from '../../hooks/useTheme';
 import { cn } from '@/lib/utils';
@@ -19,7 +19,6 @@ import { api } from '../../api/client';
 import { TerminalPanel } from './TerminalPanel';
 import { GroupSkillsPanel } from './GroupSkillsPanel';
 import { GroupMcpPanel } from './GroupMcpPanel';
-import { GroupMembersPanel } from './GroupMembersPanel';
 import { SearchPanel } from './SearchPanel';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { AgentTabBar } from './AgentTabBar';
@@ -35,7 +34,6 @@ const SIDEBAR_TABS = [
   { id: 'env' as const, icon: Variable, label: '环境变量' },
   { id: 'skills' as const, icon: Zap, label: '技能' },
   { id: 'mcp' as const, icon: Server, label: 'MCP 服务器' },
-  { id: 'members' as const, icon: Users, label: '成员' },
 ];
 
 /** Inline elapsed-time counter for running tasks */
@@ -61,7 +59,7 @@ const TERMINAL_MAX_RATIO = 0.7;
 // Stable empty references to avoid infinite re-render loops in Zustand selectors
 const EMPTY_AGENTS: import('../../types').AgentInfo[] = [];
 
-type SidebarTab = 'search' | 'files' | 'env' | 'skills' | 'mcp' | 'members';
+type SidebarTab = 'search' | 'files' | 'env' | 'skills' | 'mcp';
 
 interface ChatViewProps {
   groupJid: string;
@@ -134,26 +132,16 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const agentHasMore = useChatStore(s => s.agentHasMore);
 
   const currentUser = useAuthStore(s => s.user);
-  const canUseTerminal = group?.execution_mode !== 'host';
+  const canUseTerminal = !!group;
   const pollRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
-  // Sidebar: members tab visibility
-  const isHome = !!group?.is_home;
-  const showMembersTab = (!!group?.is_shared || group?.member_role === 'owner') && !isHome;
-  const visibleTabs = SIDEBAR_TABS.filter(t => t.id !== 'members' || showMembersTab);
-
-  // Fallback: if current tab is hidden, reset to files
-  useEffect(() => {
-    if (sidebarTab === 'members' && !showMembersTab) setSidebarTab('files');
-  }, [sidebarTab, showMembersTab]);
+  const isHome = group?.session_kind === 'main';
+  const visibleTabs = SIDEBAR_TABS;
 
   // Fetch IM connection status for home groups
   const isOwnHome =
     isHome &&
-    (
-      (!!group?.created_by && group.created_by === currentUser?.id) ||
-      (currentUser?.role === 'admin' && group?.folder === 'main')
-    );
+    !!currentUser;
   useEffect(() => {
     if (!isOwnHome) { setImStatus(null); return; }
     let active = true;
@@ -263,7 +251,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   // 监听 WebSocket 流式事件
   useEffect(() => {
     const unsub1 = wsManager.on('stream_event', (data: any) => {
-      if (data.chatJid === groupJid) {
+      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === groupJid) {
         handleStreamEvent(groupJid, data.event, data.agentId);
         // Sync permission mode when agent calls ExitPlanMode/EnterPlanMode
         if (data.event?.eventType === 'mode_change' && data.event?.permissionMode) {
@@ -274,23 +262,23 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     });
     // agent_reply 作为 fallback：如果 new_message 已处理则为 no-op
     const unsub2 = wsManager.on('agent_reply', (data: any) => {
-      if (data.chatJid === groupJid) clearStreaming(groupJid);
+      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === groupJid) clearStreaming(groupJid);
     });
     // 通过 new_message 立即添加消息到本地状态（消除轮询延迟导致的消息"丢失"）
     const unsub3 = wsManager.on('new_message', (data: any) => {
-      if (data.chatJid === groupJid && data.message) {
+      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === groupJid && data.message) {
         handleWsNewMessage(groupJid, data.message, data.agentId);
       }
     });
     // 子 Agent 状态变更
     const unsub4 = wsManager.on('agent_status', (data: any) => {
-      if (data.chatJid === groupJid) {
+      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === groupJid) {
         handleAgentStatus(groupJid, data.agentId, data.status, data.name, data.prompt, data.resultSummary, data.kind);
       }
     });
     // Agent 生命周期状态（queued / capacity_wait / starting）
     const unsub5 = wsManager.on('runner_state', (data: any) => {
-      if (data.chatJid === groupJid) {
+      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === groupJid) {
         handleRunnerState(groupJid, data.state, data.detail);
       }
     });
@@ -323,11 +311,11 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     setPermissionMode(newMode);
     try {
       const res = await api.put<{ success: boolean; mode: string; applied: boolean }>(
-        `/api/groups/${encodeURIComponent(groupJid)}/mode`, { mode: newMode },
+        `/api/sessions/${encodeURIComponent(getRouteJid(useChatStore.getState().groups, groupJid))}/mode`, { mode: newMode },
       );
       if (res.applied === false) {
         const label = newMode === 'plan' ? 'Plan' : 'Code';
-        showToast(`已切换到 ${label} 模式`, '容器未运行，模式将在下次启动时生效');
+        showToast(`已切换到 ${label} 模式`, 'Runtime 未运行，模式将在下次启动时生效');
       }
     } catch {
       // Revert on failure
@@ -409,7 +397,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     setMobileTerminal(false);
   }, [groupJid]);
 
-  // If current group is host mode, force-close any mounted terminal.
+  // If the current group disappears, force-close any mounted terminal.
   useEffect(() => {
     if (canUseTerminal) return;
     setTerminalVisible(false);
@@ -431,7 +419,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     return (
       <div className="h-full flex items-center justify-center bg-background">
         <div className="text-center">
-          <p className="text-slate-500">群组不存在</p>
+          <p className="text-slate-500">会话不存在</p>
         </div>
       </div>
     );
@@ -454,21 +442,12 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         <div className="flex-1 min-w-0">
           <h2 className="font-semibold text-slate-900 text-[15px] truncate">{group.name}</h2>
           <div className="flex items-center gap-1.5 text-xs text-slate-500">
-            <span>{isWaiting ? '正在思考...' : group.is_home ? '主工作区' : '工作区'}</span>
-            {!isWaiting && group.is_shared && (
+            <span>{isWaiting ? '正在思考...' : isHome ? '主会话' : '工作会话'}</span>
+            {!isWaiting && group && (
               <>
                 <span className="text-slate-300">·</span>
-                <span className="inline-flex items-center gap-0.5">
-                  <Users className="w-3 h-3" />
-                  {group.member_count ?? 0} 人协作
-                </span>
-              </>
-            )}
-            {!isWaiting && group.execution_mode && (
-              <>
-                <span className="text-slate-300">·</span>
-                <span className={`inline-flex items-center px-1 py-px rounded text-[10px] font-medium ${group.execution_mode === 'host' ? 'bg-amber-100 text-amber-700' : 'bg-sky-100 text-sky-700'}`}>
-                  {group.execution_mode === 'host' ? '宿主机' : 'Docker'}
+                <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-medium bg-emerald-100 text-emerald-700">
+                  本地运行
                 </span>
               </>
             )}
@@ -544,9 +523,9 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       {isOwnHome && imStatus && !imStatus.feishu && !imStatus.telegram && !imBannerDismissed && (
         <div className="flex items-center gap-2 px-4 py-2 bg-amber-50 border-b border-amber-200 text-amber-800 text-sm">
           <Link className="w-4 h-4 flex-shrink-0" />
-          <span className="flex-1 min-w-0">未配置 IM 渠道，飞书 / Telegram 消息无法与主工作区互通</span>
+          <span className="flex-1 min-w-0">未配置 IM 渠道，飞书 / Telegram 消息无法与主会话互通</span>
           <button
-            onClick={() => navigate('/setup/channels')}
+            onClick={() => navigate('/settings?tab=my-channels')}
             className="flex-shrink-0 px-3 py-1 text-xs font-medium rounded-md bg-amber-600 text-white hover:bg-amber-700 transition-colors cursor-pointer"
           >
             去配置
@@ -825,11 +804,9 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
             ) : sidebarTab === 'files' ? (
               <FilePanel groupJid={groupJid} />
             ) : sidebarTab === 'env' ? (
-              <ContainerEnvPanel groupJid={groupJid} />
+              <RuntimeEnvPanel sessionId={groupJid} session={group} />
             ) : sidebarTab === 'mcp' ? (
               <GroupMcpPanel groupJid={groupJid} />
-            ) : sidebarTab === 'members' ? (
-              <GroupMembersPanel groupJid={groupJid} />
             ) : (
               <GroupSkillsPanel groupJid={groupJid} />
             )}
@@ -889,11 +866,12 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       <Sheet open={mobilePanel === 'env'} onOpenChange={(v) => !v && setMobilePanel(null)}>
         <SheetContent side="bottom" className="h-[80dvh] p-0">
           <SheetHeader className="px-4 pt-4 pb-2">
-            <SheetTitle>工作区环境变量</SheetTitle>
+            <SheetTitle>会话运行环境</SheetTitle>
           </SheetHeader>
           <div className="flex-1 overflow-hidden h-[calc(80dvh-56px)]">
-            <ContainerEnvPanel
-              groupJid={groupJid}
+            <RuntimeEnvPanel
+              sessionId={groupJid}
+              session={group}
               onClose={() => setMobilePanel(null)}
             />
           </div>
@@ -926,18 +904,6 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         </SheetContent>
       </Sheet>
 
-      {/* Mobile: members sheet */}
-      <Sheet open={mobilePanel === 'members'} onOpenChange={(v) => !v && setMobilePanel(null)}>
-        <SheetContent side="bottom" className="h-[80dvh] p-0">
-          <SheetHeader className="px-4 pt-4 pb-2">
-            <SheetTitle>成员管理</SheetTitle>
-          </SheetHeader>
-          <div className="flex-1 overflow-hidden h-[calc(80dvh-56px)]">
-            <GroupMembersPanel groupJid={groupJid} />
-          </div>
-        </SheetContent>
-      </Sheet>
-
       {/* Mobile: Terminal sheet */}
       <Sheet open={mobileTerminal} onOpenChange={(v) => !v && setMobileTerminal(false)}>
         <SheetContent side="bottom" className="h-[85dvh] p-0">
@@ -959,14 +925,14 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       <Sheet open={mobileActionsOpen} onOpenChange={(v) => !v && setMobileActionsOpen(false)}>
         <SheetContent side="bottom" className="pb-[env(safe-area-inset-bottom)]">
           <SheetHeader>
-            <SheetTitle>工作区操作</SheetTitle>
+            <SheetTitle>会话操作</SheetTitle>
           </SheetHeader>
           <div className="space-y-2 pt-2">
             <button
               onClick={openMobileFiles}
               className="w-full text-left px-4 py-3 rounded-lg border border-border hover:bg-accent transition-colors cursor-pointer text-foreground text-sm"
             >
-              工作区文件
+              会话文件
             </button>
             <button
               onClick={openMobileEnv}
@@ -986,14 +952,6 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
             >
               MCP 服务器
             </button>
-            {showMembersTab && (
-              <button
-                onClick={() => { setMobileActionsOpen(false); setMobilePanel('members'); }}
-                className="w-full text-left px-4 py-3 rounded-lg border border-border hover:bg-accent transition-colors cursor-pointer text-foreground text-sm"
-              >
-                成员管理
-              </button>
-            )}
             {canUseTerminal && (
               <button
                 onClick={() => {
@@ -1017,7 +975,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         title="清除上下文"
         message={resetAgentId
           ? '将清除该子会话的 Claude 会话上下文，下次发送消息时将开始全新会话。聊天记录不受影响。'
-          : '将清除 Claude 会话上下文并停止运行中的工作区进程，下次发送消息时将开始全新会话。聊天记录不受影响。'
+          : '将清除 Claude 会话上下文并停止当前会话的运行环境，下次发送消息时将开始全新会话。聊天记录不受影响。'
         }
         confirmText="清除"
         confirmVariant="danger"

@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { api } from '../api/client';
 
-export interface ContainerEnvPublicConfig {
+export interface RuntimeEnvPublicConfig {
   anthropicBaseUrl: string;
   anthropicAuthTokenMasked: string | null;
   anthropicApiKeyMasked: string | null;
@@ -11,10 +11,13 @@ export interface ContainerEnvPublicConfig {
   hasClaudeCodeOauthToken: boolean;
   happyclawModel: string;
   customEnv: Record<string, string>;
+  codexBaseUrl: string;
+  codexDefaultModel: string;
+  codexCustomEnv: Record<string, string>;
 }
 
-interface ContainerEnvState {
-  configs: Record<string, ContainerEnvPublicConfig>;
+interface RuntimeEnvState {
+  configs: Record<string, RuntimeEnvPublicConfig>;
   loading: boolean;
   saving: boolean;
   error: string | null;
@@ -27,10 +30,13 @@ interface ContainerEnvState {
     claudeCodeOauthToken?: string;
     happyclawModel?: string;
     customEnv?: Record<string, string>;
+    codexBaseUrl?: string;
+    codexDefaultModel?: string;
+    codexCustomEnv?: Record<string, string>;
   }) => Promise<boolean>;
 }
 
-export const useContainerEnvStore = create<ContainerEnvState>((set) => ({
+export const useRuntimeEnvStore = create<RuntimeEnvState>((set) => ({
   configs: {},
   loading: false,
   saving: false,
@@ -39,8 +45,8 @@ export const useContainerEnvStore = create<ContainerEnvState>((set) => ({
   loadConfig: async (jid: string) => {
     set({ loading: true, error: null });
     try {
-      const data = await api.get<ContainerEnvPublicConfig>(
-        `/api/groups/${encodeURIComponent(jid)}/env`
+      const data = await api.get<RuntimeEnvPublicConfig>(
+        `/api/sessions/${encodeURIComponent(jid)}/env`
       );
       set((s) => ({
         configs: { ...s.configs, [jid]: data },
@@ -48,7 +54,7 @@ export const useContainerEnvStore = create<ContainerEnvState>((set) => ({
       }));
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to load config';
-      console.error('Failed to load container env config:', err);
+      console.error('Failed to load runtime env config:', err);
       set({ loading: false, error: msg });
     }
   },
@@ -56,8 +62,8 @@ export const useContainerEnvStore = create<ContainerEnvState>((set) => ({
   saveConfig: async (jid, data) => {
     set({ saving: true });
     try {
-      const result = await api.put<ContainerEnvPublicConfig>(
-        `/api/groups/${encodeURIComponent(jid)}/env`,
+      const result = await api.put<RuntimeEnvPublicConfig>(
+        `/api/sessions/${encodeURIComponent(jid)}/env`,
         data,
       );
       set((s) => ({
@@ -67,7 +73,7 @@ export const useContainerEnvStore = create<ContainerEnvState>((set) => ({
       return true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to save config';
-      console.error('Failed to save container env config:', err);
+      console.error('Failed to save runtime env config:', err);
       set({ saving: false, error: msg });
       return false;
     }

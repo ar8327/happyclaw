@@ -1,14 +1,9 @@
-import { execFile, spawn } from 'child_process';
-import path from 'path';
-import readline from 'readline';
-import { promisify } from 'util';
-
 import { Hono } from 'hono';
+import path from 'path';
 import type { Variables } from '../web-context.js';
-import { authMiddleware, systemConfigMiddleware } from '../middleware/auth.js';
+import { authMiddleware } from '../middleware/auth.js';
 import type { AuthUser } from '../types.js';
 import {
-  isHostExecutionGroup,
   hasHostExecutionPermission,
   canAccessGroup,
   getWebDeps,
@@ -16,13 +11,10 @@ import {
 import {
   getRegisteredGroup,
   getRouterState,
-  hasContainerModeGroups,
+  getSessionRecord,
 } from '../db.js';
-import { CONTAINER_IMAGE } from '../config.js';
 import { getSystemSettings } from '../runtime-config.js';
 import { logger } from '../logger.js';
-
-const execFileAsync = promisify(execFile);
 
 // --- Claude Code version cache (1h TTL) ---
 
@@ -61,6 +53,9 @@ async function getClaudeCodeVersion(): Promise<string | null> {
 
   for (const { cmd, args } of candidates) {
     try {
+      const { execFile } = await import('child_process');
+      const { promisify } = await import('util');
+      const execFileAsync = promisify(execFile);
       const { stdout } = await execFileAsync(cmd, args, { timeout: 5000 });
       const version = stdout.trim() || null;
       if (version) {
@@ -76,34 +71,46 @@ async function getClaudeCodeVersion(): Promise<string | null> {
   return null;
 }
 
-// --- Docker build state ---
+function resolveRuntimeAccess(
+  runtimeJid: string,
+): {
+  accessJid: string;
+  sessionId: string | null;
+  runnerId: 'claude' | 'codex';
+  runtimeMode: 'local';
+} | null {
+  const agentSep = runtimeJid.indexOf('#agent:');
+  if (agentSep >= 0) {
+    const accessJid = runtimeJid.slice(0, agentSep);
+    const agentId = runtimeJid.slice(agentSep + '#agent:'.length);
+    const group = getRegisteredGroup(accessJid);
+    const workerSession = agentId ? getSessionRecord(`worker:${agentId}`) : undefined;
+    const parentSession = workerSession?.parent_session_id
+      ? getSessionRecord(workerSession.parent_session_id)
+      : undefined;
+    if (!group || !workerSession) return null;
+    return {
+      accessJid,
+      sessionId: workerSession.id,
+      runnerId: workerSession.runner_id || parentSession?.runner_id || 'claude',
+      runtimeMode: 'local',
+    };
+  }
 
-let buildState: {
-  building: boolean;
-  startedAt: number | null;
-  startedBy: string | null;
-  logs: string[];
-  result: { success: boolean; error?: string } | null;
-} = {
-  building: false,
-  startedAt: null,
-  startedBy: null,
-  logs: [],
-  result: null,
-};
+  const group = getRegisteredGroup(runtimeJid);
+  if (!group) return null;
+  const session = getSessionRecord(`main:${group.folder}`);
+  return {
+    accessJid: runtimeJid,
+    sessionId: session?.id || null,
+    runnerId: session?.runner_id || (group.llm_provider === 'openai' ? 'codex' : 'claude'),
+    runtimeMode: 'local',
+  };
+}
 
-// --- Dependency injection (avoid circular imports) ---
-
-let broadcastLog: ((line: string) => void) | null = null;
-let broadcastComplete: ((success: boolean, error?: string) => void) | null =
-  null;
-
-export function injectMonitorDeps(deps: {
-  broadcastDockerBuildLog: (line: string) => void;
-  broadcastDockerBuildComplete: (success: boolean, error?: string) => void;
-}) {
-  broadcastLog = deps.broadcastDockerBuildLog;
-  broadcastComplete = deps.broadcastDockerBuildComplete;
+function normalizeRuntimeLabel(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  return raw.startsWith('host-') ? `local-${raw.slice('host-'.length)}` : raw;
 }
 
 const monitorRoutes = new Hono<{ Variables: Variables }>();
@@ -149,21 +156,6 @@ monitorRoutes.get('/health', async (c) => {
   return c.json({ status, checks }, statusCode);
 });
 
-async function checkDockerImageExists(): Promise<boolean> {
-  // Skip Docker check entirely when no groups use container mode
-  if (!hasContainerModeGroups()) return false;
-  try {
-    const { stdout } = await execFileAsync(
-      'docker',
-      ['images', CONTAINER_IMAGE, '--format', '{{.ID}}'],
-      { timeout: 10000 },
-    );
-    return stdout.trim().length > 0;
-  } catch {
-    return false;
-  }
-}
-
 // GET /api/status - 获取系统状态
 monitorRoutes.get('/status', authMiddleware, async (c) => {
   const deps = getWebDeps();
@@ -171,166 +163,61 @@ monitorRoutes.get('/status', authMiddleware, async (c) => {
 
   const authUser = c.get('user') as AuthUser;
   const isAdmin = hasHostExecutionPermission(authUser);
-  const queueStatus = deps.queue.getStatus();
+  const queueStatus = deps.queue.getRuntimeStatus();
 
   // 监控页面属于系统管理功能，admin 可见所有群组状态（不受工作区隔离约束）
   const filteredGroups = isAdmin
     ? queueStatus.groups
     : queueStatus.groups.filter((g) => {
-        const group = getRegisteredGroup(g.jid);
+        const resolved = resolveRuntimeAccess(g.jid);
+        if (!resolved) return false;
+        const group = getRegisteredGroup(resolved.accessJid);
         if (!group) return false;
-        if (isHostExecutionGroup(group)) return false;
-        return canAccessGroup({ id: authUser.id, role: authUser.role }, group);
+        return canAccessGroup(
+          { id: authUser.id, role: authUser.role },
+          { ...group, jid: resolved.accessJid },
+        );
       });
 
-  const dockerImageExists = await checkDockerImageExists();
+  const runtimeSessions = filteredGroups.map((runtime) => {
+    const resolved = resolveRuntimeAccess(runtime.jid);
+    return {
+      ...runtime,
+      session_id: resolved?.sessionId || null,
+      runtime_mode: resolved?.runtimeMode || 'local',
+      runner_id: resolved?.runnerId || 'claude',
+      runtime_identifier: normalizeRuntimeLabel(runtime.runtimeIdentifier),
+      runtime_label: normalizeRuntimeLabel(runtime.runtimeLabel),
+    };
+  });
 
   // For non-admin users, derive aggregate metrics from their own filtered groups only
-  // to prevent leaking global system load information across users
-  let activeContainers: number;
-  let queueLength: number;
-  if (isAdmin) {
-    activeContainers = queueStatus.activeContainerCount;
-    queueLength = queueStatus.waitingCount;
-  } else {
-    activeContainers = filteredGroups.filter((g) => g.active).length;
-    // Filter waiting groups by user ownership
-    queueLength = queueStatus.waitingGroupJids.filter((jid) => {
-      const group = getRegisteredGroup(jid);
-      if (!group) return false;
-      if (isHostExecutionGroup(group)) return false;
-      return canAccessGroup({ id: authUser.id, role: authUser.role }, group);
-    }).length;
-  }
+  // to prevent leaking global system load information across users.
+  const activeRuntimes = isAdmin
+    ? queueStatus.activeCount
+    : filteredGroups.filter((g) => g.active).length;
+  const queueLength = isAdmin
+    ? queueStatus.waitingCount
+    : queueStatus.waitingGroupJids.filter((jid) => {
+        const resolved = resolveRuntimeAccess(jid);
+        if (!resolved) return false;
+        const group = getRegisteredGroup(resolved.accessJid);
+        if (!group) return false;
+        return canAccessGroup(
+          { id: authUser.id, role: authUser.role },
+          { ...group, jid: resolved.accessJid },
+        );
+      }).length;
 
   return c.json({
-    activeContainers,
-    activeHostProcesses: isAdmin
-      ? queueStatus.activeHostProcessCount
-      : undefined,
-    activeTotal: isAdmin ? queueStatus.activeCount : activeContainers,
-    maxConcurrentContainers: getSystemSettings().maxConcurrentContainers,
-    maxConcurrentHostProcesses: isAdmin
-      ? getSystemSettings().maxConcurrentHostProcesses
-      : undefined,
+    activeRuntimes,
+    maxConcurrentRuntimes: getSystemSettings().maxConcurrentRuntimes,
     queueLength,
     uptime: Math.floor(process.uptime()),
-    groups: filteredGroups,
-    dockerImageExists,
-    dockerBuildInProgress: buildState.building,
+    groups: runtimeSessions,
+    sessions: runtimeSessions,
     claudeCodeVersion: isAdmin ? await getClaudeCodeVersion() : undefined,
-    dockerBuildLogs:
-      isAdmin && buildState.building ? buildState.logs.slice(-50) : undefined,
-    dockerBuildResult: isAdmin ? buildState.result : undefined,
   });
 });
-
-// POST /api/docker/build - 构建 Docker 镜像（仅 admin，异步启动 + WS 推送进度）
-monitorRoutes.post(
-  '/docker/build',
-  authMiddleware,
-  systemConfigMiddleware,
-  async (c) => {
-    if (buildState.building) {
-      return c.json(
-        {
-          error: 'Docker image build already in progress',
-          startedAt: buildState.startedAt,
-          startedBy: buildState.startedBy,
-        },
-        409,
-      );
-    }
-
-    const authUser = c.get('user') as AuthUser;
-    const buildScript = path.resolve(process.cwd(), 'container', 'build.sh');
-
-    buildState = {
-      building: true,
-      startedAt: Date.now(),
-      startedBy: authUser.username,
-      logs: [],
-      result: null,
-    };
-    logger.info(
-      { startedBy: authUser.username },
-      'Docker image build requested via API',
-    );
-
-    // Spawn build process asynchronously
-    const proc = spawn('bash', [buildScript], {
-      cwd: path.resolve(process.cwd(), 'container'),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    // 10-minute timeout
-    const timeout = setTimeout(
-      () => {
-        proc.kill('SIGKILL');
-        const errMsg = 'Docker build timed out after 10 minutes';
-        logger.error(errMsg);
-        buildState.building = false;
-        buildState.result = { success: false, error: errMsg };
-        broadcastLog?.(errMsg);
-        broadcastComplete?.(false, errMsg);
-      },
-      10 * 60 * 1000,
-    );
-
-    const pushLine = (line: string) => {
-      buildState.logs.push(line);
-      // Keep last 200 lines in memory
-      if (buildState.logs.length > 200) {
-        buildState.logs = buildState.logs.slice(-200);
-      }
-      broadcastLog?.(line);
-    };
-
-    // Read stdout and stderr line by line
-    if (proc.stdout) {
-      const rl = readline.createInterface({ input: proc.stdout });
-      rl.on('line', pushLine);
-    }
-    if (proc.stderr) {
-      const rl = readline.createInterface({ input: proc.stderr });
-      rl.on('line', pushLine);
-    }
-
-    proc.on('close', (code) => {
-      clearTimeout(timeout);
-      const success = code === 0;
-      const error = success
-        ? undefined
-        : `Build process exited with code ${code}`;
-      if (success) {
-        logger.info('Docker image build completed');
-      } else {
-        logger.error({ code }, 'Docker image build failed');
-      }
-      buildState.building = false;
-      buildState.result = { success, error };
-      broadcastComplete?.(success, error);
-    });
-
-    proc.on('error', (err) => {
-      clearTimeout(timeout);
-      const errorMsg = err.message;
-      logger.error({ err }, 'Docker image build process error');
-      buildState.building = false;
-      buildState.result = { success: false, error: errorMsg };
-      broadcastComplete?.(false, errorMsg);
-    });
-
-    // Return immediately with 202 Accepted
-    return c.json(
-      {
-        accepted: true,
-        message:
-          'Docker image build started. Progress will be streamed via WebSocket.',
-      },
-      202,
-    );
-  },
-);
 
 export default monitorRoutes;

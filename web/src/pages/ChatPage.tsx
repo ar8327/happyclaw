@@ -8,22 +8,24 @@ import { ChatView } from '../components/chat/ChatView';
 import { useSwipeBack } from '../hooks/useSwipeBack';
 
 export function ChatPage() {
-  const { groupFolder } = useParams<{ groupFolder?: string }>();
+  const { sessionSlug } = useParams<{ sessionSlug?: string }>();
   const navigate = useNavigate();
   const { groups, currentGroup, selectGroup } = useChatStore();
-  const routeGroupJid = useMemo(() => {
-    if (!groupFolder) return null;
+  const routeSessionJid = useMemo(() => {
+    if (!sessionSlug) return null;
     const entry =
       Object.entries(groups).find(
         ([jid, info]) =>
-          info.folder === groupFolder && jid.startsWith('web:') && !!info.is_home,
+          info.folder === sessionSlug &&
+          jid.startsWith('web:') &&
+          info.session_kind === 'main',
       ) ||
       Object.entries(groups).find(
-        ([jid, info]) => info.folder === groupFolder && jid.startsWith('web:'),
+        ([jid, info]) => info.folder === sessionSlug && jid.startsWith('web:'),
       ) ||
-      Object.entries(groups).find(([_, info]) => info.folder === groupFolder);
+      Object.entries(groups).find(([_, info]) => info.folder === sessionSlug);
     return entry?.[0] || null;
-  }, [groupFolder, groups]);
+  }, [groups, sessionSlug]);
   const [searchParams, setSearchParams] = useSearchParams();
   const highlightId = searchParams.get('highlightId');
   const highlightTs = searchParams.get('ts');
@@ -33,29 +35,29 @@ export function ChatPage() {
   // Sync URL param to store selection. No auto-redirect to home container —
   // users land on the welcome screen and choose a container manually.
   useEffect(() => {
-    if (!groupFolder) return;
-    if (routeGroupJid && currentGroup !== routeGroupJid) {
-      selectGroup(routeGroupJid);
+    if (!sessionSlug) return;
+    if (routeSessionJid && currentGroup !== routeSessionJid) {
+      selectGroup(routeSessionJid);
       return;
     }
-    if (hasGroups && !routeGroupJid) {
+    if (hasGroups && !routeSessionJid) {
       navigate('/chat', { replace: true });
     }
-  }, [groupFolder, routeGroupJid, hasGroups, currentGroup, selectGroup, navigate]);
+  }, [sessionSlug, routeSessionJid, hasGroups, currentGroup, selectGroup, navigate]);
 
-  const activeGroupJid = groupFolder ? routeGroupJid : currentGroup;
+  const activeSessionJid = sessionSlug ? routeSessionJid : currentGroup;
   const chatViewRef = useRef<HTMLDivElement>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const loadMessagesAroundTimestamp = useChatStore((s) => s.loadMessagesAroundTimestamp);
 
   // Handle search highlight: load messages around the target and clear URL params
   useEffect(() => {
-    if (highlightId && highlightTs && activeGroupJid) {
-      loadMessagesAroundTimestamp(activeGroupJid, highlightTs, highlightId);
+    if (highlightId && highlightTs && activeSessionJid) {
+      loadMessagesAroundTimestamp(activeSessionJid, highlightTs, highlightId);
       // Clear URL params to avoid re-triggering on refresh
       setSearchParams({}, { replace: true });
     }
-  }, [highlightId, highlightTs, activeGroupJid, loadMessagesAroundTimestamp, setSearchParams]);
+  }, [highlightId, highlightTs, activeSessionJid, loadMessagesAroundTimestamp, setSearchParams]);
 
   const handleBackToList = () => {
     navigate('/chat');
@@ -66,15 +68,15 @@ export function ChatPage() {
   return (
     <div className="h-full flex">
       {/* Sidebar - Desktop: always visible, Mobile: visible in list route */}
-      <div className={`${groupFolder ? 'hidden lg:block' : 'block'} w-full ${sidebarCollapsed ? 'lg:w-0 lg:overflow-hidden' : 'lg:w-72'} flex-shrink-0 transition-all duration-200`}>
+      <div className={`${sessionSlug ? 'hidden lg:block' : 'block'} w-full ${sidebarCollapsed ? 'lg:w-0 lg:overflow-hidden' : 'lg:w-72'} flex-shrink-0 transition-all duration-200`}>
         <ChatSidebar onToggleCollapse={() => setSidebarCollapsed(true)} />
       </div>
 
       {/* Chat View - Desktop: visible when active group exists, Mobile: only in detail route */}
-      {activeGroupJid ? (
-        <div ref={chatViewRef} className={`${groupFolder ? 'flex-1' : 'hidden lg:block flex-1'}`}>
+      {activeSessionJid ? (
+        <div ref={chatViewRef} className={`${sessionSlug ? 'flex-1' : 'hidden lg:block flex-1'}`}>
           <ChatView
-            groupJid={activeGroupJid}
+            groupJid={activeSessionJid}
             onBack={handleBackToList}
             headerLeft={sidebarCollapsed ? (
               <button
@@ -107,7 +109,7 @@ export function ChatPage() {
               欢迎使用 {appearance?.appName || 'HappyClaw'}
             </h2>
             <p className="text-slate-500 text-sm">
-              从左侧选择一个工作区开始对话
+              从左侧选择一个会话开始对话
             </p>
           </div>
         </div>

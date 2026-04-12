@@ -497,7 +497,7 @@ export function CodexProviderSection({ setNotice, setError }: SettingsNotificati
                 )}
               </div>
               <p className="text-xs text-slate-500">
-                容器启动时将自动同步登录凭据，无需额外操作。
+                Runtime 启动时将自动同步登录凭据，无需额外操作。
               </p>
             </div>
           ) : (

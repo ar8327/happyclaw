@@ -94,7 +94,7 @@ export function TaskCard({ task, onPause, onResume, onDelete }: TaskCardProps) {
               </div>
 
               <div className="flex items-center gap-2">
-                <span className="text-slate-500">群组:</span>
+                <span className="text-slate-500">会话:</span>
                 <span className="text-foreground font-medium">
                   {task.group_folder}
                 </span>

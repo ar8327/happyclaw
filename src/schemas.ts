@@ -111,7 +111,7 @@ export const MessageCreateSchema = z
 
 export const GroupCreateSchema = z.object({
   name: z.string().min(1).max(MAX_GROUP_NAME_LEN),
-  execution_mode: z.enum(['container', 'host']).optional(),
+  execution_mode: z.enum(['local', 'container', 'host']).optional(),
   custom_cwd: z
     .string()
     .optional()
@@ -223,37 +223,61 @@ export const RegistrationConfigSchema = z.object({
   requireInviteCode: z.boolean(),
 });
 
-export const SystemSettingsSchema = z.object({
-  containerTimeout: z.number().int().min(60000).max(86400000).optional(),
-  idleTimeout: z.number().int().min(60000).max(86400000).optional(),
-  containerMaxOutputSize: z
-    .number()
-    .int()
-    .min(1048576)
-    .max(104857600)
-    .optional(),
-  maxConcurrentContainers: z.number().int().min(1).max(100).optional(),
-  maxConcurrentHostProcesses: z.number().int().min(1).max(50).optional(),
-  maxLoginAttempts: z.number().int().min(1).max(100).optional(),
-  loginLockoutMinutes: z.number().int().min(1).max(1440).optional(),
-  maxConcurrentScripts: z.number().int().min(1).max(50).optional(),
-  scriptTimeout: z.number().int().min(5000).max(600000).optional(),
-  billingEnabled: z.boolean().optional(),
-  billingMode: z.literal('wallet_first').optional(),
-  billingMinStartBalanceUsd: z.number().min(0).max(1000000).optional(),
-  billingCurrency: z.string().min(1).max(10).optional(),
-  billingCurrencyRate: z.number().min(0.0001).max(1000000).optional(),
-  memoryQueryTimeout: z.number().int().min(10000).max(600000).optional(),
-  memoryGlobalSleepTimeout: z.number().int().min(60000).max(3600000).optional(),
-  memorySendTimeout: z.number().int().min(30000).max(3600000).optional(),
-  turnBatchWindowMs: z.number().int().min(1000).max(60000).optional(),
-  turnMaxBatchMs: z.number().int().min(5000).max(300000).optional(),
-  traceRetentionDays: z.number().int().min(1).max(90).optional(),
-  feishuApiDomain: z.string().min(1).max(100).optional(),
-  feishuDocDomain: z.string().min(1).max(100).optional(),
-  webPublicUrl: z.string().max(200).optional(),
-  defaultClaudeModel: z.string().max(100).optional(),
-});
+export const SystemSettingsSchema = z
+  .object({
+    runtimeTimeout: z.number().int().min(60000).max(86400000).optional(),
+    idleTimeout: z.number().int().min(60000).max(86400000).optional(),
+    runtimeMaxOutputSize: z
+      .number()
+      .int()
+      .min(1048576)
+      .max(104857600)
+      .optional(),
+    maxConcurrentRuntimes: z.number().int().min(1).max(100).optional(),
+    maxLoginAttempts: z.number().int().min(1).max(100).optional(),
+    loginLockoutMinutes: z.number().int().min(1).max(1440).optional(),
+    maxConcurrentScripts: z.number().int().min(1).max(50).optional(),
+    scriptTimeout: z.number().int().min(5000).max(600000).optional(),
+    billingEnabled: z.boolean().optional(),
+    billingMode: z.literal('wallet_first').optional(),
+    billingMinStartBalanceUsd: z.number().min(0).max(1000000).optional(),
+    billingCurrency: z.string().min(1).max(10).optional(),
+    billingCurrencyRate: z.number().min(0.0001).max(1000000).optional(),
+    memoryQueryTimeout: z.number().int().min(10000).max(600000).optional(),
+    memoryGlobalSleepTimeout: z.number().int().min(60000).max(3600000).optional(),
+    memorySendTimeout: z.number().int().min(30000).max(3600000).optional(),
+    turnBatchWindowMs: z.number().int().min(1000).max(60000).optional(),
+    turnMaxBatchMs: z.number().int().min(5000).max(300000).optional(),
+    traceRetentionDays: z.number().int().min(1).max(90).optional(),
+    feishuApiDomain: z.string().min(1).max(100).optional(),
+    feishuDocDomain: z.string().min(1).max(100).optional(),
+    webPublicUrl: z.string().max(200).optional(),
+    defaultClaudeModel: z.string().max(100).optional(),
+    containerTimeout: z.number().int().min(60000).max(86400000).optional(),
+    containerMaxOutputSize: z
+      .number()
+      .int()
+      .min(1048576)
+      .max(104857600)
+      .optional(),
+    maxConcurrentContainers: z.number().int().min(1).max(100).optional(),
+  })
+  .transform((data) => {
+    const {
+      containerTimeout,
+      containerMaxOutputSize,
+      maxConcurrentContainers,
+      ...rest
+    } = data;
+    return {
+      ...rest,
+      runtimeTimeout: rest.runtimeTimeout ?? containerTimeout,
+      runtimeMaxOutputSize:
+        rest.runtimeMaxOutputSize ?? containerMaxOutputSize,
+      maxConcurrentRuntimes:
+        rest.maxConcurrentRuntimes ?? maxConcurrentContainers,
+    };
+  });
 
 export const AppearanceConfigSchema = z.object({
   appName: z.string().max(32).optional(),
@@ -452,11 +476,19 @@ export const ContainerEnvSchema = z.object({
   anthropicApiKey: z.string().max(2000).optional(),
   claudeCodeOauthToken: z.string().max(2000).optional(),
   happyclawModel: z.string().max(128).optional(),
+  codexBaseUrl: z.string().max(2000).optional(),
+  codexDefaultModel: z.string().max(128).optional(),
   customEnv: z
     .record(z.string().max(256), z.string().max(4096))
     .optional()
     .refine((env) => !env || Object.keys(env).length <= 50, {
       message: 'customEnv must have at most 50 entries',
+    }),
+  codexCustomEnv: z
+    .record(z.string().max(256), z.string().max(4096))
+    .optional()
+    .refine((env) => !env || Object.keys(env).length <= 50, {
+      message: 'codexCustomEnv must have at most 50 entries',
     }),
 });
 
@@ -612,7 +644,7 @@ export interface MemorySearchHit extends MemorySource {
 
 export const UserIMPreferencesSchema = z.object({
   autoCreateWorkspaceForGroups: z.boolean().optional(),
-  autoCreateExecutionMode: z.enum(['host', 'container']).optional(),
+  autoCreateExecutionMode: z.enum(['local', 'host', 'container']).optional(),
 });
 
 export const WeChatConfigSchema = z.object({

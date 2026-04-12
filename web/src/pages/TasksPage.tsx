@@ -23,7 +23,7 @@ export function TasksPage() {
   }, [loadTasks, loadGroups]);
 
   const handleCreateTask = async (data: {
-    groupFolder: string;
+    sessionFolder: string;
     chatJid: string;
     prompt: string;
     scheduleType: 'cron' | 'interval' | 'once';
@@ -34,7 +34,7 @@ export function TasksPage() {
     model: string;
   }) => {
     await createTask(
-      data.groupFolder,
+      data.sessionFolder,
       data.chatJid,
       data.prompt,
       data.scheduleType,
@@ -65,7 +65,7 @@ export function TasksPage() {
     }
   };
 
-  const groupsList = Object.entries(groups).map(([jid, group]) => ({
+  const sessionOptions = Object.entries(groups).map(([jid, group]) => ({
     jid,
     name: group.name,
     folder: group.folder,
@@ -179,7 +179,7 @@ export function TasksPage() {
 
       {showCreateForm && (
         <CreateTaskForm
-          groups={groupsList}
+          sessions={sessionOptions}
           onSubmit={handleCreateTask}
           onClose={() => setShowCreateForm(false)}
           isAdmin={isAdmin}

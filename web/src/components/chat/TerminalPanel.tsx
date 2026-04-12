@@ -5,6 +5,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { EyeOff, Trash2 } from 'lucide-react';
 import '@xterm/xterm/css/xterm.css';
 import { wsManager } from '../../api/ws';
+import { resolveStoreJid, useChatStore } from '../../stores/chat';
 
 type ConnectionState = 'idle' | 'connecting' | 'connected' | 'disconnected';
 
@@ -114,26 +115,26 @@ export function TerminalPanel({
 
     // 监听 WebSocket 消息
     const unsubOutput = wsManager.on('terminal_output', (data: any) => {
-      if (data.chatJid === groupJid) {
+      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === groupJid) {
         terminal.write(data.data);
       }
     });
 
     const unsubStarted = wsManager.on('terminal_started', (data: any) => {
-      if (data.chatJid === groupJid) {
+      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === groupJid) {
         syncConnState('connected');
       }
     });
 
     const unsubStopped = wsManager.on('terminal_stopped', (data: any) => {
-      if (data.chatJid === groupJid) {
+      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === groupJid) {
         syncConnState('disconnected');
         terminal.write(`\r\n\x1b[33m[${data.reason || '终端已断开'}]\x1b[0m\r\n`);
       }
     });
 
     const unsubError = wsManager.on('terminal_error', (data: any) => {
-      if (data.chatJid === groupJid) {
+      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === groupJid) {
         syncConnState('disconnected');
         // 针对工作区未运行的错误给出更友好的提示
         if (data.error?.includes('工作区未运行')) {

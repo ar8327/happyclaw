@@ -1,15 +1,16 @@
 import { create } from 'zustand';
 import { api } from '../api/client';
-import type { GroupInfo, GroupMember } from '../types';
+import type { SessionInfo, SessionMember } from '../types';
 import { useChatStore } from './chat';
 
-export type { GroupInfo };
+export type GroupInfo = SessionInfo;
+export type GroupMember = SessionMember;
 
 interface GroupsState {
-  groups: Record<string, GroupInfo>;
+  groups: Record<string, SessionInfo>;
   loading: boolean;
   error: string | null;
-  members: Record<string, GroupMember[]>;
+  members: Record<string, SessionMember[]>;
   membersLoading: boolean;
   loadGroups: () => Promise<void>;
   updateGroup: (jid: string, updates: Record<string, unknown>) => Promise<void>;
@@ -28,15 +29,25 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
   loadGroups: async () => {
     set({ loading: true });
     try {
-      const data = await api.get<{ groups: Record<string, GroupInfo> }>('/api/groups');
-      set({ groups: data.groups, loading: false, error: null });
+      const data = await api.get<{
+        sessions?: Record<string, SessionInfo>;
+        groups?: Record<string, SessionInfo>;
+      }>('/api/sessions');
+      const sessionMap = data.sessions || data.groups || {};
+      const groups = Object.fromEntries(
+        Object.entries(sessionMap).filter(
+          ([, info]) =>
+            info.session_kind === 'main' || info.session_kind === 'workspace',
+        ),
+      );
+      set({ groups, loading: false, error: null });
     } catch (err) {
       set({ loading: false, error: err instanceof Error ? err.message : String(err) });
     }
   },
 
   updateGroup: async (jid: string, updates: Record<string, unknown>) => {
-    await api.patch(`/api/groups/${encodeURIComponent(jid)}`, updates);
+    await api.patch(`/api/sessions/${encodeURIComponent(jid)}`, updates);
     await get().loadGroups();
     useChatStore.getState().loadGroups();
   },
@@ -44,7 +55,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
   loadMembers: async (jid: string) => {
     set({ membersLoading: true });
     try {
-      const data = await api.get<{ members: GroupMember[] }>(`/api/groups/${encodeURIComponent(jid)}/members`);
+      const data = await api.get<{ members: SessionMember[] }>(`/api/sessions/${encodeURIComponent(jid)}/members`);
       set((state) => ({
         members: { ...state.members, [jid]: data.members },
         membersLoading: false,
@@ -56,8 +67,8 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
   },
 
   addMember: async (jid: string, userId: string) => {
-    const data = await api.post<{ members: GroupMember[] }>(
-      `/api/groups/${encodeURIComponent(jid)}/members`,
+    const data = await api.post<{ members: SessionMember[] }>(
+      `/api/sessions/${encodeURIComponent(jid)}/members`,
       { user_id: userId },
     );
     set((state) => ({
@@ -69,8 +80,8 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
   },
 
   removeMember: async (jid: string, userId: string) => {
-    const data = await api.delete<{ members: GroupMember[] }>(
-      `/api/groups/${encodeURIComponent(jid)}/members/${encodeURIComponent(userId)}`,
+    const data = await api.delete<{ members: SessionMember[] }>(
+      `/api/sessions/${encodeURIComponent(jid)}/members/${encodeURIComponent(userId)}`,
     );
     set((state) => ({
       members: { ...state.members, [jid]: data.members },

@@ -2,16 +2,14 @@
 
 import { WebSocket } from 'ws';
 import { RegisteredGroup, UserRole } from './types.js';
-import { GroupQueue } from './group-queue.js';
+import { SessionRuntimeManager } from './session-runtime-manager.js';
 import type { AuthUser, NewMessage, MessageCursor } from './types.js';
 import type { ActiveTurn } from './turn-manager.js';
 import type { TurnObservabilitySnapshot } from './turn-observability.js';
 import type { CompressOptions } from './context-compressor.js';
 import {
-  getJidsByFolder,
-  getRegisteredGroup,
-  getGroupMemberRole,
 } from './db.js';
+import { getLocalWorkbenchAuthUser } from './local-user.js';
 
 export interface WsClientInfo {
   sessionId: string;
@@ -20,15 +18,16 @@ export interface WsClientInfo {
 }
 
 export interface WebDeps {
-  queue: GroupQueue;
+  queue: SessionRuntimeManager;
   getRegisteredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
   processGroupMessages: (chatJid: string) => Promise<boolean>;
-  ensureTerminalContainerStarted: (chatJid: string) => boolean;
+  ensureTerminalRuntimeStarted: (chatJid: string) => boolean;
   formatMessages: (messages: NewMessage[], isShared?: boolean) => string;
   getLastAgentTimestamp: () => Record<string, MessageCursor>;
   setLastAgentTimestamp: (jid: string, cursor: MessageCursor) => void;
   advanceGlobalCursor: (cursor: MessageCursor) => void;
+  trackIpcDelivery?: (jid: string) => void;
   reloadFeishuConnection?: (config: {
     appId: string;
     appSecret: string;
@@ -118,88 +117,40 @@ export function parseCookie(
   return cookies;
 }
 
-// Host execution helpers
+// Legacy execution-mode helpers. The runtime is now unified as a local
+// subprocess, so old host/container branching is no longer authoritative.
 export function isHostExecutionGroup(group: RegisteredGroup): boolean {
-  return (group.executionMode || 'container') === 'host';
+  return false;
 }
 
 export function hasHostExecutionPermission(user: AuthUser): boolean {
   return user.role === 'admin';
 }
 
-/**
- * Check if a user can access (view messages, send messages to) a group.
- * All users (including admin) follow the same visibility rules:
- * - is_home groups → only the owner (created_by) can access
- * - IM groups (jid does not start with 'web:') → owner or group_members
- * - folder === 'main' → only the admin who owns it
- * - Web groups → created_by matches user.id, or user is in group_members
- */
 export function canAccessGroup(
   user: { id: string; role: UserRole },
   group: RegisteredGroup & { jid: string },
 ): boolean {
-  if (group.is_home) return group.created_by === user.id;
-  // IM groups: check ownership if created_by is set.
-  // For legacy rows without created_by, resolve owner from sibling home group.
-  if (!group.jid.startsWith('web:')) {
-    if (group.created_by === user.id) return true;
-    // Check membership for IM groups sharing a non-home folder
-    if (getGroupMemberRole(group.folder, user.id) !== null) return true;
-    if (group.created_by) return false;
-    const siblingJids = getJidsByFolder(group.folder);
-    for (const jid of siblingJids) {
-      if (jid === group.jid) continue;
-      const sibling = getRegisteredGroup(jid);
-      if (sibling?.is_home && sibling.created_by) {
-        return sibling.created_by === user.id;
-      }
-    }
-    // Ownership cannot be resolved for this IM group → deny by default.
-    return false;
-  }
-  // folder === 'main': only accessible by the admin who owns it (via created_by or group_members)
-  if (group.folder === 'main') {
-    if (group.created_by === user.id) return true;
-    return getGroupMemberRole(group.folder, user.id) !== null;
-  }
-  if (group.created_by === user.id) return true;
-  // Check group_members table for shared workspaces
-  return getGroupMemberRole(group.folder, user.id) !== null;
+  void group;
+  return user.id === getLocalWorkbenchAuthUser().id || user.role === 'admin';
 }
 
-/**
- * Check if a user can modify (rename, reset) a group.
- * - Users can modify their own home group.
- * - Users can modify web groups they created.
- * - IM groups can be modified by their owner (created_by).
- */
 export function canModifyGroup(
   user: { id: string; role: UserRole },
   group: RegisteredGroup & { jid: string },
 ): boolean {
-  if (group.is_home) return group.created_by === user.id;
-  if (!group.jid.startsWith('web:')) return group.created_by === user.id;
-  return group.created_by === user.id;
+  return canAccessGroup(user, group);
 }
 
-/**
- * Check if a user can manage members (add/remove) of a group.
- * - Home groups cannot have members managed.
- * - Only the group creator (owner) can manage members.
- */
 export function canManageGroupMembers(
   user: { id: string; role: UserRole },
   group: RegisteredGroup & { jid: string },
 ): boolean {
-  if (group.is_home) return false;
-  return group.created_by === user.id;
+  void user;
+  void group;
+  return false;
 }
 
-/**
- * Check if a user can delete a group.
- * - is_home groups cannot be deleted by anyone.
- */
 export function canDeleteGroup(
   user: { id: string; role: UserRole },
   group: RegisteredGroup & { jid: string },

@@ -11,6 +11,7 @@ import type { StreamEvent } from './stream-event.types.js';
 export interface ContainerInput {
   prompt: string;
   sessionId?: string;
+  resumeAnchor?: string;
   groupFolder: string;
   chatJid: string;
   /** Whether this is the user's home container (admin or member). */
@@ -26,6 +27,13 @@ export interface ContainerInput {
   turnId?: string;
   /** Compressed conversation summary from previous session. */
   contextSummary?: string;
+  bootstrapState?: {
+    providerState?: Record<string, unknown>;
+    recentImChannels?: string[];
+    imChannelLastSeen?: Record<string, number>;
+    currentPermissionMode?: string | null;
+    lastMessageCursor?: string | null;
+  };
 }
 
 export interface ContainerOutput {
@@ -34,6 +42,15 @@ export interface ContainerOutput {
   newSessionId?: string;
   error?: string;
   streamEvent?: StreamEvent;
+  runtimeState?: {
+    providerSessionId?: string;
+    resumeAnchor?: string;
+    providerState?: Record<string, unknown>;
+    recentImChannels: string[];
+    imChannelLastSeen: Record<string, number>;
+    currentPermissionMode: string;
+    lastMessageCursor?: string | null;
+  };
 }
 
 export interface SessionEntry {

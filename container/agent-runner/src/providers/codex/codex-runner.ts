@@ -13,7 +13,10 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import type { ContextManager } from 'happyclaw-agent-runner-core';
-import { normalizeHomeFlags } from 'happyclaw-agent-runner-core';
+import {
+  buildChannelRoutingReminder,
+  normalizeHomeFlags,
+} from 'happyclaw-agent-runner-core';
 
 import type {
   AgentRunner,
@@ -31,6 +34,7 @@ import { createContextManager } from '../../context-manager-factory.js';
 import { CodexSession, type CodexSessionConfig } from './codex-session.js';
 import { convertThreadEvent } from './codex-event-adapter.js';
 import { saveImagesToTempFiles } from './codex-image-utils.js';
+import { CodexArchiveManager } from './codex-archive.js';
 
 // ---------------------------------------------------------------------------
 // Options
@@ -67,6 +71,9 @@ export class CodexRunner implements AgentRunner {
   private instructionsFile!: string;
   private mcpServerPath!: string;
   private tmpDir!: string;
+  private archiveMgr = new CodexArchiveManager();
+  private startFreshOnNextTurn = false;
+  private pendingRoutingReminder: string | null = null;
   private readonly opts: CodexRunnerOptions;
 
   constructor(opts: CodexRunnerOptions) {
@@ -147,6 +154,11 @@ export class CodexRunner implements AgentRunner {
     const { opts } = this;
     const { log } = opts;
 
+    const composedPrompt = this.pendingRoutingReminder
+      ? `${this.pendingRoutingReminder}\n\n${config.prompt}`
+      : config.prompt;
+    this.pendingRoutingReminder = null;
+
     // Update instructions file each turn (dynamic content may change)
     this.ctxMgr.updateDynamicContext({
       recentImChannels: opts.state.recentImChannels,
@@ -161,7 +173,13 @@ export class CodexRunner implements AgentRunner {
     }
 
     // Start or resume thread
-    this.session.startOrResume(config.resumeAt || config.sessionId || undefined);
+    this.archiveMgr.recordUserMessage(config.prompt);
+    this.session.startOrResume(
+      this.startFreshOnNextTurn
+        ? undefined
+        : (config.resumeAt || config.sessionId || undefined),
+    );
+    this.startFreshOnNextTurn = false;
 
     // Run turn and convert events
     let usage: UsageInfo | undefined;
@@ -169,7 +187,7 @@ export class CodexRunner implements AgentRunner {
     let threadId: string | null = null;
 
     try {
-      for await (const event of this.session.runTurn(config.prompt, imagePaths)) {
+      for await (const event of this.session.runTurn(composedPrompt, imagePaths)) {
         // Convert to StreamEvents
         const streamEvents = convertThreadEvent(event);
         for (const se of streamEvents) {
@@ -231,6 +249,34 @@ export class CodexRunner implements AgentRunner {
     // Emit result
     yield { kind: 'result', text: finalText, usage };
 
+    this.archiveMgr.recordTurn(usage, finalText);
+
+    if (this.archiveMgr.shouldArchive()) {
+      yield {
+        kind: 'stream_event',
+        event: {
+          eventType: 'status',
+          statusText: 'synthetic_archive:start',
+        },
+      };
+      await this.archiveMgr.archive(
+        this.opts.containerInput.groupFolder,
+        this.opts.containerInput.userId || undefined,
+      );
+      this.session.resetThread();
+      this.startFreshOnNextTurn = true;
+      const channels = [...this.opts.state.recentImChannels];
+      this.pendingRoutingReminder =
+        channels.length > 0 ? buildChannelRoutingReminder(channels) : null;
+      yield {
+        kind: 'stream_event',
+        event: {
+          eventType: 'status',
+          statusText: 'synthetic_archive:completed',
+        },
+      };
+    }
+
     // Emit resume anchor (thread ID)
     const currentThreadId = threadId || this.session.getThreadId();
     if (currentThreadId) {
@@ -260,6 +306,13 @@ export class CodexRunner implements AgentRunner {
   // query-loop uses default values
 
   async cleanup(): Promise<void> {
+    await this.archiveMgr.forceArchive(
+      this.opts.containerInput.groupFolder,
+      this.opts.containerInput.userId || undefined,
+    );
+    if (this.startFreshOnNextTurn) {
+      this.session.resetThread();
+    }
     // Clean up temp directory
     try {
       fs.rmSync(this.tmpDir, { recursive: true, force: true });

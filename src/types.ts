@@ -33,17 +33,15 @@ export interface ContainerConfig {
   timeout?: number; // Default: 300000 (5 minutes)
 }
 
-export type ExecutionMode = 'container' | 'host';
-
 export interface RegisteredGroup {
   name: string;
   folder: string;
   added_at: string;
   containerConfig?: ContainerConfig;
-  executionMode?: ExecutionMode; // 默认 'container'
-  customCwd?: string; // 宿主机模式的自定义工作目录（绝对路径）
-  initSourcePath?: string; // 容器模式下复制来源的宿主机绝对路径
-  initGitUrl?: string; // 容器模式下 clone 来源的 Git URL
+  executionMode?: 'local';
+  customCwd?: string; // 本地 Runtime 的自定义工作目录
+  initSourcePath?: string; // 初始化时复制来源的本机绝对路径
+  initGitUrl?: string; // 初始化时 clone 来源的 Git URL
   created_by?: string;
   is_home?: boolean; // 用户主容器标记
   selected_skills?: string[] | null; // null = 全部启用
@@ -283,6 +281,160 @@ export interface SubAgent {
   result_summary: string | null;
 }
 
+// --- Session workbench types ---
+
+export type SessionKind = 'main' | 'workspace' | 'worker' | 'memory';
+export type SessionRuntimeMode = 'local' | 'container' | 'host';
+export type SessionBindingMode = 'direct' | 'source_only' | 'mirror';
+export type RunnerId = 'claude' | 'codex';
+export type ResumeStrength = 'none' | 'weak' | 'strong';
+export type InterruptStrength = 'none' | 'weak' | 'strong';
+export type UsageQuality = 'none' | 'approx' | 'exact';
+export type ToolStreamingMode = 'none' | 'coarse' | 'fine';
+export type SubAgentMode = 'native' | 'tool-only' | 'none';
+export type CustomToolsMode = 'native' | 'mcp' | 'none';
+export type SkillsMode = 'native' | 'tool-loader';
+export type McpTransport = 'stdio' | 'http' | 'sse';
+export type TurnBoundaryMode = 'native' | 'simulated';
+export type ArchivalTrigger =
+  | 'pre_compact'
+  | 'turn_threshold'
+  | 'cleanup_only'
+  | 'external';
+export type ContextShrinkTriggerMode = 'native_event' | 'synthetic' | 'none';
+export type BeforeToolExecutionGuardMode =
+  | 'native_hook'
+  | 'tool_wrapper'
+  | 'sandbox_only'
+  | 'none';
+export type HookStreamingMode = 'none' | 'begin_end' | 'progress';
+export type PostCompactRepairMode = 'native' | 'synthetic' | 'none';
+export type PromptMode = 'append' | 'full_prompt' | 'instructions_file';
+export type DynamicContextReloadMode = 'none' | 'turn' | 'mid_turn';
+
+export interface SessionRecord {
+  id: string;
+  name: string;
+  kind: SessionKind;
+  parent_session_id: string | null;
+  cwd: string;
+  runner_id: RunnerId;
+  runner_profile_id: string | null;
+  runtime_mode: SessionRuntimeMode;
+  model: string | null;
+  thinking_effort: 'low' | 'medium' | 'high' | null;
+  context_compression: 'off' | 'auto' | 'manual';
+  knowledge_extraction: boolean;
+  is_pinned: boolean;
+  archived: boolean;
+  owner_key: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SessionBindingRecord {
+  channel_jid: string;
+  session_id: string;
+  binding_mode: SessionBindingMode;
+  activation_mode: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+  require_mention: boolean;
+  display_name: string | null;
+  reply_policy: 'source_only' | 'mirror';
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SessionRuntimeStateRecord {
+  session_id: string;
+  provider_session_id: string | null;
+  resume_anchor: string | null;
+  provider_state_json: string | null;
+  recent_im_channels_json: string | null;
+  im_channel_last_seen_json: string | null;
+  current_permission_mode: string | null;
+  last_message_cursor: string | null;
+  updated_at: string;
+}
+
+export interface RuntimeStateSnapshot {
+  providerSessionId?: string;
+  resumeAnchor?: string;
+  providerState?: Record<string, unknown>;
+  recentImChannels: string[];
+  imChannelLastSeen: Record<string, number>;
+  currentPermissionMode: string;
+  lastMessageCursor?: string | null;
+}
+
+export interface WorkerSessionRecord {
+  session_id: string;
+  parent_session_id: string;
+  source_chat_jid: string;
+  name: string;
+  kind: AgentKind;
+  prompt: string;
+  status: AgentStatus;
+  created_at: string;
+  completed_at: string | null;
+  result_summary: string | null;
+}
+
+export interface RunnerProfileRecord {
+  id: string;
+  runner_id: RunnerId;
+  name: string;
+  config_json: string;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RunnerCapabilities {
+  sessionResume: ResumeStrength;
+  interrupt: InterruptStrength;
+  imageInput: boolean;
+  usage: UsageQuality;
+  midQueryPush: boolean;
+  runtimeModeSwitch: boolean;
+  toolStreaming: ToolStreamingMode;
+  backgroundTasks: boolean;
+  subAgent: SubAgentMode;
+  customTools: CustomToolsMode;
+  mcpTransport: McpTransport[];
+  skills: SkillsMode[];
+}
+
+export interface RunnerLifecycleCapabilities {
+  turnBoundary: TurnBoundaryMode;
+  archivalTrigger: ArchivalTrigger[];
+  contextShrinkTrigger: ContextShrinkTriggerMode;
+  beforeToolExecutionGuard: BeforeToolExecutionGuardMode;
+  hookStreaming: HookStreamingMode;
+  postCompactRepair: PostCompactRepairMode;
+}
+
+export interface RunnerPromptContract {
+  mode: PromptMode;
+  dynamicContextReload: DynamicContextReloadMode;
+}
+
+export interface RunnerCompatibility {
+  chat: 'full' | 'degraded' | 'unsupported';
+  memory: 'full' | 'synthetic' | 'unsupported';
+  im: 'full' | 'degraded' | 'unsupported';
+  observability: 'full' | 'degraded' | 'unsupported';
+}
+
+export interface RunnerDescriptor {
+  id: RunnerId;
+  label: string;
+  capabilities: RunnerCapabilities;
+  lifecycle: RunnerLifecycleCapabilities;
+  promptContract: RunnerPromptContract;
+  compatibility: RunnerCompatibility;
+  defaultProfileFactory?: () => object;
+}
+
 // WebSocket message types
 export type WsMessageOut =
   | {
@@ -301,9 +453,8 @@ export type WsMessageOut =
   | { type: 'typing'; chatJid: string; isTyping: boolean; agentId?: string }
   | {
       type: 'status_update';
-      activeContainers: number;
-      activeHostProcesses: number;
-      activeTotal: number;
+      activeRuntimes: number;
+      maxConcurrentRuntimes: number;
       queueLength: number;
     }
   | {
@@ -352,8 +503,6 @@ export type WsMessageOut =
   | { type: 'terminal_started'; chatJid: string }
   | { type: 'terminal_stopped'; chatJid: string; reason?: string }
   | { type: 'terminal_error'; chatJid: string; error: string }
-  | { type: 'docker_build_log'; line: string }
-  | { type: 'docker_build_complete'; success: boolean; error?: string }
   | {
       type: 'billing_update';
       userId: string;

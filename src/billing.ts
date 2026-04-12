@@ -36,11 +36,26 @@ import type {
   UserSubscription,
 } from './types.js';
 
+const BILLING_COMPAT_DISABLED = true;
+
+function buildBillingDisabledAccess(userId: string): BillingAccessResult {
+  const balance = getUserBalance(userId);
+  return {
+    allowed: true,
+    balanceUsd: balance.balance_usd,
+    minBalanceUsd: 0,
+    planId: null,
+    planName: null,
+    subscriptionStatus: null,
+  };
+}
+
 // --- Billing enabled check ---
 // Delegates to getSystemSettings() which already has mtime-based file caching.
 // No extra manual cache needed — avoids stale state when settings change.
 
 export function isBillingEnabled(): boolean {
+  if (BILLING_COMPAT_DISABLED) return false;
   return getSystemSettings().billingEnabled === true;
 }
 
@@ -176,6 +191,9 @@ export function invalidateAllBillingCaches(): void {
 }
 
 export function checkQuota(userId: string, userRole: string): QuotaCheckResult {
+  if (BILLING_COMPAT_DISABLED) {
+    return { allowed: true };
+  }
   // Admin bypasses all billing
   if (userRole === 'admin') {
     return { allowed: true };
@@ -204,6 +222,9 @@ export function checkBillingAccess(
   userId: string,
   userRole: string,
 ): BillingAccessResult {
+  if (BILLING_COMPAT_DISABLED) {
+    return buildBillingDisabledAccess(userId);
+  }
   const cached = _accessCache.get(userId);
   if (cached && cached.expires > Date.now()) {
     return cached.result;
@@ -218,6 +239,9 @@ export function checkBillingAccessFresh(
   userId: string,
   userRole: string,
 ): BillingAccessResult {
+  if (BILLING_COMPAT_DISABLED) {
+    return buildBillingDisabledAccess(userId);
+  }
   const result = _checkBillingAccessInternal(userId, userRole);
   _accessCacheSet(userId, result);
   return result;
@@ -312,6 +336,9 @@ function _checkBillingAccessInternal(
 export function formatBillingAccessDeniedMessage(
   accessResult: BillingAccessResult,
 ): string {
+  if (BILLING_COMPAT_DISABLED) {
+    return '⚠️ 当前运行时受到兼容限制，请检查上游 runner 的凭据或服务状态。';
+  }
   const reason = accessResult.reason || '当前账户不可用';
   let resetHint = '';
   if (accessResult.resetAt) {
@@ -474,6 +501,7 @@ export function checkGroupLimit(
   userId: string,
   userRole: string,
 ): { allowed: boolean; reason?: string } {
+  if (BILLING_COMPAT_DISABLED) return { allowed: true };
   if (userRole === 'admin' || !isBillingEnabled()) return { allowed: true };
 
   const effective = getUserEffectivePlan(userId);
@@ -497,6 +525,7 @@ export function checkImChannelLimit(
   userRole: string,
   currentEnabledCount: number,
 ): { allowed: boolean; reason?: string } {
+  if (BILLING_COMPAT_DISABLED) return { allowed: true };
   if (userRole === 'admin' || !isBillingEnabled()) return { allowed: true };
 
   const effective = getUserEffectivePlan(userId);
@@ -519,6 +548,7 @@ export function checkMcpServerLimit(
   userRole: string,
   currentCount: number,
 ): { allowed: boolean; reason?: string } {
+  if (BILLING_COMPAT_DISABLED) return { allowed: true };
   if (userRole === 'admin' || !isBillingEnabled()) return { allowed: true };
 
   const effective = getUserEffectivePlan(userId);
@@ -542,6 +572,7 @@ export function checkStorageLimit(
   currentStorageBytes: number,
   additionalBytes: number,
 ): { allowed: boolean; reason?: string } {
+  if (BILLING_COMPAT_DISABLED) return { allowed: true };
   if (userRole === 'admin' || !isBillingEnabled()) return { allowed: true };
 
   const effective = getUserEffectivePlan(userId);
@@ -565,6 +596,7 @@ export function getUserConcurrentContainerLimit(
   userId: string,
   userRole: string,
 ): number | null {
+  if (BILLING_COMPAT_DISABLED) return null;
   if (userRole === 'admin' || !isBillingEnabled()) return null;
 
   const effective = getUserEffectivePlan(userId);
@@ -634,6 +666,9 @@ export function updateUsage(
   inputTokens: number,
   outputTokens: number,
 ): ReturnType<typeof getUserEffectivePlan> {
+  if (BILLING_COMPAT_DISABLED) {
+    return getUserEffectivePlan(userId);
+  }
   // Apply rate_multiplier
   const effective = getUserEffectivePlan(userId);
   const multiplier = effective?.plan.rate_multiplier ?? 1.0;
@@ -664,6 +699,7 @@ export function deductUsageCost(
   msgId: string,
   cachedEffective?: ReturnType<typeof getUserEffectivePlan>,
 ): void {
+  if (BILLING_COMPAT_DISABLED) return;
   if (!isBillingEnabled() || costUSD <= 0) return;
 
   const effective = cachedEffective ?? getUserEffectivePlan(userId);
@@ -849,6 +885,7 @@ export function generateRedeemCode(length = 16): string {
 // --- Periodic tasks ---
 
 export function checkAndExpireSubscriptions(): void {
+  if (BILLING_COMPAT_DISABLED) return;
   try {
     const expired = expireSubscriptions();
     if (expired > 0) {
@@ -866,6 +903,7 @@ export function checkAndExpireSubscriptions(): void {
  * If drift exceeds threshold, corrects monthly_usage to match daily_usage sum.
  */
 export function reconcileMonthlyUsage(userId: string, month: string): void {
+  if (BILLING_COMPAT_DISABLED) return;
   try {
     const dailySum = getDailyUsageSumForMonth(userId, month);
     const existing = getMonthlyUsage(userId, month);

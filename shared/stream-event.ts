@@ -59,6 +59,11 @@ export interface StreamEvent {
     numTurns: number;
     modelUsage?: Record<string, { inputTokens: number; outputTokens: number; costUSD: number }>;
   };
+  /** IPC delivery acknowledgement metadata emitted by agent-runner */
+  ipcAckSessionId?: string;
+  ipcAckTargets?: string[];
+  ipcAckSources?: string[];
+  ipcAckMessageCount?: number;
   /** Turn lifecycle fields (emitted by host process, not agent-runner) */
   turnId?: string;
   turnStatus?: 'started' | 'completed' | 'interrupted' | 'error' | 'drained';

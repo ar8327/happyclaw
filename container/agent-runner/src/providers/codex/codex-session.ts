@@ -130,6 +130,11 @@ export class CodexSession {
     return this.threadId;
   }
 
+  resetThread(): void {
+    this.thread = null;
+    this.threadId = null;
+  }
+
   interrupt(): void {
     if (this.abortController) {
       this.abortController.abort();

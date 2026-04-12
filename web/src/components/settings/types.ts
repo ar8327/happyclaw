@@ -66,11 +66,10 @@ export interface SettingsNotification {
 }
 
 export interface SystemSettings {
-  containerTimeout: number;
+  runtimeTimeout: number;
   idleTimeout: number;
-  containerMaxOutputSize: number;
-  maxConcurrentContainers: number;
-  maxConcurrentHostProcesses: number;
+  runtimeMaxOutputSize: number;
+  maxConcurrentRuntimes: number;
   maxLoginAttempts: number;
   loginLockoutMinutes: number;
   maxConcurrentScripts: number;
@@ -90,7 +89,21 @@ export interface SystemSettings {
   defaultClaudeModel: string;
 }
 
-export type SettingsTab = 'claude' | 'codex' | 'registration' | 'appearance' | 'system' | 'profile' | 'my-channels' | 'security' | 'groups' | 'memory' | 'skills' | 'mcp-servers' | 'agent-definitions' | 'users' | 'about' | 'bindings';
+export type SettingsTab =
+  | 'claude'
+  | 'codex'
+  | 'runners'
+  | 'appearance'
+  | 'system'
+  | 'profile'
+  | 'my-channels'
+  | 'groups'
+  | 'memory'
+  | 'skills'
+  | 'mcp-servers'
+  | 'agent-definitions'
+  | 'about'
+  | 'bindings';
 
 // ─── Codex Provider Types ───────────────────────────────────────
 

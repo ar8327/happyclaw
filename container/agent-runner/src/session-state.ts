@@ -16,6 +16,8 @@ export class SessionState {
   recentImChannels = new Set<string>();
   imChannelLastSeen = new Map<string, number>();
   private imPersistTimer: ReturnType<typeof setTimeout> | null = null;
+  private providerState?: Record<string, unknown>;
+  private lastMessageCursor: string | null = null;
 
   /** Load persisted IM channels from disk (with TTL filtering) */
   loadImChannels(channelsFile: string): void {
@@ -41,6 +43,47 @@ export class SessionState {
       if (pruned) this.persistImChannels(channelsFile);
     } catch {
       // Ignore corrupt file
+    }
+  }
+
+  hydrate(snapshot?: {
+    providerState?: Record<string, unknown>;
+    recentImChannels?: string[];
+    imChannelLastSeen?: Record<string, number>;
+    currentPermissionMode?: string | null;
+    lastMessageCursor?: string | null;
+  }): void {
+    if (!snapshot) return;
+    if (
+      snapshot.providerState
+      && typeof snapshot.providerState === 'object'
+      && !Array.isArray(snapshot.providerState)
+    ) {
+      this.providerState = { ...snapshot.providerState };
+    }
+    if (Array.isArray(snapshot.recentImChannels)) {
+      for (const channel of snapshot.recentImChannels) {
+        if (typeof channel !== 'string' || !channel) continue;
+        this.recentImChannels.add(channel);
+      }
+    }
+    if (snapshot.imChannelLastSeen) {
+      for (const [channel, lastSeen] of Object.entries(snapshot.imChannelLastSeen)) {
+        if (!channel || typeof lastSeen !== 'number' || !Number.isFinite(lastSeen)) {
+          continue;
+        }
+        this.recentImChannels.add(channel);
+        this.imChannelLastSeen.set(channel, lastSeen);
+      }
+    }
+    if (typeof snapshot.currentPermissionMode === 'string' && snapshot.currentPermissionMode) {
+      this.currentPermissionMode = snapshot.currentPermissionMode;
+    }
+    if ('lastMessageCursor' in snapshot) {
+      this.lastMessageCursor =
+        typeof snapshot.lastMessageCursor === 'string'
+          ? snapshot.lastMessageCursor
+          : null;
     }
   }
 
@@ -106,5 +149,62 @@ export class SessionState {
 
   isWithinInterruptGraceWindow(): boolean {
     return this.lastInterruptRequestedAt > 0 && Date.now() - this.lastInterruptRequestedAt <= INTERRUPT_GRACE_WINDOW_MS;
+  }
+
+  applyRuntimeSnapshot(snapshot?: {
+    providerState?: Record<string, unknown>;
+    lastMessageCursor?: string | null;
+  }): void {
+    if (!snapshot) return;
+    if (Object.prototype.hasOwnProperty.call(snapshot, 'providerState')) {
+      if (
+        snapshot.providerState
+        && typeof snapshot.providerState === 'object'
+        && !Array.isArray(snapshot.providerState)
+      ) {
+        this.providerState = { ...snapshot.providerState };
+      } else {
+        this.providerState = undefined;
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(snapshot, 'lastMessageCursor')) {
+      this.lastMessageCursor =
+        typeof snapshot.lastMessageCursor === 'string'
+          ? snapshot.lastMessageCursor
+          : null;
+    }
+  }
+
+  snapshot(overrides?: {
+    providerSessionId?: string;
+    resumeAnchor?: string;
+    providerState?: Record<string, unknown>;
+    lastMessageCursor?: string | null;
+  }): {
+    providerSessionId?: string;
+    resumeAnchor?: string;
+    providerState?: Record<string, unknown>;
+    recentImChannels: string[];
+    imChannelLastSeen: Record<string, number>;
+    currentPermissionMode: string;
+    lastMessageCursor?: string | null;
+  } {
+    const hasProviderStateOverride =
+      overrides && Object.prototype.hasOwnProperty.call(overrides, 'providerState');
+    const hasLastMessageCursorOverride =
+      overrides && Object.prototype.hasOwnProperty.call(overrides, 'lastMessageCursor');
+    return {
+      providerSessionId: overrides?.providerSessionId,
+      resumeAnchor: overrides?.resumeAnchor,
+      providerState: hasProviderStateOverride
+        ? overrides?.providerState
+        : this.providerState,
+      recentImChannels: [...this.recentImChannels],
+      imChannelLastSeen: Object.fromEntries(this.imChannelLastSeen.entries()),
+      currentPermissionMode: this.currentPermissionMode,
+      lastMessageCursor: hasLastMessageCursorOverride
+        ? overrides?.lastMessageCursor
+        : this.lastMessageCursor,
+    };
   }
 }

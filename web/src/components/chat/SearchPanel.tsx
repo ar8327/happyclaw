@@ -86,7 +86,7 @@ export function SearchPanel({ groupJid }: SearchPanelProps) {
         const params = new URLSearchParams({ q, limit: '50', offset: String(offset) });
         if (daysFilter > 0) params.set('days', String(daysFilter));
         const data = await api.get<SearchResponse>(
-          `/api/groups/${encodeURIComponent(groupJid)}/messages/search?${params}`,
+          `/api/sessions/${encodeURIComponent(groupJid)}/messages/search?${params}`,
         );
 
         if (isLoadMore) {

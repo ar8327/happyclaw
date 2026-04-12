@@ -9,10 +9,14 @@ import type { Variables } from '../web-context.js';
 import { canAccessGroup, getWebDeps } from '../web-context.js';
 import { getChannelType } from '../im-channel.js';
 import {
+  deleteSessionBinding,
   deleteRegisteredGroup,
   deleteChatHistory,
   getRegisteredGroup,
+  getSessionBinding,
+  getSessionRecord,
   setRegisteredGroup,
+  saveSessionBinding,
   getAgent,
 } from '../db.js';
 import { authMiddleware, systemConfigMiddleware } from '../middleware/auth.js';
@@ -32,7 +36,6 @@ import {
   QQConfigSchema,
   ImGeneralConfigSchema,
   WeChatConfigSchema,
-  RegistrationConfigSchema,
   AppearanceConfigSchema,
   SystemSettingsSchema,
   UserIMPreferencesSchema,
@@ -60,8 +63,6 @@ import {
   getTelegramProviderConfigWithSource,
   toPublicTelegramProviderConfig,
   saveTelegramProviderConfig,
-  getRegistrationConfig,
-  saveRegistrationConfig,
   getAppearanceConfig,
   saveAppearanceConfig,
   getSystemSettings,
@@ -172,7 +173,7 @@ async function applyClaudeConfigToAllGroups(
 
   const groupJids = Object.keys(deps.getRegisteredGroups());
   const results = await Promise.allSettled(
-    groupJids.map((jid) => deps.queue.stopGroup(jid)),
+    groupJids.map((jid) => deps.queue.stopSession(jid)),
   );
   const failedCount = results.filter((r) => r.status === 'rejected').length;
   const stoppedCount = groupJids.length - failedCount;
@@ -413,7 +414,7 @@ configRoutes.post(
       if (!alreadyActive && deps) {
         const groupJids = Object.keys(deps.getRegisteredGroups());
         const results = await Promise.allSettled(
-          groupJids.map((jid: string) => deps.queue.stopGroup(jid)),
+          groupJids.map((jid: string) => deps.queue.stopSession(jid)),
         );
         failedCount = results.filter((r: PromiseSettledResult<unknown>) => r.status === 'rejected').length;
         stoppedCount = groupJids.length - failedCount;
@@ -463,7 +464,7 @@ configRoutes.post(
       if (!deps) throw new Error('Server not initialized');
       const groupJids = Object.keys(deps.getRegisteredGroups());
       const results = await Promise.allSettled(
-        groupJids.map((jid: string) => deps.queue.stopGroup(jid)),
+        groupJids.map((jid: string) => deps.queue.stopSession(jid)),
       );
       const failedCount = results.filter((r: PromiseSettledResult<unknown>) => r.status === 'rejected').length;
       const stoppedCount = groupJids.length - failedCount;
@@ -745,7 +746,7 @@ configRoutes.put(
       // Update .credentials.json in all session directories when credentials change
       if (validation.data.claudeOAuthCredentials) {
         updateAllSessionCredentials(saved);
-        deps?.queue?.closeAllActiveForCredentialRefresh();
+        deps?.queue?.closeAllActiveForRuntimeRefresh();
       }
 
       appendClaudeConfigAudit(actor, 'update_secrets', changedFields);
@@ -1275,7 +1276,7 @@ configRoutes.post(
       // Write .credentials.json to all session directories
       if (oauthCredentials) {
         updateAllSessionCredentials(saved);
-        deps?.queue?.closeAllActiveForCredentialRefresh();
+        deps?.queue?.closeAllActiveForRuntimeRefresh();
       }
 
       appendClaudeConfigAudit(actor, 'oauth_login', [
@@ -1324,6 +1325,50 @@ function applyBindingUpdate(imJid: string, updated: RegisteredGroup): void {
     if (groups[imJid]) groups[imJid] = updated;
     webDeps.clearImFailCounts?.(imJid);
   }
+}
+
+function applyExplicitSessionBinding(
+  imJid: string,
+  sessionId: string | null,
+  imGroup: RegisteredGroup,
+  updates: {
+    reply_policy?: 'source_only' | 'mirror';
+    activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+    require_mention?: boolean;
+  },
+): void {
+  const now = new Date().toISOString();
+  const currentBinding = getSessionBinding(imJid);
+  const nextReplyPolicy = updates.reply_policy ?? imGroup.reply_policy ?? 'source_only';
+  const nextActivationMode = updates.activation_mode ?? imGroup.activation_mode ?? 'auto';
+  const nextRequireMention =
+    updates.require_mention !== undefined
+      ? updates.require_mention
+      : imGroup.require_mention === true;
+
+  if (!sessionId) {
+    deleteSessionBinding(imJid);
+    return;
+  }
+
+  const boundSession = getSessionRecord(sessionId);
+  const bindingMode =
+    !boundSession || boundSession.kind === 'main' ? 'source_only'
+      : boundSession.kind === 'worker' ? 'direct'
+      : 'direct';
+
+  saveSessionBinding({
+    channel_jid: imJid,
+    session_id: sessionId,
+    binding_mode:
+      nextReplyPolicy === 'mirror' ? 'mirror' : bindingMode,
+    activation_mode: nextActivationMode,
+    require_mention: nextRequireMention,
+    display_name: imGroup.name,
+    reply_policy: nextReplyPolicy,
+    created_at: currentBinding?.created_at || imGroup.added_at || now,
+    updated_at: now,
+  });
 }
 
 configRoutes.get('/feishu', authMiddleware, systemConfigMiddleware, (c) => {
@@ -1532,55 +1577,6 @@ configRoutes.post(
       return c.json({ error: message }, 400);
     } finally {
       destroyTelegramApiAgent(agent);
-    }
-  },
-);
-
-// ─── Registration config ─────────────────────────────────────────
-
-configRoutes.get(
-  '/registration',
-  authMiddleware,
-  systemConfigMiddleware,
-  (c) => {
-    try {
-      return c.json(getRegistrationConfig());
-    } catch (err) {
-      logger.error({ err }, 'Failed to load registration config');
-      return c.json({ error: 'Failed to load registration config' }, 500);
-    }
-  },
-);
-
-configRoutes.put(
-  '/registration',
-  authMiddleware,
-  systemConfigMiddleware,
-  async (c) => {
-    const body = await c.req.json().catch(() => ({}));
-    const validation = RegistrationConfigSchema.safeParse(body);
-    if (!validation.success) {
-      return c.json(
-        { error: 'Invalid request body', details: validation.error.format() },
-        400,
-      );
-    }
-
-    try {
-      const actor = (c.get('user') as AuthUser).username;
-      const saved = saveRegistrationConfig(validation.data);
-      appendClaudeConfigAudit(actor, 'update_registration_config', [
-        'allowRegistration',
-        'requireInviteCode',
-      ]);
-      return c.json(saved);
-    } catch (err) {
-      const message =
-        err instanceof Error
-          ? err.message
-          : 'Invalid registration config payload';
-      logger.warn({ err }, 'Invalid registration config payload');
-      return c.json({ error: message }, 400);
     }
   },
 );
@@ -2464,7 +2460,11 @@ configRoutes.get('/user-im/preferences', authMiddleware, (c) => {
 configRoutes.put('/user-im/preferences', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
   const body = UserIMPreferencesSchema.parse(await c.req.json());
-  const saved = saveUserIMPreferences(user.id, body);
+  const saved = saveUserIMPreferences(user.id, {
+    ...body,
+    autoCreateExecutionMode:
+      body.autoCreateExecutionMode !== undefined ? 'local' : undefined,
+  });
   return c.json(saved);
 });
 
@@ -2812,6 +2812,45 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
   }
 
   const body = await c.req.json().catch(() => ({}));
+  const replyPolicy =
+    body.reply_policy === 'mirror'
+      ? 'mirror'
+      : body.reply_policy === 'source_only'
+        ? 'source_only'
+        : undefined;
+  const activationMode =
+    body.activation_mode === 'auto' ||
+    body.activation_mode === 'always' ||
+    body.activation_mode === 'when_mentioned' ||
+    body.activation_mode === 'disabled'
+      ? body.activation_mode
+      : undefined;
+  const requireMention =
+    typeof body.require_mention === 'boolean'
+      ? body.require_mention
+      : undefined;
+
+  if (
+    body.unbind !== true &&
+    !body.target_agent_id &&
+    !body.target_main_jid &&
+    (activationMode !== undefined ||
+      requireMention !== undefined ||
+      body.reply_policy !== undefined)
+  ) {
+    const updated: RegisteredGroup = {
+      ...imGroup,
+      reply_policy: replyPolicy ?? imGroup.reply_policy,
+      activation_mode: activationMode ?? imGroup.activation_mode,
+      require_mention:
+        requireMention !== undefined
+          ? requireMention
+          : imGroup.require_mention,
+    };
+    applyBindingUpdate(imJid, updated);
+    applyExplicitSessionBinding(imJid, getSessionBinding(imJid)?.session_id || null, updated, {});
+    return c.json({ success: true });
+  }
 
   // Unbind mode
   if (body.unbind === true) {
@@ -2819,8 +2858,15 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
       ...imGroup,
       target_main_jid: undefined,
       target_agent_id: undefined,
+      reply_policy: replyPolicy ?? imGroup.reply_policy,
+      activation_mode: activationMode ?? 'disabled',
+      require_mention:
+        requireMention !== undefined
+          ? requireMention
+          : imGroup.require_mention,
     };
     applyBindingUpdate(imJid, updated);
+    applyExplicitSessionBinding(imJid, null, updated, {});
     logger.info({ imJid, userId: user.id }, 'IM group unbound (bindings page)');
     return c.json({ success: true });
   }
@@ -2848,11 +2894,10 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
     }
 
     const force = body.force === true;
-    const replyPolicy =
-      body.reply_policy === 'mirror' ? 'mirror' : 'source_only';
+    const currentBinding = getSessionBinding(imJid);
+    const targetSessionId = `worker:${agentId}`;
     const hasConflict =
-      (imGroup.target_agent_id && imGroup.target_agent_id !== agentId) ||
-      !!imGroup.target_main_jid;
+      !!currentBinding && currentBinding.session_id !== targetSessionId;
     if (hasConflict && !force) {
       return c.json({ error: 'IM group is already bound elsewhere' }, 409);
     }
@@ -2861,9 +2906,17 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
       ...imGroup,
       target_agent_id: agentId,
       target_main_jid: undefined,
-      reply_policy: replyPolicy,
+      reply_policy: replyPolicy ?? imGroup.reply_policy,
+      activation_mode:
+        activationMode
+        ?? (imGroup.activation_mode === 'disabled' ? 'auto' : imGroup.activation_mode),
+      require_mention:
+        requireMention !== undefined
+          ? requireMention
+          : imGroup.require_mention,
     };
     applyBindingUpdate(imJid, updated);
+    applyExplicitSessionBinding(imJid, targetSessionId, updated, {});
     logger.info(
       { imJid, agentId, userId: user.id },
       'IM group bound to agent (bindings page)',
@@ -2889,14 +2942,10 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
     }
 
     const force = body.force === true;
-    const replyPolicy =
-      body.reply_policy === 'mirror' ? 'mirror' : 'source_only';
-    const legacyMainJid = `web:${targetGroup.folder}`;
+    const currentBinding = getSessionBinding(imJid);
+    const targetSessionId = `main:${targetGroup.folder}`;
     const hasConflict =
-      !!imGroup.target_agent_id ||
-      (imGroup.target_main_jid &&
-        imGroup.target_main_jid !== targetMainJid &&
-        imGroup.target_main_jid !== legacyMainJid);
+      !!currentBinding && currentBinding.session_id !== targetSessionId;
     if (hasConflict && !force) {
       return c.json({ error: 'IM group is already bound elsewhere' }, 409);
     }
@@ -2905,9 +2954,17 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
       ...imGroup,
       target_main_jid: targetMainJid,
       target_agent_id: undefined,
-      reply_policy: replyPolicy,
+      reply_policy: replyPolicy ?? imGroup.reply_policy,
+      activation_mode:
+        activationMode
+        ?? (imGroup.activation_mode === 'disabled' ? 'auto' : imGroup.activation_mode),
+      require_mention:
+        requireMention !== undefined
+          ? requireMention
+          : imGroup.require_mention,
     };
     applyBindingUpdate(imJid, updated);
+    applyExplicitSessionBinding(imJid, targetSessionId, updated, {});
     logger.info(
       { imJid, targetMainJid, userId: user.id },
       'IM group bound to workspace (bindings page)',
@@ -2957,7 +3014,7 @@ configRoutes.post(
       );
 
       updateAllSessionCredentials(saved);
-      deps?.queue?.closeAllActiveForCredentialRefresh();
+      deps?.queue?.closeAllActiveForRuntimeRefresh();
       appendClaudeConfigAudit(actor, 'import_local_cc', [
         'claudeOAuthCredentials:import_local',
       ]);

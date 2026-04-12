@@ -1,6 +1,5 @@
 import { useState, useRef, useCallback, memo } from 'react';
 import { Copy, Check, ChevronDown, ChevronUp, Ellipsis, Loader2 } from 'lucide-react';
-import { Link } from 'react-router-dom';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { Message, useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
@@ -330,18 +329,10 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
     );
   }
 
-  // Billing system message (quota exceeded / insufficient balance)
+  // Legacy billing/system message retained for compatibility during migration.
   if (message.sender === '__billing__') {
     const displayMsg = message.content.replace(/^⚠️\s*/, '');
-    const isBalanceBlocked = displayMsg.includes('充值余额后继续使用');
-    // Detect which quota window was exceeded
-    const windowLabels: Record<string, string> = { daily: '日度', weekly: '周度', monthly: '月度' };
-    let exceededWindow = '';
-    if (displayMsg.includes('日度')) exceededWindow = 'daily';
-    else if (displayMsg.includes('周度')) exceededWindow = 'weekly';
-    else if (displayMsg.includes('月度')) exceededWindow = 'monthly';
-    const windowTag = isBalanceBlocked ? '余额' : windowLabels[exceededWindow] || '配额';
-    // Extract reset hint if present (e.g. "约 3 小时后重置" or "约 1 天后重置")
+    const isExecutionLimit = displayMsg.includes('配额') || displayMsg.includes('余额');
     const resetMatch = displayMsg.match(/约\s*(\d+)\s*(小时|天)后重置/);
     return (
       <div className="mb-6">
@@ -349,7 +340,7 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
           <div className="flex items-center gap-2 mb-2">
             <span className="text-xs text-slate-500">{time}</span>
             <span className="text-xs font-medium text-amber-600">
-              {isBalanceBlocked ? '余额提醒' : '配额提醒'}
+              {isExecutionLimit ? '运行限制提醒' : '系统提醒'}
             </span>
           </div>
         )}
@@ -359,31 +350,15 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
               !
             </div>
             <div className="flex-1">
-              <div className="flex items-center gap-2 mb-1">
-                <h3 className="text-sm font-semibold text-amber-900 dark:text-amber-200">
-                  {isBalanceBlocked ? '余额不足' : `${windowTag}配额已用完`}
-                </h3>
-                {!isBalanceBlocked && exceededWindow && (
-                  <span className={`px-1.5 py-0.5 text-[10px] rounded-full font-medium ${
-                    exceededWindow === 'daily'
-                      ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
-                      : exceededWindow === 'weekly'
-                        ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300'
-                        : 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
-                  }`}>
-                    {windowTag}限额
-                  </span>
-                )}
-              </div>
+              <h3 className="text-sm font-semibold text-amber-900 dark:text-amber-200 mb-1">
+                {isExecutionLimit ? '执行限制触发' : '系统兼容提醒'}
+              </h3>
               <p className="text-sm text-amber-800 dark:text-amber-300 leading-relaxed">{displayMsg}</p>
               {resetMatch && (
                 <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
                   预计 {resetMatch[1]} {resetMatch[2]}后自动重置
                 </p>
               )}
-              <Link to="/billing" className="inline-block mt-2 text-sm text-primary hover:underline font-medium">
-                查看账单 &rarr;
-              </Link>
             </div>
           </div>
         </div>

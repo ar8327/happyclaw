@@ -13,19 +13,27 @@ import {
   type MemorySearchHit,
 } from '../schemas.js';
 import {
-  getAllRegisteredGroups,
-  getGroupsByOwner,
   getJidsByFolder,
+  getPrimarySessionForOwner,
+  getRunnerProfile,
+  getSessionRecord,
   getUserById,
-  getUserHomeGroup,
+  listSessionRecords,
+  saveSessionRecord,
 } from '../db.js';
 import { logger } from '../logger.js';
 import { GROUPS_DIR, DATA_DIR } from '../config.js';
 import type { AuthUser } from '../types.js';
-import type { MemoryAgentManager } from '../memory-agent.js';
-import { readMemoryState, writeMemoryState, exportTranscriptsForUser } from '../memory-agent.js';
+import { readMemoryState, writeMemoryState } from '../memory-agent.js';
+import type { MemoryOrchestrator } from '../memory-orchestrator.js';
+import {
+  canServeAsMemoryRunner,
+  explainRunnerDegradation,
+  getRunnerDescriptor,
+  listRunnerDescriptors,
+} from '../runner-registry.js';
 
-import type { GroupQueue } from '../group-queue.js';
+import type { SessionRuntimeManager } from '../session-runtime-manager.js';
 
 const memoryRoutes = new Hono<{ Variables: Variables }>();
 
@@ -57,6 +65,65 @@ const MEMORY_SOURCE_EXTENSIONS = new Set([
   '.cfg',
   '.conf',
 ]);
+
+function resolvePrimarySessionFolderForOwner(ownerKey: string): string | null {
+  const primary = getPrimarySessionForOwner(ownerKey);
+  if (!primary) return null;
+  return primary.id.startsWith('main:')
+    ? primary.id.slice('main:'.length)
+    : null;
+}
+
+function listOwnedSessionFolders(ownerKey: string): string[] {
+  return Array.from(
+    new Set(
+      listSessionRecords()
+        .filter(
+          (session) =>
+            session.owner_key === ownerKey &&
+            (session.kind === 'main' || session.kind === 'workspace') &&
+            session.id.startsWith('main:'),
+        )
+        .map((session) => session.id.slice('main:'.length)),
+    ),
+  );
+}
+
+function getMemorySessionForOwner(ownerKey: string) {
+  return getSessionRecord(`memory:${ownerKey}`);
+}
+
+function serializeMemoryConfig(user: AuthUser) {
+  const session = getMemorySessionForOwner(user.id);
+  const primaryFolder = resolvePrimarySessionFolderForOwner(user.id);
+  const ownedFolders = listOwnedSessionFolders(user.id);
+  return {
+    session: session
+      ? {
+          id: session.id,
+          name: session.name,
+          runner_id: session.runner_id,
+          runner_profile_id: session.runner_profile_id,
+          model: session.model,
+          thinking_effort: session.thinking_effort,
+          context_compression: session.context_compression,
+          knowledge_extraction: session.knowledge_extraction,
+          owner_key: session.owner_key,
+          cwd: session.cwd,
+          primary_session_folder: primaryFolder,
+          owned_session_folders: ownedFolders,
+          owned_session_count: ownedFolders.length,
+        }
+      : null,
+    runners: listRunnerDescriptors().map((descriptor) => ({
+      id: descriptor.id,
+      label: descriptor.label,
+      memory_compatibility: descriptor.compatibility.memory,
+      can_serve_memory: canServeAsMemoryRunner(descriptor),
+      degradation_reasons: explainRunnerDegradation(descriptor),
+    })),
+  };
+}
 
 // --- Utility Functions ---
 
@@ -141,20 +208,19 @@ function resolveMemoryPath(
   return { absolutePath: absolute, writable };
 }
 
-/** Check if a folder belongs to the user (via registered_groups). */
+/** Check if a folder belongs to the user via session ownership. */
 function isUserOwnedFolder(
   user: { id: string; role: string },
   folder: string,
 ): boolean {
   if (user.role === 'admin') return true;
   if (!folder) return false;
-  const groups = getAllRegisteredGroups();
-  for (const group of Object.values(groups)) {
-    if (group.folder === folder && group.created_by === user.id) {
-      return true;
-    }
-  }
-  return false;
+  return listSessionRecords().some(
+    (session) =>
+      session.owner_key === user.id &&
+      session.id === `main:${folder}` &&
+      (session.kind === 'main' || session.kind === 'workspace'),
+  );
 }
 
 function classifyAgentMemoryLabel(ownerLabel: string, subPath: string): string {
@@ -361,17 +427,25 @@ function isMemoryCandidateFile(filePath: string): boolean {
 function listMemorySources(user: AuthUser): MemorySource[] {
   const files = new Set<string>();
   const isAdmin = user.role === 'admin';
-  const groups = getAllRegisteredGroups();
   const accessibleFolders = new Set<string>();
 
   if (isAdmin) {
-    for (const group of Object.values(groups)) {
-      accessibleFolders.add(group.folder);
+    for (const session of listSessionRecords()) {
+      if (
+        session.id.startsWith('main:') &&
+        (session.kind === 'main' || session.kind === 'workspace')
+      ) {
+        accessibleFolders.add(session.id.slice('main:'.length));
+      }
     }
   } else {
-    for (const group of Object.values(groups)) {
-      if (group.created_by === user.id) {
-        accessibleFolders.add(group.folder);
+    for (const session of listSessionRecords()) {
+      if (
+        session.owner_key === user.id &&
+        session.id.startsWith('main:') &&
+        (session.kind === 'main' || session.kind === 'workspace')
+      ) {
+        accessibleFolders.add(session.id.slice('main:'.length));
       }
     }
   }
@@ -665,14 +739,14 @@ memoryRoutes.put('/global', authMiddleware, async (c) => {
 
 // --- Memory Agent status & manual triggers ---
 
-let injectedManager: MemoryAgentManager | null = null;
-let injectedQueue: GroupQueue | null = null;
+let injectedOrchestrator: MemoryOrchestrator | null = null;
+let injectedQueue: SessionRuntimeManager | null = null;
 
 export function injectMemoryDeps(deps: {
-  manager: MemoryAgentManager;
-  queue: GroupQueue;
+  orchestrator: MemoryOrchestrator;
+  queue: SessionRuntimeManager;
 }): void {
-  injectedManager = deps.manager;
+  injectedOrchestrator = deps.orchestrator;
   injectedQueue = deps.queue;
 }
 
@@ -680,17 +754,22 @@ memoryRoutes.get('/status', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
 
   const state = readMemoryState(user.id);
-  const homeGroup = getUserHomeGroup(user.id);
+  const primaryFolder = resolvePrimarySessionFolderForOwner(user.id);
+  const ownedFolders = listOwnedSessionFolders(user.id);
 
   // Check active sessions
   let hasActiveSession = false;
   if (injectedQueue) {
-    const queueStatus = injectedQueue.getStatus();
+    const queueStatus = injectedQueue.getRuntimeStatus();
     const activeJids = new Set(
       queueStatus.groups.filter((g) => g.active).map((g) => g.jid),
     );
-    const userGroups = getGroupsByOwner(user.id);
-    hasActiveSession = userGroups.some((g) => activeJids.has(g.jid));
+    const relevantFolders = primaryFolder
+      ? [primaryFolder, ...ownedFolders.filter((folder) => folder !== primaryFolder)]
+      : ownedFolders;
+    hasActiveSession = relevantFolders.some((folder) =>
+      getJidsByFolder(folder).some((jid) => activeJids.has(jid)),
+    );
   }
 
   const pendingWrapups = (state.pendingWrapups || []) as string[];
@@ -700,7 +779,9 @@ memoryRoutes.get('/status', authMiddleware, (c) => {
     lastGlobalSleep: (state.lastGlobalSleep as string | null) || null,
     lastSessionWrapupAt: (state.lastSessionWrapupAt as string | null) || null,
     pendingWrapupsCount: pendingWrapups.length,
-    canTriggerWrapup: !!homeGroup && !activeWrapups.has(user.id),
+    ownedSessionFolders: ownedFolders,
+    canTriggerWrapup:
+      (ownedFolders.length > 0 || !!primaryFolder) && !activeWrapups.has(user.id),
     canTriggerGlobalSleep:
       pendingWrapups.length > 0 && !activeGlobalSleeps.has(user.id),
     hasActiveSession,
@@ -709,40 +790,137 @@ memoryRoutes.get('/status', authMiddleware, (c) => {
   });
 });
 
+memoryRoutes.get('/config', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  return c.json(serializeMemoryConfig(user));
+});
+
+memoryRoutes.put('/config', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const existing = getMemorySessionForOwner(user.id);
+  if (!existing) {
+    return c.json({ error: '记忆会话不存在' }, 404);
+  }
+
+  const body = await c.req.json().catch(() => null);
+  const runnerId = body?.runner_id === 'codex' ? 'codex'
+    : body?.runner_id === 'claude' ? 'claude'
+    : null;
+  if (!runnerId) {
+    return c.json({ error: 'runner_id 必须是 claude 或 codex' }, 400);
+  }
+
+  const descriptor = getRunnerDescriptor(runnerId);
+  if (!descriptor || !canServeAsMemoryRunner(descriptor)) {
+    return c.json({ error: '该 runner 不支持 memory 会话' }, 400);
+  }
+
+  const thinkingEffort =
+    body?.thinking_effort === 'low' ||
+    body?.thinking_effort === 'medium' ||
+    body?.thinking_effort === 'high'
+      ? body.thinking_effort
+      : null;
+  const contextCompression =
+    body?.context_compression === 'auto' || body?.context_compression === 'manual'
+      ? body.context_compression
+      : 'off';
+  const model =
+    typeof body?.model === 'string' && body.model.trim()
+      ? body.model.trim()
+      : null;
+  const name =
+    typeof body?.name === 'string' && body.name.trim()
+      ? body.name.trim().slice(0, 100)
+      : existing.name;
+  const runnerProfileId =
+    typeof body?.runner_profile_id === 'string' && body.runner_profile_id.trim()
+      ? body.runner_profile_id.trim()
+      : body?.runner_profile_id === null
+        ? null
+        : existing.runner_profile_id;
+  if (runnerProfileId) {
+    const profile = getRunnerProfile(runnerProfileId);
+    if (!profile) {
+      return c.json({ error: 'runner_profile_id 不存在' }, 400);
+    }
+    if (profile.runner_id !== runnerId) {
+      return c.json({ error: 'runner_profile_id 与 runner_id 不匹配' }, 400);
+    }
+  }
+
+  saveSessionRecord({
+    ...existing,
+    name,
+    runner_id: runnerId,
+    runner_profile_id: runnerProfileId,
+    model,
+    thinking_effort: thinkingEffort,
+    context_compression: contextCompression,
+    knowledge_extraction: body?.knowledge_extraction === true,
+    updated_at: new Date().toISOString(),
+  });
+
+  return c.json(serializeMemoryConfig(user));
+});
+
 memoryRoutes.post('/trigger-wrapup', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
 
-  if (!injectedManager) {
+  if (!injectedOrchestrator) {
     return c.json({ error: '记忆系统未初始化' }, 503);
   }
   if (activeWrapups.has(user.id)) {
     return c.json({ error: '会话整理正在进行中，请勿重复触发' }, 409);
   }
 
-  const homeGroup = getUserHomeGroup(user.id);
-  if (!homeGroup) {
-    return c.json({ error: '未找到主容器' }, 400);
+  const ownedFolders = listOwnedSessionFolders(user.id);
+  if (ownedFolders.length === 0) {
+    return c.json({ error: '未找到可整理的会话' }, 400);
   }
 
   activeWrapups.add(user.id);
   try {
-    const allJids = getJidsByFolder(homeGroup.folder);
-    const result = await exportTranscriptsForUser(
-      user.id,
-      homeGroup.folder,
-      allJids,
-      injectedManager,
-    );
-    if (result === null) {
-      return c.json({ success: true, message: '没有新消息需要整理' });
+    let completedFolders = 0;
+    let touchedFolders = 0;
+    const failures: string[] = [];
+
+    for (const folder of ownedFolders) {
+      try {
+        const allJids = getJidsByFolder(folder);
+        const result = await injectedOrchestrator.exportTranscripts(
+          user.id,
+          folder,
+          allJids,
+        );
+        completedFolders++;
+        if (result !== null) touchedFolders++;
+        if (result && !result.success) {
+          failures.push(`${folder}: ${result.error || '未知错误'}`);
+        }
+      } catch (err) {
+        failures.push(
+          `${folder}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
-    if (result.success) {
-      return c.json({ success: true, message: '会话整理完成' });
+
+    if (failures.length > 0) {
+      return c.json(
+        { error: `会话整理部分失败: ${failures.join('；')}` },
+        500,
+      );
     }
-    return c.json(
-      { error: `会话整理失败: ${result.error || '未知错误'}` },
-      500,
-    );
+    if (touchedFolders === 0) {
+      return c.json({
+        success: true,
+        message: `没有新消息需要整理，共检查 ${completedFolders} 个会话`,
+      });
+    }
+    return c.json({
+      success: true,
+      message: `会话整理完成，共处理 ${touchedFolders} 个会话`,
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err, userId: user.id }, 'Manual session_wrapup failed');
@@ -755,7 +933,7 @@ memoryRoutes.post('/trigger-wrapup', authMiddleware, async (c) => {
 memoryRoutes.post('/trigger-global-sleep', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
 
-  if (!injectedManager) {
+  if (!injectedOrchestrator) {
     return c.json({ error: '记忆系统未初始化' }, 503);
   }
   if (activeGlobalSleeps.has(user.id)) {
@@ -770,7 +948,7 @@ memoryRoutes.post('/trigger-global-sleep', authMiddleware, async (c) => {
 
   activeGlobalSleeps.add(user.id);
   try {
-    await injectedManager.send(user.id, { type: 'global_sleep' });
+    await injectedOrchestrator.globalSleep(user.id);
     // Main process updates state.json after successful global_sleep
     const updatedState = readMemoryState(user.id);
     updatedState.lastGlobalSleep = new Date().toISOString();
@@ -793,15 +971,20 @@ memoryRoutes.post('/stop-active-sessions', authMiddleware, async (c) => {
     return c.json({ error: '队列未初始化' }, 503);
   }
 
-  const userGroups = getGroupsByOwner(user.id);
-  const queueStatus = injectedQueue.getStatus();
+  const queueStatus = injectedQueue.getRuntimeStatus();
   const activeJids = new Set(
     queueStatus.groups.filter((g) => g.active).map((g) => g.jid),
   );
-
-  const activeGroupJids = userGroups
-    .map((g) => g.jid)
-    .filter((jid) => activeJids.has(jid));
+  const primaryFolder = resolvePrimarySessionFolderForOwner(user.id);
+  const ownedFolders = listOwnedSessionFolders(user.id);
+  const candidateFolders = primaryFolder
+    ? [primaryFolder, ...ownedFolders.filter((folder) => folder !== primaryFolder)]
+    : ownedFolders;
+  const activeGroupJids = Array.from(
+    new Set(
+      candidateFolders.flatMap((folder) => getJidsByFolder(folder)),
+    ),
+  ).filter((jid) => activeJids.has(jid));
 
   if (activeGroupJids.length === 0) {
     return c.json({ stopped: 0, message: '没有活跃会话' });
@@ -810,7 +993,7 @@ memoryRoutes.post('/stop-active-sessions', authMiddleware, async (c) => {
   let stopped = 0;
   for (const jid of activeGroupJids) {
     try {
-      await injectedQueue.stopGroup(jid);
+      await injectedQueue.stopSession(jid);
       stopped++;
     } catch (err) {
       logger.warn({ jid, err }, 'Failed to stop group for memory deep sleep');

@@ -6,6 +6,8 @@ import { Hono } from 'hono';
 
 import {
   getRegisteredGroup,
+  getJidsByFolder,
+  getSessionRecord,
   getTurnsByFolder,
   getTurnById,
   getActiveTurnByFolder,
@@ -15,8 +17,31 @@ import type { AuthUser } from '../types.js';
 import { canAccessGroup, type Variables } from '../web-context.js';
 import { getWebDeps } from '../web-context.js';
 import { loadTurnTrace } from '../turn-trace.js';
+import type { RegisteredGroup } from '../types.js';
 
 const turnsRoutes = new Hono<{ Variables: Variables }>();
+
+function resolveRouteGroup(
+  id: string,
+): { routeJid: string; group: RegisteredGroup } | null {
+  const direct = getRegisteredGroup(id);
+  if (direct) return { routeJid: id, group: direct };
+
+  const session = getSessionRecord(id);
+  if (!session) return null;
+
+  const folder = session.id.startsWith('main:')
+    ? session.id.slice('main:'.length)
+    : session.parent_session_id?.startsWith('main:')
+      ? session.parent_session_id.slice('main:'.length)
+      : null;
+  if (!folder) return null;
+
+  const backingJid = getJidsByFolder(folder).find((jid) => jid.startsWith('web:'));
+  if (!backingJid) return null;
+  const group = getRegisteredGroup(backingJid);
+  return group ? { routeJid: backingJid, group } : null;
+}
 
 // All routes require authentication
 turnsRoutes.use('/*', authMiddleware);
@@ -27,8 +52,8 @@ turnsRoutes.use('/*', authMiddleware);
 turnsRoutes.get('/:jid/turns', (c) => {
   const user = c.get('user') as AuthUser;
   const jid = c.req.param('jid');
-  const group = getRegisteredGroup(jid);
-  if (!group || !canAccessGroup(user, group)) {
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved || !canAccessGroup(user, { ...resolved.group, jid: resolved.routeJid })) {
     return c.json({ error: 'Not found' }, 404);
   }
 
@@ -36,7 +61,7 @@ turnsRoutes.get('/:jid/turns', (c) => {
   const offset = parseInt(c.req.query('offset') || '0', 10) || 0;
 
   // Query by folder so all IM channels sharing the same home group are included
-  const turns = getTurnsByFolder(group.folder, limit, offset);
+  const turns = getTurnsByFolder(resolved.group.folder, limit, offset);
   return c.json({
     turns: turns.map((t) => ({
       id: t.id,
@@ -59,14 +84,14 @@ turnsRoutes.get('/:jid/turns', (c) => {
 turnsRoutes.get('/:jid/turns/active', (c) => {
   const user = c.get('user') as AuthUser;
   const jid = c.req.param('jid');
-  const group = getRegisteredGroup(jid);
-  if (!group || !canAccessGroup(user, group)) {
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved || !canAccessGroup(user, { ...resolved.group, jid: resolved.routeJid })) {
     return c.json({ error: 'Not found' }, 404);
   }
 
   const deps = getWebDeps();
-  const runtimeTurn = deps?.getActiveTurnRuntime?.(group.folder) || null;
-  const dbTurn = !runtimeTurn ? getActiveTurnByFolder(group.folder) : null;
+  const runtimeTurn = deps?.getActiveTurnRuntime?.(resolved.group.folder) || null;
+  const dbTurn = !runtimeTurn ? getActiveTurnByFolder(resolved.group.folder) : null;
   const activeTurn = runtimeTurn
     ? {
         id: runtimeTurn.id,
@@ -84,8 +109,8 @@ turnsRoutes.get('/:jid/turns/active', (c) => {
           startedAt: dbTurn.started_at,
         }
       : null;
-  const pendingCounts = deps?.getPendingTurnCounts?.(group.folder) || new Map();
-  const observability = deps?.getTurnObservability?.(group.folder) || null;
+  const pendingCounts = deps?.getPendingTurnCounts?.(resolved.group.folder) || new Map();
+  const observability = deps?.getTurnObservability?.(resolved.group.folder) || null;
   const pendingBuffer = Array.from(pendingCounts.entries())
     .filter(([, count]) => count > 0)
     .map(([channel, count]) => ({ channel, count }));
@@ -112,14 +137,14 @@ turnsRoutes.get('/:jid/turns/active', (c) => {
 turnsRoutes.get('/:jid/turns/:turnId', (c) => {
   const user = c.get('user') as AuthUser;
   const jid = c.req.param('jid');
-  const group = getRegisteredGroup(jid);
-  if (!group || !canAccessGroup(user, group)) {
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved || !canAccessGroup(user, { ...resolved.group, jid: resolved.routeJid })) {
     return c.json({ error: 'Not found' }, 404);
   }
 
   const turnId = c.req.param('turnId');
   const turn = getTurnById(turnId);
-  if (!turn || turn.chat_jid !== jid) {
+  if (!turn || turn.group_folder !== resolved.group.folder) {
     return c.json({ error: 'Turn not found' }, 404);
   }
 
@@ -145,14 +170,14 @@ turnsRoutes.get('/:jid/turns/:turnId', (c) => {
 turnsRoutes.get('/:jid/turns/:turnId/trace', (c) => {
   const user = c.get('user') as AuthUser;
   const jid = c.req.param('jid');
-  const group = getRegisteredGroup(jid);
-  if (!group || !canAccessGroup(user, group)) {
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved || !canAccessGroup(user, { ...resolved.group, jid: resolved.routeJid })) {
     return c.json({ error: 'Not found' }, 404);
   }
 
   const turnId = c.req.param('turnId');
   const turn = getTurnById(turnId);
-  if (!turn || turn.chat_jid !== jid) {
+  if (!turn || turn.group_folder !== resolved.group.folder) {
     return c.json({ error: 'Turn not found' }, 404);
   }
 

@@ -117,7 +117,7 @@ function ImagePreview({
     return () => window.removeEventListener('keydown', handleEsc);
   }, [onClose]);
 
-  const previewUrl = withBasePath(`/api/groups/${encodeURIComponent(groupJid)}/files/preview/${toBase64Url(file.path)}`);
+  const previewUrl = withBasePath(`/api/sessions/${encodeURIComponent(groupJid)}/files/preview/${toBase64Url(file.path)}`);
 
   return createPortal(
     <div
@@ -366,7 +366,7 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
 
   const handleDownload = (item: FileEntry) => {
     const encoded = toBase64Url(item.path);
-    const url = withBasePath(`/api/groups/${encodeURIComponent(groupJid)}/files/download/${encoded}`);
+    const url = withBasePath(`/api/sessions/${encodeURIComponent(groupJid)}/files/download/${encoded}`);
     const a = document.createElement('a');
     a.href = url;
     a.download = item.name;
@@ -400,7 +400,7 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
     setOpenDirLoading(true);
     setOpenDirError(null);
     try {
-      await api.post(`/api/groups/${encodeURIComponent(groupJid)}/files/open-directory`, {
+      await api.post(`/api/sessions/${encodeURIComponent(groupJid)}/files/open-directory`, {
         path: currentDir,
       });
     } catch (err) {

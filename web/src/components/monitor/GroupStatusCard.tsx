@@ -3,11 +3,13 @@ import { Badge } from '@/components/ui/badge';
 interface GroupStatusCardProps {
   group: {
     jid: string;
+    session_id?: string | null;
     active: boolean;
     pendingMessages: boolean;
     pendingTasks: number;
-    containerName: string | null;
-    displayName: string | null;
+    runtime_mode?: 'local';
+    runner_id?: 'claude' | 'codex';
+    runtime_identifier?: string | null;
   };
 }
 
@@ -16,7 +18,7 @@ export function GroupStatusCard({ group }: GroupStatusCardProps) {
     <div className="bg-card rounded-xl border border-border p-4">
       <div className="flex items-center justify-between mb-2">
         <span className="text-sm font-medium text-foreground truncate mr-2">
-          {group.jid}
+          {group.session_id || group.jid}
         </span>
         {group.active ? (
           <Badge variant="default" className="bg-green-100 text-green-700 hover:bg-green-200 shrink-0">
@@ -37,9 +39,15 @@ export function GroupStatusCard({ group }: GroupStatusCardProps) {
           </span>
         </div>
         <div className="flex items-center justify-between">
+          <span>Runner</span>
+          <span className="text-foreground">
+            {group.runner_id || '-'} / {group.runtime_mode || '-'}
+          </span>
+        </div>
+        <div className="flex items-center justify-between">
           <span>进程标识</span>
           <span className="text-foreground font-mono truncate ml-2 max-w-[60%] text-right">
-            {group.displayName || group.containerName || '-'}
+            {group.runtime_identifier || '-'}
           </span>
         </div>
       </div>

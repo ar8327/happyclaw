@@ -470,6 +470,7 @@ function buildSessionPayload(
       !!backingJid &&
       !!backingGroup &&
       canDeleteGroup(user, { ...backingGroup, jid: backingJid }),
+    runtime_mode: session.runtime_mode,
     execution_mode: session.runtime_mode,
     custom_cwd: session.cwd,
     cwd: session.cwd,

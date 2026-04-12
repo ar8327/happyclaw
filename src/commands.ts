@@ -18,7 +18,9 @@ import type { NewMessage, MessageCursor } from './types.js';
 // ─── Types ──────────────────────────────────────────────────────
 
 export interface CommandDeps {
-  queue: { stopGroup(jid: string, opts?: { force?: boolean }): Promise<void> };
+  queue: {
+    stopSession(jid: string, opts?: { force?: boolean }): Promise<void>;
+  };
   sessions: Record<string, string>;
   broadcast: (jid: string, msg: NewMessage & { is_from_me: boolean }) => void;
   setLastAgentTimestamp: (jid: string, cursor: MessageCursor) => void;
@@ -57,13 +59,13 @@ export async function executeSessionReset(
 ): Promise<void> {
   if (agentId) {
     // Agent-specific reset: only stop the agent's virtual JID process
-    const virtualJid = `web:${folder}#agent:${agentId}`;
-    await deps.queue.stopGroup(virtualJid, { force: true });
+    const virtualJid = `${chatJid}#agent:${agentId}`;
+    await deps.queue.stopSession(virtualJid, { force: true });
   } else {
     // Main session reset: stop all processes for this folder
     const siblingJids = getJidsByFolder(folder);
     await Promise.all(
-      siblingJids.map((j) => deps.queue.stopGroup(j, { force: true })),
+      siblingJids.map((j) => deps.queue.stopSession(j, { force: true })),
     );
   }
 
@@ -77,7 +79,7 @@ export async function executeSessionReset(
   }
 
   // 4. Insert context_reset divider message into the correct JID
-  const targetJid = agentId ? `web:${folder}#agent:${agentId}` : chatJid;
+  const targetJid = agentId ? `${chatJid}#agent:${agentId}` : chatJid;
   const dividerMessageId = crypto.randomUUID();
   const timestamp = new Date().toISOString();
   ensureChatExists(targetJid);
@@ -104,7 +106,7 @@ export async function executeSessionReset(
   // 5. Advance lastAgentTimestamp so old messages before the reset are not
   //    re-sent to the next fresh agent session.
   if (agentId) {
-    const virtualJid = `web:${folder}#agent:${agentId}`;
+    const virtualJid = `${chatJid}#agent:${agentId}`;
     deps.setLastAgentTimestamp(virtualJid, { rowid: dividerRowid });
   } else {
     const siblingJids = getJidsByFolder(folder);

@@ -6,7 +6,7 @@ import pty from 'node-pty';
 import { logger } from './logger.js';
 
 interface TerminalSessionBase {
-  containerName: string;
+  runtimeIdentifier: string;
   groupJid: string;
   createdAt: number;
   stoppedManually: boolean;
@@ -65,7 +65,7 @@ export class TerminalManager {
 
   start(
     groupJid: string,
-    containerName: string,
+    workingDirectory: string,
     cols: number,
     rows: number,
     onData: (data: string) => void,
@@ -77,25 +77,27 @@ export class TerminalManager {
     }
 
     logger.info(
-      { groupJid, containerName, cols, rows },
+      { groupJid, workingDirectory, cols, rows },
       'Starting terminal session',
     );
 
-    const shellBootstrap =
-      'if command -v zsh >/dev/null 2>&1; then exec zsh -il; ' +
-      'elif command -v bash >/dev/null 2>&1; then exec bash -il; ' +
-      'else exec sh -i; fi';
+    const shell =
+      process.env.SHELL
+      || process.env.COMSPEC
+      || (process.platform === 'win32' ? 'cmd.exe' : '/bin/zsh');
+    const shellArgs = process.platform === 'win32' ? [] : ['-il'];
 
     this.ensurePtySpawnHelperExecutable();
 
     try {
       const ptyProcess = pty.spawn(
-        'docker',
-        ['exec', '-it', containerName, '/bin/sh', '-lc', shellBootstrap],
+        shell,
+        shellArgs,
         {
           name: 'xterm-256color',
           cols,
           rows,
+          cwd: workingDirectory,
           env: process.env as Record<string, string>,
         },
       );
@@ -103,7 +105,7 @@ export class TerminalManager {
       const session: PtyTerminalSession = {
         mode: 'pty',
         pty: ptyProcess,
-        containerName,
+        runtimeIdentifier: workingDirectory,
         groupJid,
         createdAt: Date.now(),
         stoppedManually: false,
@@ -121,24 +123,29 @@ export class TerminalManager {
       return;
     } catch (err) {
       logger.warn(
-        { err, groupJid, containerName },
+        { err, groupJid, workingDirectory },
         'PTY spawn failed, falling back to pipe terminal',
       );
     }
 
-    const proc = spawn('docker', ['exec', '-i', containerName, '/bin/sh'], {
+    const proc: ChildProcess = spawn(
+      shell,
+      process.platform === 'win32' ? [] : ['-i'],
+      {
       stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: workingDirectory,
       env: {
         ...process.env,
         TERM: process.env.TERM || 'xterm-256color',
       },
-    });
+      },
+    );
 
     const session: PipeTerminalSession = {
       mode: 'pipe',
       process: proc,
       onData,
-      containerName,
+      runtimeIdentifier: workingDirectory,
       groupJid,
       createdAt: Date.now(),
       stoppedManually: false,
@@ -159,11 +166,11 @@ export class TerminalManager {
     proc.stderr?.on('data', (chunk: Buffer) => {
       onData(chunk.toString());
     });
-    proc.on('error', (err) => {
+    proc.on('error', (err: Error) => {
       onData(`\r\n[terminal process error: ${err.message}]\r\n`);
       finalizeExit(1);
     });
-    proc.on('close', (exitCode) => {
+    proc.on('close', (exitCode: number | null) => {
       finalizeExit(exitCode ?? 0);
     });
 

@@ -99,6 +99,12 @@ function selectProvider(): 'claude' | 'codex' {
   return 'claude';
 }
 
+function buildSessionRecordId(containerInput: ContainerInput): string {
+  return containerInput.agentId
+    ? `worker:${containerInput.agentId}`
+    : `main:${containerInput.groupFolder}`;
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -120,10 +126,12 @@ async function main(): Promise<void> {
   }
 
   const provider = selectProvider();
+  const sessionRecordId = buildSessionRecordId(containerInput);
   log(`Provider: ${provider}`);
 
   // Initialize session state
   state.loadImChannels(IM_CHANNELS_FILE);
+  state.hydrate(containerInput.bootstrapState);
 
   // Clean up stale sentinels
   fs.mkdirSync(ipcPaths.inputDir, { recursive: true });
@@ -172,7 +180,9 @@ async function main(): Promise<void> {
       runner,
       initialPrompt: prompt,
       initialImages: promptImages,
+      sessionRecordId,
       sessionId: containerInput.sessionId,
+      initialResumeAnchor: containerInput.resumeAnchor,
       state,
       ipcPaths,
       imChannelsFile: IM_CHANNELS_FILE,
@@ -202,7 +212,9 @@ async function main(): Promise<void> {
       runner,
       initialPrompt: prompt,
       initialImages: promptImages,
+      sessionRecordId,
       sessionId: containerInput.sessionId,
+      initialResumeAnchor: containerInput.resumeAnchor,
       state,
       ipcPaths,
       imChannelsFile: IM_CHANNELS_FILE,

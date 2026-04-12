@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../../api/client';
 import { useChatStore } from '../../../stores/chat';
-import type { AvailableImGroup, AgentInfo } from '../../../types';
+import type { AvailableImGroup } from '../../../types';
 
 export interface BindingTarget {
   type: 'main' | 'agent';
+  sessionId: string;
   groupJid: string;
   groupName: string;
   agentId?: string;
@@ -25,7 +26,7 @@ export function useImBindings() {
   // Derive homeJid as a stable value — no callback, no dependency cycle
   const homeJid = useMemo((): string | null => {
     for (const [jid, group] of Object.entries(groups)) {
-      if (group.is_my_home) return jid;
+      if (group.session_kind === 'main') return jid;
     }
     return null;
   }, [groups]);
@@ -55,47 +56,26 @@ export function useImBindings() {
   const loadTargets = useCallback(async () => {
     setTargetsLoading(true);
     try {
-      const currentGroups = groupsRef.current;
-      const webGroups = Object.entries(currentGroups).filter(
-        ([jid, g]) => jid.startsWith('web:') && !g.is_home,
+      const data = await api.get<{
+        targets: Array<{
+          type: 'main' | 'agent';
+          session_id: string;
+          groupJid: string;
+          groupName: string;
+          agentId?: string;
+          agentName?: string;
+        }>;
+      }>('/api/sessions/binding-targets');
+      setTargets(
+        data.targets.map((target) => ({
+          type: target.type,
+          sessionId: target.session_id,
+          groupJid: target.groupJid,
+          groupName: target.groupName,
+          agentId: target.agentId,
+          agentName: target.agentName,
+        })),
       );
-
-      const allTargets: BindingTarget[] = [];
-
-      for (const [jid, group] of webGroups) {
-        allTargets.push({
-          type: 'main',
-          groupJid: jid,
-          groupName: group.name,
-        });
-      }
-
-      // Load conversation agents for each workspace
-      const agentPromises = webGroups.map(async ([jid, group]) => {
-        try {
-          const data = await api.get<{ agents: AgentInfo[] }>(
-            `/api/groups/${encodeURIComponent(jid)}/agents`,
-          );
-          return data.agents
-            .filter((a) => a.kind === 'conversation')
-            .map((a) => ({
-              type: 'agent' as const,
-              groupJid: jid,
-              groupName: group.name,
-              agentId: a.id,
-              agentName: a.name,
-            }));
-        } catch {
-          return [];
-        }
-      });
-
-      const agentResults = await Promise.all(agentPromises);
-      for (const agents of agentResults) {
-        allTargets.push(...agents);
-      }
-
-      setTargets(allTargets);
     } finally {
       setTargetsLoading(false);
     }
@@ -122,17 +102,17 @@ export function useImBindings() {
     async (
       imJid: string,
       target: {
-        target_main_jid?: string;
-        target_agent_id?: string;
+        session_id?: string;
         unbind?: boolean;
-        force?: boolean;
         reply_policy?: 'source_only' | 'mirror';
+        activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+        require_mention?: boolean;
       },
     ): Promise<string | null> => {
       setError(null);
       try {
         await api.put(
-          `/api/config/user-im/bindings/${encodeURIComponent(imJid)}`,
+          `/api/sessions/bindings/${encodeURIComponent(imJid)}`,
           target,
         );
         await loadBindings();

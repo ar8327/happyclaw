@@ -40,6 +40,7 @@ export interface AppearanceConfig {
 export interface SetupStatus {
   needsSetup: boolean;
   claudeConfigured: boolean;
+  codexConfigured?: boolean;
   feishuConfigured: boolean;
 }
 
@@ -88,7 +89,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   logout: async () => {
     await api.post('/api/auth/logout');
-    set({ authenticated: false, user: null, setupStatus: null, appearance: null, initialized: true });
+    const data = await api.get<{ user: UserPublic; setupStatus?: SetupStatus; appearance?: AppearanceConfig }>('/api/auth/me');
+    set({
+      authenticated: true,
+      user: data.user,
+      setupStatus: data.setupStatus ?? null,
+      appearance: data.appearance ?? null,
+      initialized: true,
+      checking: false,
+    });
   },
 
   checkStatus: async () => {

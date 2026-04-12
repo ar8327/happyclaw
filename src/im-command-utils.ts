@@ -151,10 +151,8 @@ export function resolveLocationInfo(
 // ─── System Status Formatting ─────────────────────────────────
 
 export interface QueueStatusInfo {
-  activeContainerCount: number;
-  activeHostProcessCount: number;
-  maxContainers: number;
-  maxHostProcesses: number;
+  activeRuntimes: number;
+  maxRuntimes: number;
   waitingCount: number;
   waitingGroupJids: string[];
 }
@@ -179,7 +177,7 @@ export function formatSystemStatus(
     '━━━━━━━━━━',
     `📍 位置: ${location.locationLine}`,
     `⚡ 状态: ${statusText}`,
-    `📦 负载: ${queueStatus.activeContainerCount}/${queueStatus.maxContainers} 容器, ${queueStatus.activeHostProcessCount}/${queueStatus.maxHostProcesses} 进程`,
+    `📦 负载: ${queueStatus.activeRuntimes}/${queueStatus.maxRuntimes} 个 Runtime`,
     '',
     '💡 /where 查看绑定 · /list 查看全部',
   ];

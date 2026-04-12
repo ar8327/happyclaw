@@ -56,7 +56,7 @@ export function GroupSkillsPanel({ groupJid }: GroupSkillsPanelProps) {
     setActivationMode(mode as typeof activationMode);
     setSavingMode(true);
     try {
-      await api.patch(`/api/groups/${encodeURIComponent(groupJid)}`, { activation_mode: mode });
+      await api.patch(`/api/sessions/${encodeURIComponent(groupJid)}`, { activation_mode: mode });
       useChatStore.setState(s => {
         const g = s.groups[groupJid];
         if (!g) return s;
@@ -118,7 +118,7 @@ export function GroupSkillsPanel({ groupJid }: GroupSkillsPanelProps) {
     setSaving(true);
     try {
       const payload = allSelected ? null : Array.from(selectedIds!);
-      await api.patch(`/api/groups/${encodeURIComponent(groupJid)}`, { selected_skills: payload });
+      await api.patch(`/api/sessions/${encodeURIComponent(groupJid)}`, { selected_skills: payload });
       // 更新本地 store
       useChatStore.setState(s => {
         const g = s.groups[groupJid];
@@ -194,6 +194,9 @@ export function GroupSkillsPanel({ groupJid }: GroupSkillsPanelProps) {
         <p className="text-[11px] text-muted-foreground mt-1">
           {ACTIVATION_MODES.find(m => m.value === activationMode)?.desc}
         </p>
+        <p className="text-[11px] text-muted-foreground mt-1">
+          这里修改的是当前会话的默认响应模式，已绑定到该会话的 IM 渠道会同步更新；单独改某个渠道时，以绑定页里的配置为准。
+        </p>
       </div>
 
       <div className="flex-1 overflow-y-auto">
@@ -233,7 +236,7 @@ export function GroupSkillsPanel({ groupJid }: GroupSkillsPanelProps) {
 
       <div className="px-4 py-2 border-t border-border">
         <p className="text-[11px] text-muted-foreground">
-          更改将在下次容器启动时生效
+          更改将在下次 Runtime 启动时生效
         </p>
       </div>
     </div>

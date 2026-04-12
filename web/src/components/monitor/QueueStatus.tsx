@@ -24,7 +24,7 @@ export function QueueStatus({ status }: QueueStatusProps) {
 
       <div className="space-y-1">
         <div className="text-xs text-slate-500">
-          {groupsWithQueue.length} 个群组有待处理任务或消息
+          {groupsWithQueue.length} 个会话 runtime 有待处理任务或消息
         </div>
 
         {groupsWithQueue.length > 0 && (
@@ -34,7 +34,7 @@ export function QueueStatus({ status }: QueueStatusProps) {
                 key={group.jid}
                 className="flex items-center justify-between text-xs"
               >
-                <span className="text-slate-600 truncate">{group.jid}</span>
+                <span className="text-slate-600 truncate">{group.session_id || group.jid}</span>
                 <span className="text-foreground font-medium ml-2">
                   {group.pendingTasks}{group.pendingMessages ? ' + 消息' : ''}
                 </span>
@@ -42,7 +42,7 @@ export function QueueStatus({ status }: QueueStatusProps) {
             ))}
             {groupsWithQueue.length > 3 && (
               <div className="text-xs text-slate-400">
-                ... 还有 {groupsWithQueue.length - 3} 个群组
+                ... 还有 {groupsWithQueue.length - 3} 个会话
               </div>
             )}
           </div>

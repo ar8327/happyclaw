@@ -1,4 +1,4 @@
-import { replaceInApp, withBasePath } from '../utils/url';
+import { withBasePath } from '../utils/url';
 
 type WsHandler = (data: any) => void;
 
@@ -41,15 +41,9 @@ class WsManager {
       } catch {}
     };
 
-    ws.onclose = (event: CloseEvent) => {
+    ws.onclose = (_event: CloseEvent) => {
       if (this.ws !== ws) return;
       this.emit('disconnected', {});
-      // 1008 = Policy Violation (backend auth failure), 4001 = custom auth error
-      if (event.code === 1008 || event.code === 4001) {
-        this.ws = null;
-        replaceInApp('/login');
-        return;
-      }
       this.scheduleReconnect();
     };
 

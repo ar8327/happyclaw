@@ -81,8 +81,9 @@ export function SearchPage() {
 
   const handleResultClick = useCallback(
     (result: GlobalSearchResult) => {
-      if (result.group_folder) {
-        navigate(`/chat/${result.group_folder}?highlightId=${encodeURIComponent(result.id)}&ts=${encodeURIComponent(result.timestamp)}`);
+      const sessionSlug = result.group_folder;
+      if (sessionSlug) {
+        navigate(`/chat/${sessionSlug}?highlightId=${encodeURIComponent(result.id)}&ts=${encodeURIComponent(result.timestamp)}`);
       }
     },
     [navigate],
@@ -121,7 +122,7 @@ export function SearchPage() {
     );
   };
 
-  // Group results by group_folder
+  // Group results by session slug
   const grouped = results.reduce<Record<string, { name: string; results: GlobalSearchResult[] }>>(
     (acc, result) => {
       const key = result.group_folder || 'unknown';
@@ -146,7 +147,7 @@ export function SearchPage() {
             type="text"
             value={query}
             onChange={(e) => handleInputChange(e.target.value)}
-            placeholder="搜索所有工作区的聊天记录..."
+            placeholder="搜索所有会话的聊天记录..."
             className="w-full pl-9 pr-8 py-2.5 rounded-lg bg-muted/50 border border-border text-sm focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground"
           />
           {query && (
@@ -195,7 +196,7 @@ export function SearchPage() {
         ) : results.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
             <Search className="w-12 h-12 mb-3 opacity-30" />
-            <p className="text-sm">输入关键词搜索所有工作区的聊天记录</p>
+            <p className="text-sm">输入关键词搜索所有会话的聊天记录</p>
           </div>
         ) : (
           <div>

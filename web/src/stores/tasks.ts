@@ -36,7 +36,7 @@ interface TasksState {
   error: string | null;
   loadTasks: () => Promise<void>;
   createTask: (
-    groupFolder: string,
+    sessionFolder: string,
     chatJid: string,
     prompt: string,
     scheduleType: 'cron' | 'interval' | 'once',
@@ -77,7 +77,7 @@ export const useTasksStore = create<TasksState>((set, get) => ({
   },
 
   createTask: async (
-    groupFolder: string,
+    sessionFolder: string,
     chatJid: string,
     prompt: string,
     scheduleType: 'cron' | 'interval' | 'once',
@@ -94,7 +94,7 @@ export const useTasksStore = create<TasksState>((set, get) => ({
           : scheduleValue.trim();
 
       const body: Record<string, unknown> = {
-        group_folder: groupFolder,
+        group_folder: sessionFolder,
         chat_jid: chatJid,
         prompt: prompt.trim(),
         schedule_type: scheduleType,

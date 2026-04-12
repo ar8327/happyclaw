@@ -6,25 +6,23 @@ import { useAuthStore } from '../stores/auth';
 import { SettingsNav } from '../components/settings/SettingsNav';
 import { ClaudeProviderSection } from '../components/settings/ClaudeProviderSection';
 import { CodexProviderSection } from '../components/settings/CodexProviderSection';
-import { RegistrationSection } from '../components/settings/RegistrationSection';
 import { ProfileSection } from '../components/settings/ProfileSection';
-import { SecuritySection } from '../components/settings/SecuritySection';
 import { AboutSection } from '../components/settings/AboutSection';
 import { AppearanceSection } from '../components/settings/AppearanceSection';
 import { SystemSettingsSection } from '../components/settings/SystemSettingsSection';
 import { UserChannelsSection } from '../components/settings/UserChannelsSection';
 import { GroupsPage } from './GroupsPage';
 import { MemoryPage } from './MemoryPage';
+import { RunnersPage } from './RunnersPage';
 import { SkillsPage } from './SkillsPage';
 import { McpServersPage } from './McpServersPage';
-import { UsersPage } from './UsersPage';
 import { BindingsSection } from '../components/settings/BindingsSection';
 import { AgentDefinitionsPage } from './AgentDefinitionsPage';
 import type { SettingsTab } from '../components/settings/types';
 
-const VALID_TABS: SettingsTab[] = ['claude', 'codex', 'registration', 'appearance', 'system', 'profile', 'my-channels', 'security', 'groups', 'memory', 'skills', 'mcp-servers', 'agent-definitions', 'users', 'about', 'bindings'];
-const SYSTEM_TABS: SettingsTab[] = ['claude', 'codex', 'registration', 'appearance', 'system'];
-const FULLPAGE_TABS: SettingsTab[] = ['groups', 'memory', 'skills', 'mcp-servers', 'agent-definitions', 'users', 'bindings'];
+const VALID_TABS: SettingsTab[] = ['claude', 'codex', 'runners', 'appearance', 'system', 'profile', 'my-channels', 'groups', 'memory', 'skills', 'mcp-servers', 'agent-definitions', 'about', 'bindings'];
+const SYSTEM_TABS: SettingsTab[] = ['claude', 'codex', 'runners', 'appearance', 'system'];
+const FULLPAGE_TABS: SettingsTab[] = ['groups', 'memory', 'runners', 'skills', 'mcp-servers', 'agent-definitions', 'bindings'];
 
 export function SettingsPage() {
   const { user: currentUser } = useAuthStore();
@@ -37,13 +35,8 @@ export function SettingsPage() {
     currentUser?.role === 'admin' || !!currentUser?.permissions.includes('manage_system_config');
   const mustChangePassword = !!currentUser?.must_change_password;
   const canManageSystemConfig = hasSystemConfigPermission && !mustChangePassword;
-  const canManageUsers =
-    currentUser?.role === 'admin' ||
-    !!currentUser?.permissions.includes('manage_users') ||
-    !!currentUser?.permissions.includes('manage_invites') ||
-    !!currentUser?.permissions.includes('view_audit_log');
 
-  const defaultTab: SettingsTab = canManageSystemConfig ? 'claude' : 'profile';
+  const defaultTab: SettingsTab = canManageSystemConfig ? 'runners' : 'profile';
 
   const activeTab = useMemo((): SettingsTab => {
     if (mustChangePassword) return 'profile';
@@ -67,11 +60,10 @@ export function SettingsPage() {
     const tabs: { key: SettingsTab; label: string }[] = [];
     tabs.push({ key: 'profile', label: '个人资料' });
     tabs.push({ key: 'my-channels', label: '消息渠道' });
-    tabs.push({ key: 'security', label: '安全' });
     if (canManageSystemConfig) {
+      tabs.push({ key: 'runners', label: 'Runners' });
       tabs.push({ key: 'claude', label: 'Claude' });
       tabs.push({ key: 'codex', label: 'Codex' });
-      tabs.push({ key: 'registration', label: '注册' });
       tabs.push({ key: 'appearance', label: '外观' });
       tabs.push({ key: 'system', label: '系统' });
     }
@@ -81,12 +73,9 @@ export function SettingsPage() {
     tabs.push({ key: 'mcp-servers', label: 'MCP' });
     tabs.push({ key: 'agent-definitions', label: 'Agent' });
     tabs.push({ key: 'bindings', label: 'IM 绑定' });
-    if (canManageUsers) {
-      tabs.push({ key: 'users', label: '用户' });
-    }
     tabs.push({ key: 'about', label: '关于' });
     return tabs;
-  }, [canManageSystemConfig, canManageUsers]);
+  }, [canManageSystemConfig]);
 
   const tabBarRef = useRef<HTMLDivElement>(null);
 
@@ -100,20 +89,18 @@ export function SettingsPage() {
   }, [activeTab]);
 
   const sectionTitle: Record<SettingsTab, string> = {
-    claude: 'Claude 提供商',
-    codex: 'Codex 提供商',
-    registration: '注册管理',
+    claude: 'Claude 兼容桥接',
+    codex: 'Codex 兼容桥接',
+    runners: 'Runner 注册表',
     appearance: '外观设置（全局默认）',
     system: '系统参数',
     profile: '个人资料',
     'my-channels': '消息渠道',
-    security: '安全与设备',
     groups: '会话管理',
     memory: '记忆管理',
     skills: '技能管理',
     'mcp-servers': 'MCP 服务器',
     'agent-definitions': 'Agent 定义',
-    users: '用户管理',
     about: '关于',
     bindings: 'IM 绑定',
   };
@@ -167,7 +154,6 @@ export function SettingsPage() {
         activeTab={activeTab}
         onTabChange={handleTabChange}
         canManageSystemConfig={canManageSystemConfig}
-        canManageUsers={!!canManageUsers}
         mustChangePassword={mustChangePassword}
         open={navOpen}
         onOpenChange={setNavOpen}
@@ -178,10 +164,10 @@ export function SettingsPage() {
           <>
             {activeTab === 'groups' && <GroupsPage />}
             {activeTab === 'memory' && <MemoryPage />}
+            {activeTab === 'runners' && <RunnersPage />}
             {activeTab === 'skills' && <SkillsPage />}
             {activeTab === 'mcp-servers' && <McpServersPage />}
             {activeTab === 'agent-definitions' && <AgentDefinitionsPage />}
-            {activeTab === 'users' && <UsersPage />}
             {activeTab === 'bindings' && <BindingsSection />}
           </>
         ) : (
@@ -207,12 +193,10 @@ export function SettingsPage() {
               <div className="bg-card rounded-xl border border-border p-6">
                 {activeTab === 'claude' && <ClaudeProviderSection setNotice={setNotice} setError={setError} />}
                 {activeTab === 'codex' && <CodexProviderSection setNotice={setNotice} setError={setError} />}
-                {activeTab === 'registration' && <RegistrationSection setNotice={setNotice} setError={setError} />}
                 {activeTab === 'appearance' && <AppearanceSection setNotice={setNotice} setError={setError} />}
                 {activeTab === 'system' && <SystemSettingsSection setNotice={setNotice} setError={setError} />}
                 {activeTab === 'profile' && <ProfileSection setNotice={setNotice} setError={setError} />}
                 {activeTab === 'my-channels' && <UserChannelsSection setNotice={setNotice} setError={setError} />}
-                {activeTab === 'security' && <SecuritySection setNotice={setNotice} setError={setError} />}
                 {activeTab === 'about' && <AboutSection />}
               </div>
             </div>
