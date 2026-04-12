@@ -71,8 +71,6 @@ function isImplicitDefaultSessionBinding(
   binding: ReturnType<typeof getSessionBinding> | undefined,
 ): boolean {
   return !!binding
-    && !imGroup.target_agent_id
-    && !imGroup.target_main_jid
     && binding.session_id === `main:${imGroup.folder}`;
 }
 
@@ -553,10 +551,10 @@ router.put('/:jid/agents/:agentId/im-binding', authMiddleware, async (c) => {
     return c.json({ error: 'IM group is already bound elsewhere' }, 409);
   }
 
-  // Update DB + in-memory cache — clear target_main_jid to avoid conflicts
+  // Explicit bindings now persist through session_bindings only.
   const updated: RegisteredGroup = {
     ...imGroup,
-    target_agent_id: agentId,
+    target_agent_id: undefined,
     target_main_jid: undefined,
     reply_policy: replyPolicy,
     activation_mode:
@@ -611,6 +609,7 @@ router.delete(
     const updated = {
       ...imGroup,
       target_agent_id: undefined,
+      target_main_jid: undefined,
       activation_mode: 'disabled' as const,
     };
     setRegisteredGroup(imJid, updated);
@@ -659,7 +658,6 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
   if (!canAccessGroup(user, { ...imGroup, jid: imJid })) {
     return c.json({ error: 'Forbidden' }, 403);
   }
-  const targetMainJid = accessJid; // Use actual registered JID (not folder-based)
   const force = body.force === true;
   const replyPolicy = body.reply_policy === 'mirror' ? 'mirror' : 'source_only';
   const currentBinding = getExplicitSessionBinding(imJid, imGroup);
@@ -670,10 +668,10 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
     return c.json({ error: 'IM group is already bound elsewhere' }, 409);
   }
 
-  // Update DB + in-memory cache — clear target_agent_id to avoid conflicts
+  // Explicit bindings now persist through session_bindings only.
   const updated: RegisteredGroup = {
     ...imGroup,
-    target_main_jid: targetMainJid,
+    target_main_jid: undefined,
     target_agent_id: undefined,
     reply_policy: replyPolicy,
     activation_mode:
@@ -684,7 +682,7 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
   syncImGroupCache(imJid, updated);
 
   logger.info(
-    { imJid, targetMainJid, userId: user.id },
+    { imJid, sessionId: targetSessionId, userId: user.id },
     'IM group bound to workspace main conversation',
   );
   return c.json({ success: true });
@@ -713,7 +711,6 @@ router.delete('/:jid/im-binding/:imJid', authMiddleware, async (c) => {
   if (!canAccessGroup(user, { ...imGroup, jid: imJid })) {
     return c.json({ error: 'Forbidden' }, 403);
   }
-  const targetMainJid = accessJid; // Use actual registered JID (not folder-based)
   const currentBinding = getExplicitSessionBinding(imJid, imGroup);
   if (currentBinding?.session_id !== `main:${group.folder}`) {
     return c.json({ error: 'IM group is not bound to this workspace' }, 400);
@@ -723,6 +720,7 @@ router.delete('/:jid/im-binding/:imJid', authMiddleware, async (c) => {
   const updated = {
     ...imGroup,
     target_main_jid: undefined,
+    target_agent_id: undefined,
     activation_mode: 'disabled' as const,
   };
   setRegisteredGroup(imJid, updated);
@@ -730,7 +728,7 @@ router.delete('/:jid/im-binding/:imJid', authMiddleware, async (c) => {
   syncImGroupCache(imJid, updated);
 
   logger.info(
-    { imJid, targetMainJid, userId: user.id },
+    { imJid, sessionId: `main:${group.folder}`, userId: user.id },
     'IM group unbound from workspace main conversation',
   );
   return c.json({ success: true });

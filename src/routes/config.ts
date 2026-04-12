@@ -1365,8 +1365,6 @@ function isImplicitDefaultSessionBinding(
   binding: ReturnType<typeof getSessionBinding> | undefined,
 ): boolean {
   return !!binding
-    && !imGroup.target_agent_id
-    && !imGroup.target_main_jid
     && binding.session_id === resolveDefaultBindingSessionId(imGroup);
 }
 
@@ -2964,7 +2962,7 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
 
     const updated: RegisteredGroup = {
       ...imGroup,
-      target_agent_id: agentId,
+      target_agent_id: undefined,
       target_main_jid: undefined,
       reply_policy: replyPolicy ?? imGroup.reply_policy,
       activation_mode:
@@ -3012,8 +3010,7 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
 
     const updated: RegisteredGroup = {
       ...imGroup,
-      target_main_jid:
-        targetGroup.folder === imGroup.folder ? undefined : targetMainJid,
+      target_main_jid: undefined,
       target_agent_id: undefined,
       reply_policy: replyPolicy ?? imGroup.reply_policy,
       activation_mode:

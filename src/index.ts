@@ -418,8 +418,9 @@ function isImplicitDefaultSessionBinding(
   binding: ReturnType<typeof getSessionBinding> | undefined,
 ): boolean {
   if (!group || !binding) return false;
-  if (group.target_agent_id || group.target_main_jid) return false;
-  return binding.session_id === resolveDefaultSessionBinding(chatJid, group);
+  if (group.activation_mode === 'disabled') return false;
+  if (chatJid.startsWith('web:')) return false;
+  return binding.session_id === `main:${group.folder}`;
 }
 
 function getExplicitSessionBinding(
@@ -597,9 +598,9 @@ function applyExplicitChatBinding(
   const current = getSessionBinding(chatJid);
   const now = new Date().toISOString();
   const implicitDefaultSessionId =
-    !group.target_agent_id && !group.target_main_jid
-      ? resolveDefaultSessionBinding(chatJid, group)
-      : null;
+    group.activation_mode === 'disabled' || chatJid.startsWith('web:')
+      ? null
+      : `main:${group.folder}`;
   if (!sessionId || sessionId === implicitDefaultSessionId) {
     deleteSessionBinding(chatJid);
     return;
@@ -1107,8 +1108,6 @@ function resolveBindingTarget(
   rawSpec: string,
 ): {
   sessionId: string;
-  target_agent_id?: string;
-  target_main_jid?: string;
   display: string;
 } | null {
   const spec = rawSpec.trim();
@@ -1126,11 +1125,9 @@ function resolveBindingTarget(
   if (!workspace) return null;
 
   if (!agentSpec || agentSpec === 'main' || agentSpec === '主会话' || agentSpec === '主对话') {
-    const mainJid = findWebJidForFolder(workspace.folder);
-    if (!mainJid) return null;
+    if (!findWebJidForFolder(workspace.folder)) return null;
     return {
       sessionId: `main:${workspace.folder}`,
-      target_main_jid: mainJid,
       display: `${workspace.name} / 主会话`,
     };
   }
@@ -1144,7 +1141,6 @@ function resolveBindingTarget(
 
   return {
     sessionId: `worker:${agent.id}`,
-    target_agent_id: agent.id,
     display: `${workspace.name} / ${agent.name}`,
   };
 }
@@ -1323,14 +1319,8 @@ function handleBindCommand(chatJid: string, rawSpec: string): string {
 
   const updated: RegisteredGroup = {
     ...group,
-    target_agent_id:
-      resolved.sessionId === `main:${group.folder}`
-        ? undefined
-        : resolved.target_agent_id,
-    target_main_jid:
-      resolved.sessionId === `main:${group.folder}`
-        ? undefined
-        : resolved.target_main_jid,
+    target_agent_id: undefined,
+    target_main_jid: undefined,
     reply_policy: 'source_only',
   };
   setRegisteredGroup(chatJid, updated);
@@ -1373,7 +1363,7 @@ function handleNewCommand(chatJid: string, rawName: string): string {
   // Bind the current IM group to the new workspace's main conversation
   const updated: RegisteredGroup = {
     ...group,
-    target_main_jid: newJid,
+    target_main_jid: undefined,
     target_agent_id: undefined,
     reply_policy: 'source_only',
   };
@@ -4362,9 +4352,9 @@ async function startMessageLoop(): Promise<void> {
           }
           if (!group) continue;
 
-          // Skip groups with target_agent_id — their messages are routed
-          // to conversation agents at IM ingestion time (feishu.ts/telegram.ts)
-          if (group.target_agent_id) continue;
+          // Skip groups already bound to worker sessions — their messages are
+          // routed to conversation agents at IM ingestion time.
+          if (getChatBindingPolicy(chatJid).sessionId?.startsWith('worker:')) continue;
 
           // Billing quota check before processing
           const ownerUserId = resolveChatOwnerKey(chatJid, group);
@@ -4825,7 +4815,6 @@ function buildOnNewChat(
         name: chatName,
         folder: homeFolder,
         added_at: now,
-        target_main_jid: newJid,
         reply_policy: 'source_only',
       });
       applyExplicitChatBinding(

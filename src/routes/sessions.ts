@@ -444,14 +444,12 @@ function buildUpdatedImGroupForSessionBinding(
       options.requireMention !== undefined
         ? options.requireMention
         : imGroup.require_mention,
+    target_agent_id: undefined,
+    target_main_jid: undefined,
   };
 
   const defaultSessionId = `main:${imGroup.folder}`;
-  if (!targetSession || targetSession.id === defaultSessionId) {
-    updated.target_agent_id = undefined;
-    updated.target_main_jid = undefined;
-    return updated;
-  }
+  if (!targetSession || targetSession.id === defaultSessionId) return updated;
 
   if (targetSession.kind === 'worker') {
     const worker = getWorkerSessionRecord(targetSession.id);
@@ -461,18 +459,10 @@ function buildUpdatedImGroupForSessionBinding(
     if (!worker || worker.kind !== 'conversation' || !agentId) {
       throw new Error('Only conversation worker sessions can bind IM channels');
     }
-    updated.target_agent_id = agentId;
-    updated.target_main_jid = undefined;
     return updated;
   }
 
   if (targetSession.kind === 'main' || targetSession.kind === 'workspace') {
-    const backingJid = resolveBackingJid(targetSession);
-    if (!backingJid) {
-      throw new Error('Target session has no backing group');
-    }
-    updated.target_main_jid = backingJid;
-    updated.target_agent_id = undefined;
     return updated;
   }
 
@@ -484,8 +474,6 @@ function isImplicitDefaultSessionBinding(
   binding: ReturnType<typeof getSessionBinding> | undefined,
 ): boolean {
   return !!binding
-    && !imGroup.target_agent_id
-    && !imGroup.target_main_jid
     && binding.session_id === `main:${imGroup.folder}`;
 }
 
@@ -781,9 +769,7 @@ sessionRoutes.put('/bindings/:channelJid', authMiddleware, async (c) => {
     syncRegisteredGroupCache(channelJid, updated);
     const explicitSessionId =
       targetSession
-      && (targetSession.id !== `main:${updated.folder}`
-        || !!updated.target_agent_id
-        || !!updated.target_main_jid)
+      && targetSession.id !== `main:${updated.folder}`
         ? targetSession.id
         : null;
     syncExplicitSessionBinding(channelJid, updated, explicitSessionId, {
