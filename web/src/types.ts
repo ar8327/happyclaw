@@ -62,14 +62,3 @@ export interface AvailableImChannel {
 }
 
 export type AvailableImGroup = AvailableImChannel;
-
-export interface SessionMember {
-  user_id: string;
-  role: 'owner' | 'member';
-  added_at: string;
-  added_by?: string;
-  username: string;
-  display_name: string;
-}
-
-export type GroupMember = SessionMember;

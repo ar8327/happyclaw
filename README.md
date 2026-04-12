@@ -94,7 +94,7 @@
 主运行链路由 `src/runtime-runner.ts` 驱动，本地启动 `container/agent-runner` 中的 Claude 或 Codex provider，并统一向外暴露 Session 语义。
 
 - **Session 是一等对象** — 主会话、workspace、worker、memory 都经由 `/api/sessions` 投影和管理
-- **统一本地 runtime** — 新 Session 固定为 `runtime_mode=local`，旧 `execution_mode` 只作为兼容字段回写
+- **统一本地 runtime** — 新 Session 固定走本地 runtime；`runtime_mode` 与 `execution_mode` 旧字段都已退出对外 Session 契约
 - **Runner 可切换** — 当前支持 Claude 与 Codex，runner profile、模型、thinking effort、环境变量都能在 Session 级别配置
 - **多 Session 并发** — Runtime 队列按 Session 调度，并通过 `/api/status` 统一暴露运行与排队状态
 - **工作目录可初始化** — 新建 Session 可从本地目录复制或从 Git 仓库初始化，再在设置中单独调整 cwd
@@ -296,7 +296,7 @@ make start
 | **Claude** | 原生支持更完整的 session resume、hook 与 observability | 聊天、记忆、IM、观测均为 full |
 | **Codex** | 聊天主链路可用，但记忆和观测存在降级 | 聊天可用，memory 与 observability 为 degraded 或 synthetic |
 
-当前所有 Session 都通过本地 runtime 启动。界面中的 `runtime_mode` 固定为 `local`，旧 `execution_mode` 仅用于兼容历史数据。
+当前所有 Session 都通过本地 runtime 启动。`runtime_mode` 与 `execution_mode` 已不再作为 Session 接口字段返回，旧 `execution_mode` 只在底层兼容层保留。
 
 ## 技术架构
 
