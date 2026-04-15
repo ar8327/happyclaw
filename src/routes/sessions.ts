@@ -1003,6 +1003,19 @@ sessionRoutes.post('/', authMiddleware, async (c) => {
       400,
     );
   }
+  if (
+    body &&
+    typeof body === 'object' &&
+    Object.prototype.hasOwnProperty.call(body, 'runtime_mode')
+  ) {
+    return c.json(
+      {
+        error:
+          'runtime_mode has been removed. Sessions always use the unified local runtime.',
+      },
+      400,
+    );
+  }
 
   const initSourcePath = validation.data.init_source_path;
   const initGitUrl = validation.data.init_git_url;
@@ -1265,6 +1278,15 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
       {
         error:
           'runtime_mode has been removed. Sessions always use the unified local runtime.',
+      },
+      400,
+    );
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'execution_mode')) {
+    return c.json(
+      {
+        error:
+          'execution_mode has been removed. Sessions always use the unified local runtime.',
       },
       400,
     );
