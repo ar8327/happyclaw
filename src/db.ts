@@ -3993,11 +3993,9 @@ export function listUsers(options: ListUsersOptions = {}): ListUsersResult {
   const rows = db
     .prepare(
       `
-      SELECT u.*, MAX(s.last_active_at) AS last_active_at
+      SELECT u.*, u.last_login_at AS last_active_at
       FROM users u
-      LEFT JOIN user_sessions s ON s.user_id = u.id
       ${whereClause}
-      GROUP BY u.id
       ORDER BY
         CASE u.status
           WHEN 'active' THEN 0
@@ -4160,15 +4158,11 @@ export function updateUserFields(
 
 export function deleteUser(id: string): void {
   const now = new Date().toISOString();
-  const tx = db.transaction((userId: string) => {
-    db.prepare('DELETE FROM user_sessions WHERE user_id = ?').run(userId);
-    db.prepare(
-      `UPDATE users
-       SET status = 'deleted', deleted_at = ?, disable_reason = COALESCE(disable_reason, 'deleted_by_admin'), updated_at = ?
-       WHERE id = ?`,
-    ).run(now, now, userId);
-  });
-  tx(id);
+  db.prepare(
+    `UPDATE users
+     SET status = 'deleted', deleted_at = ?, disable_reason = COALESCE(disable_reason, 'deleted_by_admin'), updated_at = ?
+     WHERE id = ?`,
+  ).run(now, now, id);
 }
 
 export function restoreUser(id: string): void {
