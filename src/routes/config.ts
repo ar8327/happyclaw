@@ -2860,8 +2860,6 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
   if (body.unbind === true) {
     const updated: RegisteredGroup = {
       ...imGroup,
-      target_main_jid: undefined,
-      target_agent_id: undefined,
       reply_policy: replyPolicy ?? imGroup.reply_policy,
       activation_mode: activationMode ?? 'disabled',
       require_mention:
@@ -2916,8 +2914,6 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
 
     const updated: RegisteredGroup = {
       ...imGroup,
-      target_agent_id: undefined,
-      target_main_jid: undefined,
       reply_policy: replyPolicy ?? imGroup.reply_policy,
       activation_mode:
         activationMode
@@ -2953,8 +2949,6 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
 
   const updated: RegisteredGroup = {
     ...imGroup,
-    target_main_jid: undefined,
-    target_agent_id: undefined,
     reply_policy: replyPolicy ?? imGroup.reply_policy,
     activation_mode:
       activationMode

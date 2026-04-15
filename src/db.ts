@@ -89,6 +89,160 @@ function ensureColumn(
   );
 }
 
+function resolveLegacyMainSessionId(targetMainJid: string): string | null {
+  const trimmed = targetMainJid.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith(MAIN_SESSION_ID_PREFIX)) return trimmed;
+
+  const direct = db
+    .prepare('SELECT folder FROM registered_groups WHERE jid = ? LIMIT 1')
+    .get(trimmed) as { folder: string } | undefined;
+  if (direct?.folder) return buildMainSessionId(direct.folder);
+
+  if (!trimmed.startsWith('web:')) return null;
+  const folder = trimmed.slice(4).trim();
+  if (!folder) return null;
+
+  const resolved = db
+    .prepare(
+      "SELECT folder FROM registered_groups WHERE folder = ? AND jid LIKE 'web:%' LIMIT 1",
+    )
+    .get(folder) as { folder: string } | undefined;
+  return buildMainSessionId(resolved?.folder || folder);
+}
+
+function migrateLegacyRegisteredGroupBindings(): void {
+  const hasTargetAgent = hasColumn('registered_groups', 'target_agent_id');
+  const hasTargetMain = hasColumn('registered_groups', 'target_main_jid');
+  if (!hasTargetAgent && !hasTargetMain) return;
+
+  const rows = db
+    .prepare(
+      `SELECT jid, name, folder, added_at, reply_policy, activation_mode, require_mention${
+        hasTargetAgent ? ', target_agent_id' : ", NULL AS target_agent_id"
+      }${hasTargetMain ? ', target_main_jid' : ", NULL AS target_main_jid"}
+       FROM registered_groups`,
+    )
+    .all() as Array<{
+      jid: string;
+      name: string;
+      folder: string;
+      added_at: string;
+      reply_policy: string | null;
+      activation_mode: string | null;
+      require_mention: number | null;
+      target_agent_id: string | null;
+      target_main_jid: string | null;
+    }>;
+
+  const tx = db.transaction(() => {
+    for (const row of rows) {
+      if (row.jid.startsWith('web:')) {
+        db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(row.jid);
+        continue;
+      }
+
+      const targetAgentId = row.target_agent_id?.trim() || null;
+      const targetMainJid = row.target_main_jid?.trim() || null;
+      if (!targetAgentId && !targetMainJid) continue;
+
+      const defaultSessionId = buildMainSessionId(row.folder);
+      const sessionId = targetAgentId
+        ? buildWorkerSessionId(targetAgentId)
+        : resolveLegacyMainSessionId(targetMainJid || '');
+      if (!sessionId) continue;
+
+      const current = getSessionBinding(row.jid);
+      const currentIsImplicitDefault = current?.session_id === defaultSessionId;
+      if (current && !currentIsImplicitDefault) continue;
+
+      if (sessionId === defaultSessionId) {
+        if (currentIsImplicitDefault) {
+          db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(row.jid);
+        }
+        continue;
+      }
+
+      const session = getSessionRecord(sessionId);
+      const now = new Date().toISOString();
+      const replyPolicy = row.reply_policy === 'mirror' ? 'mirror' : 'source_only';
+      saveSessionBinding({
+        channel_jid: row.jid,
+        session_id: sessionId,
+        binding_mode:
+          replyPolicy === 'mirror'
+            ? 'mirror'
+            : targetAgentId
+              ? 'direct'
+              : session?.kind === 'worker'
+              ? 'direct'
+              : 'source_only',
+        activation_mode: parseActivationMode(row.activation_mode),
+        require_mention: row.require_mention === 1,
+        display_name: row.name,
+        reply_policy: replyPolicy,
+        created_at: current?.created_at || row.added_at || now,
+        updated_at: now,
+      });
+    }
+  });
+
+  tx();
+}
+
+function dropLegacyRegisteredGroupBindingColumns(): void {
+  if (
+    !hasColumn('registered_groups', 'target_agent_id')
+    && !hasColumn('registered_groups', 'target_main_jid')
+  ) {
+    return;
+  }
+
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE registered_groups_new (
+        jid TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        folder TEXT NOT NULL,
+        added_at TEXT NOT NULL,
+        container_config TEXT,
+        custom_cwd TEXT,
+        init_source_path TEXT,
+        init_git_url TEXT,
+        created_by TEXT,
+        is_home INTEGER DEFAULT 0,
+        selected_skills TEXT,
+        reply_policy TEXT DEFAULT 'source_only',
+        require_mention INTEGER DEFAULT 0,
+        activation_mode TEXT DEFAULT 'auto',
+        mcp_mode TEXT DEFAULT 'inherit',
+        selected_mcps TEXT,
+        llm_provider TEXT DEFAULT 'claude',
+        model TEXT,
+        thinking_effort TEXT,
+        context_compression TEXT DEFAULT 'off',
+        knowledge_extraction INTEGER DEFAULT 0
+      );
+      INSERT INTO registered_groups_new (
+        jid, name, folder, added_at, container_config, custom_cwd,
+        init_source_path, init_git_url, created_by, is_home, selected_skills,
+        reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps,
+        llm_provider, model, thinking_effort, context_compression,
+        knowledge_extraction
+      )
+      SELECT
+        jid, name, folder, added_at, container_config, custom_cwd,
+        init_source_path, init_git_url, created_by, is_home, selected_skills,
+        reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps,
+        llm_provider, model, thinking_effort, context_compression,
+        knowledge_extraction
+      FROM registered_groups;
+      DROP TABLE registered_groups;
+      ALTER TABLE registered_groups_new RENAME TO registered_groups;
+    `);
+  })();
+}
+
 function assertSchema(
   tableName: string,
   requiredColumns: string[],
@@ -613,8 +767,6 @@ export function initDatabase(): void {
   ensureColumn('scheduled_tasks', 'execution_type', "TEXT DEFAULT 'agent'");
   ensureColumn('scheduled_tasks', 'script_command', 'TEXT');
   ensureColumn('registered_groups', 'selected_skills', 'TEXT');
-  ensureColumn('registered_groups', 'target_agent_id', 'TEXT');
-  ensureColumn('registered_groups', 'target_main_jid', 'TEXT');
   ensureColumn(
     'registered_groups',
     'reply_policy',
@@ -651,14 +803,6 @@ export function initDatabase(): void {
     )
   `);
   ensureColumn('messages', 'token_usage', 'TEXT');
-
-  // Add index on target_agent_id for fast lookup of IM bindings
-  db.exec(
-    'CREATE INDEX IF NOT EXISTS idx_rg_target_agent ON registered_groups(target_agent_id)',
-  );
-  db.exec(
-    'CREATE INDEX IF NOT EXISTS idx_rg_target_main ON registered_groups(target_main_jid)',
-  );
 
   // Migration: remove UNIQUE constraint from registered_groups.folder
   // Multiple groups (web:main + feishu chats) share folder='main' by design.
@@ -711,8 +855,6 @@ export function initDatabase(): void {
           created_by TEXT,
           is_home INTEGER DEFAULT 0,
           selected_skills TEXT,
-          target_agent_id TEXT,
-          target_main_jid TEXT,
           reply_policy TEXT DEFAULT 'source_only',
           require_mention INTEGER DEFAULT 0,
           activation_mode TEXT DEFAULT 'auto',
@@ -727,22 +869,25 @@ export function initDatabase(): void {
         INSERT INTO registered_groups_new (
           jid, name, folder, added_at, container_config, custom_cwd,
           init_source_path, init_git_url, created_by, is_home, selected_skills,
-          target_agent_id, target_main_jid, reply_policy, require_mention,
-          activation_mode, mcp_mode, selected_mcps, llm_provider, model,
-          thinking_effort, context_compression, knowledge_extraction
+          reply_policy, require_mention, activation_mode, mcp_mode,
+          selected_mcps, llm_provider, model, thinking_effort,
+          context_compression, knowledge_extraction
         )
         SELECT
           jid, name, folder, added_at, container_config, custom_cwd,
           init_source_path, init_git_url, created_by, is_home, selected_skills,
-          target_agent_id, target_main_jid, reply_policy, require_mention,
-          activation_mode, mcp_mode, selected_mcps, llm_provider, model,
-          thinking_effort, context_compression, knowledge_extraction
+          reply_policy, require_mention, activation_mode, mcp_mode,
+          selected_mcps, llm_provider, model, thinking_effort,
+          context_compression, knowledge_extraction
         FROM registered_groups;
         DROP TABLE registered_groups;
         ALTER TABLE registered_groups_new RENAME TO registered_groups;
       `);
     })();
   }
+
+  migrateLegacyRegisteredGroupBindings();
+  dropLegacyRegisteredGroupBindingColumns();
 
   // v19→v20 migration: add token_usage column to messages
   ensureColumn('messages', 'token_usage', 'TEXT');
@@ -791,11 +936,14 @@ export function initDatabase(): void {
       'created_by',
       'is_home',
       'selected_skills',
-      'target_agent_id',
-      'target_main_jid',
       'reply_policy',
     ],
-    ['trigger_pattern', 'requires_trigger'],
+    [
+      'trigger_pattern',
+      'requires_trigger',
+      'target_agent_id',
+      'target_main_jid',
+    ],
   );
 
   assertSchema('users', [
@@ -914,10 +1062,12 @@ export function initDatabase(): void {
 
   const curVer = getRouterStateInternal('schema_version');
 
-  // v22: Fix target_main_jid that used folder-based JID (web:${folder})
-  // instead of actual registered group JID (web:${uuid}).
-  // Only affects non-home workspaces where folder != uuid.
-  if (curVer && parseInt(curVer, 10) < 22) {
+  // v22: Fix legacy target_main_jid before route data is migrated away.
+  if (
+    hasColumn('registered_groups', 'target_main_jid')
+    && curVer
+    && parseInt(curVer, 10) < 22
+  ) {
     const rows = db
       .prepare(
         "SELECT jid, target_main_jid FROM registered_groups WHERE target_main_jid IS NOT NULL AND target_main_jid != ''",
@@ -1170,11 +1320,13 @@ export function initDatabase(): void {
     })();
   }
 
-  // v29: Auto-registered IM groups should route to their home web JID.
-  // Previously buildOnNewChat did not set target_main_jid, causing messages
-  // to be stored under the IM JID directly — leading to duplicate replies
-  // when multiple IM groups share the same folder.
-  if (curVer && parseInt(curVer, 10) < 29) {
+  // v29: Legacy auto-route backfill before session_bindings became canonical.
+  if (
+    hasColumn('registered_groups', 'target_main_jid')
+    && hasColumn('registered_groups', 'target_agent_id')
+    && curVer
+    && parseInt(curVer, 10) < 29
+  ) {
     db.exec(`
       UPDATE registered_groups
       SET target_main_jid = (
@@ -1195,7 +1347,7 @@ export function initDatabase(): void {
         )
     `);
     logger.info(
-      'Migration v28→v29: set target_main_jid for auto-registered IM groups',
+      'Migration v28→v29: set legacy target_main_jid for auto-registered IM groups',
     );
   }
 
@@ -2539,33 +2691,6 @@ function findPrimaryGroupForFolder(groupFolder: string): RegisteredGroup | undef
     || candidates[0];
 }
 
-function deriveBindingMode(group: RegisteredGroup): SessionBindingMode {
-  if (group.reply_policy === 'mirror') return 'mirror';
-  if (group.target_agent_id || group.target_main_jid) return 'direct';
-  return 'source_only';
-}
-
-function resolveBindingSessionId(
-  group: RegisteredGroup & { jid: string },
-): string | null {
-  if (group.jid.startsWith('web:')) return null;
-  if (group.target_agent_id) return buildWorkerSessionId(group.target_agent_id);
-  if (group.target_main_jid?.startsWith('web:')) {
-    const target = getRegisteredGroup(group.target_main_jid);
-    return buildMainSessionId(target?.folder || group.target_main_jid.slice(4));
-  }
-  return buildMainSessionId(group.folder);
-}
-
-function isImplicitDefaultBindingSessionId(
-  group: RegisteredGroup & { jid: string },
-  sessionId: string | null,
-): boolean {
-  if (!sessionId) return false;
-  if (group.jid.startsWith('web:')) return false;
-  return sessionId === buildMainSessionId(group.folder);
-}
-
 function ensureSessionRecordFromGroup(
   jid: string,
   group: RegisteredGroup,
@@ -2661,59 +2786,6 @@ function ensureSessionRecordForLegacyKey(
     now,
   );
   return sessionId;
-}
-
-function syncLegacySessionBindingFromGroup(
-  jid: string,
-  group: RegisteredGroup,
-): void {
-  if (jid.startsWith('web:')) {
-    db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(jid);
-    return;
-  }
-  const projectedGroup = { ...group, jid };
-  const currentBinding = getSessionBinding(jid);
-  const sessionId = resolveBindingSessionId(projectedGroup);
-  if (!sessionId || isImplicitDefaultBindingSessionId(projectedGroup, sessionId)) {
-    if (
-      currentBinding
-      && isImplicitDefaultBindingSessionId(projectedGroup, currentBinding.session_id)
-    ) {
-      db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(jid);
-    }
-    return;
-  }
-  if (
-    currentBinding
-    && !isImplicitDefaultBindingSessionId(projectedGroup, currentBinding.session_id)
-  ) {
-    return;
-  }
-  const now = new Date().toISOString();
-  db.prepare(
-    `INSERT INTO session_bindings (
-      channel_jid, session_id, binding_mode, activation_mode, require_mention,
-      display_name, reply_policy, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(channel_jid) DO UPDATE SET
-      session_id = excluded.session_id,
-      binding_mode = excluded.binding_mode,
-      activation_mode = excluded.activation_mode,
-      require_mention = excluded.require_mention,
-      display_name = excluded.display_name,
-      reply_policy = excluded.reply_policy,
-      updated_at = excluded.updated_at`,
-  ).run(
-    jid,
-    sessionId,
-    deriveBindingMode(group),
-    group.activation_mode ?? 'auto',
-    group.require_mention ? 1 : 0,
-    group.name,
-    group.reply_policy ?? 'source_only',
-    group.added_at || now,
-    now,
-  );
 }
 
 function syncSessionProjectionForGroup(
@@ -3156,8 +3228,6 @@ type RegisteredGroupRow = {
   created_by: string | null;
   is_home: number;
   selected_skills: string | null;
-  target_agent_id: string | null;
-  target_main_jid: string | null;
   reply_policy: string | null;
   require_mention: number;
   activation_mode: string | null;
@@ -3190,8 +3260,6 @@ function parseGroupRow(
     selected_skills: row.selected_skills
       ? JSON.parse(row.selected_skills)
       : null,
-    target_agent_id: row.target_agent_id ?? undefined,
-    target_main_jid: row.target_main_jid ?? undefined,
     reply_policy: row.reply_policy === 'mirror' ? 'mirror' : 'source_only',
     require_mention: row.require_mention === 1,
     activation_mode: parseActivationMode(row.activation_mode),
@@ -3252,8 +3320,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps, llm_provider, model, thinking_effort, context_compression, knowledge_extraction)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps, llm_provider, model, thinking_effort, context_compression, knowledge_extraction)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -3266,8 +3334,6 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.created_by ?? null,
     group.is_home ? 1 : 0,
     group.selected_skills ? JSON.stringify(group.selected_skills) : null,
-    group.target_agent_id ?? null,
-    group.target_main_jid ?? null,
     group.reply_policy ?? 'source_only',
     group.require_mention === true ? 1 : 0,
     group.activation_mode ?? 'auto',
@@ -3351,10 +3417,6 @@ function syncSessionWorkbenchProjection(): void {
       syncWorkerSession(mapLegacyAgentRow(agentRow));
     }
     db.exec('DROP TABLE agents');
-  }
-
-  for (const [jid, group] of Object.entries(groups)) {
-    syncLegacySessionBindingFromGroup(jid, group);
   }
 
   const memoryOwners = new Set<string>();

@@ -452,8 +452,6 @@ function buildUpdatedImGroupForSessionBinding(
       options.requireMention !== undefined
         ? options.requireMention
         : imGroup.require_mention,
-    target_agent_id: undefined,
-    target_main_jid: undefined,
   };
 
   const defaultSessionId = `main:${imGroup.folder}`;

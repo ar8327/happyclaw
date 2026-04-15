@@ -542,8 +542,6 @@ router.put('/:jid/agents/:agentId/im-binding', authMiddleware, async (c) => {
   // Explicit bindings now persist through session_bindings only.
   const updated: RegisteredGroup = {
     ...imGroup,
-    target_agent_id: undefined,
-    target_main_jid: undefined,
     reply_policy: replyPolicy,
     activation_mode:
       imGroup.activation_mode === 'disabled' ? 'auto' : imGroup.activation_mode,
@@ -594,8 +592,6 @@ router.delete(
     // Update DB + in-memory cache
     const updated = {
       ...imGroup,
-      target_agent_id: undefined,
-      target_main_jid: undefined,
       activation_mode: 'disabled' as const,
     };
     setRegisteredGroup(imJid, updated);
@@ -655,8 +651,6 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
   // Explicit bindings now persist through session_bindings only.
   const updated: RegisteredGroup = {
     ...imGroup,
-    target_main_jid: undefined,
-    target_agent_id: undefined,
     reply_policy: replyPolicy,
     activation_mode:
       imGroup.activation_mode === 'disabled' ? 'auto' : imGroup.activation_mode,
@@ -701,8 +695,6 @@ router.delete('/:jid/im-binding/:imJid', authMiddleware, async (c) => {
   // Update DB + in-memory cache
   const updated = {
     ...imGroup,
-    target_main_jid: undefined,
-    target_agent_id: undefined,
     activation_mode: 'disabled' as const,
   };
   setRegisteredGroup(imJid, updated);

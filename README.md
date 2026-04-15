@@ -71,7 +71,7 @@
 - **移动端 PWA** — 针对移动端深度优化，支持一键安装到桌面，iOS / Android 均已适配，随时随地通过手机访问 AI Agent
 - **四端消息统一路由** — 飞书 WebSocket 长连接（富文本卡片、Reaction 反馈）、Telegram Bot API、QQ Bot API v2（私聊 + 群聊 @Bot）、Web 界面，四端消息统一路由
 
-> 当前实现更接近本地 Agent workbench，而不是多租户平台。Session 是核心对象，`registered_groups`、`created_by`、`target_main_jid` 等旧字段仍存在于兼容层，但新代码应优先围绕 `/api/sessions`、runner registry 和本地 runtime 理解系统。
+> 当前实现更接近本地 Agent workbench，而不是多租户平台。Session 是核心对象；`registered_groups` 只保留渠道与工作区基础元数据，IM 路由统一落在 `session_bindings`，新代码应优先围绕 `/api/sessions`、runner registry 和本地 runtime 理解系统。
 
 ## 核心能力
 

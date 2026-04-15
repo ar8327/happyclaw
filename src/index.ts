@@ -109,7 +109,6 @@ import {
   formatContextMessages,
   formatWorkspaceList,
   formatSystemStatus,
-  resolveLocationInfo,
   type WorkspaceInfo,
 } from './im-command-utils.js';
 import {
@@ -663,8 +662,6 @@ function unbindImGroup(jid: string, reason: string): void {
   }
   const updated = {
     ...group,
-    target_agent_id: undefined,
-    target_main_jid: undefined,
     reply_policy: 'source_only' as const,
     activation_mode: 'disabled' as const,
   };
@@ -1293,8 +1290,6 @@ function handleBindCommand(chatJid: string, rawSpec: string): string {
 
   const updated: RegisteredGroup = {
     ...group,
-    target_agent_id: undefined,
-    target_main_jid: undefined,
     reply_policy: 'source_only',
   };
   setRegisteredGroup(chatJid, updated);
@@ -1336,8 +1331,6 @@ function handleNewCommand(chatJid: string, rawName: string): string {
   // Bind the current IM group to the new workspace's main conversation
   const updated: RegisteredGroup = {
     ...group,
-    target_main_jid: undefined,
-    target_agent_id: undefined,
     reply_policy: 'source_only',
   };
   setRegisteredGroup(chatJid, updated);
@@ -2145,7 +2138,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // Auto-compression: fire-and-forget after successful completion.
   // Called from both 'drained' and normal-exit paths.
-  // For IM groups with target_main_jid, inherit compression setting from target group.
+  // For IM groups with explicit session binding, inherit compression from the bound target.
   const tryAutoCompress = (): void => {
     const ownCompression = group.context_compression;
     const boundTarget = resolveBoundSessionTarget(chatJid, group);
@@ -4604,7 +4597,7 @@ function buildOnNewChat(
         return;
       }
 
-      // Don't override groups with explicit agent routing configured.
+      // Don't override chats with explicit worker-session bindings.
       if (isWorkerSessionId(binding?.session_id)) return;
 
       // Different user's connection now owns this IM app.
@@ -4615,7 +4608,6 @@ function buildOnNewChat(
         const previousFolder = existing.folder;
         const previousOwnerKey = existingOwnerKey;
         existing.folder = homeFolder;
-        existing.target_main_jid = undefined;
         setRegisteredGroup(chatJid, existing);
         applyExplicitChatBinding(chatJid, existing, `main:${homeFolder}`);
         registeredGroups[chatJid] = existing;
