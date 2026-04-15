@@ -717,7 +717,6 @@ function resolveEffectiveGroup(group: RegisteredGroup): {
       return {
         effectiveGroup: {
           ...group,
-          executionMode: sibling.executionMode,
           customCwd: sibling.customCwd || group.customCwd,
           created_by: group.created_by || sibling.created_by,
           is_home: true,
@@ -1329,7 +1328,6 @@ function handleNewCommand(chatJid: string, rawName: string): string {
     name,
     folder,
     added_at: now,
-    executionMode: 'local',
     created_by: userId,
   };
 
@@ -1713,23 +1711,7 @@ function loadState(): void {
   // Normalize legacy home groups onto the single local-runtime compatibility shape.
   for (const [jid, group] of Object.entries(registeredGroups)) {
     if (!group.is_home) continue;
-
-    const expectedMode = 'local';
-
-    if (group.executionMode !== expectedMode) {
-      group.executionMode = expectedMode;
-      setRegisteredGroup(jid, group);
-      registeredGroups[jid] = group;
-      // 清除旧 session，避免恢复不兼容的 session
-      if (sessions[group.folder]) {
-        logger.info(
-          { folder: group.folder, expectedMode },
-          'Clearing stale session during execution mode migration',
-        );
-        delete sessions[group.folder];
-        deleteSession(group.folder);
-      }
-    }
+    registeredGroups[jid] = group;
   }
 
   // Initialize per-user global CLAUDE.md from template for users missing it
@@ -4673,7 +4655,6 @@ function buildOnNewChat(
         name: chatName,
         folder,
         added_at: now,
-        executionMode: 'local',
         created_by: userId,
       };
       registerGroup(newJid, newGroup);

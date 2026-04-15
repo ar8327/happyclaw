@@ -34,7 +34,7 @@ interface ProviderInfo {
 }
 
 function detectProviders(): { claude: ProviderInfo; codex: ProviderInfo } {
-  // Claude: available if we have API key, OAuth token, or container-runner flagged it
+  // Claude: available if we have API key, OAuth token, or the launcher flagged it
   const hasClaudeKey = !!(process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY);
   const isClaudeCode = !!process.env.CLAUDE_CODE;
   const hasClaudeOAuth = !!process.env.CLAUDE_CODE_OAUTH_TOKEN;
@@ -42,7 +42,7 @@ function detectProviders(): { claude: ProviderInfo; codex: ProviderInfo } {
   const claudeAvailable = hasClaudeKey || isClaudeCode || hasClaudeOAuth || flaggedAvailable;
   const claudeDefault = process.env.HAPPYCLAW_MODEL || 'sonnet';
 
-  // Codex: available via API key, CLI login credentials, or container-runner flag
+  // Codex: available via API key, CLI login credentials, or the launcher flag
   const hasOpenAIKey = !!(process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY);
   const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
   let hasCodexCliAuth = false;

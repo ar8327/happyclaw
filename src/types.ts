@@ -38,7 +38,6 @@ export interface RegisteredGroup {
   folder: string;
   added_at: string;
   containerConfig?: ContainerConfig;
-  executionMode?: 'local';
   customCwd?: string; // 本地 Runtime 的自定义工作目录
   initSourcePath?: string; // 初始化时复制来源的本机绝对路径
   initGitUrl?: string; // 初始化时 clone 来源的 Git URL

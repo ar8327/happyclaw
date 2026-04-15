@@ -616,11 +616,6 @@ export function initDatabase(): void {
   ensureColumn('invite_codes', 'permissions', "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn('users', 'avatar_emoji', 'TEXT');
   ensureColumn('users', 'avatar_color', 'TEXT');
-  ensureColumn(
-    'registered_groups',
-    'execution_mode',
-    "TEXT DEFAULT 'local'",
-  );
   ensureColumn('registered_groups', 'custom_cwd', 'TEXT');
   ensureColumn('registered_groups', 'init_source_path', 'TEXT');
   ensureColumn('registered_groups', 'init_git_url', 'TEXT');
@@ -708,28 +703,66 @@ export function initDatabase(): void {
           folder TEXT NOT NULL,
           added_at TEXT NOT NULL,
           container_config TEXT,
-          execution_mode TEXT DEFAULT 'local',
           custom_cwd TEXT,
           init_source_path TEXT,
           init_git_url TEXT,
           created_by TEXT,
           is_home INTEGER DEFAULT 0
         );
-        INSERT INTO registered_groups_new SELECT jid, name, folder, added_at, container_config, execution_mode, custom_cwd, NULL, NULL, NULL, 0 FROM registered_groups;
+        INSERT INTO registered_groups_new SELECT jid, name, folder, added_at, container_config, custom_cwd, NULL, NULL, NULL, 0 FROM registered_groups;
         DROP TABLE registered_groups;
         ALTER TABLE registered_groups_new RENAME TO registered_groups;
       `);
     })();
   }
 
-  // Collapse legacy execution modes onto the single local runtime model.
-  db.prepare(
-    `UPDATE registered_groups
-     SET execution_mode = 'local'
-     WHERE execution_mode IS NOT NULL
-       AND execution_mode != ''
-       AND execution_mode != 'local'`,
-  ).run();
+  if (hasColumn('registered_groups', 'execution_mode')) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE registered_groups_new (
+          jid TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          folder TEXT NOT NULL,
+          added_at TEXT NOT NULL,
+          container_config TEXT,
+          custom_cwd TEXT,
+          init_source_path TEXT,
+          init_git_url TEXT,
+          created_by TEXT,
+          is_home INTEGER DEFAULT 0,
+          selected_skills TEXT,
+          target_agent_id TEXT,
+          target_main_jid TEXT,
+          reply_policy TEXT DEFAULT 'source_only',
+          require_mention INTEGER DEFAULT 0,
+          activation_mode TEXT DEFAULT 'auto',
+          mcp_mode TEXT DEFAULT 'inherit',
+          selected_mcps TEXT,
+          llm_provider TEXT DEFAULT 'claude',
+          model TEXT,
+          thinking_effort TEXT,
+          context_compression TEXT DEFAULT 'off',
+          knowledge_extraction INTEGER DEFAULT 0
+        );
+        INSERT INTO registered_groups_new (
+          jid, name, folder, added_at, container_config, custom_cwd,
+          init_source_path, init_git_url, created_by, is_home, selected_skills,
+          target_agent_id, target_main_jid, reply_policy, require_mention,
+          activation_mode, mcp_mode, selected_mcps, llm_provider, model,
+          thinking_effort, context_compression, knowledge_extraction
+        )
+        SELECT
+          jid, name, folder, added_at, container_config, custom_cwd,
+          init_source_path, init_git_url, created_by, is_home, selected_skills,
+          target_agent_id, target_main_jid, reply_policy, require_mention,
+          activation_mode, mcp_mode, selected_mcps, llm_provider, model,
+          thinking_effort, context_compression, knowledge_extraction
+        FROM registered_groups;
+        DROP TABLE registered_groups;
+        ALTER TABLE registered_groups_new RENAME TO registered_groups;
+      `);
+    })();
+  }
 
   // v19→v20 migration: add token_usage column to messages
   ensureColumn('messages', 'token_usage', 'TEXT');
@@ -772,7 +805,6 @@ export function initDatabase(): void {
       'folder',
       'added_at',
       'container_config',
-      'execution_mode',
       'custom_cwd',
       'init_source_path',
       'init_git_url',
@@ -2517,7 +2549,7 @@ function normalizeStoredRunnerId(
 }
 
 function deriveRuntimeMode(
-  group: Pick<RegisteredGroup, 'executionMode'> | null | undefined,
+  _group?: RegisteredGroup | null,
 ): SessionRecord['runtime_mode'] {
   return 'local';
 }
@@ -3173,18 +3205,6 @@ export function deleteSessionRuntimeState(sessionId: string): void {
 
 // --- Registered group accessors ---
 
-function parseExecutionMode(
-  raw: string | null,
-  context: string,
-): 'local' {
-  if (raw !== null && raw !== '' && raw !== 'local') {
-    console.warn(
-      `Legacy execution_mode "${raw}" for ${context} normalized to "local"`,
-    );
-  }
-  return 'local';
-}
-
 /** Raw row shape from registered_groups table — single source of truth for column mapping. */
 type RegisteredGroupRow = {
   jid: string;
@@ -3192,7 +3212,6 @@ type RegisteredGroupRow = {
   folder: string;
   added_at: string;
   container_config: string | null;
-  execution_mode: string | null;
   custom_cwd: string | null;
   init_source_path: string | null;
   init_git_url: string | null;
@@ -3225,7 +3244,6 @@ function parseGroupRow(
     containerConfig: row.container_config
       ? JSON.parse(row.container_config)
       : undefined,
-    executionMode: parseExecutionMode(row.execution_mode, `group ${row.jid}`),
     customCwd: row.custom_cwd ?? undefined,
     initSourcePath: row.init_source_path ?? undefined,
     initGitUrl: row.init_git_url ?? undefined,
@@ -3296,15 +3314,14 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps, llm_provider, model, thinking_effort, context_compression, knowledge_extraction)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps, llm_provider, model, thinking_effort, context_compression, knowledge_extraction)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
     group.folder,
     group.added_at,
     group.containerConfig ? JSON.stringify(group.containerConfig) : null,
-    'local',
     group.customCwd ?? null,
     group.initSourcePath ?? null,
     group.initGitUrl ?? null,
@@ -3569,8 +3586,6 @@ export function getUserHomeGroup(
 /**
  * Ensure a user has a home group. If not, create one.
  * Single-user migration keeps legacy home groups as compatibility rows.
- * The backing `execution_mode` column remains only for compatibility,
- * but every group is normalized to the unified local runtime.
  * Returns the JID of the home group.
  */
 export function ensureUserHomeGroup(
@@ -3592,7 +3607,7 @@ export function ensureUserHomeGroup(
     const existingMain = getRegisteredGroup(jid);
     if (existingMain) {
       // web:main already exists.
-      // Ensure is_home, created_by, and local runtime metadata are correct.
+      // Ensure is_home and created_by are correct.
       const patched = { ...existingMain };
       let changed = false;
       if (!patched.is_home) {
@@ -3601,10 +3616,6 @@ export function ensureUserHomeGroup(
       }
       if (!patched.created_by) {
         patched.created_by = userId;
-        changed = true;
-      }
-      if (patched.executionMode !== 'local') {
-        patched.executionMode = 'local';
         changed = true;
       }
       if (changed) {
@@ -3621,7 +3632,6 @@ export function ensureUserHomeGroup(
     name,
     folder,
     added_at: now,
-    executionMode: 'local',
     created_by: userId,
     is_home: true,
   };
@@ -4017,7 +4027,6 @@ export function getGroupsByOwner(
     folder: string;
     added_at: string;
     container_config: string | null;
-    execution_mode: string | null;
     custom_cwd: string | null;
     init_source_path: string | null;
     init_git_url: string | null;
@@ -4034,7 +4043,6 @@ export function getGroupsByOwner(
     containerConfig: row.container_config
       ? JSON.parse(row.container_config)
       : undefined,
-    executionMode: parseExecutionMode(row.execution_mode, `group ${row.jid}`),
     customCwd: row.custom_cwd ?? undefined,
     initSourcePath: row.init_source_path ?? undefined,
     initGitUrl: row.init_git_url ?? undefined,

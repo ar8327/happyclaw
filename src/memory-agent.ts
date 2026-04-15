@@ -925,7 +925,6 @@ export class MemoryAgentManager {
           is_home: false,
           customCwd: groupDir,
           containerConfig: { timeout: timeoutMs },
-          executionMode: 'local',
           llm_provider:
             runnerId === 'codex'
               ? 'openai'

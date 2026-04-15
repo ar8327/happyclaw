@@ -405,7 +405,6 @@ function buildCompatibilityGroupForSession(
     name: session.name,
     folder: options.folder,
     added_at: existing?.added_at || options.addedAt,
-    executionMode: 'local',
     initSourcePath: options.initSourcePath ?? existing?.initSourcePath,
     initGitUrl: options.initGitUrl ?? existing?.initGitUrl,
     created_by: options.ownerKey ?? existing?.created_by,
