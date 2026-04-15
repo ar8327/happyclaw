@@ -1165,7 +1165,6 @@ sessionRoutes.post('/', authMiddleware, async (c) => {
 
   return c.json({
     success: true,
-    jid: createdSession.id,
     session: payload,
   });
 });

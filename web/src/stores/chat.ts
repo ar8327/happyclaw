@@ -1257,7 +1257,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const needsLongTimeout = !!(options?.init_source_path || options?.init_git_url);
       const data = await api.post<{
         success: boolean;
-        jid: string;
         session: GroupInfo;
       }>('/api/sessions', body, needsLongTimeout ? 120_000 : undefined);
       if (!data.success) return null;
@@ -1266,11 +1265,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const createdEntry = Object.entries(get().groups).find(
         ([, group]) =>
           group.folder === createdSession.folder ||
-          group.backing_jid === data.jid ||
-          group.id === data.jid,
+          group.backing_jid === createdSession.id ||
+          group.id === createdSession.id,
       );
       return {
-        jid: createdEntry?.[0] || data.jid,
+        jid: createdEntry?.[0] || createdSession.id || createdSession.folder,
         folder: createdEntry?.[1].folder || createdSession.folder,
       };
     } catch (err) {
