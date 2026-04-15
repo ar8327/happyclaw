@@ -1,53 +1,28 @@
-import { generateUserId, hashPassword } from './auth.js';
-import {
-  initDatabase,
-  getUserByUsername,
-  createUser,
-  updateUserFields,
-  deleteUserSessionsByUserId,
-} from './db.js';
+import { saveLocalWorkbenchProfile } from './local-user.js';
+
+function printUsage(): void {
+  console.error('Usage: npm run reset:admin -- <username>');
+}
 
 async function main(): Promise<void> {
-  initDatabase();
-
-  const username = (process.argv[2] || 'admin').trim();
-  const nextPassword = process.argv[3];
-  if (!nextPassword || nextPassword.trim().length < 8) {
-    console.error('Usage: npm run reset:admin -- <username> <new_password>');
-    console.error('new_password must be at least 8 characters');
+  const username = (process.argv[2] || '').trim();
+  if (!username) {
+    printUsage();
     process.exit(1);
   }
 
-  const now = new Date().toISOString();
-  const passwordHash = await hashPassword(nextPassword);
-  const existing = getUserByUsername(username);
-  if (existing) {
-    updateUserFields(existing.id, {
-      role: 'admin',
-      status: 'active',
-      password_hash: passwordHash,
-      must_change_password: false,
-      disable_reason: null,
-      deleted_at: null,
-    });
-    deleteUserSessionsByUserId(existing.id);
-    console.log(`[OK] Reset admin account: ${username}`);
-    return;
-  }
-
-  createUser({
-    id: generateUserId(),
+  const ignoredPassword = process.argv[3];
+  const user = saveLocalWorkbenchProfile({
     username,
-    password_hash: passwordHash,
     display_name: username,
-    role: 'admin',
-    status: 'active',
-    must_change_password: false,
-    created_at: now,
-    updated_at: now,
-    notes: 'Created by reset-admin script',
   });
-  console.log(`[OK] Created admin account: ${username}`);
+
+  console.log(`[OK] Updated local operator profile: ${user.username}`);
+  if (ignoredPassword) {
+    console.log(
+      '[INFO] Single-user mode does not use an application password. Runner credentials stay in provider-specific config.',
+    );
+  }
 }
 
 void main();

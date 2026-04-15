@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR } from './config.js';
-import { getAllUsers, getSessionRecord, listSessionRecords, updateUserFields } from './db.js';
+import { getSessionRecord, listSessionRecords } from './db.js';
 import { getDefaultPermissions } from './permissions.js';
 import type { AuthUser, UserPublic } from './types.js';
 
@@ -58,13 +58,6 @@ function resolvePrimaryOwnerKey(): string | null {
   return null;
 }
 
-function resolveBackingUser(): UserPublic | null {
-  const ownerKey = resolvePrimaryOwnerKey();
-  if (!ownerKey) return null;
-  const users = getAllUsers().filter((user) => user.status !== 'deleted');
-  return users.find((user) => user.id === ownerKey) || null;
-}
-
 export function getLocalWorkbenchSessionId(): string {
   return LOCAL_SESSION_ID;
 }
@@ -72,17 +65,15 @@ export function getLocalWorkbenchSessionId(): string {
 export function getLocalWorkbenchUserPublic(): UserPublic {
   const fallbackNow = new Date().toISOString();
   const stored = loadLocalOperatorFile();
-  const backingUser = resolveBackingUser();
   const primaryOwnerKey =
-    backingUser?.id ||
     resolvePrimaryOwnerKey() ||
     getSessionRecord('memory:local')?.owner_key ||
     'local';
 
   return {
     id: primaryOwnerKey,
-    username: stored.username || backingUser?.username || 'operator',
-    display_name: stored.display_name || backingUser?.display_name || 'Operator',
+    username: stored.username || 'operator',
+    display_name: stored.display_name || 'Operator',
     role: 'admin',
     status: 'active',
     permissions: getDefaultPermissions('admin'),
@@ -92,31 +83,31 @@ export function getLocalWorkbenchUserPublic(): UserPublic {
     avatar_emoji:
       stored.avatar_emoji !== undefined
         ? stored.avatar_emoji
-        : (backingUser?.avatar_emoji ?? null),
+        : null,
     avatar_color:
       stored.avatar_color !== undefined
         ? stored.avatar_color
-        : (backingUser?.avatar_color ?? null),
+        : null,
     ai_name:
-      stored.ai_name !== undefined ? stored.ai_name : (backingUser?.ai_name ?? null),
+      stored.ai_name !== undefined ? stored.ai_name : null,
     ai_avatar_emoji:
       stored.ai_avatar_emoji !== undefined
         ? stored.ai_avatar_emoji
-        : (backingUser?.ai_avatar_emoji ?? null),
+        : null,
     ai_avatar_color:
       stored.ai_avatar_color !== undefined
         ? stored.ai_avatar_color
-        : (backingUser?.ai_avatar_color ?? null),
+        : null,
     ai_avatar_url:
       stored.ai_avatar_url !== undefined
         ? stored.ai_avatar_url
-        : (backingUser?.ai_avatar_url ?? null),
+        : null,
     created_at:
-      stored.created_at || backingUser?.created_at || fallbackNow,
+      stored.created_at || fallbackNow,
     last_login_at:
       stored.last_login_at !== undefined
         ? stored.last_login_at
-        : (backingUser?.last_login_at ?? fallbackNow),
+        : fallbackNow,
     last_active_at: fallbackNow,
     deleted_at: null,
   };
@@ -158,21 +149,6 @@ export function saveLocalWorkbenchProfile(
     last_login_at: current.last_login_at,
   };
   saveLocalOperatorFile(nextFile);
-
-  const backingUser = resolveBackingUser();
-  if (backingUser) {
-    updateUserFields(backingUser.id, {
-      username: updates.username,
-      display_name: updates.display_name,
-      avatar_emoji: updates.avatar_emoji,
-      avatar_color: updates.avatar_color,
-      ai_name: updates.ai_name,
-      ai_avatar_emoji: updates.ai_avatar_emoji,
-      ai_avatar_color: updates.ai_avatar_color,
-      ai_avatar_url: updates.ai_avatar_url,
-      last_login_at: current.last_login_at,
-    });
-  }
 
   return getLocalWorkbenchUserPublic();
 }
