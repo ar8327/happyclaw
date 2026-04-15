@@ -26,7 +26,7 @@ function groupByDate(items: GroupEntry[]): DateSection[] {
     { label: '更早', items: [] },
   ];
   items.forEach((g) => {
-    const time = new Date(g.lastMessageTime || g.added_at);
+    const time = new Date(g.lastMessageTime || g.created_at);
     if (time >= today) sections[0].items.push(g);
     else if (time >= weekAgo) sections[1].items.push(g);
     else sections[2].items.push(g);
@@ -85,8 +85,8 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
     }
 
     others.sort((a, b) => {
-      const timeA = a.lastMessageTime || a.added_at;
-      const timeB = b.lastMessageTime || b.added_at;
+      const timeA = a.lastMessageTime || a.created_at;
+      const timeB = b.lastMessageTime || b.created_at;
       return new Date(timeB).getTime() - new Date(timeA).getTime();
     });
 

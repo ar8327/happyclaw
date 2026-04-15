@@ -2,7 +2,7 @@ export interface SessionInfo {
   id?: string;
   name: string;
   folder: string;
-  added_at: string;
+  created_at: string;
   kind?: 'home' | 'main' | 'workspace' | 'worker' | 'memory' | 'feishu' | 'web';
   editable?: boolean;
   deletable?: boolean;

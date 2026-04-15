@@ -437,9 +437,9 @@ export function GroupDetail({ group }: GroupDetailProps) {
 
       {/* Added At */}
       <div>
-        <div className="text-xs text-slate-500 mb-1">添加时间</div>
+        <div className="text-xs text-slate-500 mb-1">创建时间</div>
         <div className="text-sm text-foreground">
-          {formatDate(group.added_at)}
+          {formatDate(group.created_at)}
         </div>
       </div>
 

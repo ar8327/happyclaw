@@ -569,7 +569,7 @@ function buildSessionPayload(
     id: session.id,
     name: session.name,
     folder: getFolderForSession(session),
-    added_at: session.created_at,
+    created_at: session.created_at,
     updated_at: session.updated_at,
     kind: session.kind,
     editable: session.kind === 'main' || session.kind === 'workspace',
