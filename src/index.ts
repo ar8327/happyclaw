@@ -3224,7 +3224,7 @@ function startIpcWatcher(): void {
         const messagesDir = path.join(ipcRoot, 'messages');
         const tasksDir = path.join(ipcRoot, 'tasks');
 
-        // Process messages from this group's IPC directory
+        // Process messages from this Session workspace IPC directory
         try {
           if (fs.existsSync(messagesDir)) {
             const messageFiles = fs
@@ -3470,7 +3470,7 @@ function startIpcWatcher(): void {
           );
         }
 
-        // Process tasks from this group's IPC directory
+        // Process tasks from this Session workspace IPC directory
         try {
           if (fs.existsSync(tasksDir)) {
             const allEntries = fs.readdirSync(tasksDir, {

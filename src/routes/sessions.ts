@@ -1383,7 +1383,7 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
   } else {
     const resolvedBacking = resolveBackingGroupForSession(existing);
     if (!resolvedBacking) {
-      return c.json({ error: 'Session has no backing group' }, 400);
+      return c.json({ error: 'Session has no backing channel' }, 400);
     }
     const { backingJid, backingGroup } = resolvedBacking;
     if (!backingGroup || !canModifyGroup(user, { ...backingGroup, jid: backingJid })) {
@@ -1603,7 +1603,7 @@ sessionRoutes.post('/:id/stop', authMiddleware, async (c) => {
     } else {
       const backingJid = resolveBackingJid(session);
       if (!backingJid) {
-        return c.json({ error: 'Session has no backing group' }, 400);
+        return c.json({ error: 'Session has no backing channel' }, 400);
       }
       await deps.queue.stopSession(backingJid);
     }
@@ -1639,7 +1639,7 @@ sessionRoutes.post('/:id/interrupt', authMiddleware, async (c) => {
 
   const backingJid = resolveBackingJid(session);
   if (!backingJid) {
-    return c.json({ error: 'Session has no backing group' }, 400);
+    return c.json({ error: 'Session has no backing channel' }, 400);
   }
   return c.json({
     success: true,
@@ -1661,7 +1661,7 @@ sessionRoutes.post('/:id/reset-session', authMiddleware, async (c) => {
 
   const resolvedBacking = resolveBackingGroupForSession(session);
   if (!resolvedBacking) {
-    return c.json({ error: 'Session has no backing group' }, 400);
+    return c.json({ error: 'Session has no backing channel' }, 400);
   }
   const { backingJid, backingGroup } = resolvedBacking;
   if (!canModifyGroup(user, { ...backingGroup, jid: backingJid })) {
@@ -1723,7 +1723,7 @@ sessionRoutes.post('/:id/clear-history', authMiddleware, async (c) => {
 
   const resolvedBacking = resolveBackingGroupForSession(session);
   if (!resolvedBacking) {
-    return c.json({ error: 'Session has no backing group' }, 400);
+    return c.json({ error: 'Session has no backing channel' }, 400);
   }
   const { backingJid, backingGroup } = resolvedBacking;
   if (!canModifyGroup(user, { ...backingGroup, jid: backingJid })) {
@@ -1896,7 +1896,7 @@ sessionRoutes.post('/:id/compress', authMiddleware, async (c) => {
 
   const resolvedBacking = resolveBackingGroupForSession(session);
   if (!resolvedBacking) {
-    return c.json({ error: 'Session has no backing group' }, 400);
+    return c.json({ error: 'Session has no backing channel' }, 400);
   }
   const { backingJid, backingGroup } = resolvedBacking;
   if (!canModifyGroup(user, { ...backingGroup, jid: backingJid })) {
@@ -2030,7 +2030,7 @@ sessionRoutes.put('/:id/mode', authMiddleware, async (c) => {
 
   const backingJid = resolveBackingJid(session);
   if (!backingJid) {
-    return c.json({ error: 'Session has no backing group' }, 400);
+    return c.json({ error: 'Session has no backing channel' }, 400);
   }
   const applied = deps.queue.setPermissionMode(backingJid, mode);
   if (applied) {
@@ -2054,7 +2054,7 @@ sessionRoutes.get('/:id/mcp', authMiddleware, (c) => {
 
   const resolvedBacking = resolveBackingGroupForSession(session);
   if (!resolvedBacking) {
-    return c.json({ error: 'Session has no backing group' }, 400);
+    return c.json({ error: 'Session has no backing channel' }, 400);
   }
 
   return c.json({
@@ -2074,7 +2074,7 @@ sessionRoutes.put('/:id/mcp', authMiddleware, async (c) => {
 
   const resolvedBacking = resolveBackingGroupForSession(session);
   if (!resolvedBacking) {
-    return c.json({ error: 'Session has no backing group' }, 400);
+    return c.json({ error: 'Session has no backing channel' }, 400);
   }
   const { backingJid, backingGroup } = resolvedBacking;
   if (!canAccessGroup(user, { ...backingGroup, jid: backingJid })) {
@@ -2150,11 +2150,11 @@ sessionRoutes.delete('/:id', authMiddleware, async (c) => {
 
   const backingJid = resolveBackingJid(session);
   if (!backingJid) {
-    return c.json({ error: 'Session has no backing group' }, 400);
+    return c.json({ error: 'Session has no backing channel' }, 400);
   }
   const backingGroup = getRegisteredGroup(backingJid);
   if (!backingGroup) {
-    return c.json({ error: 'Session backing group not found' }, 404);
+    return c.json({ error: 'Session backing channel not found' }, 404);
   }
 
   const user = c.get('user') as AuthUser;

@@ -318,7 +318,7 @@ export function validateMount(
 }
 
 /**
- * Validate all additional mounts for a group.
+ * Validate all additional mounts for a Session workspace.
  * Returns array of validated mounts (only those that passed validation).
  * Logs warnings for rejected mounts.
  */

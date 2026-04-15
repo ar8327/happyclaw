@@ -156,7 +156,7 @@ export function writeTasksSnapshot(
     next_run: string | null;
   }>,
 ): void {
-  // Write filtered tasks to the group's IPC directory
+  // Write filtered tasks to the Session IPC directory
   const groupIpcDir = path.join(DATA_DIR, 'ipc', groupFolder);
   fs.mkdirSync(groupIpcDir, { recursive: true });
 
@@ -183,9 +183,9 @@ export interface AvailableGroup {
 }
 
 /**
- * Write available groups snapshot for the runtime to read.
+ * Write available Session-channel targets for the runtime to read.
  * Only the primary Session workspace gets the full activation target list.
- * Other workspaces see nothing because they cannot activate arbitrary groups.
+ * Other workspaces see nothing because they cannot activate arbitrary channels.
  */
 export function writeGroupsSnapshot(
   groupFolder: string,
@@ -272,7 +272,7 @@ export async function runHostAgent(
   const defaultGroupDir = path.join(GROUPS_DIR, group.folder);
   if (!group.customCwd) {
     fs.mkdirSync(defaultGroupDir, { recursive: true });
-    // 确保 group 目录是独立 git root，防止 Claude Code 向上找到父项目的 .git
+    // 确保 Session 工作目录是独立 git root，防止 Claude Code 向上找到父项目的 .git
     const gitDir = path.join(defaultGroupDir, '.git');
     if (!fs.existsSync(gitDir)) {
       try {
@@ -282,7 +282,7 @@ export async function runHostAgent(
         });
         logger.info(
           { folder: group.folder },
-          'Initialized git repository for group',
+          'Initialized git repository for session workspace',
         );
       } catch (err) {
         // Non-fatal: agent still works, just reports wrong working directory

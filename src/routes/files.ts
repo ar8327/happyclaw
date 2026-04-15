@@ -290,13 +290,13 @@ fileRoutes.get('/:jid/files', authMiddleware, (c) => {
 
   const resolved = resolveRouteGroup(jid);
   if (!resolved) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   const { accessJid, group, session } = resolved;
 
   const authUser = c.get('user') as AuthUser;
   if (!canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid: accessJid })) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
@@ -324,13 +324,13 @@ fileRoutes.post('/:jid/files', authMiddleware, async (c) => {
 
   const resolved = resolveRouteGroup(jid);
   if (!resolved) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   const { accessJid, group, session } = resolved;
 
   const authUser = c.get('user') as AuthUser;
   if (!canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid: accessJid })) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
@@ -412,13 +412,13 @@ fileRoutes.post('/:jid/files/open-directory', authMiddleware, async (c) => {
 
   const resolved = resolveRouteGroup(jid);
   if (!resolved) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   const { accessJid, group, session } = resolved;
 
   const authUser = c.get('user') as AuthUser;
   if (!canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid: accessJid })) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   // 打开本地目录属于宿主机操作，限制为有宿主机权限的用户
   if (!hasHostExecutionPermission(authUser)) {
@@ -474,13 +474,13 @@ fileRoutes.get('/:jid/files/download/:path', authMiddleware, (c) => {
 
   const resolved = resolveRouteGroup(jid);
   if (!resolved) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   const { accessJid, group, session } = resolved;
 
   const authUser = c.get('user') as AuthUser;
   if (!canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid: accessJid })) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
@@ -590,13 +590,13 @@ fileRoutes.get('/:jid/files/preview/:path', authMiddleware, (c) => {
 
   const resolved = resolveRouteGroup(jid);
   if (!resolved) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   const { accessJid, group, session } = resolved;
 
   const authUser = c.get('user') as AuthUser;
   if (!canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid: accessJid })) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
@@ -664,13 +664,13 @@ fileRoutes.get('/:jid/files/content/:path', authMiddleware, (c) => {
 
   const resolved = resolveRouteGroup(jid);
   if (!resolved) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   const { accessJid, group, session } = resolved;
 
   const authUser = c.get('user') as AuthUser;
   if (!canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid: accessJid })) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
@@ -729,13 +729,13 @@ fileRoutes.put('/:jid/files/content/:path', authMiddleware, async (c) => {
 
   const resolved = resolveRouteGroup(jid);
   if (!resolved) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   const { accessJid, group, session } = resolved;
 
   const authUser = c.get('user') as AuthUser;
   if (!canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid: accessJid })) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
@@ -807,13 +807,13 @@ fileRoutes.delete('/:jid/files/:path', authMiddleware, (c) => {
 
   const resolved = resolveRouteGroup(jid);
   if (!resolved) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   const { accessJid, group, session } = resolved;
 
   const authUser = c.get('user') as AuthUser;
   if (!canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid: accessJid })) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
@@ -856,13 +856,13 @@ fileRoutes.post('/:jid/directories', authMiddleware, async (c) => {
 
   const resolved = resolveRouteGroup(jid);
   if (!resolved) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   const { accessJid, group, session } = resolved;
 
   const authUser = c.get('user') as AuthUser;
   if (!canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid: accessJid })) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(

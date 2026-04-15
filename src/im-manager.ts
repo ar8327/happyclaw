@@ -275,8 +275,7 @@ class IMConnectionManager {
   }
 
   /**
-   * Find the appropriate IMChannel for a given JID, using group ownership lookup
-   * and sibling fallback.
+   * Find the appropriate IMChannel for a given JID by resolving its bound Session owner.
    */
   private findChannelForJid(
     jid: string,
@@ -588,7 +587,7 @@ class IMConnectionManager {
   }
 
   /**
-   * Sync Feishu groups via a specific user's connection.
+   * Sync Feishu chats via the local operator connection.
    */
   async syncFeishuGroups(userId: string): Promise<void> {
     const conn = this.connections.get(userId);

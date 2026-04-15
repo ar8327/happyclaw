@@ -222,7 +222,7 @@ app.post('/api/messages', authMiddleware, async (c) => {
 
   const { chatJid, content, attachments } = validation.data;
   const resolved = resolveRouteGroup(chatJid);
-  if (!resolved) return c.json({ error: 'Group not found' }, 404);
+  if (!resolved) return c.json({ error: 'Session not found' }, 404);
   const { accessJid, group } = resolved;
   const authUser = c.get('user') as AuthUser;
   if (!canAccessGroup(authUser, { ...group, jid: accessJid })) {
@@ -276,7 +276,7 @@ async function handleWebUserMessage(
   if (!group) {
     // Group may exist in DB but not in memory cache (created via setup/registration after loadState)
     const dbGroup = getRegisteredGroup(chatJid);
-    if (!dbGroup) return { ok: false, status: 404, error: 'Group not found' };
+    if (!dbGroup) return { ok: false, status: 404, error: 'Session not found' };
     group = dbGroup;
   }
 

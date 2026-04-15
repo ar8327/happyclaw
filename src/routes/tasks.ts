@@ -181,7 +181,7 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
   }
   const authUser = c.get('user') as AuthUser;
   if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(

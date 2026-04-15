@@ -3733,7 +3733,7 @@ export function getMessagesByTimeRange(
 }
 
 /**
- * Get all registered groups owned by a specific user.
+ * Get all registered Session channels resolved to a specific owner.
  */
 export function getGroupsByOwner(
   userId: string,

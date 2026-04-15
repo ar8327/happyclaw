@@ -139,11 +139,11 @@ function generateUserSummary(
     return false;
   }
 
-  // Get all groups owned by this user
+  // Resolve all registered Session channels owned by this operator
   const groups = getGroupsByOwner(userId);
   if (groups.length === 0) return false;
 
-  // Collect all chat_jids for the user's groups
+  // Collect channel JIDs covered by those Session channels
   const chatJids = groups.map((g) => g.jid);
 
   // Fetch messages for all jids in the time range

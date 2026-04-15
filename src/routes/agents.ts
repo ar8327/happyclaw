@@ -120,7 +120,7 @@ router.get('/:jid/agents', authMiddleware, async (c) => {
   const user = c.get('user');
   const resolved = resolveRouteGroup(jid);
   if (!resolved) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   const { accessJid, group } = resolved;
 
@@ -163,7 +163,7 @@ router.post('/:jid/agents', authMiddleware, async (c) => {
   const user = c.get('user');
   const resolved = resolveRouteGroup(jid);
   if (!resolved) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   const { accessJid, group } = resolved;
 
@@ -255,7 +255,7 @@ router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
   const user = c.get('user');
   const resolved = resolveRouteGroup(jid);
   if (!resolved) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   const { accessJid, group } = resolved;
 
@@ -366,7 +366,7 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
   const user = c.get('user');
   const resolved = resolveRouteGroup(jid);
   if (!resolved) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   const { accessJid, group } = resolved;
   if (!canAccessGroup(user, { ...group, jid: accessJid })) {
@@ -497,7 +497,7 @@ router.put('/:jid/agents/:agentId/im-binding', authMiddleware, async (c) => {
   const user = c.get('user');
   const resolved = resolveRouteGroup(jid);
   if (!resolved) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   const { accessJid, group } = resolved;
   if (!canAccessGroup(user, { ...group, jid: accessJid })) {
@@ -564,7 +564,7 @@ router.delete(
   const user = c.get('user');
   const resolved = resolveRouteGroup(jid);
     if (!resolved) {
-      return c.json({ error: 'Group not found' }, 404);
+      return c.json({ error: 'Session not found' }, 404);
     }
     const { accessJid, group } = resolved;
     if (!canAccessGroup(user, { ...group, jid: accessJid })) {
@@ -611,7 +611,7 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
   const user = c.get('user');
   const resolved = resolveRouteGroup(jid);
   if (!resolved) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   const { accessJid, group } = resolved;
   if (!canAccessGroup(user, { ...group, jid: accessJid })) {
@@ -672,7 +672,7 @@ router.delete('/:jid/im-binding/:imJid', authMiddleware, async (c) => {
   const user = c.get('user');
   const resolved = resolveRouteGroup(jid);
   if (!resolved) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   const { accessJid, group } = resolved;
   if (!canAccessGroup(user, { ...group, jid: accessJid })) {
