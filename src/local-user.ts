@@ -20,6 +20,7 @@ interface LocalOperatorFile {
   ai_avatar_url?: string | null;
   created_at?: string;
   last_login_at?: string | null;
+  last_active_at?: string | null;
 }
 
 function isPublicOwnerKey(ownerKey: string | null | undefined): ownerKey is string {
@@ -40,6 +41,29 @@ function loadLocalOperatorFile(): LocalOperatorFile {
 function saveLocalOperatorFile(next: LocalOperatorFile): void {
   fs.mkdirSync(path.dirname(LOCAL_OPERATOR_FILE), { recursive: true });
   fs.writeFileSync(LOCAL_OPERATOR_FILE, JSON.stringify(next, null, 2) + '\n', 'utf-8');
+}
+
+function normalizeLocalOperatorFile(
+  stored: LocalOperatorFile,
+  fallbackNow: string,
+): LocalOperatorFile {
+  const createdAt =
+    stored.created_at ||
+    (typeof stored.last_login_at === 'string' ? stored.last_login_at : null) ||
+    fallbackNow;
+  const lastLoginAt =
+    stored.last_login_at !== undefined ? stored.last_login_at : createdAt;
+  const lastActiveAt =
+    stored.last_active_at !== undefined
+      ? stored.last_active_at
+      : lastLoginAt;
+
+  return {
+    ...stored,
+    created_at: createdAt,
+    last_login_at: lastLoginAt,
+    last_active_at: lastActiveAt,
+  };
 }
 
 function resolvePrimaryOwnerKey(): string | null {
@@ -65,6 +89,14 @@ export function getLocalWorkbenchSessionId(): string {
 export function getLocalWorkbenchUserPublic(): UserPublic {
   const fallbackNow = new Date().toISOString();
   const stored = loadLocalOperatorFile();
+  const normalized = normalizeLocalOperatorFile(stored, fallbackNow);
+  if (
+    stored.created_at !== normalized.created_at ||
+    stored.last_login_at !== normalized.last_login_at ||
+    stored.last_active_at !== normalized.last_active_at
+  ) {
+    saveLocalOperatorFile(normalized);
+  }
   const primaryOwnerKey =
     resolvePrimaryOwnerKey() ||
     getSessionRecord('memory:local')?.owner_key ||
@@ -72,8 +104,8 @@ export function getLocalWorkbenchUserPublic(): UserPublic {
 
   return {
     id: primaryOwnerKey,
-    username: stored.username || 'operator',
-    display_name: stored.display_name || 'Operator',
+    username: normalized.username || 'operator',
+    display_name: normalized.display_name || 'Operator',
     role: 'admin',
     status: 'active',
     permissions: getDefaultPermissions('admin'),
@@ -81,34 +113,36 @@ export function getLocalWorkbenchUserPublic(): UserPublic {
     disable_reason: null,
     notes: null,
     avatar_emoji:
-      stored.avatar_emoji !== undefined
-        ? stored.avatar_emoji
+      normalized.avatar_emoji !== undefined
+        ? normalized.avatar_emoji
         : null,
     avatar_color:
-      stored.avatar_color !== undefined
-        ? stored.avatar_color
+      normalized.avatar_color !== undefined
+        ? normalized.avatar_color
         : null,
     ai_name:
-      stored.ai_name !== undefined ? stored.ai_name : null,
+      normalized.ai_name !== undefined ? normalized.ai_name : null,
     ai_avatar_emoji:
-      stored.ai_avatar_emoji !== undefined
-        ? stored.ai_avatar_emoji
+      normalized.ai_avatar_emoji !== undefined
+        ? normalized.ai_avatar_emoji
         : null,
     ai_avatar_color:
-      stored.ai_avatar_color !== undefined
-        ? stored.ai_avatar_color
+      normalized.ai_avatar_color !== undefined
+        ? normalized.ai_avatar_color
         : null,
     ai_avatar_url:
-      stored.ai_avatar_url !== undefined
-        ? stored.ai_avatar_url
+      normalized.ai_avatar_url !== undefined
+        ? normalized.ai_avatar_url
         : null,
-    created_at:
-      stored.created_at || fallbackNow,
+    created_at: normalized.created_at ?? fallbackNow,
     last_login_at:
-      stored.last_login_at !== undefined
-        ? stored.last_login_at
-        : fallbackNow,
-    last_active_at: fallbackNow,
+      normalized.last_login_at !== undefined
+        ? normalized.last_login_at
+        : normalized.created_at ?? fallbackNow,
+    last_active_at:
+      normalized.last_active_at !== undefined
+        ? normalized.last_active_at
+        : normalized.last_login_at ?? normalized.created_at ?? fallbackNow,
     deleted_at: null,
   };
 }
@@ -147,6 +181,7 @@ export function saveLocalWorkbenchProfile(
     ...updates,
     created_at: current.created_at,
     last_login_at: current.last_login_at,
+    last_active_at: current.last_active_at,
   };
   saveLocalOperatorFile(nextFile);
 

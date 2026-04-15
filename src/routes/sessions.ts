@@ -1955,7 +1955,7 @@ sessionRoutes.get('/:id/members', authMiddleware, (c) => {
       {
         user_id: user.id,
         role: 'owner',
-        added_at: new Date().toISOString(),
+        added_at: session.created_at,
         username: user.username,
         display_name: user.display_name,
       },

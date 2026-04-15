@@ -116,15 +116,16 @@ authRoutes.put('/password', authMiddleware, async (c) => {
 });
 
 authRoutes.get('/sessions', authMiddleware, (c) => {
+  const user = getLocalWorkbenchUserPublic();
   return c.json({
     sessions: [
       {
         id: getLocalWorkbenchSessionId(),
         ip_address: 'local',
         user_agent: 'single-user-workbench',
-        created_at: getLocalWorkbenchUserPublic().created_at,
+        created_at: user.created_at,
         expires_at: null,
-        last_active_at: new Date().toISOString(),
+        last_active_at: user.last_active_at,
         is_current: true,
       },
     ],
