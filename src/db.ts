@@ -3385,6 +3385,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
 
 export function deleteRegisteredGroup(jid: string): void {
   deleteSessionProjectionForGroup(jid);
+  db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(jid);
   db.prepare('DELETE FROM registered_groups WHERE jid = ?').run(jid);
 }
 
