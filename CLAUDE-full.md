@@ -98,7 +98,7 @@ HappyClaw 是一个自托管的多用户 AI Agent 系统：
 | `/login` | `LoginPage` | 公开 |
 | `/register` | `RegisterPage` | 公开（可通过设置关闭） |
 | `/chat/:groupFolder?` | `ChatPage` — 主聊天界面（懒加载） | 登录后 |
-| `/groups` | 重定向到 `/settings?tab=groups` | 登录后 |
+| `/groups` | 重定向到 `/settings?tab=sessions` | 登录后 |
 | `/tasks` | `TasksPage` — 定时任务（懒加载） | 登录后 |
 | `/monitor` | `MonitorPage` — 系统监控（懒加载） | 登录后 |
 | `/memory` | `MemoryPage` — 记忆管理 | 登录后 |

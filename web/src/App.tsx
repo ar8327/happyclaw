@@ -47,7 +47,7 @@ export function App() {
         >
           <Route path="/chat/:sessionSlug?" element={<ErrorBoundary label="ChatPage"><Suspense fallback={null}><ChatPage /></Suspense></ErrorBoundary>} />
           <Route path="/search" element={<ErrorBoundary label="SearchPage"><Suspense fallback={null}><SearchPage /></Suspense></ErrorBoundary>} />
-          <Route path="/groups" element={<Navigate to="/settings?tab=groups" replace />} />
+          <Route path="/groups" element={<Navigate to="/settings?tab=sessions" replace />} />
           <Route path="/tasks" element={<ErrorBoundary label="TasksPage"><Suspense fallback={null}><TasksPage /></Suspense></ErrorBoundary>} />
           <Route path="/monitor" element={<ErrorBoundary label="MonitorPage"><Suspense fallback={null}><MonitorPage /></Suspense></ErrorBoundary>} />
           <Route path="/memory" element={<MemoryPage />} />
