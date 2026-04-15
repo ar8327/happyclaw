@@ -51,7 +51,7 @@
 
 ## 这个 Fork 是什么
 
-本项目是 [HappyClaw](https://github.com/riba2534/happyclaw) 的实验性 fork，基于上游的自托管多用户 AI Agent 系统，重点探索三个方向：
+本项目是 [HappyClaw](https://github.com/riba2534/happyclaw) 的实验性 fork，源自上游的自托管 AI Agent 系统，重点探索三个方向：
 
 1. **Memory Agent 系统** — 独立的记忆会话与记忆子进程，自动归档对话、构建索引、深度整理，替代上游的 inline MCP 记忆工具
 2. **显式消息路由** — Agent 的 stdout 仅显示在 Web 端，IM 消息必须通过 `send_message` MCP 工具显式发送，Agent 自主控制消息路由
