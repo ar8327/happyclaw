@@ -1156,7 +1156,6 @@ sessionRoutes.post('/', authMiddleware, async (c) => {
   return c.json({
     success: true,
     jid: createdSession.id,
-    group: payload,
     session: payload,
   });
 });
@@ -1202,7 +1201,6 @@ sessionRoutes.get('/', authMiddleware, (c) => {
 
   return c.json({
     sessions: payload,
-    groups: payload,
   });
 });
 

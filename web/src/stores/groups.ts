@@ -22,10 +22,9 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
     set({ loading: true });
     try {
       const data = await api.get<{
-        sessions?: Record<string, SessionInfo>;
-        groups?: Record<string, SessionInfo>;
+        sessions: Record<string, SessionInfo>;
       }>('/api/sessions');
-      const sessionMap = data.sessions || data.groups || {};
+      const sessionMap = data.sessions;
       const groups = Object.fromEntries(
         Object.entries(sessionMap).filter(
           ([, info]) =>

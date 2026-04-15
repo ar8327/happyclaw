@@ -820,10 +820,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ loading: true });
     try {
       const data = await api.get<{
-        sessions?: Record<string, GroupInfo>;
-        groups?: Record<string, GroupInfo>;
+        sessions: Record<string, GroupInfo>;
       }>('/api/sessions');
-      const sessionMap = data.sessions || data.groups || {};
+      const sessionMap = data.sessions;
       const groups = Object.fromEntries(
         Object.entries(sessionMap)
           .filter(([, info]) => info.session_kind === 'main' || info.session_kind === 'workspace')
@@ -1259,12 +1258,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const data = await api.post<{
         success: boolean;
         jid: string;
-        session?: GroupInfo;
-        group?: GroupInfo;
+        session: GroupInfo;
       }>('/api/sessions', body, needsLongTimeout ? 120_000 : undefined);
       if (!data.success) return null;
-      const createdSession = data.session || data.group;
-      if (!createdSession) return null;
+      const createdSession = data.session;
       await get().loadGroups();
       const createdEntry = Object.entries(get().groups).find(
         ([, group]) =>
