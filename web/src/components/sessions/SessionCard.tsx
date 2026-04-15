@@ -1,19 +1,19 @@
 import { useState } from 'react';
 import { ChevronDown, ChevronUp } from 'lucide-react';
-import { GroupInfo } from '../../stores/groups';
-import { GroupDetail } from './GroupDetail';
+import type { SessionInfo } from '../../types';
+import { SessionDetail } from './SessionDetail';
 
-interface GroupCardProps {
-  group: GroupInfo & { jid: string };
+interface SessionCardProps {
+  session: SessionInfo & { jid: string };
 }
 
-export function GroupCard({ group }: GroupCardProps) {
+export function SessionCard({ session }: SessionCardProps) {
   const [expanded, setExpanded] = useState(false);
   const isSessionView =
-    group.kind === 'main' ||
-    group.kind === 'workspace' ||
-    group.kind === 'worker' ||
-    group.kind === 'memory';
+    session.kind === 'main' ||
+    session.kind === 'workspace' ||
+    session.kind === 'worker' ||
+    session.kind === 'memory';
 
   const truncateId = (value: string) => {
     if (value.length <= 30) return value;
@@ -37,13 +37,13 @@ export function GroupCard({ group }: GroupCardProps) {
             {/* Group Name */}
             <div className="flex items-center gap-2 mb-1">
               <h3 className="text-lg font-semibold text-foreground truncate">
-                {group.name}
+                {session.name}
               </h3>
             </div>
 
             {/* Session ID / JID */}
             <p className="text-xs text-slate-500 font-mono mb-2">
-              {truncateId(group.jid)}
+              {truncateId(session.jid)}
             </p>
 
             {/* Core metadata */}
@@ -53,14 +53,14 @@ export function GroupCard({ group }: GroupCardProps) {
                   {isSessionView ? '会话类型:' : '会话目录:'}
                 </span>
                 <span className="text-foreground font-medium">
-                  {isSessionView ? (group.kind || 'unknown') : group.folder}
+                  {isSessionView ? (session.kind || 'unknown') : session.folder}
                 </span>
               </div>
               {isSessionView && (
                 <div className="flex items-center gap-2">
                   <span className="text-slate-500">运行引擎:</span>
                   <span className="text-foreground font-medium">
-                    {group.runner_label || group.runner_id || 'unknown'}
+                    {session.runner_label || session.runner_id || 'unknown'}
                   </span>
                 </div>
               )}
@@ -68,7 +68,7 @@ export function GroupCard({ group }: GroupCardProps) {
                 <div className="flex items-center gap-2">
                   <span className="text-slate-500">渠道绑定:</span>
                   <span className="text-foreground font-medium truncate">
-                    {group.binding_summary || '无渠道绑定'}
+                    {session.binding_summary || '无渠道绑定'}
                   </span>
                 </div>
               )}
@@ -89,7 +89,7 @@ export function GroupCard({ group }: GroupCardProps) {
       {/* Expanded Detail */}
       {expanded && (
         <div className="border-t border-border">
-          <GroupDetail group={group} />
+          <SessionDetail session={session} />
         </div>
       )}
     </div>

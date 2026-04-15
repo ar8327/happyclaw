@@ -1,19 +1,19 @@
 import { useEffect } from 'react';
 import { Users } from 'lucide-react';
-import { useGroupsStore } from '../stores/groups';
-import { GroupCard } from '../components/groups/GroupCard';
+import { useSessionsStore } from '../stores/sessions';
+import { SessionCard } from '../components/sessions/SessionCard';
 import { PageHeader } from '@/components/common/PageHeader';
 import { SkeletonCardGrid } from '@/components/common/Skeletons';
 import { EmptyState } from '@/components/common/EmptyState';
 
 export function SessionsPage() {
-  const { groups, loading, loadGroups } = useGroupsStore();
+  const { sessions, loading, loadSessions } = useSessionsStore();
 
   useEffect(() => {
-    loadGroups();
-  }, [loadGroups]);
+    loadSessions();
+  }, [loadSessions]);
 
-  const groupsArray = Object.entries(groups).map(([jid, info]) => ({
+  const sessionCards = Object.entries(sessions).map(([jid, info]) => ({
     jid,
     ...info,
   }));
@@ -23,7 +23,7 @@ export function SessionsPage() {
       <div className="max-w-7xl mx-auto">
         <PageHeader
           title="会话管理"
-          subtitle={`${groupsArray.length} 个已注册会话`}
+          subtitle={`${sessionCards.length} 个已注册会话`}
           className="mb-6"
         />
 
@@ -31,7 +31,7 @@ export function SessionsPage() {
           <SkeletonCardGrid />
         )}
 
-        {!loading && groupsArray.length === 0 && (
+        {!loading && sessionCards.length === 0 && (
           <EmptyState
             icon={Users}
             title="暂无会话"
@@ -39,10 +39,10 @@ export function SessionsPage() {
           />
         )}
 
-        {!loading && groupsArray.length > 0 && (
+        {!loading && sessionCards.length > 0 && (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {groupsArray.map((group) => (
-              <GroupCard key={group.jid} group={group} />
+            {sessionCards.map((session) => (
+              <SessionCard key={session.jid} session={session} />
             ))}
           </div>
         )}
@@ -50,5 +50,3 @@ export function SessionsPage() {
     </div>
   );
 }
-
-export const GroupsPage = SessionsPage;

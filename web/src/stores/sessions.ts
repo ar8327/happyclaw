@@ -3,43 +3,41 @@ import { api } from '../api/client';
 import type { SessionInfo } from '../types';
 import { useChatStore } from './chat';
 
-export type GroupInfo = SessionInfo;
-
-interface GroupsState {
-  groups: Record<string, SessionInfo>;
+interface SessionsState {
+  sessions: Record<string, SessionInfo>;
   loading: boolean;
   error: string | null;
-  loadGroups: () => Promise<void>;
-  updateGroup: (jid: string, updates: Record<string, unknown>) => Promise<void>;
+  loadSessions: () => Promise<void>;
+  updateSession: (jid: string, updates: Record<string, unknown>) => Promise<void>;
 }
 
-export const useGroupsStore = create<GroupsState>((set, get) => ({
-  groups: {},
+export const useSessionsStore = create<SessionsState>((set, get) => ({
+  sessions: {},
   loading: false,
   error: null,
 
-  loadGroups: async () => {
+  loadSessions: async () => {
     set({ loading: true });
     try {
       const data = await api.get<{
         sessions: Record<string, SessionInfo>;
       }>('/api/sessions');
       const sessionMap = data.sessions;
-      const groups = Object.fromEntries(
+      const sessions = Object.fromEntries(
         Object.entries(sessionMap).filter(
           ([, info]) =>
             info.kind === 'main' || info.kind === 'workspace',
         ),
       );
-      set({ groups, loading: false, error: null });
+      set({ sessions, loading: false, error: null });
     } catch (err) {
       set({ loading: false, error: err instanceof Error ? err.message : String(err) });
     }
   },
 
-  updateGroup: async (jid: string, updates: Record<string, unknown>) => {
+  updateSession: async (jid: string, updates: Record<string, unknown>) => {
     await api.patch(`/api/sessions/${encodeURIComponent(jid)}`, updates);
-    await get().loadGroups();
+    await get().loadSessions();
     useChatStore.getState().loadGroups();
   },
 }));

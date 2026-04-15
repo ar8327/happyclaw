@@ -1,7 +1,7 @@
 import { Skeleton } from '@/components/ui/skeleton';
 
 /**
- * GroupsPage - 2x3 grid of skeleton cards
+ * SessionsPage - 2x3 grid of skeleton cards
  */
 export function SkeletonCardGrid() {
   return (

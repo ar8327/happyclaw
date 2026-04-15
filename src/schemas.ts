@@ -117,7 +117,7 @@ export const MessageCreateSchema = z
     }
   });
 
-export const GroupCreateSchema = z.object({
+export const SessionCreateSchema = z.object({
   name: z.string().min(1).max(MAX_GROUP_NAME_LEN),
   custom_cwd: z
     .string()
@@ -186,32 +186,6 @@ export const ClaudeThirdPartyProfileSecretsSchema = z
       data.clearAnthropicAuthToken === true,
     { message: 'At least one secret field must be provided' },
   );
-
-export const GroupPatchSchema = z.object({
-  name: z.string().min(1).max(MAX_GROUP_NAME_LEN).optional(),
-  selected_skills: z
-    .array(
-      z
-        .string()
-        .max(128)
-        .regex(
-          /^[\w\-]+$/,
-          'Skill ID must be alphanumeric with hyphens/underscores',
-        ),
-    )
-    .max(200)
-    .nullable()
-    .optional(),
-  is_pinned: z.boolean().optional(),
-  activation_mode: z
-    .enum(['auto', 'always', 'when_mentioned', 'disabled'])
-    .optional(),
-  llm_provider: z.enum(['claude', 'openai']).optional(),
-  model: z.string().max(128).nullable().optional(),
-  thinking_effort: z.enum(['low', 'medium', 'high']).nullable().optional(),
-  context_compression: z.enum(['off', 'auto', 'manual']).optional(),
-  knowledge_extraction: z.boolean().optional(),
-});
 
 export const LoginSchema = z.object({
   username: z.string().min(1),

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Check, Loader2, Archive } from 'lucide-react';
-import { GroupInfo, useGroupsStore } from '../../stores/groups';
+import type { SessionInfo } from '../../types';
+import { useSessionsStore } from '../../stores/sessions';
 import {
   Select,
   SelectContent,
@@ -147,75 +148,75 @@ function RunnerCapabilitySummary({ runner }: { runner: RunnerOption | null }) {
   );
 }
 
-interface GroupDetailProps {
-  group: GroupInfo & { jid: string };
+interface SessionDetailProps {
+  session: SessionInfo & { jid: string };
 }
 
-export function GroupDetail({ group }: GroupDetailProps) {
-  const { updateGroup } = useGroupsStore();
+export function SessionDetail({ session }: SessionDetailProps) {
+  const { updateSession } = useSessionsStore();
   const isSessionView =
-    group.kind === 'main' ||
-    group.kind === 'workspace' ||
-    group.kind === 'worker' ||
-    group.kind === 'memory';
-  const backingJid = group.backing_jid || group.jid;
+    session.kind === 'main' ||
+    session.kind === 'workspace' ||
+    session.kind === 'worker' ||
+    session.kind === 'memory';
+  const backingJid = session.backing_jid || session.jid;
   const runnerTouchedRef = useRef(false);
   const [runnerId, setRunnerId] = useState<string>(
-    resolveRunnerValue(group.runner_id),
+    resolveRunnerValue(session.runner_id),
   );
   const [runnerProfileId, setRunnerProfileId] = useState<string>(
-    group.runner_profile_id || '',
+    session.runner_profile_id || '',
   );
   const [runnerOptions, setRunnerOptions] = useState<RunnerOption[]>([]);
   const [runnerProfiles, setRunnerProfiles] = useState<RunnerProfileOption[]>([]);
-  const [model, setModel] = useState(group.model || '');
+  const [model, setModel] = useState(session.model || '');
   const [thinkingEffort, setThinkingEffort] = useState<string>(
-    group.thinking_effort || '',
+    session.thinking_effort || '',
   );
-  const [cwd, setCwd] = useState(group.cwd || group.folder);
-  const [compression, setCompression] = useState<string>(group.context_compression || 'off');
-  const [knowledgeExtraction, setKnowledgeExtraction] = useState(group.knowledge_extraction ?? false);
+  const [cwd, setCwd] = useState(session.cwd || session.folder);
+  const [compression, setCompression] = useState<string>(session.context_compression || 'off');
+  const [knowledgeExtraction, setKnowledgeExtraction] = useState(session.knowledge_extraction ?? false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [compressing, setCompressing] = useState(false);
   const [compressResult, setCompressResult] = useState<string | null>(null);
   const [summaryInfo, setSummaryInfo] = useState<ContextSummary | null>(null);
 
-  // Sync local state when group prop changes
+  // Sync local state when session prop changes
   useEffect(() => {
     runnerTouchedRef.current = false;
     setRunnerId(
-      resolveRunnerValue(group.runner_id, runnerOptions),
+      resolveRunnerValue(session.runner_id, runnerOptions),
     );
-    setRunnerProfileId(group.runner_profile_id || '');
-    setModel(group.model || '');
-    setThinkingEffort(group.thinking_effort || '');
-    setCwd(group.cwd || group.folder);
-    setCompression(group.context_compression || 'off');
-    setKnowledgeExtraction(group.knowledge_extraction ?? false);
+    setRunnerProfileId(session.runner_profile_id || '');
+    setModel(session.model || '');
+    setThinkingEffort(session.thinking_effort || '');
+    setCwd(session.cwd || session.folder);
+    setCompression(session.context_compression || 'off');
+    setKnowledgeExtraction(session.knowledge_extraction ?? false);
     setCompressResult(null);
     setSummaryInfo(null);
   }, [
-    group.jid,
-    group.runner_id,
-    group.runner_profile_id,
-    group.model,
-    group.thinking_effort,
-    group.cwd,
-    group.folder,
-    group.context_compression,
-    group.knowledge_extraction,
+    session.jid,
+    session.runner_id,
+    session.runner_profile_id,
+    session.model,
+    session.thinking_effort,
+    session.cwd,
+    session.folder,
+    session.context_compression,
+    session.knowledge_extraction,
   ]);
 
   const runnerDirty =
     runnerId !==
-    resolveRunnerValue(group.runner_id, runnerOptions);
-  const runnerProfileDirty = runnerProfileId !== (group.runner_profile_id || '');
-  const modelDirty = model !== (group.model || '');
-  const thinkingDirty = thinkingEffort !== (group.thinking_effort || '');
-  const cwdDirty = cwd !== (group.cwd || group.folder);
-  const compressionDirty = compression !== (group.context_compression || 'off');
-  const knowledgeDirty = knowledgeExtraction !== (group.knowledge_extraction ?? false);
+    resolveRunnerValue(session.runner_id, runnerOptions);
+  const runnerProfileDirty = runnerProfileId !== (session.runner_profile_id || '');
+  const modelDirty = model !== (session.model || '');
+  const thinkingDirty = thinkingEffort !== (session.thinking_effort || '');
+  const cwdDirty = cwd !== (session.cwd || session.folder);
+  const compressionDirty = compression !== (session.context_compression || 'off');
+  const knowledgeDirty = knowledgeExtraction !== (session.knowledge_extraction ?? false);
   const dirty =
     runnerDirty ||
     runnerProfileDirty ||
@@ -226,13 +227,13 @@ export function GroupDetail({ group }: GroupDetailProps) {
     knowledgeDirty;
   const runnerSelectOptions = withCurrentRunnerOption(
     runnerOptions,
-    runnerId || group.runner_id,
-    group.runner_label,
+    runnerId || session.runner_id,
+    session.runner_label,
   );
   const selectedRunner =
-    runnerSelectOptions.find((option) => option.value === (runnerId || group.runner_id || ''))
+    runnerSelectOptions.find((option) => option.value === (runnerId || session.runner_id || ''))
     || null;
-  const isMemorySession = group.kind === 'memory';
+  const isMemorySession = session.kind === 'memory';
 
   const formatDate = (timestamp: string | number) => {
     return new Date(timestamp).toLocaleString('zh-CN', {
@@ -256,10 +257,10 @@ export function GroupDetail({ group }: GroupDetailProps) {
   }, [backingJid]);
 
   useEffect(() => {
-    if (group.context_compression && group.context_compression !== 'off') {
+    if (session.context_compression && session.context_compression !== 'off') {
       loadSummary();
     }
-  }, [group.context_compression, loadSummary]);
+  }, [session.context_compression, loadSummary]);
 
   useEffect(() => {
     let cancelled = false;
@@ -307,10 +308,10 @@ export function GroupDetail({ group }: GroupDetailProps) {
               : [];
           setRunnerOptions(nextOptions);
           setRunnerId((current) => {
-            if (group.runner_id || runnerTouchedRef.current) return current;
-            const previousFallback = resolveRunnerValue(group.runner_id);
+            if (session.runner_id || runnerTouchedRef.current) return current;
+            const previousFallback = resolveRunnerValue(session.runner_id);
             if (current !== previousFallback) return current;
-            return resolveRunnerValue(group.runner_id, nextOptions);
+            return resolveRunnerValue(session.runner_id, nextOptions);
           });
         }
       })
@@ -372,14 +373,14 @@ export function GroupDetail({ group }: GroupDetailProps) {
       if (knowledgeDirty && !('knowledge_extraction' in updates)) {
         updates.knowledge_extraction = knowledgeExtraction;
       }
-      await updateGroup(group.jid, updates);
+      await updateSession(session.jid, updates);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
       if (compressionDirty && compression !== 'off') {
         loadSummary();
       }
     } catch (err) {
-      console.error('Failed to update group:', err);
+      console.error('Failed to update session:', err);
     } finally {
       setSaving(false);
     }
@@ -421,7 +422,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
           {isSessionView ? '会话 ID' : '完整 JID'}
         </div>
         <code className="block text-xs font-mono bg-card px-3 py-2 rounded border border-border break-all">
-          {group.jid}
+          {session.jid}
         </code>
       </div>
 
@@ -431,7 +432,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
           {isSessionView ? '工作目录' : '文件夹'}
         </div>
         <div className="text-sm text-foreground font-medium">
-          {group.cwd || group.folder}
+          {session.cwd || session.folder}
         </div>
       </div>
 
@@ -439,7 +440,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
       <div>
         <div className="text-xs text-slate-500 mb-1">创建时间</div>
         <div className="text-sm text-foreground">
-          {formatDate(group.created_at)}
+          {formatDate(session.created_at)}
         </div>
       </div>
 
@@ -447,17 +448,17 @@ export function GroupDetail({ group }: GroupDetailProps) {
       <div>
         <div className="text-xs text-slate-500 mb-1">运行引擎 / 模型</div>
         <div className="text-sm text-foreground">
-          {group.runner_label || runnerId}
-          {group.model && <span className="text-slate-400"> / {group.model}</span>}
+          {session.runner_label || runnerId}
+          {session.model && <span className="text-slate-400"> / {session.model}</span>}
         </div>
-        {group.binding_summary && (
+        {session.binding_summary && (
           <div className="text-xs text-slate-400 mt-1">
-            绑定: {group.binding_summary}
+            绑定: {session.binding_summary}
           </div>
         )}
-        {group.degradation_reasons && group.degradation_reasons.length > 0 && (
+        {session.degradation_reasons && session.degradation_reasons.length > 0 && (
           <div className="mt-2 space-y-1">
-            {group.degradation_reasons.map((reason) => (
+            {session.degradation_reasons.map((reason) => (
               <div key={reason} className="text-xs text-amber-600">
                 {reason}
               </div>
@@ -469,7 +470,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
         </div>
       </div>
 
-      {group.editable && (
+      {session.editable && (
         <div className="space-y-3">
           <div>
             <div className="text-xs text-slate-500 mb-1">运行引擎</div>
@@ -574,7 +575,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
       )}
 
       {/* Context Compression */}
-      {group.editable && (
+      {session.editable && (
         <div>
           <div className="text-xs text-slate-500 mb-1">上下文压缩</div>
           <div className="flex items-center gap-2">
@@ -645,7 +646,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
       )}
 
       {/* Save button */}
-      {group.editable && dirty && (
+      {session.editable && dirty && (
         <div className="flex items-center gap-2">
           <button
             onClick={handleSave}
@@ -660,15 +661,15 @@ export function GroupDetail({ group }: GroupDetailProps) {
       )}
 
       {/* Last Message */}
-      {group.lastMessage && (
+      {session.lastMessage && (
         <div>
           <div className="text-xs text-slate-500 mb-1">最后消息</div>
           <div className="text-sm text-foreground bg-card px-3 py-2 rounded border border-border line-clamp-3 break-words">
-            {group.lastMessage}
+            {session.lastMessage}
           </div>
-          {group.lastMessageTime && (
+          {session.lastMessageTime && (
             <div className="text-xs text-slate-400 mt-1">
-              {formatDate(group.lastMessageTime)}
+              {formatDate(session.lastMessageTime)}
             </div>
           )}
         </div>

@@ -11,7 +11,7 @@ import { AboutSection } from '../components/settings/AboutSection';
 import { AppearanceSection } from '../components/settings/AppearanceSection';
 import { SystemSettingsSection } from '../components/settings/SystemSettingsSection';
 import { UserChannelsSection } from '../components/settings/UserChannelsSection';
-import { SessionsPage } from './GroupsPage';
+import { SessionsPage } from './SessionsPage';
 import { MemoryPage } from './MemoryPage';
 import { RunnersPage } from './RunnersPage';
 import { SkillsPage } from './SkillsPage';

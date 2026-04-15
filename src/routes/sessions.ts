@@ -17,7 +17,7 @@ import {
   canModifyGroup,
   getWebDeps,
 } from '../web-context.js';
-import { ContainerEnvSchema, GroupCreateSchema } from '../schemas.js';
+import { ContainerEnvSchema, SessionCreateSchema } from '../schemas.js';
 import {
   clearWorkerArtifactsForFolder,
   deleteChatHistory,
@@ -955,7 +955,7 @@ sessionRoutes.post('/', authMiddleware, async (c) => {
 
   const user = c.get('user') as AuthUser;
   const body = await c.req.json().catch(() => ({}));
-  const validation = GroupCreateSchema.safeParse(body);
+  const validation = SessionCreateSchema.safeParse(body);
   if (!validation.success) {
     return c.json({ error: 'Invalid request body' }, 400);
   }
