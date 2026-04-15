@@ -22,7 +22,7 @@
 如果下文某些段落仍出现 `group`、`home`、`container` 等旧术语，优先按下面这套主模型理解：
 
 - `Session` 是正式执行对象
-- `registered_groups` 只是兼容投影和渠道元数据
+- `session_channels` 承担渠道元数据与 web / IM backing 行
 - `session_bindings` 承担 IM 渠道路由
 - 运行时只有本地 unified runtime，没有产品层面的 Docker 模式
 
@@ -148,7 +148,7 @@
 - **Session 是一等对象**：主会话、workspace、worker、memory 都通过 `sessions` 表投影与 `/api/sessions` 管理
 - **worker 主键已切到 Session**：运行控制统一使用 `worker:{agentId}`，消息存储仍允许 `web:*#agent:{agentId}` 这类 transcript chat key
 - **IM 显式绑定只看 `session_bindings`**：`target_main_jid`、`target_agent_id` 等 legacy 路由已退出主链路
-- **历史兼容层仍存在**：`registered_groups` 继续保存 backing JID、folder、下载目录等兼容元数据，但不再是正式运行模型
+- **历史兼容层仍存在**：`session_channels` 继续保存 backing JID、渠道显示名、下载目录初始化信息等兼容元数据，但不再是正式运行模型
 
 ### 2.5 Dual mode 退场说明
 
@@ -367,7 +367,7 @@ StreamEvent 类型以 `shared/stream-event.ts` 为单一真相源，构建时通
 
 ### 4.4 当前隔离模型
 
-当前默认模型是**单用户单 operator**。历史 `users`、`user_sessions`、`invite_codes`、RBAC 等表和接口仍可能存在兼容用途，但正式运行语义已经切到：
+当前默认模型是**单用户单 operator**。正式运行语义已经切到：
 
 | 维度 | 当前主模型 |
 |------|-----------|
@@ -375,7 +375,8 @@ StreamEvent 类型以 `shared/stream-event.ts` 为单一真相源，构建时通
 | 渠道路由 | `session_bindings` |
 | 运行状态 | `session_state` |
 | worker 元数据 | `worker_sessions` |
-| 兼容投影 | `registered_groups` |
+| 渠道元数据 | `session_channels` |
+| 本地 operator 身份 | `users` 单行本地账号 |
 
 ## 5. 数据库表
 
@@ -391,18 +392,13 @@ SQLite WAL 模式。当前最重要的是区分**正式主写表**和**兼容表
 | `worker_sessions` | `session_id` | worker Session 元数据，替代旧 `agents` 表主写职责 |
 | `session_bindings` | `channel_jid` | IM 渠道到 Session 的显式绑定 |
 | `session_state` | `session_id` | provider session id、resume anchor、permission mode、IM channel state |
-| `registered_groups` | `jid` | 兼容投影，保存 backing JID、folder、下载目录、部分旧设置 |
+| `session_channels` | `jid` | 渠道元数据与 backing 行，保存 `session_id`、显示名、cwd 初始化信息和 Session 级兼容设置投影 |
 | `router_state` | `key` | KV 存储（`last_timestamp`、`last_agent_timestamp`） |
-| `users` | `id` | 兼容 auth 数据，单用户模式下只应围绕本地 operator 使用 |
-| `user_sessions` | `id` | 登录会话（兼容 auth） |
-| `invite_codes` | `code` | 邀请码（兼容 auth） |
-| `auth_audit_log` | `id` (auto) | 认证审计日志 |
-| `group_members` | `(group_folder, user_id)` | 旧多用户共享工作区残留表 |
+| `users` | `id` | 本地 operator 资料，仅保留单用户登录所需字段 |
 | `usage_records` | `id` | Token 用量明细（per-model 拆行，关联 user_id、group_folder、message_id） |
 | `usage_daily_summary` | `(user_id, model, date)` | 日维度用量预聚合（本地时区日期，增量 UPSERT） |
-| `user_quotas` | `user_id` | 用户配额（预留，暂不写入数据） |
 
-**注意**：`registered_groups.folder` 允许重复，因为多个 IM 渠道可以映射到同一 folder。`is_home` 只剩兼容含义，不应继续扩散到新设计。
+**注意**：多个 IM 渠道可以映射到同一个主 Session，所以 `session_channels.session_id` 可以重复。`is_home` 只作为运行时兼容投影存在，不是数据库字段，也不应继续扩散到新设计。
 
 ## 6. 目录约定
 
@@ -545,13 +541,13 @@ scripts/                      # 构建辅助脚本
 
 ### 8.1 设置向导
 
-首次启动时，`GET /api/auth/status` 返回 `initialized: false`（无任何用户）。前端 `AuthGuard` 检测到未初始化状态后重定向到 `/setup`，引导创建管理员账号（自定义用户名 + 密码，调用 `POST /api/auth/setup`）。创建后自动登录并跳转到 `/setup/providers` 完成 Claude API 和飞书配置。
+首次启动时，`GET /api/auth/status` 返回 `initialized: false`。前端 `AuthGuard` 会重定向到 `/setup`，引导创建本地 operator 账号。创建后自动登录并跳转到 `/setup/providers` 完成 Claude API 和飞书配置。
 
-当前主线只围绕这一个本地 operator 工作。历史多用户注册入口仍可能存在兼容代码，但不再是推荐部署模型。不存在默认账号。`POST /api/auth/setup` 仅在用户表为空时可用。
+当前主线只围绕这一个本地 operator 工作。不存在默认账号。`POST /api/auth/setup` 仅在 `users` 表为空时可用。
 
 ### 8.2 IM 自动注册
 
-未注册的飞书/Telegram/QQ 会话首次发消息时，通过 `onNewChat` 回调自动补出兼容 `registered_groups` 行，并默认路由到当前 folder 的主 Session。显式绑定则写入 `session_bindings`。QQ 通道需先通过配对码绑定（`/pair <code>`）。
+未注册的飞书/Telegram/QQ 会话首次发消息时，通过 `onNewChat` 回调自动补出 `session_channels` 行，并默认路由到当前 folder 的主 Session。显式绑定则写入 `session_bindings`。QQ 通道需先通过配对码绑定。
 
 ### 8.3 无触发词
 
@@ -566,7 +562,7 @@ scripts/                      # 构建辅助脚本
 - 主 Session 可以访问自己的工作目录、Session env 和绑定渠道
 - worker Session 跟随父 Session 的工作区，但运行控制、resume 状态和 IM 显式绑定都以自己的 `session_id` 持久化
 - Memory Session 通过 `MemoryProfile` 收紧工具白名单，不允许继续暴露 Messaging、Tasks、Groups、Skills、Memory、InvokeAgent 等普通 runtime 工具
-- `registered_groups` 里的 `is_home` 只剩兼容含义，不应再拿来当正式产品能力设计
+- 运行时对象里的 `is_home` 只剩兼容含义，不应再拿来当正式产品能力设计
 
 ### 8.6 回复路由（Fork 特有）
 
@@ -586,7 +582,7 @@ scripts/                      # 构建辅助脚本
 
 启动时会围绕当前本地 operator 校正默认主 Session 与兼容路由：
 - 确保本地 operator 拥有可用的主 Session 与默认 folder
-- 同步 `web:{folder}` 对应的 chat 记录和 `registered_groups` 兼容行
+- 同步 `web:{folder}` 对应的 chat 记录和 `session_channels` backing 行
 - IM 默认路由、`user-global` 目录和连接恢复都只围绕这个 operator 进行
 
 ### 8.9 AI 外观
@@ -677,7 +673,7 @@ Session runtime 收尾 → export transcripts
 - 系统路径不可通过文件 API 操作：`logs/`、`CLAUDE.md`、`.claude/`、`conversations/`
 - StreamEvent 类型以 `shared/stream-event.ts` 为单一真相源，修改后运行 `make sync-types` 同步（`make build` 自动触发，`make typecheck` 校验一致性）
 - 主 Agent 依赖本机可用的 Claude Code CLI 或 Codex 运行环境
-- 不要重新把 Session 语义折回 `registered_groups` 或 `/api/groups` 兼容入口
+- 不要重新把 Session 语义折回 `session_channels` 兼容投影或 `/api/groups` 兼容入口
 
 ## 11. 本地开发
 
@@ -736,7 +732,7 @@ make help          # 列出所有可用的 make 命令
 
 ### 新增会话级功能
 
-1. 先确认它是不是正式 Session 能力，而不是 `registered_groups` 兼容字段
+1. 先确认它是不是正式 Session 能力，而不是 `session_channels` 兼容字段
 2. 明确是否写入会话私有目录
 3. 同步更新 Web API 路由和前端 Store
 

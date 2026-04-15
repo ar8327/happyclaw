@@ -71,7 +71,7 @@
 - **移动端 PWA** — 针对移动端深度优化，支持一键安装到桌面，iOS / Android 均已适配，随时随地通过手机访问 AI Agent
 - **四端消息统一路由** — 飞书 WebSocket 长连接（富文本卡片、Reaction 反馈）、Telegram Bot API、QQ Bot API v2（私聊 + 群聊 @Bot）、Web 界面，四端消息统一路由
 
-> 当前实现更接近本地 Agent workbench，而不是多租户平台。Session 是核心对象；`registered_groups` 只保留渠道与工作区基础元数据，IM 路由统一落在 `session_bindings`，新代码应优先围绕 `/api/sessions`、runner registry 和本地 runtime 理解系统。
+> 当前实现更接近本地 Agent workbench，而不是多租户平台。Session 是核心对象；渠道元数据落在 `session_channels`，IM 路由统一落在 `session_bindings`，新代码应优先围绕 `/api/sessions`、runner registry 和本地 runtime 理解系统。
 
 ## 核心能力
 
@@ -296,7 +296,7 @@ make start
 | **Claude** | 原生支持更完整的 session resume、hook 与 observability | 聊天、记忆、IM、观测均为 full |
 | **Codex** | 聊天主链路可用，但记忆和观测存在降级 | 聊天可用，memory 与 observability 为 degraded 或 synthetic |
 
-当前所有 Session 都通过本地 runtime 启动。`runtime_mode`、`execution_mode` 与 `llm_provider` 已不再作为 Session 接口字段返回；如果请求体继续携带这些旧字段，`/api/sessions` 会直接拒绝。它们只在历史数据库迁移和 `registered_groups` 兼容投影中被识别并清理。
+当前所有 Session 都通过本地 runtime 启动。`runtime_mode`、`execution_mode` 与 `llm_provider` 已不再作为 Session 接口字段返回；如果请求体继续携带这些旧字段，`/api/sessions` 会直接拒绝。它们只在历史数据库迁移和启动期兼容清理中被识别并移除。
 
 ## 技术架构
 
