@@ -70,6 +70,18 @@ function extractResultText(message: Record<string, unknown>): string | null {
   return typeof result === 'string' ? result : null;
 }
 
+function resolveAdditionalDirectories(defaultDirs: string[]): string[] {
+  const raw = process.env.HAPPYCLAW_ADDITIONAL_DIRECTORIES;
+  if (!raw) return defaultDirs;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return defaultDirs;
+    return parsed.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0);
+  } catch {
+    return defaultDirs;
+  }
+}
+
 function isInterruptedResult(message: Record<string, unknown>, session: ClaudeSession): boolean {
   const subtype = typeof message.subtype === 'string' ? message.subtype : '';
   const stopReason = typeof message.stop_reason === 'string' ? message.stop_reason : '';
@@ -179,7 +191,10 @@ export class ClaudeRunner implements AgentRunner {
       sessionId: config.sessionId,
       resumeAt: config.resumeAt,
       cwd: opts.groupDir,
-      additionalDirectories: [opts.globalDir, opts.memoryDir],
+      additionalDirectories: resolveAdditionalDirectories([
+        opts.globalDir,
+        opts.memoryDir,
+      ]),
       model: opts.model,
       thinkingEffort: opts.thinkingEffort,
       permissionMode: (config.permissionMode ?? opts.state.currentPermissionMode) as ClaudePermissionMode,

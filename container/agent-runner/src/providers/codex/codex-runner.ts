@@ -58,6 +58,18 @@ export interface CodexRunnerOptions {
   skillsDir: string;
 }
 
+function resolveAdditionalDirectories(defaultDirs: string[]): string[] {
+  const raw = process.env.HAPPYCLAW_ADDITIONAL_DIRECTORIES;
+  if (!raw) return defaultDirs;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return defaultDirs;
+    return parsed.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0);
+  } catch {
+    return defaultDirs;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // CodexRunner
 // ---------------------------------------------------------------------------
@@ -157,7 +169,10 @@ export class CodexRunner implements AgentRunner {
       model: this.opts.model,
       thinkingEffort: this.opts.thinkingEffort,
       workingDirectory: groupDir,
-      additionalDirectories: [globalDir, memoryDir],
+      additionalDirectories: resolveAdditionalDirectories([
+        globalDir,
+        memoryDir,
+      ]),
       mcpServerPath: this.mcpServerPath,
       mcpServerEnv: mcpEnv,
       modelInstructionsFile: this.instructionsFile,

@@ -3,6 +3,7 @@ import type { ChildProcess } from 'child_process';
 import {
   type AvailableGroup,
   type RuntimeInput,
+  type RuntimeLaunchProfile,
   type RuntimeOutput,
   type ContainerInput,
   type ContainerOutput,
@@ -15,6 +16,7 @@ import type { RegisteredGroup } from './types.js';
 export type {
   AvailableGroup,
   RuntimeInput,
+  RuntimeLaunchProfile,
   RuntimeOutput,
   ContainerInput,
   ContainerOutput,
@@ -27,8 +29,16 @@ export async function runLocalSessionRuntime(
   onProcess: (proc: ChildProcess, identifier: string) => void,
   onOutput?: (output: RuntimeOutput) => Promise<void>,
   ownerHomeFolder?: string,
+  launchProfile?: RuntimeLaunchProfile,
 ): Promise<RuntimeOutput> {
-  return runLocalAgent(session, input, onProcess, onOutput, ownerHomeFolder);
+  return runLocalAgent(
+    session,
+    input,
+    onProcess,
+    onOutput,
+    ownerHomeFolder,
+    launchProfile,
+  );
 }
 
 export async function runSessionAgent(
@@ -37,6 +47,7 @@ export async function runSessionAgent(
   onProcess: (proc: ChildProcess, identifier: string) => void,
   onOutput?: (output: RuntimeOutput) => Promise<void>,
   ownerHomeFolder?: string,
+  launchProfile?: RuntimeLaunchProfile,
 ): Promise<RuntimeOutput> {
   return runLocalSessionRuntime(
     session,
@@ -44,5 +55,6 @@ export async function runSessionAgent(
     onProcess,
     onOutput,
     ownerHomeFolder,
+    launchProfile,
   );
 }

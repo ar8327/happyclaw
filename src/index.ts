@@ -174,12 +174,8 @@ import {
 } from './context-compressor.js';
 import { turnObservabilityManager } from './turn-observability.js';
 import { verifyPairingCode } from './telegram-pairing.js';
-import {
-  MemoryAgentManager,
-  exportTranscriptsForUser,
-} from './memory-agent.js';
 import { MemoryOrchestrator } from './memory-orchestrator.js';
-import { injectMemoryAgentDeps } from './routes/memory-agent.js';
+import { injectMemoryOrchestratorDeps } from './routes/memory-agent.js';
 import { injectFeishuApiDeps } from './routes/feishu-api.js';
 import { injectMemoryDeps } from './routes/memory.js';
 import { sendToolCommentary, resetTurnCommentaryTimer } from './im-commentary.js';
@@ -2004,8 +2000,8 @@ function buildCompressOptions(group: RegisteredGroup): CompressOptions | undefin
   return {
     extractKnowledge: true,
     onKnowledgeEntry: async (content: string, importance: string) => {
-      if (!memoryAgentManagerRef) return;
-      await memoryAgentManagerRef.send(userId, {
+      if (!memoryOrchestratorRef) return;
+      await memoryOrchestratorRef.send(userId, {
         type: 'remember',
         content,
         importance,
@@ -3538,8 +3534,7 @@ function startIpcWatcher(): void {
   logger.info('IPC watcher started (per-group namespaces)');
 }
 
-// Module-level reference set after MemoryAgentManager creation, used by processTaskIpc.
-let memoryAgentManagerRef: MemoryAgentManager | null = null;
+// Module-level reference set after MemoryOrchestrator creation, used by processTaskIpc.
 let memoryOrchestratorRef: MemoryOrchestrator | null = null;
 
 async function processTaskIpc(
@@ -5139,14 +5134,12 @@ async function main(): Promise<void> {
 
   loadState();
 
-  // --- Memory Agent Manager ---
-  const memoryAgentManager = new MemoryAgentManager();
-  const memoryOrchestrator = new MemoryOrchestrator(memoryAgentManager);
-  memoryAgentManagerRef = memoryAgentManager;
+  // --- Memory Orchestrator ---
+  const memoryOrchestrator = new MemoryOrchestrator();
   memoryOrchestratorRef = memoryOrchestrator;
   const memoryAgentToken = crypto.randomBytes(32).toString('hex');
-  injectMemoryAgentDeps({
-    manager: memoryAgentManager,
+  injectMemoryOrchestratorDeps({
+    orchestrator: memoryOrchestrator,
     token: memoryAgentToken,
   });
   injectFeishuApiDeps({ token: memoryAgentToken }); // Reuse same internal token
@@ -5670,7 +5663,7 @@ async function main(): Promise<void> {
     sendMessage,
     assistantName: ASSISTANT_NAME,
     globalSleepDeps: {
-      manager: memoryAgentManager,
+      manager: memoryOrchestrator,
       queue,
     },
   });

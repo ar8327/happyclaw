@@ -117,6 +117,12 @@ export interface RuntimeInput {
   };
 }
 
+export interface RuntimeLaunchProfile {
+  toolProfile?: 'memory';
+  additionalDirectories?: string[];
+  disableUserMcpServers?: boolean;
+}
+
 export interface RuntimeOutput {
   status: 'success' | 'error' | 'stream' | 'closed' | 'drained';
   result: string | null;
@@ -253,6 +259,7 @@ export async function runHostAgent(
   onProcess: (proc: ChildProcess, identifier: string) => void,
   onOutput?: (output: RuntimeOutput) => Promise<void>,
   ownerPrimarySessionFolder?: string,
+  launchProfile?: RuntimeLaunchProfile,
 ): Promise<RuntimeOutput> {
   const startTime = Date.now();
   const localRuntimeSetupError = (message: string): RuntimeOutput => ({
@@ -400,7 +407,9 @@ export async function runHostAgent(
   // 3. 写入 settings.json（合并模式，不覆盖已有用户配置）
   // Resolve MCP servers based on group's mcp_mode for the unified local runtime.
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  const hostMcpServers = resolveGroupMcpServers(group, sessionOwnerKey || undefined);
+  const hostMcpServers = launchProfile?.disableUserMcpServers
+    ? {}
+    : resolveGroupMcpServers(group, sessionOwnerKey || undefined);
   ensureSettingsJson(settingsFile, hostMcpServers);
 
   // 4. Skills 自动链接到 session 目录
@@ -607,6 +616,17 @@ export async function runHostAgent(
   hostEnv['HAPPYCLAW_WORKSPACE_IPC'] = groupIpcDir;
   if (ownerId) {
     hostEnv['HAPPYCLAW_SKILLS_DIR'] = path.join(DATA_DIR, 'skills', ownerId);
+  }
+  if (launchProfile?.toolProfile) {
+    hostEnv['HAPPYCLAW_TOOL_PROFILE'] = launchProfile.toolProfile;
+  }
+  if (
+    launchProfile?.additionalDirectories &&
+    launchProfile.additionalDirectories.length > 0
+  ) {
+    hostEnv['HAPPYCLAW_ADDITIONAL_DIRECTORIES'] = JSON.stringify(
+      launchProfile.additionalDirectories,
+    );
   }
   hostEnv['HAPPYCLAW_PROJECT_SKILLS_DIR'] = path.join(process.cwd(), 'container', 'skills');
   hostEnv['CLAUDE_CONFIG_DIR'] = groupSessionsDir;

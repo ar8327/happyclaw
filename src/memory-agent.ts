@@ -1,5 +1,5 @@
 /**
- * MemoryAgentManager — per-user Memory Agent orchestration.
+ * MemoryOrchestrator support code.
  *
  * Memory turns run through the shared session launcher so they share the same
  * runtime contract, state persistence, and runner selection as normal sessions.
@@ -28,7 +28,8 @@ import { logger } from './logger.js';
 import { resolveMemoryRunnerId } from './runner-registry.js';
 import { getSystemSettings } from './runtime-config.js';
 import type { MessageCursor, SessionRecord } from './types.js';
-import { runSessionAgent } from './session-launcher.js';
+import { MemoryRunnerAdapter } from './memory-runner-adapter.js';
+import { buildMemoryProfile } from './memory-profile.js';
 
 // Limits
 const MAX_CONCURRENT_MEMORY_AGENTS = 3;
@@ -350,7 +351,7 @@ export async function exportTranscriptsForUser(
   userId: string,
   folder: string,
   chatJids: string[],
-  memoryAgentManager: MemoryAgentManager,
+  memoryOrchestrator: MemoryOrchestrator,
 ): Promise<MemoryAgentResponse | null> {
   try {
     const memDir = ensureMemoryDir(userId);
@@ -455,12 +456,12 @@ export async function exportTranscriptsForUser(
     writeMemoryState(userId, state);
 
     // Trigger session_wrapup and return the result
-    return await memoryAgentManager.send(userId, {
-        type: 'session_wrapup',
-        transcriptFile: transcriptRelPath,
-        groupFolder: folder,
-        chatJids: Array.from(transcriptChatJids),
-      });
+    return await memoryOrchestrator.send(userId, {
+      type: 'session_wrapup',
+      transcriptFile: transcriptRelPath,
+      groupFolder: folder,
+      chatJids: Array.from(transcriptChatJids),
+    });
   } catch (err) {
     logger.error(
       { userId, folder, err },
@@ -777,9 +778,13 @@ function persistMemoryRuntimeSnapshot(
   });
 }
 
-export class MemoryAgentManager {
+export class MemoryOrchestrator {
   private agents: Map<string, AgentEntry> = new Map();
   private idleCheckTimer: ReturnType<typeof setInterval> | null = null;
+
+  constructor(
+    private readonly runnerAdapter: MemoryRunnerAdapter = new MemoryRunnerAdapter(),
+  ) {}
 
   startIdleChecks(): void {
     if (this.idleCheckTimer) return;
@@ -880,7 +885,13 @@ export class MemoryAgentManager {
       primarySession,
       memorySession,
     );
-    const runnerId = effectiveMemorySession.runner_id;
+    const memoryProfile = buildMemoryProfile({
+      userId,
+      runtimeKey,
+      primaryFolder,
+      groupDir,
+      memorySession: effectiveMemorySession,
+    });
     const input = {
       prompt: buildMemoryPrompt(request, memDir),
       sessionId: runtimeState?.provider_session_id || undefined,
@@ -916,26 +927,9 @@ export class MemoryAgentManager {
     let finalOutput: RuntimeOutput | null = null;
     let closeRequested = false;
     try {
-      const output = await runSessionAgent(
-        {
-          name: effectiveMemorySession.name,
-          folder: primaryFolder,
-          added_at: effectiveMemorySession.created_at,
-          created_by: userId,
-          is_home: false,
-          customCwd: groupDir,
-          containerConfig: { timeout: timeoutMs },
-          llm_provider:
-            runnerId === 'codex'
-              ? 'openai'
-              : (runnerId === 'claude' ? 'claude' : undefined),
-          model: effectiveMemorySession.model || undefined,
-          thinking_effort: effectiveMemorySession.thinking_effort || undefined,
-          context_compression: effectiveMemorySession.context_compression,
-          knowledge_extraction: effectiveMemorySession.knowledge_extraction,
-        },
+      const output = await this.runnerAdapter.run(
+        memoryProfile,
         input,
-        () => {},
         async (output) => {
           persistMemoryRuntimeSnapshot(userId, output);
           if (
@@ -1060,6 +1054,61 @@ export class MemoryAgentManager {
     );
   }
 
+  start(): void {
+    this.startIdleChecks();
+  }
+
+  stop(): void {
+    this.stopIdleChecks();
+  }
+
+  remember(
+    userId: string,
+    content: string,
+    source?: string,
+  ): Promise<MemoryAgentResponse> {
+    return this.send(userId, {
+      type: 'remember',
+      content,
+      source,
+    });
+  }
+
+  sessionWrapup(
+    userId: string,
+    groupFolder: string,
+  ): Promise<MemoryAgentResponse> {
+    return this.send(userId, {
+      type: 'session_wrapup',
+      groupFolder,
+    });
+  }
+
+  globalSleep(userId: string): Promise<MemoryAgentResponse> {
+    return this.send(userId, { type: 'global_sleep' });
+  }
+
+  exportSessionTranscripts(
+    userId: string,
+    groupFolder: string,
+    chatJid: string,
+  ): Promise<MemoryAgentResponse | null> {
+    return this.exportTranscripts(userId, groupFolder, [chatJid]);
+  }
+
+  exportTranscripts(
+    userId: string,
+    groupFolder: string,
+    chatJids: string[],
+  ): Promise<MemoryAgentResponse | null> {
+    return exportTranscriptsForUser(
+      userId,
+      groupFolder,
+      chatJids,
+      this,
+    );
+  }
+
   checkIdleAgents(): void {
     const now = Date.now();
     for (const [userId, entry] of this.agents) {
@@ -1095,7 +1144,7 @@ export class MemoryAgentManager {
 // --- Global sleep scheduling ---
 
 export interface GlobalSleepDeps {
-  manager: MemoryAgentManager;
+  manager: MemoryOrchestrator;
   queue: SessionRuntimeManager;
 }
 
