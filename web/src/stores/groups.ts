@@ -28,7 +28,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
       const groups = Object.fromEntries(
         Object.entries(sessionMap).filter(
           ([, info]) =>
-            info.session_kind === 'main' || info.session_kind === 'workspace',
+            info.kind === 'main' || info.kind === 'workspace',
         ),
       );
       set({ groups, loading: false, error: null });

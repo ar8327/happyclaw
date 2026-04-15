@@ -9,7 +9,11 @@ interface GroupCardProps {
 
 export function GroupCard({ group }: GroupCardProps) {
   const [expanded, setExpanded] = useState(false);
-  const isSessionView = !!group.session_kind;
+  const isSessionView =
+    group.kind === 'main' ||
+    group.kind === 'workspace' ||
+    group.kind === 'worker' ||
+    group.kind === 'memory';
 
   const truncateId = (value: string) => {
     if (value.length <= 30) return value;
@@ -49,7 +53,7 @@ export function GroupCard({ group }: GroupCardProps) {
                   {isSessionView ? '会话类型:' : '会话目录:'}
                 </span>
                 <span className="text-foreground font-medium">
-                  {isSessionView ? (group.session_kind || group.kind || 'unknown') : group.folder}
+                  {isSessionView ? (group.kind || 'unknown') : group.folder}
                 </span>
               </div>
               {isSessionView && (

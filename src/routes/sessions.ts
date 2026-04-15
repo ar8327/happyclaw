@@ -572,13 +572,11 @@ function buildSessionPayload(
     added_at: session.created_at,
     updated_at: session.updated_at,
     kind: session.kind,
-    session_kind: session.kind,
     editable: session.kind === 'main' || session.kind === 'workspace',
     deletable:
       !!backingJid &&
       !!backingGroup &&
       canDeleteGroup(user, { ...backingGroup, jid: backingJid }),
-    custom_cwd: session.cwd,
     cwd: session.cwd,
     backing_jid: backingJid,
     owner_key: session.owner_key,

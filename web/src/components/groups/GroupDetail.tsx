@@ -153,7 +153,11 @@ interface GroupDetailProps {
 
 export function GroupDetail({ group }: GroupDetailProps) {
   const { updateGroup } = useGroupsStore();
-  const isSessionView = !!group.session_kind;
+  const isSessionView =
+    group.kind === 'main' ||
+    group.kind === 'workspace' ||
+    group.kind === 'worker' ||
+    group.kind === 'memory';
   const backingJid = group.backing_jid || group.jid;
   const runnerTouchedRef = useRef(false);
   const [runnerId, setRunnerId] = useState<string>(
@@ -168,7 +172,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
   const [thinkingEffort, setThinkingEffort] = useState<string>(
     group.thinking_effort || '',
   );
-  const [cwd, setCwd] = useState(group.cwd || group.custom_cwd || group.folder);
+  const [cwd, setCwd] = useState(group.cwd || group.folder);
   const [compression, setCompression] = useState<string>(group.context_compression || 'off');
   const [knowledgeExtraction, setKnowledgeExtraction] = useState(group.knowledge_extraction ?? false);
   const [saving, setSaving] = useState(false);
@@ -186,7 +190,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
     setRunnerProfileId(group.runner_profile_id || '');
     setModel(group.model || '');
     setThinkingEffort(group.thinking_effort || '');
-    setCwd(group.cwd || group.custom_cwd || group.folder);
+    setCwd(group.cwd || group.folder);
     setCompression(group.context_compression || 'off');
     setKnowledgeExtraction(group.knowledge_extraction ?? false);
     setCompressResult(null);
@@ -198,7 +202,6 @@ export function GroupDetail({ group }: GroupDetailProps) {
     group.model,
     group.thinking_effort,
     group.cwd,
-    group.custom_cwd,
     group.folder,
     group.context_compression,
     group.knowledge_extraction,
@@ -210,7 +213,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
   const runnerProfileDirty = runnerProfileId !== (group.runner_profile_id || '');
   const modelDirty = model !== (group.model || '');
   const thinkingDirty = thinkingEffort !== (group.thinking_effort || '');
-  const cwdDirty = cwd !== (group.cwd || group.custom_cwd || group.folder);
+  const cwdDirty = cwd !== (group.cwd || group.folder);
   const compressionDirty = compression !== (group.context_compression || 'off');
   const knowledgeDirty = knowledgeExtraction !== (group.knowledge_extraction ?? false);
   const dirty =
@@ -229,7 +232,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
   const selectedRunner =
     runnerSelectOptions.find((option) => option.value === (runnerId || group.runner_id || ''))
     || null;
-  const isMemorySession = group.session_kind === 'memory';
+  const isMemorySession = group.kind === 'memory';
 
   const formatDate = (timestamp: string | number) => {
     return new Date(timestamp).toLocaleString('zh-CN', {
@@ -428,7 +431,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
           {isSessionView ? '工作目录' : '文件夹'}
         </div>
         <div className="text-sm text-foreground font-medium">
-          {group.cwd || group.custom_cwd || group.folder}
+          {group.cwd || group.folder}
         </div>
       </div>
 

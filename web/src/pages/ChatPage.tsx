@@ -19,7 +19,7 @@ export function ChatPage() {
         ([jid, info]) =>
           info.folder === sessionSlug &&
           jid.startsWith('web:') &&
-          info.session_kind === 'main',
+          info.kind === 'main',
       ) ||
       Object.entries(groups).find(
         ([jid, info]) => info.folder === sessionSlug && jid.startsWith('web:'),

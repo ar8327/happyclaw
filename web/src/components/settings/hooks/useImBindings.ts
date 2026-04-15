@@ -26,7 +26,7 @@ export function useImBindings() {
   // Derive homeJid as a stable value — no callback, no dependency cycle
   const homeJid = useMemo((): string | null => {
     for (const [jid, group] of Object.entries(groups)) {
-      if (group.session_kind === 'main') return jid;
+      if (group.kind === 'main') return jid;
     }
     return null;
   }, [groups]);

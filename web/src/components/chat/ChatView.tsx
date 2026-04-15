@@ -135,7 +135,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const canUseTerminal = !!group;
   const pollRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
-  const isHome = group?.session_kind === 'main';
+  const isHome = group?.kind === 'main';
   const visibleTabs = SIDEBAR_TABS;
 
   // Fetch IM connection status for home groups

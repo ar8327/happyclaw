@@ -77,7 +77,7 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
 
     for (const [jid, info] of Object.entries(groups)) {
       const entry = { jid, ...info };
-      if (info.session_kind === 'main') {
+      if (info.kind === 'main') {
         main = entry;
       } else {
         others.push(entry);

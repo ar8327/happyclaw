@@ -67,8 +67,8 @@ export function TasksPage() {
     .filter(
       (group) =>
         !!group.id &&
-        group.session_kind !== 'worker' &&
-        group.session_kind !== 'memory',
+        group.kind !== 'worker' &&
+        group.kind !== 'memory',
     )
     .map((group) => ({
       id: group.id!,

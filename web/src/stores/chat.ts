@@ -825,7 +825,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const sessionMap = data.sessions;
       const groups = Object.fromEntries(
         Object.entries(sessionMap)
-          .filter(([, info]) => info.session_kind === 'main' || info.session_kind === 'workspace')
+          .filter(([, info]) => info.kind === 'main' || info.kind === 'workspace')
           .map(([sessionId, info]) => [
             sessionId,
             { ...info, id: info.id || sessionId },
@@ -882,7 +882,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         let nextCurrentFinal = selectedCurrent;
         if (!nextCurrentFinal) {
           const homeEntry = Object.entries(nextGroups).find(
-            ([, group]) => group.session_kind === 'main',
+            ([, group]) => group.kind === 'main',
           );
           if (homeEntry) {
             nextCurrentFinal = homeEntry[0];

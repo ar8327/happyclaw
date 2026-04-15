@@ -32,7 +32,6 @@ type RuntimeEnvSession = {
   model?: string | null;
   thinking_effort?: SessionInfo['thinking_effort'] | null;
   cwd?: string | null;
-  custom_cwd?: string | null;
   context_compression?: SessionInfo['context_compression'] | null;
   knowledge_extraction?: boolean | null;
 };
@@ -172,7 +171,7 @@ export function RuntimeEnvPanel({
   const [thinkingEffort, setThinkingEffort] = useState(session?.thinking_effort || '__default__');
   const [runnerProfileId, setRunnerProfileId] = useState(session?.runner_profile_id || '__default__');
   const [runnerProfiles, setRunnerProfiles] = useState<RunnerProfileOption[]>([]);
-  const [cwd, setCwd] = useState(session?.cwd || session?.custom_cwd || '');
+  const [cwd, setCwd] = useState(session?.cwd || '');
   const [contextCompression, setContextCompression] = useState<'off' | 'manual' | 'auto'>(
     session?.context_compression || 'off',
   );
@@ -208,13 +207,12 @@ export function RuntimeEnvPanel({
     setModel(session?.model || '__default__');
     setThinkingEffort(session?.thinking_effort || '__default__');
     setRunnerProfileId(session?.runner_profile_id || '__default__');
-    setCwd(session?.cwd || session?.custom_cwd || '');
+    setCwd(session?.cwd || '');
     setContextCompression(session?.context_compression || 'off');
     setKnowledgeExtraction(session?.knowledge_extraction ?? false);
   }, [
     session?.context_compression,
     session?.cwd,
-    session?.custom_cwd,
     session?.knowledge_extraction,
     session?.model,
     session?.runner_id,
@@ -321,10 +319,10 @@ export function RuntimeEnvPanel({
 
   const handleCwdBlur = useCallback(async () => {
     const nextCwd = cwd.trim();
-    const currentCwd = (session?.cwd || session?.custom_cwd || '').trim();
+    const currentCwd = (session?.cwd || '').trim();
     if (!nextCwd || nextCwd === currentCwd) return;
     await patchSession({ cwd: nextCwd });
-  }, [cwd, patchSession, session?.cwd, session?.custom_cwd]);
+  }, [cwd, patchSession, session?.cwd]);
 
   const handleSave = async () => {
     const data: Record<string, unknown> = {};

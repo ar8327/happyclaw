@@ -8,7 +8,6 @@ export interface SessionInfo {
   deletable?: boolean;
   lastMessage?: string;
   lastMessageTime?: string;
-  custom_cwd?: string;
   selected_skills?: string[] | null;
   pinned_at?: string;
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
@@ -19,7 +18,6 @@ export interface SessionInfo {
   thinking_effort?: 'low' | 'medium' | 'high' | null;
   context_compression?: 'off' | 'auto' | 'manual';
   knowledge_extraction?: boolean;
-  session_kind?: 'main' | 'workspace' | 'worker' | 'memory';
   cwd?: string;
   owner_key?: string | null;
   binding_count?: number;
