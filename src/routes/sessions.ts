@@ -181,13 +181,10 @@ function normalizeRegisteredRunnerId(
 
 function normalizeRunnerId(
   runnerId: unknown,
-  llmProvider: unknown,
   fallback: SessionRecord['runner_id'],
 ): SessionRecord['runner_id'] {
   const normalizedRunnerId = normalizeRegisteredRunnerId(runnerId);
   if (normalizedRunnerId) return normalizedRunnerId;
-  if (llmProvider === 'openai') return 'codex';
-  if (llmProvider === 'claude') return 'claude';
   return fallback;
 }
 
@@ -587,7 +584,6 @@ function buildSessionPayload(
     owner_key: session.owner_key,
     runner_id: session.runner_id,
     runner_profile_id: session.runner_profile_id,
-    llm_provider: mapLegacyLlmProvider(session.runner_id, backingGroup?.llm_provider),
     model: session.model,
     thinking_effort: session.thinking_effort,
     context_compression: session.context_compression,
@@ -985,6 +981,20 @@ sessionRoutes.post('/', authMiddleware, async (c) => {
   if (
     body &&
     typeof body === 'object' &&
+    Object.prototype.hasOwnProperty.call(body, 'llm_provider')
+  ) {
+    return c.json(
+      {
+        error:
+          'llm_provider has been removed. Sessions must use runner_id.',
+      },
+      400,
+    );
+  }
+
+  if (
+    body &&
+    typeof body === 'object' &&
     Object.prototype.hasOwnProperty.call(body, 'execution_mode')
   ) {
     return c.json(
@@ -1244,6 +1254,15 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
   }
 
   const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(body, 'llm_provider')) {
+    return c.json(
+      {
+        error:
+          'llm_provider has been removed. Sessions must use runner_id.',
+      },
+      400,
+    );
+  }
   if (Object.prototype.hasOwnProperty.call(body, 'runtime_mode')) {
     return c.json(
       {
@@ -1267,7 +1286,6 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
   try {
     nextRunnerId = normalizeRunnerId(
       body.runner_id,
-      body.llm_provider,
       existing.runner_id,
     );
     nextRunnerProfileId =
