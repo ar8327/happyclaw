@@ -54,7 +54,6 @@ import {
   getSessionRuntimeState,
   getWorkerSessionRecord,
   listSessionBindings,
-  listUsers,
   listSessionRecords,
   setLastGroupSync,
   setRegisteredGroup,
@@ -78,8 +77,6 @@ import {
   getGroupsByOwner,
   getMessagesPage,
   addGroupMember,
-  cleanupOldDailyUsage,
-  cleanupOldBillingAuditLog,
   insertUsageRecord,
   getTranscriptMessagesSince,
   markStaleTurnsAsError,
@@ -178,6 +175,7 @@ import { injectMemoryOrchestratorDeps } from './routes/memory-agent.js';
 import { injectFeishuApiDeps } from './routes/feishu-api.js';
 import { injectMemoryDeps } from './routes/memory.js';
 import { sendToolCommentary, resetTurnCommentaryTimer } from './im-commentary.js';
+import { getLocalWorkbenchUserPublic } from './local-user.js';
 
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const execFileAsync = promisify(execFile);
@@ -1528,7 +1526,7 @@ interface SendMessageOptions {
 }
 
 /**
- * One-time migration: copy system-level IM config → admin's per-user config.
+ * One-time migration: copy system-level IM config → local operator config.
  * Safe to call repeatedly — writes a flag file after first successful run.
  */
 function migrateSystemIMToPerUser(): void {
@@ -1536,29 +1534,18 @@ function migrateSystemIMToPerUser(): void {
   if (fs.existsSync(flagFile)) return;
 
   try {
-    // Find first admin user
-    const adminResult = listUsers({
-      status: 'active',
-      role: 'admin',
-      page: 1,
-      pageSize: 1,
-    });
-    const admin = adminResult.users[0];
-    if (!admin) {
-      // No admin yet (fresh install) — nothing to migrate
-      return;
-    }
+    const operator = getLocalWorkbenchUserPublic();
 
     let migratedFeishu = false;
     let migratedTelegram = false;
 
-    // Feishu: copy system config → admin per-user (if admin has no per-user config)
-    const existingUserFeishu = getUserFeishuConfig(admin.id);
+    // Feishu: copy system config → local operator per-user config when missing.
+    const existingUserFeishu = getUserFeishuConfig(operator.id);
     if (!existingUserFeishu) {
       const { config: sysFeishu, source: feishuSource } =
         getFeishuProviderConfigWithSource();
       if (feishuSource !== 'none' && sysFeishu.appId && sysFeishu.appSecret) {
-        saveUserFeishuConfig(admin.id, {
+        saveUserFeishuConfig(operator.id, {
           appId: sysFeishu.appId,
           appSecret: sysFeishu.appSecret,
           enabled: sysFeishu.enabled,
@@ -1567,13 +1554,13 @@ function migrateSystemIMToPerUser(): void {
       }
     }
 
-    // Telegram: copy system config → admin per-user (if admin has no per-user config)
-    const existingUserTelegram = getUserTelegramConfig(admin.id);
+    // Telegram: copy system config → local operator per-user config when missing.
+    const existingUserTelegram = getUserTelegramConfig(operator.id);
     if (!existingUserTelegram) {
       const { config: sysTelegram, source: telegramSource } =
         getTelegramProviderConfigWithSource();
       if (telegramSource !== 'none' && sysTelegram.botToken) {
-        saveUserTelegramConfig(admin.id, {
+        saveUserTelegramConfig(operator.id, {
           botToken: sysTelegram.botToken,
           proxyUrl: sysTelegram.proxyUrl,
           enabled: sysTelegram.enabled,
@@ -1589,11 +1576,11 @@ function migrateSystemIMToPerUser(): void {
     if (migratedFeishu || migratedTelegram) {
       logger.info(
         {
-          adminId: admin.id,
+          operatorId: operator.id,
           feishu: migratedFeishu,
           telegram: migratedTelegram,
         },
-        'Migrated system-level IM config to admin per-user config',
+        'Migrated system-level IM config to local operator config',
       );
     }
   } catch (err) {
@@ -1663,38 +1650,23 @@ function loadState(): void {
     }
   }
 
-  // Ensure every active user has a home group (is_home=true).
-  // Admin → folder='main'
-  // Member → folder='home-{userId}'
+  // Single-user mode keeps exactly one local operator home group.
   try {
-    // Paginate through all active users
-    const activeUsers: Array<{ id: string; role: string; username: string }> =
-      [];
-    {
-      let page = 1;
-      while (true) {
-        const result = listUsers({ status: 'active', page, pageSize: 200 });
-        activeUsers.push(...result.users);
-        if (activeUsers.length >= result.total) break;
-        page++;
-      }
-    }
-    for (const user of activeUsers) {
-      const homeJid = ensureUserHomeGroup(
-        user.id,
-        user.role as 'admin' | 'member',
-        user.username,
-      );
-      // Always refresh this entry from DB to pick up any patches.
-      const freshGroup = getRegisteredGroup(homeJid);
-      if (freshGroup) {
-        registeredGroups[homeJid] = freshGroup;
-      } else if (!registeredGroups[homeJid]) {
-        registeredGroups = getAllRegisteredGroups();
-      }
+    const operator = getLocalWorkbenchUserPublic();
+    const homeJid = ensureUserHomeGroup(
+      operator.id,
+      'admin',
+      operator.username,
+    );
+    // Always refresh this entry from DB to pick up any patches.
+    const freshGroup = getRegisteredGroup(homeJid);
+    if (freshGroup) {
+      registeredGroups[homeJid] = freshGroup;
+    } else if (!registeredGroups[homeJid]) {
+      registeredGroups = getAllRegisteredGroups();
     }
   } catch (err) {
-    logger.warn({ err }, 'Failed to ensure user home groups');
+    logger.warn({ err }, 'Failed to ensure local operator home group');
   }
 
   // Normalize legacy home groups onto the single local-runtime compatibility shape.
@@ -1703,7 +1675,7 @@ function loadState(): void {
     registeredGroups[jid] = group;
   }
 
-  // Initialize per-user global CLAUDE.md from template for users missing it
+  // Initialize the local operator global CLAUDE.md from template when missing.
   const templatePath = path.resolve(
     process.cwd(),
     'config',
@@ -1712,39 +1684,29 @@ function loadState(): void {
   if (fs.existsSync(templatePath)) {
     const template = fs.readFileSync(templatePath, 'utf-8');
     const userGlobalBase = path.join(GROUPS_DIR, 'user-global');
-    // Ensure every active user has a user-global dir
     try {
-      let page = 1;
-      const allUsers: Array<{ id: string }> = [];
-      while (true) {
-        const result = listUsers({ status: 'active', page, pageSize: 200 });
-        allUsers.push(...result.users);
-        if (allUsers.length >= result.total) break;
-        page++;
-      }
-      for (const u of allUsers) {
-        const userDir = path.join(userGlobalBase, u.id);
-        fs.mkdirSync(userDir, { recursive: true });
-        const userClaudeMd = path.join(userDir, 'CLAUDE.md');
-        if (!fs.existsSync(userClaudeMd)) {
-          try {
-            fs.writeFileSync(userClaudeMd, template, { flag: 'wx' });
-            logger.info(
-              { userId: u.id },
-              'Initialized user-global CLAUDE.md from template',
+      const operator = getLocalWorkbenchUserPublic();
+      const userDir = path.join(userGlobalBase, operator.id);
+      fs.mkdirSync(userDir, { recursive: true });
+      const userClaudeMd = path.join(userDir, 'CLAUDE.md');
+      if (!fs.existsSync(userClaudeMd)) {
+        try {
+          fs.writeFileSync(userClaudeMd, template, { flag: 'wx' });
+          logger.info(
+            { userId: operator.id },
+            'Initialized local operator CLAUDE.md from template',
+          );
+        } catch (err: unknown) {
+          if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+            logger.warn(
+              { userId: operator.id, err },
+              'Failed to initialize local operator CLAUDE.md',
             );
-          } catch (err: unknown) {
-            if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
-              logger.warn(
-                { userId: u.id, err },
-                'Failed to initialize user-global CLAUDE.md',
-              );
-            }
           }
         }
       }
     } catch (err) {
-      logger.warn({ err }, 'Failed to initialize user-global CLAUDE.md files');
+      logger.warn({ err }, 'Failed to initialize local operator CLAUDE.md');
     }
   }
 
@@ -5235,32 +5197,20 @@ async function main(): Promise<void> {
     appSecret: string;
     enabled?: boolean;
   }): Promise<boolean> => {
-    // Find admin user's home folder (legacy global config routes to admin)
-    const adminUsers = listUsers({
-      status: 'active',
-      role: 'admin',
-      page: 1,
-      pageSize: 1,
-    }).users;
-    const adminUser = adminUsers[0];
-    if (!adminUser) {
-      logger.warn('No admin user found for Feishu reload');
-      return false;
-    }
+    const operator = getLocalWorkbenchUserPublic();
 
-    // Disconnect existing admin Feishu connection
-    await imManager.disconnectUserFeishu(adminUser.id);
+    await imManager.disconnectUserFeishu(operator.id);
     if (feishuSyncInterval) {
       clearInterval(feishuSyncInterval);
       feishuSyncInterval = null;
     }
 
     if (config.enabled !== false && config.appId && config.appSecret) {
-      const homeGroup = getUserHomeGroup(adminUser.id);
+      const homeGroup = getUserHomeGroup(operator.id);
       const homeFolder = homeGroup?.folder || MAIN_GROUP_FOLDER;
-      const onNewChat = buildOnNewChat(adminUser.id, homeFolder);
+      const onNewChat = buildOnNewChat(operator.id, homeFolder);
       const connected = await imManager.connectUserFeishu(
-        adminUser.id,
+        operator.id,
         config,
         onNewChat,
         {
@@ -5298,38 +5248,27 @@ async function main(): Promise<void> {
     proxyUrl?: string;
     enabled?: boolean;
   }): Promise<boolean> => {
-    // Find admin user
-    const adminUsers = listUsers({
-      status: 'active',
-      role: 'admin',
-      page: 1,
-      pageSize: 1,
-    }).users;
-    const adminUser = adminUsers[0];
-    if (!adminUser) {
-      logger.warn('No admin user found for Telegram reload');
-      return false;
-    }
+    const operator = getLocalWorkbenchUserPublic();
 
-    await imManager.disconnectUserTelegram(adminUser.id);
+    await imManager.disconnectUserTelegram(operator.id);
 
     if (config.enabled !== false && config.botToken) {
-      const homeGroup = getUserHomeGroup(adminUser.id);
+      const homeGroup = getUserHomeGroup(operator.id);
       const homeFolder = homeGroup?.folder || MAIN_GROUP_FOLDER;
-      const onNewChat = buildOnNewChat(adminUser.id, homeFolder);
+      const onNewChat = buildOnNewChat(operator.id, homeFolder);
       const connected = await imManager.connectUserTelegram(
-        adminUser.id,
+        operator.id,
         config,
         onNewChat,
-        buildIsChatAuthorized(adminUser.id),
-        buildOnPairAttempt(adminUser.id),
+        buildIsChatAuthorized(operator.id),
+        buildOnPairAttempt(operator.id),
         {
           onCommand: handleCommand,
           resolveGroupFolder: (chatJid) => resolveEffectiveFolder(chatJid),
           resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
           onAgentMessage: buildOnAgentMessage(),
           onBotAddedToGroup: buildTelegramBotAddedHandler(
-            adminUser.id,
+            operator.id,
             homeFolder,
           ),
           onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),
@@ -5670,45 +5609,26 @@ async function main(): Promise<void> {
   recoverPendingMessages();
   startMessageLoop();
 
-  // --- IM Connection Pool: connect per-user IM channels ---
-  // Load global IM config (backward compat: used for admin if no per-user config exists)
+  // --- IM Connection Pool: connect the single local operator channels ---
+  // Load global IM config as a legacy fallback for the single local operator.
   const globalFeishuConfig = getFeishuProviderConfigWithSource();
   const globalTelegramConfig = getTelegramProviderConfigWithSource();
-
-  // Paginate through all active users (listUsers caps at 200 per page)
-  let allActiveUsers: typeof listUsers extends (...args: any) => {
-    users: infer U;
-  }
-    ? U
-    : never = [];
-  {
-    let page = 1;
-    while (true) {
-      const result = listUsers({ status: 'active', page, pageSize: 200 });
-      allActiveUsers = allActiveUsers.concat(result.users);
-      if (allActiveUsers.length >= result.total) break;
-      page++;
-    }
-  }
-
-  // Register admin users for fallback IM routing
-  for (const user of allActiveUsers) {
-    if (user.role === 'admin') imManager.registerAdminUser(user.id);
-  }
+  const operator = getLocalWorkbenchUserPublic();
+  imManager.registerAdminUser(operator.id);
 
   let anyFeishuConnected = false;
+  const homeGroup = getUserHomeGroup(operator.id);
+  if (!homeGroup) {
+    logger.warn(
+      { operatorId: operator.id },
+      'No home group found for local operator IM startup',
+    );
+  } else {
+    const userFeishu = getUserFeishuConfig(operator.id);
+    const userTelegram = getUserTelegramConfig(operator.id);
+    const userQQ = getUserQQConfig(operator.id);
+    const userWeChat = getUserWeChatConfig(operator.id);
 
-  for (const user of allActiveUsers) {
-    const homeGroup = getUserHomeGroup(user.id);
-    if (!homeGroup) continue;
-
-    // Per-user IM config takes precedence; fall back to global config for admin
-    const userFeishu = getUserFeishuConfig(user.id);
-    const userTelegram = getUserTelegramConfig(user.id);
-    const userQQ = getUserQQConfig(user.id);
-    const userWeChat = getUserWeChatConfig(user.id);
-
-    // Determine effective Feishu config: per-user > global (admin only)
     let effectiveFeishu: FeishuConnectConfig | null = null;
     if (userFeishu && userFeishu.appId && userFeishu.appSecret) {
       effectiveFeishu = {
@@ -5716,7 +5636,7 @@ async function main(): Promise<void> {
         appSecret: userFeishu.appSecret,
         enabled: userFeishu.enabled,
       };
-    } else if (user.role === 'admin' && globalFeishuConfig.source !== 'none') {
+    } else if (globalFeishuConfig.source !== 'none') {
       const gc = globalFeishuConfig.config;
       effectiveFeishu = {
         appId: gc.appId,
@@ -5725,7 +5645,6 @@ async function main(): Promise<void> {
       };
     }
 
-    // Determine effective Telegram config: per-user > global (admin only)
     let effectiveTelegram: TelegramConnectConfig | null = null;
     if (userTelegram && userTelegram.botToken) {
       effectiveTelegram = {
@@ -5733,10 +5652,7 @@ async function main(): Promise<void> {
         proxyUrl: userTelegram.proxyUrl || globalTelegramConfig.config.proxyUrl,
         enabled: userTelegram.enabled,
       };
-    } else if (
-      user.role === 'admin' &&
-      globalTelegramConfig.source !== 'none'
-    ) {
+    } else if (globalTelegramConfig.source !== 'none') {
       const gc = globalTelegramConfig.config;
       effectiveTelegram = {
         botToken: gc.botToken,
@@ -5745,7 +5661,6 @@ async function main(): Promise<void> {
       };
     }
 
-    // Determine effective QQ config: per-user only (no global fallback)
     let effectiveQQ: QQConnectConfig | null = null;
     if (userQQ && userQQ.appId && userQQ.appSecret) {
       effectiveQQ = {
@@ -5755,7 +5670,6 @@ async function main(): Promise<void> {
       };
     }
 
-    // Determine effective WeChat config: per-user only (no global fallback)
     let effectiveWeChat: WeChatConnectConfig | null = null;
     if (userWeChat && userWeChat.botToken && userWeChat.ilinkBotId) {
       effectiveWeChat = {
@@ -5768,33 +5682,38 @@ async function main(): Promise<void> {
       };
     }
 
-    if (!effectiveFeishu && !effectiveTelegram && !effectiveQQ && !effectiveWeChat) continue;
-
-    try {
-      const result = await connectUserIMChannels(
-        user.id,
-        homeGroup.folder,
-        effectiveFeishu,
-        effectiveTelegram,
-        effectiveQQ,
-        effectiveWeChat,
-      );
-      if (result.feishu) anyFeishuConnected = true;
-      logger.info(
-        {
-          userId: user.id,
-          feishu: result.feishu,
-          telegram: result.telegram,
-          qq: result.qq,
-          wechat: result.wechat,
-        },
-        'User IM channels connected',
-      );
-    } catch (err) {
-      logger.error(
-        { userId: user.id, err },
-        'Failed to connect user IM channels',
-      );
+    if (
+      effectiveFeishu ||
+      effectiveTelegram ||
+      effectiveQQ ||
+      effectiveWeChat
+    ) {
+      try {
+        const result = await connectUserIMChannels(
+          operator.id,
+          homeGroup.folder,
+          effectiveFeishu,
+          effectiveTelegram,
+          effectiveQQ,
+          effectiveWeChat,
+        );
+        if (result.feishu) anyFeishuConnected = true;
+        logger.info(
+          {
+            userId: operator.id,
+            feishu: result.feishu,
+            telegram: result.telegram,
+            qq: result.qq,
+            wechat: result.wechat,
+          },
+          'Local operator IM channels connected',
+        );
+      } catch (err) {
+        logger.error(
+          { userId: operator.id, err },
+          'Failed to connect local operator IM channels',
+        );
+      }
     }
   }
 
