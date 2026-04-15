@@ -1308,7 +1308,7 @@ function handleNewCommand(chatJid: string, rawName: string): string {
   if (!name) return '用法: /new <工作区名称>';
   if (name.length > 50) return '名称过长（最多 50 字符）';
 
-  // Create a new workspace (same pattern as routes/groups.ts POST)
+  // Create a new workspace through the same session-first flow as POST /api/sessions
   const newJid = `web:${crypto.randomUUID()}`;
   const folder = `flow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const now = new Date().toISOString();

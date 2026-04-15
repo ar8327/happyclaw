@@ -32,7 +32,7 @@ export interface CommandDeps {
   setLastAgentTimestamp: (jid: string, cursor: MessageCursor) => void;
 }
 
-// ─── Session file cleanup (mirrors groups.ts clearSessionJsonlFiles) ────
+// ─── Session file cleanup for main and worker session state ─────────────
 
 function clearSessionFiles(folder: string, agentId?: string): void {
   const claudeDir = agentId
