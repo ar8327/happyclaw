@@ -208,6 +208,12 @@ async function consumeQueryStream(
 
     switch (msg.kind) {
       case 'stream_event':
+        if (msg.event.eventType === 'mode_change') {
+          emitRuntimeState(writeOutput, runner, state, {
+            providerSessionId: newSessionId,
+            resumeAnchor,
+          });
+        }
         writeOutput({ status: 'stream', result: null, streamEvent: msg.event });
         break;
 

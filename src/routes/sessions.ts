@@ -41,6 +41,7 @@ import {
   getRunnerProfile,
   getSessionBinding,
   getSessionRecord,
+  getSessionRuntimeState,
   getTurnByResultMessageId,
   getWorkerSessionRecord,
   listSessionBindings,
@@ -54,6 +55,7 @@ import {
   deleteSessionRuntimeState,
   setRegisteredGroup,
   storeMessageDirect,
+  upsertSessionRuntimeState,
   updateSessionBindingPolicies,
   updateChatName,
 } from '../db.js';
@@ -669,6 +671,40 @@ function getWorkerRuntimeJids(parentSessionId: string): string[] {
       return [buildWorkerSessionId(agentId)];
     });
   return Array.from(new Set(queueJids));
+}
+
+function parseSessionStateJson<T>(value: string | null | undefined, fallback: T): T {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function persistPermissionModeSnapshot(
+  sessionId: string,
+  mode: 'bypassPermissions' | 'plan',
+): void {
+  const current = getSessionRuntimeState(sessionId);
+  upsertSessionRuntimeState(sessionId, {
+    providerSessionId: current?.provider_session_id || undefined,
+    resumeAnchor: current?.resume_anchor || undefined,
+    providerState: parseSessionStateJson<Record<string, unknown> | undefined>(
+      current?.provider_state_json,
+      undefined,
+    ),
+    recentImChannels: parseSessionStateJson<string[]>(
+      current?.recent_im_channels_json,
+      [],
+    ),
+    imChannelLastSeen: parseSessionStateJson<Record<string, number>>(
+      current?.im_channel_last_seen_json,
+      {},
+    ),
+    currentPermissionMode: mode,
+    lastMessageCursor: current?.last_message_cursor ?? null,
+  });
 }
 
 function buildBindingTargets(user: AuthUser) {
@@ -1953,10 +1989,14 @@ sessionRoutes.put('/:id/mode', authMiddleware, async (c) => {
     if (!worker || !agentId) {
       return c.json({ error: 'Worker session is malformed' }, 400);
     }
+    const applied = deps.queue.setPermissionMode(buildWorkerSessionId(agentId), mode);
+    if (applied) {
+      persistPermissionModeSnapshot(session.id, mode);
+    }
     return c.json({
       success: true,
       mode,
-      applied: deps.queue.setPermissionMode(buildWorkerSessionId(agentId), mode),
+      applied,
     });
   }
 
@@ -1964,10 +2004,14 @@ sessionRoutes.put('/:id/mode', authMiddleware, async (c) => {
   if (!backingJid) {
     return c.json({ error: 'Session has no backing group' }, 400);
   }
+  const applied = deps.queue.setPermissionMode(backingJid, mode);
+  if (applied) {
+    persistPermissionModeSnapshot(session.id, mode);
+  }
   return c.json({
     success: true,
     mode,
-    applied: deps.queue.setPermissionMode(backingJid, mode),
+    applied,
   });
 });
 
