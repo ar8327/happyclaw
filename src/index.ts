@@ -1,3 +1,5 @@
+import './fetch-globals.js';
+
 import { ChildProcess, execFile } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';

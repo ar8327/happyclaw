@@ -1,3 +1,4 @@
+import './fetch-globals.js';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
@@ -85,6 +86,7 @@ import {
   getLocalWorkbenchSessionId,
   getLocalWorkbenchUserPublic,
 } from './local-user.js';
+import { restoreNativeFetchGlobals } from './fetch-globals.js';
 import {
   buildWorkerConversationJid,
   buildWorkerSessionId,
@@ -171,6 +173,10 @@ function isAllowedOrigin(origin: string | undefined): string | null {
 
 app.use(
   '/api/*',
+  async (_c, next) => {
+    restoreNativeFetchGlobals();
+    await next();
+  },
   cors({
     origin: (origin) => isAllowedOrigin(origin),
     credentials: true,
@@ -1219,11 +1225,16 @@ export function startWebServer(webDeps: WebDeps): void {
   deps = webDeps;
   setWebDeps(webDeps);
   injectConfigDeps(webDeps);
+  restoreNativeFetchGlobals();
 
   httpServer = serve(
     {
       fetch: app.fetch,
       port: WEB_PORT,
+      // Node 25 + @hono/node-server's Response shim can corrupt JSON bodies
+      // on the wire even though app.fetch() stays correct. Keep the native
+      // Request/Response objects for the HTTP server path.
+      overrideGlobalObjects: false,
     },
     (info) => {
       logger.info({ port: info.port }, 'Web server started');

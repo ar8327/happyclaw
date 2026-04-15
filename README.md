@@ -181,7 +181,7 @@ Agent 在运行时可通过内置 MCP Server 与主进程通信：
 | **单用户默认模型** | 当前默认只有一个本地操作者，权限、邀请码、计费等旧多用户能力已退出主链路 |
 | **Session 级边界** | cwd、runner、压缩策略、环境变量和 IM 绑定都以 Session 为边界管理 |
 | **个性化设置** | 可自定义 AI 名称、头像 emoji 和颜色 |
-| **登录保护** | 首装创建管理员，bcrypt 12 轮、失败锁定与 HMAC Cookie 仍然保留 |
+| **本地 operator 上下文** | Web API 直接注入固定本地 operator，`/api/auth/*` 只保留兼容接口，不再依赖首装建号、邀请码或应用层密码登录 |
 | **加密存储** | API 密钥 AES-256-GCM 加密，Web API 仅返回掩码值 |
 | **挂载安全** | 白名单校验 + 黑名单模式匹配（`.ssh`、`.gnupg` 等敏感路径） |
 | **终端权限** | 可直接从 Web 打开当前 Session 终端 |
@@ -317,7 +317,7 @@ flowchart TD
         Queue["Session Runtime Queue<br/>(按 Session 调度)"]
         Scheduler["定时调度器<br/>(Cron / 间隔 / 一次性)"]
         WS["WebSocket Server<br/>(流式推送 + 终端)"]
-        Auth["认证<br/>(单用户 + bcrypt + HMAC Cookie)"]
+        Auth["认证<br/>(本地 operator 上下文 + 兼容 auth API)"]
         Config["配置管理<br/>(AES-256-GCM 加密)"]
         Bindings["IM Bindings<br/>(渠道绑定到 Session)"]
         MemMgr["Memory Agent Manager<br/>(单用户记忆子进程)"]
@@ -387,7 +387,7 @@ flowchart TD
 | **前端** | React 19 · Vite 6 · Zustand 5 · Tailwind CSS 4 · shadcn/ui · Radix UI · Lucide Icons · react-markdown · mermaid · xterm.js · @tanstack/react-virtual · PWA |
 | **Runtime** | `src/runtime-runner.ts` · `container/agent-runner` · Claude Code CLI · Codex SDK · MCP SDK · IPC 文件通道 |
 | **记忆** | `container/memory-agent` · transcript wrapup · `CLAUDE.md` · Memory 索引 |
-| **安全** | bcrypt 12 轮 · AES-256-GCM · HMAC Cookie · 路径遍历防护 · 挂载白名单 |
+| **安全** | 本地 operator 上下文 · AES-256-GCM · 路径遍历防护 · 挂载白名单 |
 | **IM 集成** | @larksuiteoapi/node-sdk (飞书) · grammY (Telegram) · QQ Bot API v2 (WebSocket + REST) |
 
 ### 目录结构

@@ -33,8 +33,8 @@
 | 模块 | 职责 |
 |------|------|
 | `src/index.ts` | 入口：本地 operator 初始化、消息轮询、IPC 监听、Session runtime 编排、Memory Orchestrator 初始化 |
-| `src/web.ts` | Hono 框架：路由挂载、WebSocket 升级、HMAC Cookie 认证、静态文件托管 |
-| `src/routes/auth.ts` | 认证：本地 operator 登录态、设置向导与兼容 auth API |
+| `src/web.ts` | Hono 框架：路由挂载、WebSocket 升级、本地 operator 上下文和静态文件托管 |
+| `src/routes/auth.ts` | 认证：本地 operator 资料接口、兼容 auth API 和 setup 状态投影 |
 | `src/routes/sessions.ts` | Session CRUD、消息分页、会话重置、绑定与 runner profile 管理 |
 | `src/routes/files.ts` | 文件上传（50MB 限制）/ 下载 / 删除、目录管理、路径遍历防护 |
 | `src/routes/config.ts` | Claude / 飞书配置、system settings、Session env、当前 operator 的 IM 通道配置 |
@@ -90,7 +90,7 @@
 | 框架 | React 19 + TypeScript + Vite 6 |
 | 状态 | Zustand 5，核心 Store 包括 `auth`、`chat`、`sessions`、`tasks`、`monitor`、`files`、`skills`、`mcp-servers` |
 | 样式 | Tailwind CSS 4（teal 主色调，`lg:` 断点响应式，移动端优先） |
-| 路由 | React Router 7（AuthGuard + SetupPage 重定向） |
+| 路由 | React Router 7（AuthGuard + `/login` / `/setup*` 兼容重定向） |
 | 通信 | 统一 API 客户端（8s 超时，FormData 120s）、WebSocket 实时推送 + 指数退避重连 |
 | 渲染 | react-markdown + remark-gfm + rehype-highlight（代码高亮）、mermaid（图表渲染）、@tanstack/react-virtual（虚拟滚动） |
 | UI 组件 | radix-ui + lucide-react |
@@ -100,11 +100,10 @@
 
 | 路径 | 页面 | 权限 |
 |------|------|------|
-| `/setup` | `SetupPage` — 管理员创建向导 | 公开（仅未初始化时） |
-| `/setup/providers` | `SetupProvidersPage` — Claude/飞书配置 | 登录后 |
-| `/setup/channels` | `SetupChannelsPage` — 用户 IM 通道配置引导 | 登录后（注册后跳转） |
-| `/login` | `LoginPage` | 公开 |
-| `/register` | `RegisterPage` | 公开（可通过设置关闭） |
+| `/setup` | 兼容入口，重定向到 `/chat` | 任意 |
+| `/setup/providers` | 兼容入口，重定向到 `/settings?tab=claude` | 任意 |
+| `/setup/channels` | 兼容入口，重定向到 `/settings?tab=channels` | 任意 |
+| `/login` | 兼容入口，重定向到 `/chat` | 任意 |
 | `/chat/:sessionSlug?` | `ChatPage` — 主聊天界面（懒加载） | 登录后 |
 | `/groups` | 重定向到 `/settings?tab=sessions` | 登录后 |
 | `/tasks` | `TasksPage` — 定时任务（懒加载） | 登录后 |
@@ -339,11 +338,10 @@ StreamEvent 类型以 `shared/stream-event.ts` 为单一真相源，构建时通
 
 ### 4.1 认证机制
 
-- 密码哈希：bcrypt 12 轮（`bcryptjs`）
-- 会话有效期：30 天
-- Cookie 认证：HMAC 签名，`HttpOnly` + `SameSite=Lax`
-- 会话密钥持久化：`data/config/session-secret.key`（0600 权限），优先级：环境变量 > 文件 > 自动生成
-- 登录频率限制：5 次失败后锁定 15 分钟（可通过环境变量调整）
+- Web API 通过 `authMiddleware` 直接注入固定本地 operator，不再依赖应用层登录态
+- `GET /api/auth/me` 是前端建立 operator 上下文的真源
+- `POST /api/auth/setup`、`/login`、`/register`、`/logout`、`GET /api/auth/sessions` 等只保留兼容外形
+- `data/config/session-secret.key` 与 `SESSION_COOKIE_NAME` 仍保留，用于兼容 WebSocket session 标识和旧客户端行为
 
 ### 4.2 RBAC 权限
 
@@ -376,7 +374,9 @@ StreamEvent 类型以 `shared/stream-event.ts` 为单一真相源，构建时通
 | 运行状态 | `session_state` |
 | worker 元数据 | `worker_sessions` |
 | 渠道元数据 | `session_channels` |
-| 本地 operator 身份 | `users` 单行本地账号 |
+| 本地 operator 身份 | `data/config/local-operator.json` + `sessions.owner_key` |
+
+应用层 auth 已降级为固定本地 operator 注入。`users` 只保留兼容资料和统计关联，不再作为登录态真源。
 
 ## 5. 数据库表
 
@@ -394,7 +394,7 @@ SQLite WAL 模式。当前最重要的是区分**正式主写表**和**兼容表
 | `session_state` | `session_id` | provider session id、resume anchor、permission mode、IM channel state |
 | `session_channels` | `jid` | 渠道元数据与 backing 行，保存 `session_id`、显示名、cwd 初始化信息和 Session 级兼容设置投影 |
 | `router_state` | `key` | KV 存储（`last_timestamp`、`last_agent_timestamp`） |
-| `users` | `id` | 本地 operator 资料，仅保留单用户登录所需字段 |
+| `users` | `id` | 兼容资料表和用量关联表，不再作为本地 operator 身份主来源 |
 | `usage_records` | `id` | Token 用量明细（per-model 拆行，关联 user_id、group_folder、message_id） |
 | `usage_daily_summary` | `(user_id, model, date)` | 日维度用量预聚合（本地时区日期，增量 UPSERT） |
 
@@ -452,10 +452,12 @@ scripts/                      # 构建辅助脚本
 ## 7. Web API
 
 ### 认证
-- `GET /api/auth/status` — 系统初始化状态（`initialized`、是否有用户）
-- `POST /api/auth/setup` — 创建首个管理员（仅用户表为空时可用）
-- `POST /api/auth/login` · `POST /api/auth/logout` · `GET /api/auth/me`（含 `setupStatus`）
-- `POST /api/auth/register` · `PUT /api/auth/profile` · `PUT /api/auth/change-password`
+- `GET /api/auth/status` — 固定返回单用户状态，含 `initialized: true` 与 `singleUser: true`
+- `GET /api/auth/me` — 当前本地 operator 资料，附带 `setupStatus` 与 `appearance`
+- `PUT /api/auth/profile` · `POST /api/auth/avatar` · `GET /api/auth/avatars/:filename`
+- `PUT /api/auth/password` — 单用户兼容接口，明确返回无需应用密码
+- `POST /api/auth/logout` · `GET /api/auth/sessions` · `DELETE /api/auth/sessions/:id` — 单用户兼容接口
+- `POST /api/auth/setup` · `POST /api/auth/login` · `POST /api/auth/register` — 兼容入口，直接返回当前本地 operator payload
 
 ### 会话
 - `GET /api/sessions` · `POST /api/sessions`（创建 Web 会话）
@@ -501,13 +503,6 @@ scripts/                      # 构建辅助脚本
 - `GET /api/tasks` · `POST /api/tasks` · `PATCH /api/tasks/:id` · `DELETE /api/tasks/:id`
 - `GET /api/tasks/:id/logs`
 
-### 管理
-- `GET /api/admin/users` · `POST /api/admin/users` · `PATCH /api/admin/users/:id`
-- `DELETE /api/admin/users/:id` · `POST /api/admin/users/:id/restore`
-- `POST /api/admin/invites` · `GET /api/admin/invites` · `DELETE /api/admin/invites/:code`
-- `GET /api/admin/audit-log`
-- `GET|PUT /api/admin/settings/registration`
-
 ### Sub-Agent
 - `GET /api/sessions/:id/agents` · `POST /api/sessions/:id/agents`（创建 Sub-Agent）
 - `DELETE /api/sessions/:id/agents/:agentId`
@@ -520,11 +515,6 @@ scripts/                      # 构建辅助脚本
 - `GET /api/mcp-servers` · `POST /api/mcp-servers`（CRUD，当前 operator 作用域）
 - `PATCH /api/mcp-servers/:id` · `DELETE /api/mcp-servers/:id`
 - `POST /api/mcp-servers/sync-host`（从宿主机同步 MCP Server 配置）
-
-### 用量统计
-- `GET /api/usage/stats?days=7&userId=&model=`（从 `usage_daily_summary` 查询，支持用户/模型筛选）
-- `GET /api/usage/models`（去重模型列表）
-- `GET /api/usage/users`（有用量数据的用户列表，admin 可见全部）
 
 ### 执行日志
 - `GET /api/logs/:groupFolder`（列出日志文件，支持 `offset`/`limit` 分页）
@@ -539,11 +529,11 @@ scripts/                      # 构建辅助脚本
 
 ## 8. 关键行为
 
-### 8.1 设置向导
+### 8.1 本地 operator 初始化
 
-首次启动时，`GET /api/auth/status` 返回 `initialized: false`。前端 `AuthGuard` 会重定向到 `/setup`，引导创建本地 operator 账号。创建后自动登录并跳转到 `/setup/providers` 完成 Claude API 和飞书配置。
+前端启动时直接请求 `GET /api/auth/me` 建立固定本地 operator 上下文。`/login` 和 `/setup*` 页面只保留兼容跳转，不再承载首装建号或登录流程。
 
-当前主线只围绕这一个本地 operator 工作。不存在默认账号。`POST /api/auth/setup` 仅在 `users` 表为空时可用。
+如果后端尚未就绪，`AuthGuard` 会显示“本地工作台初始化中”占位页。后端恢复后，前端会继续进入 `/chat`。`POST /api/auth/setup`、`/login`、`/register` 现在都只是兼容入口，不会创建账号或写入应用层登录态。
 
 ### 8.2 IM 自动注册
 
@@ -765,7 +755,7 @@ make help          # 列出所有可用的 make 命令
 2. 在 `src/im-manager.ts` 中添加 `connectUser{Channel}()` / `disconnectUser{Channel}()` 方法
 3. 在 `src/routes/config.ts` 中添加 `/api/config/user-im/{channel}` 路由（GET/PUT）
 4. 在 `src/index.ts` 的启动链路里围绕本地 operator 加载新渠道
-5. 前端 `SetupChannelsPage` 和设置页添加新渠道的配置表单
+5. 前端设置页对应分区和必要的兼容跳转中补充新渠道配置入口
 
 ### 修改数据库 Schema
 
