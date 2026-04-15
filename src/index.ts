@@ -1917,8 +1917,8 @@ function splitRuntimeJid(chatJid: string): {
 }
 
 /**
- * Resolve the effective folder for a group JID (via serialization key).
- * This mirrors the logic in GroupQueue.getSerializationKey.
+ * Resolve the effective folder for a runtime JID via the shared serialization key.
+ * This mirrors the logic in SessionRuntimeQueue.getSerializationKey.
  */
 function resolveGroupFolder(chatJid: string): string {
   const { baseJid } = splitRuntimeJid(chatJid);
@@ -2004,8 +2004,8 @@ function buildCompressOptions(group: RegisteredGroup): CompressOptions | undefin
 }
 
 /**
- * Process all pending messages for a group.
- * Called by the GroupQueue when it's this group's turn.
+ * Process all pending messages for a session runtime.
+ * Called by the runtime scheduler when this channel gets the execution slot.
  *
  * Uses streaming output: agent results are sent to Feishu as they arrive.
  * The container stays alive for idleTimeout after each result, allowing

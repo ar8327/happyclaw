@@ -1,4 +1,4 @@
-import { SessionRuntimeQueue } from './group-queue.js';
+import { SessionRuntimeQueue } from './session-runtime-queue.js';
 
 export type SessionRuntimeStatus = ReturnType<SessionRuntimeQueue['getStatus']>;
 

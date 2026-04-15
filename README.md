@@ -407,7 +407,7 @@ happyclaw/
 │   ├── im-downloader.ts          #   IM 文件下载工具（保存到工作区 downloads/）
 │   ├── runtime-runner.ts         #   统一本地 runtime 启动器
 │   ├── session-runtime-manager.ts#   Session runtime 状态管理
-│   ├── group-queue.ts            #   并发控制队列
+│   ├── session-runtime-queue.ts  #   Session runtime 并发调度
 │   ├── runtime-config.ts         #   AES-256-GCM 加密配置
 │   ├── task-scheduler.ts         #   定时任务调度
 │   ├── file-manager.ts           #   文件安全（路径遍历防护）

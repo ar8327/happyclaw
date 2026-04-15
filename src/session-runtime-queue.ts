@@ -963,5 +963,3 @@ export class SessionRuntimeQueue {
     );
   }
 }
-
-export { SessionRuntimeQueue as GroupQueue };
