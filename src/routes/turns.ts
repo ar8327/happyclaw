@@ -23,10 +23,9 @@ const turnsRoutes = new Hono<{ Variables: Variables }>();
 
 function resolveRouteGroup(
   id: string,
-  options?: { allowImGroupAlias?: boolean },
 ): { routeJid: string; group: RegisteredGroup } | null {
   const direct = getRegisteredGroup(id);
-  if (direct && ((options?.allowImGroupAlias ?? true) || id.startsWith('web:'))) {
+  if (direct && id.startsWith('web:')) {
     return { routeJid: id, group: direct };
   }
 
@@ -55,9 +54,7 @@ turnsRoutes.use('/*', authMiddleware);
 turnsRoutes.get('/:jid/turns', (c) => {
   const user = c.get('user') as AuthUser;
   const jid = c.req.param('jid');
-  const resolved = resolveRouteGroup(jid, {
-    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
-  });
+  const resolved = resolveRouteGroup(jid);
   if (!resolved || !canAccessGroup(user, { ...resolved.group, jid: resolved.routeJid })) {
     return c.json({ error: 'Not found' }, 404);
   }
@@ -89,9 +86,7 @@ turnsRoutes.get('/:jid/turns', (c) => {
 turnsRoutes.get('/:jid/turns/active', (c) => {
   const user = c.get('user') as AuthUser;
   const jid = c.req.param('jid');
-  const resolved = resolveRouteGroup(jid, {
-    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
-  });
+  const resolved = resolveRouteGroup(jid);
   if (!resolved || !canAccessGroup(user, { ...resolved.group, jid: resolved.routeJid })) {
     return c.json({ error: 'Not found' }, 404);
   }
@@ -144,9 +139,7 @@ turnsRoutes.get('/:jid/turns/active', (c) => {
 turnsRoutes.get('/:jid/turns/:turnId', (c) => {
   const user = c.get('user') as AuthUser;
   const jid = c.req.param('jid');
-  const resolved = resolveRouteGroup(jid, {
-    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
-  });
+  const resolved = resolveRouteGroup(jid);
   if (!resolved || !canAccessGroup(user, { ...resolved.group, jid: resolved.routeJid })) {
     return c.json({ error: 'Not found' }, 404);
   }
@@ -179,9 +172,7 @@ turnsRoutes.get('/:jid/turns/:turnId', (c) => {
 turnsRoutes.get('/:jid/turns/:turnId/trace', (c) => {
   const user = c.get('user') as AuthUser;
   const jid = c.req.param('jid');
-  const resolved = resolveRouteGroup(jid, {
-    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
-  });
+  const resolved = resolveRouteGroup(jid);
   if (!resolved || !canAccessGroup(user, { ...resolved.group, jid: resolved.routeJid })) {
     return c.json({ error: 'Not found' }, 404);
   }

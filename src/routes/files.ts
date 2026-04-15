@@ -29,16 +29,13 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 
-function resolveRouteGroup(
-  id: string,
-  options?: { allowImGroupAlias?: boolean },
-): {
+function resolveRouteGroup(id: string): {
   accessJid: string;
   group: RegisteredGroup;
   session: ReturnType<typeof getSessionRecord> | null;
 } | null {
   const direct = getRegisteredGroup(id);
-  if (direct && ((options?.allowImGroupAlias ?? true) || id.startsWith('web:'))) {
+  if (direct && id.startsWith('web:')) {
     const session = id.startsWith('web:')
       ? getSessionRecord(`main:${direct.folder}`) || null
       : null;
@@ -286,14 +283,12 @@ async function openDirectoryInFileManager(targetDir: string): Promise<void> {
 
 const fileRoutes = new Hono<{ Variables: Variables }>();
 
-// GET /api/groups/:jid/files?path= - 列出文件
+// GET /api/sessions/:jid/files?path= - 列出文件
 fileRoutes.get('/:jid/files', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const subPath = c.req.query('path') || '';
 
-  const resolved = resolveRouteGroup(jid, {
-    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
-  });
+  const resolved = resolveRouteGroup(jid);
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -323,13 +318,11 @@ fileRoutes.get('/:jid/files', authMiddleware, (c) => {
   }
 });
 
-// POST /api/groups/:jid/files - 上传文件
+// POST /api/sessions/:jid/files - 上传文件
 fileRoutes.post('/:jid/files', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
 
-  const resolved = resolveRouteGroup(jid, {
-    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
-  });
+  const resolved = resolveRouteGroup(jid);
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -413,13 +406,11 @@ fileRoutes.post('/:jid/files', authMiddleware, async (c) => {
   }
 });
 
-// POST /api/groups/:jid/files/open-directory - 在本地文件管理器中打开目录
+// POST /api/sessions/:jid/files/open-directory - 在本地文件管理器中打开目录
 fileRoutes.post('/:jid/files/open-directory', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
 
-  const resolved = resolveRouteGroup(jid, {
-    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
-  });
+  const resolved = resolveRouteGroup(jid);
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -476,14 +467,12 @@ fileRoutes.post('/:jid/files/open-directory', authMiddleware, async (c) => {
   }
 });
 
-// GET /api/groups/:jid/files/download/:path - 下载文件
+// GET /api/sessions/:jid/files/download/:path - 下载文件
 fileRoutes.get('/:jid/files/download/:path', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const resolved = resolveRouteGroup(jid, {
-    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
-  });
+  const resolved = resolveRouteGroup(jid);
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -594,14 +583,12 @@ fileRoutes.get('/:jid/files/download/:path', authMiddleware, (c) => {
   }
 });
 
-// GET /api/groups/:jid/files/preview/:path - 预览文件
+// GET /api/sessions/:jid/files/preview/:path - 预览文件
 fileRoutes.get('/:jid/files/preview/:path', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const resolved = resolveRouteGroup(jid, {
-    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
-  });
+  const resolved = resolveRouteGroup(jid);
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -670,14 +657,12 @@ fileRoutes.get('/:jid/files/preview/:path', authMiddleware, (c) => {
   }
 });
 
-// GET /api/groups/:jid/files/content/:path - 读取文本文件内容
+// GET /api/sessions/:jid/files/content/:path - 读取文本文件内容
 fileRoutes.get('/:jid/files/content/:path', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const resolved = resolveRouteGroup(jid, {
-    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
-  });
+  const resolved = resolveRouteGroup(jid);
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -737,14 +722,12 @@ fileRoutes.get('/:jid/files/content/:path', authMiddleware, (c) => {
   }
 });
 
-// PUT /api/groups/:jid/files/content/:path - 保存文本文件内容
+// PUT /api/sessions/:jid/files/content/:path - 保存文本文件内容
 fileRoutes.put('/:jid/files/content/:path', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const resolved = resolveRouteGroup(jid, {
-    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
-  });
+  const resolved = resolveRouteGroup(jid);
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -817,14 +800,12 @@ fileRoutes.put('/:jid/files/content/:path', authMiddleware, async (c) => {
   }
 });
 
-// DELETE /api/groups/:jid/files/:path - 删除文件
+// DELETE /api/sessions/:jid/files/:path - 删除文件
 fileRoutes.delete('/:jid/files/:path', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const resolved = resolveRouteGroup(jid, {
-    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
-  });
+  const resolved = resolveRouteGroup(jid);
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -869,13 +850,11 @@ fileRoutes.delete('/:jid/files/:path', authMiddleware, (c) => {
   }
 });
 
-// POST /api/groups/:jid/directories - 创建目录
+// POST /api/sessions/:jid/directories - 创建目录
 fileRoutes.post('/:jid/directories', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
 
-  const resolved = resolveRouteGroup(jid, {
-    allowImGroupAlias: !c.req.path.startsWith('/api/sessions/'),
-  });
+  const resolved = resolveRouteGroup(jid);
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }

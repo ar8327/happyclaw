@@ -314,25 +314,6 @@ export function initDatabase(): void {
     );
   `);
 
-  // Sub-agents table for multi-agent parallel execution
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS agents (
-      id TEXT PRIMARY KEY,
-      group_folder TEXT NOT NULL,
-      chat_jid TEXT NOT NULL,
-      name TEXT NOT NULL,
-      prompt TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'running',
-      created_by TEXT,
-      created_at TEXT NOT NULL,
-      completed_at TEXT,
-      result_summary TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_agents_group ON agents(group_folder);
-    CREATE INDEX IF NOT EXISTS idx_agents_jid ON agents(chat_jid);
-    CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
-  `);
-
   // Billing tables
   db.exec(`
     CREATE TABLE IF NOT EXISTS billing_plans (
@@ -632,7 +613,6 @@ export function initDatabase(): void {
   ensureColumn('scheduled_tasks', 'execution_type', "TEXT DEFAULT 'agent'");
   ensureColumn('scheduled_tasks', 'script_command', 'TEXT');
   ensureColumn('registered_groups', 'selected_skills', 'TEXT');
-  ensureColumn('agents', 'kind', "TEXT NOT NULL DEFAULT 'task'");
   ensureColumn('registered_groups', 'target_agent_id', 'TEXT');
   ensureColumn('registered_groups', 'target_main_jid', 'TEXT');
   ensureColumn(
@@ -2517,20 +2497,6 @@ function mapWorkerAgentRow(row: Record<string, unknown>): SubAgent {
   };
 }
 
-function mergeAgentsPreferPrimary(
-  primary: SubAgent[],
-  legacy: SubAgent[],
-): SubAgent[] {
-  if (legacy.length === 0) return primary;
-  const merged = new Map(primary.map((agent) => [agent.id, agent]));
-  for (const agent of legacy) {
-    if (!merged.has(agent.id)) merged.set(agent.id, agent);
-  }
-  return Array.from(merged.values()).sort((a, b) =>
-    b.created_at.localeCompare(a.created_at),
-  );
-}
-
 function deriveRunnerId(
   group: Pick<RegisteredGroup, 'llm_provider'> | null | undefined,
 ): SessionRecord['runner_id'] {
@@ -2817,35 +2783,15 @@ function deleteWorkerArtifactsForFolderRows(groupFolder: string): void {
       session_id: string;
       source_chat_jid: string;
     }>;
-  const legacyRows = db
-    .prepare(
-      'SELECT id, chat_jid FROM agents WHERE group_folder = ?',
-    )
-    .all(groupFolder) as Array<{
-      id: string;
-      chat_jid: string;
-    }>;
-
   const sessionIds = new Set<string>();
-  const agentIds = new Set<string>();
   const virtualChatJids = new Set<string>();
 
   for (const row of workerRows) {
     const sessionId = String(row.session_id);
     const agentId = extractAgentIdFromWorkerSessionId(sessionId);
     sessionIds.add(sessionId);
-    agentIds.add(agentId);
     if (row.source_chat_jid) {
       virtualChatJids.add(`${row.source_chat_jid}#agent:${agentId}`);
-    }
-  }
-
-  for (const row of legacyRows) {
-    const agentId = String(row.id);
-    sessionIds.add(buildWorkerSessionId(agentId));
-    agentIds.add(agentId);
-    if (row.chat_jid) {
-      virtualChatJids.add(`${row.chat_jid}#agent:${agentId}`);
     }
   }
 
@@ -2864,14 +2810,6 @@ function deleteWorkerArtifactsForFolderRows(groupFolder: string): void {
     db.prepare(
       `DELETE FROM sessions WHERE id IN (${placeholders})`,
     ).run(...sessionIdList);
-  }
-
-  const agentIdList = Array.from(agentIds);
-  if (agentIdList.length > 0) {
-    const placeholders = agentIdList.map(() => '?').join(', ');
-    db.prepare(`DELETE FROM agents WHERE id IN (${placeholders})`).run(
-      ...agentIdList,
-    );
   }
 
   const virtualChatJidList = Array.from(virtualChatJids);
@@ -3410,8 +3348,9 @@ function syncSessionWorkbenchProjection(): void {
       Record<string, unknown>
     >;
     for (const agentRow of agents) {
-      syncWorkerSession(mapAgentRow(agentRow));
+      syncWorkerSession(mapLegacyAgentRow(agentRow));
     }
+    db.exec('DROP TABLE agents');
   }
 
   for (const [jid, group] of Object.entries(groups)) {
@@ -5130,22 +5069,6 @@ function syncWorkerSession(agent: SubAgent): void {
 }
 
 export function createAgent(agent: SubAgent): void {
-  db.prepare(
-    `INSERT INTO agents (id, group_folder, chat_jid, name, prompt, status, kind, created_by, created_at, completed_at, result_summary)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    agent.id,
-    agent.group_folder,
-    agent.chat_jid,
-    agent.name,
-    agent.prompt,
-    agent.status,
-    agent.kind || 'task',
-    agent.created_by ?? null,
-    agent.created_at,
-    agent.completed_at ?? null,
-    agent.result_summary ?? null,
-  );
   syncWorkerSession(agent);
 }
 
@@ -5158,17 +5081,11 @@ export function getAgent(id: string): SubAgent | undefined {
        WHERE ws.session_id = ?`,
     )
     .get(buildWorkerSessionId(id)) as Record<string, unknown> | undefined;
-  if (workerRow) return mapWorkerAgentRow(workerRow);
-
-  const row = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as
-    | Record<string, unknown>
-    | undefined;
-  if (!row) return undefined;
-  return mapAgentRow(row);
+  return workerRow ? mapWorkerAgentRow(workerRow) : undefined;
 }
 
 export function listAgentsByFolder(folder: string): SubAgent[] {
-  const primaryRows = db
+  const rows = db
     .prepare(
       `SELECT ws.*, s.owner_key
        FROM worker_sessions ws
@@ -5177,18 +5094,11 @@ export function listAgentsByFolder(folder: string): SubAgent[] {
        ORDER BY ws.created_at DESC`,
     )
     .all(buildMainSessionId(folder)) as Array<Record<string, unknown>>;
-  const primaryAgents = primaryRows.map(mapWorkerAgentRow);
-
-  const legacyRows = db
-    .prepare(
-      'SELECT * FROM agents WHERE group_folder = ? ORDER BY created_at DESC',
-    )
-    .all(folder) as Array<Record<string, unknown>>;
-  return mergeAgentsPreferPrimary(primaryAgents, legacyRows.map(mapAgentRow));
+  return rows.map(mapWorkerAgentRow);
 }
 
 export function listAgentsByJid(chatJid: string): SubAgent[] {
-  const primaryRows = db
+  const rows = db
     .prepare(
       `SELECT ws.*, s.owner_key
        FROM worker_sessions ws
@@ -5197,12 +5107,7 @@ export function listAgentsByJid(chatJid: string): SubAgent[] {
        ORDER BY ws.created_at DESC`,
     )
     .all(chatJid) as Array<Record<string, unknown>>;
-  const primaryAgents = primaryRows.map(mapWorkerAgentRow);
-
-  const legacyRows = db
-    .prepare('SELECT * FROM agents WHERE chat_jid = ? ORDER BY created_at DESC')
-    .all(chatJid) as Array<Record<string, unknown>>;
-  return mergeAgentsPreferPrimary(primaryAgents, legacyRows.map(mapAgentRow));
+  return rows.map(mapWorkerAgentRow);
 }
 
 export function updateAgentStatus(
@@ -5212,25 +5117,13 @@ export function updateAgentStatus(
 ): void {
   const completedAt =
     status !== 'running' && status !== 'idle' ? new Date().toISOString() : null;
-  db.prepare(
-    'UPDATE agents SET status = ?, completed_at = ?, result_summary = ? WHERE id = ?',
-  ).run(status, completedAt, resultSummary ?? null, id);
   const sessionId = buildWorkerSessionId(id);
   db.prepare(
     'UPDATE worker_sessions SET status = ?, completed_at = ?, result_summary = ? WHERE session_id = ?',
   ).run(status, completedAt, resultSummary ?? null, sessionId);
 }
 
-export function updateAgentInfo(
-  id: string,
-  name: string,
-  prompt: string,
-): void {
-  db.prepare('UPDATE agents SET name = ?, prompt = ? WHERE id = ?').run(
-    name,
-    prompt,
-    id,
-  );
+export function updateAgentInfo(id: string, name: string, prompt: string): void {
   const sessionId = buildWorkerSessionId(id);
   db.prepare('UPDATE worker_sessions SET name = ?, prompt = ? WHERE session_id = ?').run(
     name,
@@ -5268,24 +5161,12 @@ export function deleteCompletedTaskAgents(beforeTimestamp: string): number {
     db.prepare(
       `DELETE FROM worker_sessions WHERE session_id IN (${placeholders})`,
     ).run(...sessionIds);
-
-    const agentIds = sessionIds.map(extractAgentIdFromWorkerSessionId);
-    const agentPlaceholders = agentIds.map(() => '?').join(', ');
-    db.prepare(`DELETE FROM agents WHERE id IN (${agentPlaceholders})`).run(
-      ...agentIds,
-    );
   }
-
-  const legacyResult = db
-    .prepare(
-      "DELETE FROM agents WHERE kind = 'task' AND status IN ('completed', 'error') AND completed_at IS NOT NULL AND completed_at < ?",
-    )
-    .run(beforeTimestamp);
-  return sessionIds.length + legacyResult.changes;
+  return sessionIds.length;
 }
 
 export function getRunningTaskAgentsByChat(chatJid: string): SubAgent[] {
-  const primaryRows = db
+  const rows = db
     .prepare(
       `SELECT ws.*, s.owner_key
        FROM worker_sessions ws
@@ -5296,14 +5177,7 @@ export function getRunningTaskAgentsByChat(chatJid: string): SubAgent[] {
        ORDER BY ws.created_at DESC`,
     )
     .all(chatJid) as Array<Record<string, unknown>>;
-  const primaryAgents = primaryRows.map(mapWorkerAgentRow);
-
-  const legacyRows = db
-    .prepare(
-      "SELECT * FROM agents WHERE chat_jid = ? AND kind = 'task' AND status = 'running'",
-    )
-    .all(chatJid) as Array<Record<string, unknown>>;
-  return mergeAgentsPreferPrimary(primaryAgents, legacyRows.map(mapAgentRow));
+  return rows.map(mapWorkerAgentRow);
 }
 
 export function markRunningTaskAgentsAsError(chatJid: string): number {
@@ -5313,12 +5187,7 @@ export function markRunningTaskAgentsAsError(chatJid: string): number {
       "UPDATE worker_sessions SET status = 'error', completed_at = ? WHERE source_chat_jid = ? AND kind = 'task' AND status = 'running'",
     )
     .run(now, chatJid);
-  const legacyResult = db
-    .prepare(
-      "UPDATE agents SET status = 'error', completed_at = ? WHERE chat_jid = ? AND kind = 'task' AND status = 'running'",
-    )
-    .run(now, chatJid);
-  return Math.max(workerResult.changes, legacyResult.changes);
+  return workerResult.changes;
 }
 
 export function markAllRunningTaskAgentsAsError(
@@ -5330,23 +5199,18 @@ export function markAllRunningTaskAgentsAsError(
       "UPDATE worker_sessions SET status = 'error', completed_at = ?, result_summary = COALESCE(result_summary, ?) WHERE kind = 'task' AND status = 'running'",
     )
     .run(now, summary);
-  const legacyResult = db
-    .prepare(
-      "UPDATE agents SET status = 'error', completed_at = ?, result_summary = COALESCE(result_summary, ?) WHERE kind = 'task' AND status = 'running'",
-    )
-    .run(now, summary);
-  return Math.max(workerResult.changes, legacyResult.changes);
+  return workerResult.changes;
 }
 
 export function deleteAgent(id: string): void {
   const sessionId = buildWorkerSessionId(id);
+  db.prepare('DELETE FROM session_bindings WHERE session_id = ?').run(sessionId);
   db.prepare('DELETE FROM session_state WHERE session_id = ?').run(sessionId);
   db.prepare('DELETE FROM worker_sessions WHERE session_id = ?').run(sessionId);
   db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
-  db.prepare('DELETE FROM agents WHERE id = ?').run(id);
 }
 
-function mapAgentRow(row: Record<string, unknown>): SubAgent {
+function mapLegacyAgentRow(row: Record<string, unknown>): SubAgent {
   return {
     id: String(row.id),
     group_folder: String(row.group_folder),

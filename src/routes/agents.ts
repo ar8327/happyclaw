@@ -89,10 +89,9 @@ function getExplicitSessionBinding(
 
 function resolveRouteGroup(
   id: string,
-  options?: { allowImGroupAlias?: boolean },
 ): { accessJid: string; group: RegisteredGroup } | null {
   const direct = getRegisteredGroup(id);
-  if (direct && ((options?.allowImGroupAlias ?? true) || id.startsWith('web:'))) {
+  if (direct && id.startsWith('web:')) {
     return { accessJid: id, group: direct };
   }
 
@@ -112,13 +111,11 @@ function resolveRouteGroup(
   return group ? { accessJid, group } : null;
 }
 
-// GET /api/groups/:jid/agents — list all agents for a group
+// GET /api/sessions/:jid/agents — list all agents for a session
 router.get('/:jid/agents', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const user = c.get('user');
-  const allowImGroupAlias = !c.req.path.startsWith('/api/sessions/');
-
-  const resolved = resolveRouteGroup(jid, { allowImGroupAlias });
+  const resolved = resolveRouteGroup(jid);
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -156,13 +153,11 @@ router.get('/:jid/agents', authMiddleware, async (c) => {
   });
 });
 
-// POST /api/groups/:jid/agents — create a user conversation
+// POST /api/sessions/:jid/agents — create a user conversation
 router.post('/:jid/agents', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const user = c.get('user');
-  const allowImGroupAlias = !c.req.path.startsWith('/api/sessions/');
-
-  const resolved = resolveRouteGroup(jid, { allowImGroupAlias });
+  const resolved = resolveRouteGroup(jid);
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -248,14 +243,12 @@ router.post('/:jid/agents', authMiddleware, async (c) => {
   });
 });
 
-// DELETE /api/groups/:jid/agents/:agentId — stop and delete an agent
+// DELETE /api/sessions/:jid/agents/:agentId — stop and delete an agent
 router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const agentId = c.req.param('agentId');
   const user = c.get('user');
-  const allowImGroupAlias = !c.req.path.startsWith('/api/sessions/');
-
-  const resolved = resolveRouteGroup(jid, { allowImGroupAlias });
+  const resolved = resolveRouteGroup(jid);
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -362,13 +355,11 @@ function isTelegramPrivateChat(jid: string): boolean {
   return !id.startsWith('-');
 }
 
-// GET /api/groups/:jid/im-groups — list available IM group chats for this folder
+// GET /api/sessions/:jid/im-groups — list available IM group chats for this folder
 router.get('/:jid/im-groups', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const user = c.get('user');
-  const allowImGroupAlias = !c.req.path.startsWith('/api/sessions/');
-
-  const resolved = resolveRouteGroup(jid, { allowImGroupAlias });
+  const resolved = resolveRouteGroup(jid);
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -500,14 +491,12 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
   return c.json({ imGroups });
 });
 
-// PUT /api/groups/:jid/agents/:agentId/im-binding — bind an IM group to this agent
+// PUT /api/sessions/:jid/agents/:agentId/im-binding — bind an IM group to this agent
 router.put('/:jid/agents/:agentId/im-binding', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const agentId = c.req.param('agentId');
   const user = c.get('user');
-  const allowImGroupAlias = !c.req.path.startsWith('/api/sessions/');
-
-  const resolved = resolveRouteGroup(jid, { allowImGroupAlias });
+  const resolved = resolveRouteGroup(jid);
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -567,7 +556,7 @@ router.put('/:jid/agents/:agentId/im-binding', authMiddleware, async (c) => {
   return c.json({ success: true });
 });
 
-// DELETE /api/groups/:jid/agents/:agentId/im-binding/:imJid — unbind an IM group
+// DELETE /api/sessions/:jid/agents/:agentId/im-binding/:imJid — unbind an IM group
 router.delete(
   '/:jid/agents/:agentId/im-binding/:imJid',
   authMiddleware,
@@ -576,9 +565,7 @@ router.delete(
   const agentId = c.req.param('agentId');
   const imJid = decodeURIComponent(c.req.param('imJid'));
   const user = c.get('user');
-  const allowImGroupAlias = !c.req.path.startsWith('/api/sessions/');
-
-  const resolved = resolveRouteGroup(jid, { allowImGroupAlias });
+  const resolved = resolveRouteGroup(jid);
     if (!resolved) {
       return c.json({ error: 'Group not found' }, 404);
     }
@@ -623,13 +610,11 @@ router.delete(
   },
 );
 
-// PUT /api/groups/:jid/im-binding — bind an IM group to this workspace's main conversation
+// PUT /api/sessions/:jid/im-binding — bind an IM group to this workspace's main conversation
 router.put('/:jid/im-binding', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const user = c.get('user');
-  const allowImGroupAlias = !c.req.path.startsWith('/api/sessions/');
-
-  const resolved = resolveRouteGroup(jid, { allowImGroupAlias });
+  const resolved = resolveRouteGroup(jid);
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
@@ -687,14 +672,12 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
   return c.json({ success: true });
 });
 
-// DELETE /api/groups/:jid/im-binding/:imJid — unbind an IM group from this workspace's main conversation
+// DELETE /api/sessions/:jid/im-binding/:imJid — unbind an IM group from this workspace's main conversation
 router.delete('/:jid/im-binding/:imJid', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const imJid = decodeURIComponent(c.req.param('imJid'));
   const user = c.get('user');
-  const allowImGroupAlias = !c.req.path.startsWith('/api/sessions/');
-
-  const resolved = resolveRouteGroup(jid, { allowImGroupAlias });
+  const resolved = resolveRouteGroup(jid);
   if (!resolved) {
     return c.json({ error: 'Group not found' }, 404);
   }
