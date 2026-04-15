@@ -22,6 +22,10 @@ import {
 } from '../db.js';
 import { authMiddleware, systemConfigMiddleware } from '../middleware/auth.js';
 import {
+  extractAgentIdFromWorkerSessionId,
+  isWorkerSessionId,
+} from '../worker-session.js';
+import {
   ClaudeConfigSchema,
   ClaudeSecretsSchema,
   ClaudeCustomEnvSchema,
@@ -2823,37 +2827,7 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
     typeof body.session_id === 'string' && body.session_id.trim()
       ? body.session_id.trim()
       : null;
-  const requestedAgentId =
-    typeof body.target_agent_id === 'string' && body.target_agent_id.trim()
-      ? body.target_agent_id.trim()
-      : null;
-  const requestedMainJid =
-    typeof body.target_main_jid === 'string' && body.target_main_jid.trim()
-      ? body.target_main_jid.trim()
-      : null;
-  const legacySessionId =
-    requestedAgentId
-      ? `worker:${requestedAgentId}`
-      : (() => {
-          if (!requestedMainJid) return null;
-          const targetGroup = getRegisteredGroup(requestedMainJid);
-          return targetGroup ? `main:${targetGroup.folder}` : null;
-        })();
-
-  if (
-    requestedSessionId &&
-    legacySessionId &&
-    requestedSessionId !== legacySessionId
-  ) {
-    return c.json(
-      {
-        error:
-          'session_id does not match legacy target_main_jid/target_agent_id',
-      },
-      400,
-    );
-  }
-  const targetSessionId = requestedSessionId || legacySessionId;
+  const targetSessionId = requestedSessionId;
 
   if (
     body.unbind !== true &&
@@ -2916,8 +2890,11 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
     return c.json({ error: 'Forbidden' }, 403);
   }
 
-  if (targetSessionId.startsWith('worker:')) {
-    const agentId = targetSessionId.slice('worker:'.length);
+  if (isWorkerSessionId(targetSessionId)) {
+    const agentId = extractAgentIdFromWorkerSessionId(targetSessionId);
+    if (!agentId) {
+      return c.json({ error: 'Invalid worker session id' }, 400);
+    }
     const agent = getAgent(agentId);
     if (!agent) {
       return c.json({ error: 'Agent not found' }, 404);

@@ -112,6 +112,13 @@ import {
   resolveLocationInfo,
   type WorkspaceInfo,
 } from './im-command-utils.js';
+import {
+  buildWorkerConversationJid,
+  buildWorkerSessionId,
+  extractAgentIdFromWorkerSessionId,
+  isWorkerSessionId,
+  splitWorkerConversationJid,
+} from './worker-session.js';
 import { analyzeIntent } from './intent-analyzer.js';
 import {
   getFeishuProviderConfigWithSource,
@@ -316,7 +323,9 @@ function persistRuntimeStateForSession(
   runtimeState: NonNullable<RuntimeOutput['runtimeState']>,
   agentId?: string,
 ): void {
-  const sessionId = agentId ? `worker:${agentId}` : `main:${groupFolder}`;
+  const sessionId = agentId
+    ? buildWorkerSessionId(agentId)
+    : `main:${groupFolder}`;
   upsertSessionRuntimeState(sessionId, {
     providerSessionId: runtimeState.providerSessionId,
     resumeAnchor: runtimeState.resumeAnchor,
@@ -348,7 +357,9 @@ function getRuntimeBootstrapState(
   resumeAnchor?: string;
   bootstrapState?: RuntimeInput['bootstrapState'];
 } {
-  const sessionKey = agentId ? `worker:${agentId}` : `main:${groupFolder}`;
+  const sessionKey = agentId
+    ? buildWorkerSessionId(agentId)
+    : `main:${groupFolder}`;
   const runtimeState = getSessionRuntimeState(sessionKey);
   const providerSessionId =
     runtimeState?.provider_session_id || getSession(groupFolder, agentId) || undefined;
@@ -387,7 +398,7 @@ function buildMainSessionRecordId(groupFolder: string): string {
 }
 
 function buildWorkerSessionRecordId(agentId: string): string {
-  return `worker:${agentId}`;
+  return buildWorkerSessionId(agentId);
 }
 
 function resolveStableSessionOwnerKey(
@@ -496,9 +507,7 @@ function resolveBoundSessionTarget(
 
   if (boundSession.kind === 'worker') {
     const worker = getWorkerSessionRecord(boundSession.id);
-    const boundAgentId = boundSession.id.startsWith('worker:')
-      ? boundSession.id.slice('worker:'.length)
-      : null;
+    const boundAgentId = extractAgentIdFromWorkerSessionId(boundSession.id);
     const parentSession = boundSession.parent_session_id
       ? getSessionRecord(boundSession.parent_session_id)
       : null;
@@ -518,7 +527,7 @@ function resolveBoundSessionTarget(
       boundAgentId,
       effectiveJid:
         worker && boundAgentId
-          ? `${worker.source_chat_jid}#agent:${boundAgentId}`
+          ? buildWorkerConversationJid(worker.source_chat_jid, boundAgentId)
           : null,
       folder,
       locationLine: `${workspaceName} / ${worker?.name || boundAgentId || boundSession.name}`,
@@ -1096,7 +1105,7 @@ function resolveBindingTarget(
   if (!agent) return null;
 
   return {
-    sessionId: `worker:${agent.id}`,
+    sessionId: buildWorkerSessionId(agent.id),
     display: `${workspace.name} / ${agent.name}`,
   };
 }
@@ -1139,7 +1148,9 @@ function getConversationContext(
   const webJid = findWebJidForFolder(folder);
   if (!webJid) return '';
 
-  const chatJidForMsg = agentId ? `${webJid}#agent:${agentId}` : webJid;
+  const chatJidForMsg = agentId
+    ? buildWorkerConversationJid(webJid, agentId)
+    : webJid;
   const messages = getMessagesPage(chatJidForMsg, undefined, count);
 
   if (messages.length === 0) return '\n\n📭 该对话暂无消息记录';
@@ -1923,15 +1934,15 @@ function splitRuntimeJid(chatJid: string): {
   baseJid: string;
   agentId: string | null;
 } {
-  const agentSep = chatJid.indexOf('#agent:');
-  if (agentSep < 0) {
-    return { baseJid: chatJid, agentId: null };
+  if (isWorkerSessionId(chatJid)) {
+    const agentId = extractAgentIdFromWorkerSessionId(chatJid);
+    const workerSession = getWorkerSessionRecord(chatJid);
+    return {
+      baseJid: workerSession?.source_chat_jid || chatJid,
+      agentId,
+    };
   }
-  const agentId = chatJid.slice(agentSep + 7).trim();
-  return {
-    baseJid: chatJid.slice(0, agentSep),
-    agentId: agentId || null,
-  };
+  return splitWorkerConversationJid(chatJid);
 }
 
 /**
@@ -3934,8 +3945,8 @@ async function processAgentConversation(
 
   const { effectiveGroup } = resolveEffectiveGroup(group);
 
-  const virtualChatJid = `${chatJid}#agent:${agentId}`;
-  const virtualJid = virtualChatJid; // used as queue key
+  const virtualChatJid = buildWorkerConversationJid(chatJid, agentId);
+  const workerSessionId = buildWorkerSessionRecordId(agentId);
 
   // Get pending messages
   const sinceCursor = lastAgentTimestamp[virtualChatJid] || EMPTY_CURSOR;
@@ -3961,7 +3972,7 @@ async function processAgentConversation(
         { agentId, chatJid },
         'Agent conversation idle timeout, closing stdin',
       );
-      queue.closeStdin(virtualJid);
+      queue.closeStdin(workerSessionId);
     }, getSystemSettings().idleTimeout);
   };
 
@@ -3983,7 +3994,7 @@ async function processAgentConversation(
     agentId,
   );
   const sessionId = runtimeBootstrap.providerSessionId;
-  const sessionRecordId = buildWorkerSessionRecordId(agentId);
+  const sessionRecordId = workerSessionId;
   const sessionRecord = getSessionRecord(sessionRecordId);
 
   // Load context summary if session was compressed (no active session)
@@ -4011,7 +4022,9 @@ async function processAgentConversation(
         output.streamEvent.eventType === 'status' &&
         output.streamEvent.statusText === 'ipc_message_received'
       ) {
-        ackIpcDeliveries(collectIpcAckKeys([virtualJid], output.streamEvent));
+        ackIpcDeliveries(
+          collectIpcAckKeys([workerSessionId], output.streamEvent),
+        );
       }
 
       // Persist token usage for agent conversations
@@ -4096,7 +4109,7 @@ async function processAgentConversation(
   try {
     const onProcessCb = (proc: ChildProcess, identifier: string) => {
       queue.registerProcess(
-        virtualJid,
+        workerSessionId,
         proc,
         null,
         effectiveGroup.folder,
@@ -4259,7 +4272,7 @@ async function startMessageLoop(): Promise<void> {
 
           // Skip groups already bound to worker sessions — their messages are
           // routed to conversation agents at IM ingestion time.
-          if (getChatBindingPolicy(chatJid).sessionId?.startsWith('worker:')) continue;
+          if (isWorkerSessionId(getChatBindingPolicy(chatJid).sessionId)) continue;
 
           // Use only the new messages from this poll cycle.
           // processGroupMessages() handles the initial full fetch from
@@ -4615,7 +4628,7 @@ function buildOnNewChat(
       }
 
       // Don't override groups with explicit agent routing configured.
-      if (binding?.session_id.startsWith('worker:')) return;
+      if (isWorkerSessionId(binding?.session_id)) return;
 
       // Different user's connection now owns this IM app.
       // Re-route the chat to the current user's home folder.
@@ -4820,7 +4833,8 @@ function buildOnAgentMessage(): (baseChatJid: string, agentId: string) => void {
     // group for non-main workspaces (their JID is web:{uuid}, not web:{folder}).
     const agent = getAgent(agentId);
     const homeChatJid = agent?.chat_jid || `web:${group.folder}`;
-    const virtualChatJid = `${homeChatJid}#agent:${agentId}`;
+    const virtualChatJid = buildWorkerConversationJid(homeChatJid, agentId);
+    const workerSessionId = buildWorkerSessionRecordId(agentId);
 
     // Fetch pending messages
     const sinceCursor = lastAgentTimestamp[virtualChatJid] || EMPTY_CURSOR;
@@ -4837,9 +4851,9 @@ function buildOnAgentMessage(): (baseChatJid: string, agentId: string) => void {
       // Force close running process then enqueue fresh start.
       // Use a stable taskId so rapid-fire IM messages deduplicate into a
       // single queued restart instead of N separate restarts.
-      queue.closeStdin(virtualChatJid);
+      queue.closeStdin(workerSessionId);
       const taskId = `agent-im-restart:${agentId}`;
-      queue.enqueueTask(virtualChatJid, taskId, async () => {
+      queue.enqueueTask(workerSessionId, taskId, async () => {
         await processAgentConversation(homeChatJid, agentId);
       });
     } else {
@@ -4851,7 +4865,7 @@ function buildOnAgentMessage(): (baseChatJid: string, agentId: string) => void {
 
       const sendResult = formatted
         ? queue.sendMessage(
-            virtualChatJid,
+            workerSessionId,
             formatted,
             imagesForAgent,
             undefined,
@@ -4859,7 +4873,7 @@ function buildOnAgentMessage(): (baseChatJid: string, agentId: string) => void {
         : 'no_active';
       if (sendResult === 'no_active') {
         const taskId = `agent-conv:${agentId}:${Date.now()}`;
-        queue.enqueueTask(virtualChatJid, taskId, async () => {
+        queue.enqueueTask(workerSessionId, taskId, async () => {
           await processAgentConversation(homeChatJid, agentId);
         });
       }
@@ -5633,11 +5647,24 @@ async function main(): Promise<void> {
   });
   queue.setHostModeChecker(() => false);
   queue.setSerializationKeyResolver((groupJid: string) => {
-    // Agent virtual JIDs: {chatJid}#agent:{agentId} → separate serialization key
-    const agentSep = groupJid.indexOf('#agent:');
-    if (agentSep >= 0) {
-      const baseJid = groupJid.slice(0, agentSep);
-      const agentId = groupJid.slice(agentSep + 7);
+    if (isWorkerSessionId(groupJid)) {
+      const worker = getWorkerSessionRecord(groupJid);
+      const agentId = extractAgentIdFromWorkerSessionId(groupJid);
+      const parentSession = worker?.parent_session_id
+        ? getSessionRecord(worker.parent_session_id)
+        : null;
+      const group = worker
+        ? (registeredGroups[worker.source_chat_jid] ??
+          getRegisteredGroup(worker.source_chat_jid))
+        : undefined;
+      const folder = group?.folder
+        || (parentSession?.id?.startsWith('main:')
+          ? parentSession.id.slice('main:'.length)
+          : groupJid);
+      return agentId ? `${folder}#${agentId}` : folder;
+    }
+    const { baseJid, agentId } = splitWorkerConversationJid(groupJid);
+    if (agentId) {
       const group = registeredGroups[baseJid];
       const folder = group?.folder || baseJid;
       return `${folder}#${agentId}`;

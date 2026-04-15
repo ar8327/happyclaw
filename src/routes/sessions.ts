@@ -82,6 +82,11 @@ import {
   matchesBlockedPattern,
 } from '../mount-security.js';
 import { initializeWorkspaceFromLocalDirectory } from '../workspace-init.js';
+import {
+  buildWorkerConversationJid,
+  buildWorkerSessionId,
+  extractAgentIdFromWorkerSessionId,
+} from '../worker-session.js';
 import type {
   AuthUser,
   RegisteredGroup,
@@ -455,9 +460,7 @@ function buildUpdatedImGroupForSessionBinding(
 
   if (targetSession.kind === 'worker') {
     const worker = getWorkerSessionRecord(targetSession.id);
-    const agentId = targetSession.id.startsWith('worker:')
-      ? targetSession.id.slice('worker:'.length)
-      : '';
+    const agentId = extractAgentIdFromWorkerSessionId(targetSession.id) || '';
     if (!worker || worker.kind !== 'conversation' || !agentId) {
       throw new Error('Only conversation worker sessions can bind IM channels');
     }
@@ -641,11 +644,9 @@ function getRelevantChatJids(
 
   if (session.kind === 'worker') {
     const worker = getWorkerSessionRecord(session.id);
-    const agentId = session.id.startsWith('worker:')
-      ? session.id.slice('worker:'.length)
-      : '';
+    const agentId = extractAgentIdFromWorkerSessionId(session.id) || '';
     const chats = worker
-      ? [`${worker.source_chat_jid}#agent:${agentId}`, ...sessionBindings]
+      ? [buildWorkerConversationJid(worker.source_chat_jid, agentId), ...sessionBindings]
       : sessionBindings;
     return Array.from(new Set(chats));
   }
@@ -663,11 +664,9 @@ function getWorkerRuntimeJids(parentSessionId: string): string[] {
     .filter((candidate) => candidate.parent_session_id === parentSessionId)
     .flatMap((candidate) => {
       const worker = getWorkerSessionRecord(candidate.id);
-      const agentId = candidate.id.startsWith('worker:')
-        ? candidate.id.slice('worker:'.length)
-        : '';
+      const agentId = extractAgentIdFromWorkerSessionId(candidate.id) || '';
       if (!worker || !agentId) return [];
-      return [`${worker.source_chat_jid}#agent:${agentId}`];
+      return [buildWorkerSessionId(agentId)];
     });
   return Array.from(new Set(queueJids));
 }
@@ -701,9 +700,8 @@ function buildBindingTargets(user: AuthUser) {
         groupJid: parentBackingJid,
         groupName: parent?.name || worker.name,
         session_kind: session.kind,
-        agentId: session.id.startsWith('worker:')
-          ? session.id.slice('worker:'.length)
-          : worker.session_id,
+        agentId:
+          extractAgentIdFromWorkerSessionId(session.id) || worker.session_id,
         agentName: worker.name,
       });
       continue;
@@ -1533,13 +1531,11 @@ sessionRoutes.post('/:id/stop', authMiddleware, async (c) => {
   try {
     if (session.kind === 'worker') {
       const worker = getWorkerSessionRecord(session.id);
-      const agentId = session.id.startsWith('worker:')
-        ? session.id.slice('worker:'.length)
-        : '';
+      const agentId = extractAgentIdFromWorkerSessionId(session.id) || '';
       if (!worker || !agentId) {
         return c.json({ error: 'Worker session is malformed' }, 400);
       }
-      await deps.queue.stopSession(`${worker.source_chat_jid}#agent:${agentId}`);
+      await deps.queue.stopSession(buildWorkerSessionId(agentId));
     } else {
       const backingJid = resolveBackingJid(session);
       if (!backingJid) {
@@ -1567,15 +1563,13 @@ sessionRoutes.post('/:id/interrupt', authMiddleware, async (c) => {
 
   if (session.kind === 'worker') {
     const worker = getWorkerSessionRecord(session.id);
-    const agentId = session.id.startsWith('worker:')
-      ? session.id.slice('worker:'.length)
-      : '';
+    const agentId = extractAgentIdFromWorkerSessionId(session.id) || '';
     if (!worker || !agentId) {
       return c.json({ error: 'Worker session is malformed' }, 400);
     }
     return c.json({
       success: true,
-      interrupted: deps.queue.interruptQuery(`${worker.source_chat_jid}#agent:${agentId}`),
+      interrupted: deps.queue.interruptQuery(buildWorkerSessionId(agentId)),
     });
   }
 
@@ -1621,7 +1615,7 @@ sessionRoutes.post('/:id/reset-session', authMiddleware, async (c) => {
   }
 
   if (agentId) {
-    const workerSession = getSessionRecord(`worker:${agentId}`);
+    const workerSession = getSessionRecord(buildWorkerSessionId(agentId));
     if (!workerSession || workerSession.parent_session_id !== session.id) {
       return c.json({ error: 'Agent not found' }, 404);
     }
@@ -1955,16 +1949,14 @@ sessionRoutes.put('/:id/mode', authMiddleware, async (c) => {
 
   if (session.kind === 'worker') {
     const worker = getWorkerSessionRecord(session.id);
-    const agentId = session.id.startsWith('worker:')
-      ? session.id.slice('worker:'.length)
-      : '';
+    const agentId = extractAgentIdFromWorkerSessionId(session.id) || '';
     if (!worker || !agentId) {
       return c.json({ error: 'Worker session is malformed' }, 400);
     }
     return c.json({
       success: true,
       mode,
-      applied: deps.queue.setPermissionMode(`${worker.source_chat_jid}#agent:${agentId}`, mode),
+      applied: deps.queue.setPermissionMode(buildWorkerSessionId(agentId), mode),
     });
   }
 
@@ -2068,9 +2060,7 @@ sessionRoutes.delete('/:id', authMiddleware, async (c) => {
   if (!session) return c.json({ error: 'Session not found' }, 404);
 
   if (session.kind === 'worker') {
-    const agentId = session.id.startsWith('worker:')
-      ? session.id.slice('worker:'.length)
-      : '';
+    const agentId = extractAgentIdFromWorkerSessionId(session.id) || '';
     if (!agentId || !session.parent_session_id) {
       return c.json({ error: 'Worker session is malformed' }, 400);
     }

@@ -14,6 +14,10 @@ import {
 import { DATA_DIR } from './config.js';
 import { logger } from './logger.js';
 import type { NewMessage, MessageCursor } from './types.js';
+import {
+  buildWorkerConversationJid,
+  buildWorkerSessionId,
+} from './worker-session.js';
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -58,9 +62,7 @@ export async function executeSessionReset(
   agentId?: string,
 ): Promise<void> {
   if (agentId) {
-    // Agent-specific reset: only stop the agent's virtual JID process
-    const virtualJid = `${chatJid}#agent:${agentId}`;
-    await deps.queue.stopSession(virtualJid, { force: true });
+    await deps.queue.stopSession(buildWorkerSessionId(agentId), { force: true });
   } else {
     // Main session reset: stop all processes for this folder
     const siblingJids = getJidsByFolder(folder);
@@ -79,7 +81,9 @@ export async function executeSessionReset(
   }
 
   // 4. Insert context_reset divider message into the correct JID
-  const targetJid = agentId ? `${chatJid}#agent:${agentId}` : chatJid;
+  const targetJid = agentId
+    ? buildWorkerConversationJid(chatJid, agentId)
+    : chatJid;
   const dividerMessageId = crypto.randomUUID();
   const timestamp = new Date().toISOString();
   ensureChatExists(targetJid);
@@ -106,8 +110,9 @@ export async function executeSessionReset(
   // 5. Advance lastAgentTimestamp so old messages before the reset are not
   //    re-sent to the next fresh agent session.
   if (agentId) {
-    const virtualJid = `${chatJid}#agent:${agentId}`;
-    deps.setLastAgentTimestamp(virtualJid, { rowid: dividerRowid });
+    deps.setLastAgentTimestamp(buildWorkerConversationJid(chatJid, agentId), {
+      rowid: dividerRowid,
+    });
   } else {
     const siblingJids = getJidsByFolder(folder);
     for (const siblingJid of siblingJids) {

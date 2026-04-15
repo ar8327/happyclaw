@@ -29,6 +29,11 @@ import { DATA_DIR } from '../config.js';
 import type { RegisteredGroup, SubAgent } from '../types.js';
 import { logger } from '../logger.js';
 import { getChannelType, extractChatId } from '../im-channel.js';
+import {
+  buildWorkerConversationJid,
+  buildWorkerSessionId,
+  extractAgentIdFromWorkerSessionId,
+} from '../worker-session.js';
 
 const router = new Hono<{ Variables: Variables }>();
 
@@ -218,7 +223,7 @@ router.post('/:jid/agents', authMiddleware, async (c) => {
   fs.mkdirSync(agentSessionDir, { recursive: true });
 
   // Create virtual chat record for this agent's messages
-  const virtualChatJid = `${accessJid}#agent:${agentId}`;
+  const virtualChatJid = buildWorkerConversationJid(accessJid, agentId);
   ensureChatExists(virtualChatJid);
 
   // Broadcast agent_status (idle) via WebSocket
@@ -291,8 +296,7 @@ router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
     // Stop running process via queue
     const deps = getWebDeps();
     if (deps) {
-      const virtualJid = `${accessJid}#agent:${agentId}`;
-      deps.queue.stopSession(virtualJid);
+      deps.queue.stopSession(buildWorkerSessionId(agentId));
     }
   }
 
@@ -324,7 +328,7 @@ router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
 
   // Delete virtual chat messages for conversation agents
   if (agent.kind === 'conversation') {
-    const virtualChatJid = `${accessJid}#agent:${agentId}`;
+    const virtualChatJid = buildWorkerConversationJid(accessJid, agentId);
     deleteMessagesForChatJid(virtualChatJid);
 
     // Note: IM bindings are checked above and block deletion if present.
@@ -412,9 +416,7 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
     if (binding?.session_id) {
       const boundSession = getSessionRecord(binding.session_id);
       if (boundSession?.kind === 'worker') {
-        const agentId = boundSession.id.startsWith('worker:')
-          ? boundSession.id.slice('worker:'.length)
-          : '';
+        const agentId = extractAgentIdFromWorkerSessionId(boundSession.id) || '';
         const boundAgent = agentId ? getAgent(agentId) : undefined;
         if (boundAgent) {
           boundTargetName = boundAgent.name;
@@ -440,10 +442,7 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
       name: g.name,
       bound_session_id: binding?.session_id || null,
       binding_mode: binding?.binding_mode || 'source_only',
-      bound_agent_id:
-        binding?.session_id?.startsWith('worker:')
-          ? binding.session_id.slice('worker:'.length)
-          : null,
+      bound_agent_id: extractAgentIdFromWorkerSessionId(binding?.session_id),
       bound_main_jid:
         binding?.session_id?.startsWith('main:')
           ? getJidsByFolder(binding.session_id.slice('main:'.length)).find((jid) =>
@@ -544,7 +543,7 @@ router.put('/:jid/agents/:agentId/im-binding', authMiddleware, async (c) => {
   const force = body.force === true;
   const replyPolicy = body.reply_policy === 'mirror' ? 'mirror' : 'source_only';
   const currentBinding = getExplicitSessionBinding(imJid, imGroup);
-  const targetSessionId = `worker:${agentId}`;
+  const targetSessionId = buildWorkerSessionId(agentId);
   const hasConflict =
     !!currentBinding && currentBinding.session_id !== targetSessionId;
   if (hasConflict && !force) {
@@ -601,7 +600,7 @@ router.delete(
       return c.json({ error: 'Forbidden' }, 403);
     }
     const currentBinding = getExplicitSessionBinding(imJid, imGroup);
-    if (currentBinding?.session_id !== `worker:${agentId}`) {
+    if (currentBinding?.session_id !== buildWorkerSessionId(agentId)) {
       return c.json({ error: 'IM group is not bound to this agent' }, 400);
     }
 

@@ -12,10 +12,13 @@ import {
   getRegisteredGroup,
   getRouterState,
   getSessionRecord,
+  getWorkerSessionRecord,
+  getJidsByFolder,
 } from '../db.js';
 import { getSystemSettings } from '../runtime-config.js';
 import { logger } from '../logger.js';
 import { getDefaultRunnerId } from '../runner-registry.js';
+import { isWorkerSessionId } from '../worker-session.js';
 
 // --- Claude Code version cache (1h TTL) ---
 
@@ -80,6 +83,26 @@ function resolveRuntimeAccess(
   runnerId: string;
 } | null {
   const defaultRunnerId = getDefaultRunnerId();
+  if (isWorkerSessionId(runtimeJid)) {
+    const workerSession = getSessionRecord(runtimeJid);
+    const parentSession = workerSession?.parent_session_id
+      ? getSessionRecord(workerSession.parent_session_id)
+      : undefined;
+    const workerMeta = getWorkerSessionRecord(runtimeJid);
+    const folder = parentSession?.id?.startsWith('main:')
+      ? parentSession.id.slice('main:'.length)
+      : null;
+    const accessJid = workerMeta?.source_chat_jid || (folder
+      ? getJidsByFolder(folder).find((jid) => jid.startsWith('web:')) || ''
+      : '');
+    if (!workerSession || !accessJid) return null;
+    return {
+      accessJid,
+      sessionId: workerSession.id,
+      runnerId: workerSession.runner_id || parentSession?.runner_id || defaultRunnerId,
+    };
+  }
+
   const agentSep = runtimeJid.indexOf('#agent:');
   if (agentSep >= 0) {
     const accessJid = runtimeJid.slice(0, agentSep);
@@ -196,6 +219,8 @@ monitorRoutes.get('/status', authMiddleware, async (c) => {
     const resolved = resolveRuntimeAccess(runtime.jid);
     return {
       ...runtime,
+      jid: resolved?.accessJid || runtime.jid,
+      runtime_jid: runtime.jid,
       session_id: resolved?.sessionId || null,
       runner_id: resolved?.runnerId || defaultRunnerId,
       runtime_identifier: normalizeRuntimeLabel(runtime.runtimeIdentifier),

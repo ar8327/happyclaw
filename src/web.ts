@@ -86,6 +86,10 @@ import {
   getLocalWorkbenchSessionId,
   getLocalWorkbenchUserPublic,
 } from './local-user.js';
+import {
+  buildWorkerConversationJid,
+  buildWorkerSessionId,
+} from './worker-session.js';
 
 // --- App Setup ---
 
@@ -384,7 +388,8 @@ async function handleAgentConversationMessage(
     return;
   }
 
-  const virtualChatJid = `${chatJid}#agent:${agentId}`;
+  const virtualChatJid = buildWorkerConversationJid(chatJid, agentId);
+  const workerSessionId = buildWorkerSessionId(agentId);
 
   // Store message with virtual chat_jid
   const messageId = crypto.randomUUID();
@@ -450,7 +455,7 @@ async function handleAgentConversationMessage(
   const agentIntent = analyzeIntent(content);
   const agentImages = toAgentImages(normalizedAttachments);
   const agentSendResult = deps.queue.sendMessage(
-    virtualChatJid,
+    workerSessionId,
     formatted,
     agentImages,
     agentIntent,
@@ -459,7 +464,7 @@ async function handleAgentConversationMessage(
     // No running process — start one via processAgentConversation
     if (deps.processAgentConversation) {
       const taskId = `agent-conv:${agentId}:${Date.now()}`;
-      deps.queue.enqueueTask(virtualChatJid, taskId, async () => {
+      deps.queue.enqueueTask(workerSessionId, taskId, async () => {
         await deps!.processAgentConversation!(chatJid, agentId);
       });
     }
@@ -467,7 +472,7 @@ async function handleAgentConversationMessage(
     agentSendResult === 'sent' ||
     agentSendResult === 'interrupted_correction'
   ) {
-    deps.trackIpcDelivery?.(virtualChatJid);
+    deps.trackIpcDelivery?.(workerSessionId);
   }
   // 'sent', 'interrupted_stop', 'interrupted_correction' need no further action —
   // for correction, the IPC message was written and the agent handles it after interrupt
