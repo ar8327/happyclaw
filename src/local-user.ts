@@ -22,6 +22,12 @@ interface LocalOperatorFile {
   last_login_at?: string | null;
 }
 
+function isPublicOwnerKey(ownerKey: string | null | undefined): ownerKey is string {
+  if (typeof ownerKey !== 'string') return false;
+  const normalized = ownerKey.trim();
+  return normalized.length > 0 && normalized !== 'system';
+}
+
 function loadLocalOperatorFile(): LocalOperatorFile {
   try {
     if (!fs.existsSync(LOCAL_OPERATOR_FILE)) return {};
@@ -37,13 +43,18 @@ function saveLocalOperatorFile(next: LocalOperatorFile): void {
 }
 
 function resolvePrimaryOwnerKey(): string | null {
-  const sessionOwner = listSessionRecords().find(
+  const primarySessionOwner = listSessionRecords().find(
     (session) =>
-      (session.kind === 'main' || session.kind === 'memory') &&
-      typeof session.owner_key === 'string' &&
-      session.owner_key.trim().length > 0,
+      (session.kind === 'main' || session.kind === 'workspace') &&
+      isPublicOwnerKey(session.owner_key),
   )?.owner_key;
-  if (sessionOwner) return sessionOwner;
+  if (primarySessionOwner) return primarySessionOwner;
+
+  const memorySessionOwner = listSessionRecords().find(
+    (session) =>
+      session.kind === 'memory' && isPublicOwnerKey(session.owner_key),
+  )?.owner_key;
+  if (memorySessionOwner) return memorySessionOwner;
   return null;
 }
 

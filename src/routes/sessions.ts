@@ -619,7 +619,10 @@ function buildSessionPayload(
 
 function canAccessSession(user: AuthUser, session: SessionRecord): boolean {
   if (session.kind === 'memory') {
-    return user.role === 'admin' || session.owner_key === user.id;
+    // Single-user workbench should only expose the operator's own memory session.
+    // Internal projections like memory:system may exist for background flows, but
+    // they are not user-facing sessions and should stay off the public API.
+    return !!session.owner_key && session.owner_key === user.id;
   }
 
   if (session.kind === 'worker') {
