@@ -2247,15 +2247,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // 刷新/重连时恢复正在运行的 agent 状态
   restoreActiveState: async () => {
     try {
-      const data = await api.get<{ groups: Array<{ jid: string; active: boolean; pendingMessages?: boolean }> }>('/api/status');
+      const data = await api.get<{
+        sessions: Array<{ jid: string; active: boolean; pendingMessages?: boolean }>;
+      }>('/api/status');
       set((s) => {
         const nextWaiting = { ...s.waiting };
         const nextStreaming = { ...s.streaming };
 
-        // 构建后端已知的群组集合；不在集合中的 JID 说明后端无活跃进程
+        // 构建后端已知的会话集合；不在集合中的 JID 说明后端无活跃进程
         // （pm2 restart 后 queue 为空，所有 JID 都不在集合中）。
         const knownJids = new Set(
-          data.groups.map((g) => resolveStoreJid(s.groups, g.jid)),
+          data.sessions.map((session) => resolveStoreJid(s.groups, session.jid)),
         );
 
         // 清除后端不可见的 JID 的 waiting/streaming（进程已死）
@@ -2266,14 +2268,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
         }
 
-        for (const g of data.groups) {
-          const storeJid = resolveStoreJid(s.groups, g.jid);
-          if (g.pendingMessages) {
+        for (const session of data.sessions) {
+          const storeJid = resolveStoreJid(s.groups, session.jid);
+          if (session.pendingMessages) {
             nextWaiting[storeJid] = true;
             continue;
           }
           // 没有活跃进程且没有待处理消息 → 不应等待。
-          if (!g.active) {
+          if (!session.active) {
             delete nextWaiting[storeJid];
             delete nextStreaming[storeJid];
             continue;

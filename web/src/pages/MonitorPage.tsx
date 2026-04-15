@@ -3,7 +3,7 @@ import { useMonitorStore } from '../stores/monitor';
 import { RuntimeStatusCard } from '../components/monitor/RuntimeStatusCard';
 import { QueueStatus } from '../components/monitor/QueueStatus';
 import { SystemInfo } from '../components/monitor/SystemInfo';
-import { GroupStatusCard } from '../components/monitor/GroupStatusCard';
+import { SessionStatusCard } from '../components/monitor/SessionStatusCard';
 import { RefreshCw } from 'lucide-react';
 import { PageHeader } from '@/components/common/PageHeader';
 import { SkeletonStatCards } from '@/components/common/Skeletons';
@@ -51,7 +51,7 @@ export function MonitorPage() {
             </div>
 
             {/* 会话 Runtime 详情 */}
-            {status.groups && status.groups.length > 0 && (
+            {status.sessions.length > 0 && (
               <div className="bg-card rounded-xl border border-border p-4 lg:p-6">
                 <h2 className="text-lg font-semibold text-foreground mb-4">
                   会话 Runtime 状态
@@ -59,8 +59,8 @@ export function MonitorPage() {
 
                 {/* 移动端：卡片列表 */}
                 <div className="lg:hidden space-y-3">
-                  {status.groups.map((group) => (
-                    <GroupStatusCard key={group.jid} group={group} />
+                  {status.sessions.map((session) => (
+                    <SessionStatusCard key={session.jid} session={session} />
                   ))}
                 </div>
 
@@ -87,19 +87,19 @@ export function MonitorPage() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border">
-                      {status.groups.map((group) => (
-                        <tr key={group.jid} className="hover:bg-muted/50">
+                      {status.sessions.map((session) => (
+                        <tr key={session.jid} className="hover:bg-muted/50">
                           <td className="px-4 py-3 text-sm font-medium text-foreground">
-                            {group.session_id || group.jid}
+                            {session.session_id || session.jid}
                           </td>
                           <td className="px-4 py-3 text-sm text-slate-600">
-                            {group.runner_id || '-'}
+                            {session.runner_id || '-'}
                           </td>
                           <td className="px-4 py-3 text-sm text-slate-600">
-                            {group.pendingTasks} 个任务 / {group.pendingMessages ? '有新消息' : '无新消息'}
+                            {session.pendingTasks} 个任务 / {session.pendingMessages ? '有新消息' : '无新消息'}
                           </td>
                           <td className="px-4 py-3 text-sm">
-                            {group.active ? (
+                            {session.active ? (
                               <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-600">
                                 运行中
                               </span>
@@ -110,7 +110,7 @@ export function MonitorPage() {
                             )}
                           </td>
                           <td className="px-4 py-3 text-sm text-slate-600 font-mono text-xs">
-                            {group.runtime_identifier || '-'}
+                            {session.runtime_identifier || '-'}
                           </td>
                         </tr>
                       ))}

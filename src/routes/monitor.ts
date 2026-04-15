@@ -201,8 +201,8 @@ monitorRoutes.get('/status', authMiddleware, async (c) => {
   const defaultRunnerId = getDefaultRunnerId();
   const queueStatus = deps.queue.getRuntimeStatus();
 
-  // 监控页面属于系统管理功能，admin 可见所有群组状态（不受工作区隔离约束）
-  const filteredGroups = isAdmin
+  // 监控页面属于系统管理功能，admin 可见所有会话 runtime 状态
+  const visibleRuntimes = isAdmin
     ? queueStatus.groups
     : queueStatus.groups.filter((g) => {
         const resolved = resolveRuntimeAccess(g.jid);
@@ -215,12 +215,11 @@ monitorRoutes.get('/status', authMiddleware, async (c) => {
         );
       });
 
-  const runtimeSessions = filteredGroups.map((runtime) => {
+  const runtimeSessions = visibleRuntimes.map((runtime) => {
     const resolved = resolveRuntimeAccess(runtime.jid);
     return {
       ...runtime,
       jid: resolved?.accessJid || runtime.jid,
-      runtime_jid: runtime.jid,
       session_id: resolved?.sessionId || null,
       runner_id: resolved?.runnerId || defaultRunnerId,
       runtime_identifier: normalizeRuntimeLabel(runtime.runtimeIdentifier),
@@ -228,11 +227,11 @@ monitorRoutes.get('/status', authMiddleware, async (c) => {
     };
   });
 
-  // For non-admin users, derive aggregate metrics from their own filtered groups only
+  // For non-admin users, derive aggregate metrics from their own visible runtimes only
   // to prevent leaking global system load information across users.
   const activeRuntimes = isAdmin
     ? queueStatus.activeCount
-    : filteredGroups.filter((g) => g.active).length;
+    : visibleRuntimes.filter((g) => g.active).length;
   const queueLength = isAdmin
     ? queueStatus.waitingCount
     : queueStatus.waitingGroupJids.filter((jid) => {
@@ -251,7 +250,6 @@ monitorRoutes.get('/status', authMiddleware, async (c) => {
     maxConcurrentRuntimes: getSystemSettings().maxConcurrentRuntimes,
     queueLength,
     uptime: Math.floor(process.uptime()),
-    groups: runtimeSessions,
     sessions: runtimeSessions,
     claudeCodeVersion: isAdmin ? await getClaudeCodeVersion() : undefined,
   });
