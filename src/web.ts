@@ -1075,15 +1075,15 @@ function isHostGroupJid(chatJid: string): boolean {
 
 /**
  * Normalize chatJid for WebSocket broadcasts.
- * IM groups (Feishu/Telegram) that share a folder with an is_home group are mapped
- * to that home group's web JID so the frontend can match all home-session events.
+ * IM channels that share a folder are mapped to that folder's web session JID
+ * so the frontend sees a single event stream per Session workspace.
  */
 function normalizeHomeJid(chatJid: string): string {
   if (chatJid.startsWith('web:')) return chatJid;
   const group = getRegisteredGroup(chatJid);
   if (!group) return chatJid;
 
-  // Find the web: JID that shares this folder (typically the is_home group)
+  // Find the web: JID that represents this folder in the Session UI.
   const jids = getJidsByFolder(group.folder);
   for (const jid of jids) {
     if (jid.startsWith('web:')) {

@@ -251,7 +251,7 @@ make start
 
 当前配置入口仍位于个人设置页，但在单用户部署里它实际对应这一个本地操作者的飞书 Bot。
 
-> **群聊 Mention 控制**：默认群聊中需要 @机器人 才会响应。可通过 `/require_mention false` 命令切换为全量响应（需要 `im:message.group_msg` 权限）。
+> **群聊 Mention 控制**：新接入的群聊默认继承 `activation_mode=auto` 与 `require_mention=false`，也就是在具备 `im:message.group_msg` 权限时会处理群内普通消息。可通过 `/require_mention true` 切换为仅响应 @机器人。
 
 
 ### 配置 Telegram 集成

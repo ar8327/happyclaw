@@ -46,7 +46,11 @@
 1. 文档是否又把兼容对象写成正式模型
 2. 新增 API 是否重新引入 `group`、`home`、`created_by`、`llm_provider` 之类旧字段
 3. 真实 HTTP 链路是否仍能覆盖会话创建、改名、删除、消息发送、任务调度和 memory 状态查询
-|------|---------|
+
+## 关键代码位置
+
+| 范围 | 位置 |
+|------|------|
 | Schema & migration | `src/db.ts` |
 | Session API | `src/routes/sessions.ts` |
 | Auth / 多租户 | `src/routes/auth.ts`, `src/auth.ts`, `src/billing.ts` |
