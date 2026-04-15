@@ -382,7 +382,7 @@ export async function exportTranscriptsForUser(
     }
 
     // Collect all messages from all associated chatJids, including virtual
-    // conversation-agent channels that are not registered_groups rows.
+    // conversation-agent channels that are not persisted in session_channels.
     const allMessages: TranscriptMessage[] = [];
     for (const jid of transcriptChatJids) {
       const cursor = wrapups[jid] || defaultCursor;

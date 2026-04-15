@@ -4584,7 +4584,7 @@ function buildOnNewChat(
           if (targetJid && targetJid !== `web:${homeFolder}`) {
             const targetGroup = registeredGroups[targetJid] ?? getRegisteredGroup(targetJid);
             if (targetGroup && (!targetGroup.name || targetGroup.name === '飞书群聊')) {
-              // Update the workspace projection name kept in registered_groups.
+              // Update the workspace channel projection name kept in session_channels.
               targetGroup.name = chatName;
               setRegisteredGroup(targetJid, targetGroup);
               // Update chats table name (used by some UI paths)

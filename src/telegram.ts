@@ -26,7 +26,7 @@ export interface TelegramConnectOpts {
   onReady?: () => void;
   /** 收到消息后调用，让调用方自动注册未知的 Telegram 聊天 */
   onNewChat: (jid: string, name: string, chatType?: 'p2p' | 'group') => void;
-  /** 检查聊天是否已注册（已在 registered_groups 中） */
+  /** 检查聊天是否已注册到当前 Session 渠道映射中 */
   isChatAuthorized: (jid: string) => boolean;
   /** 配对尝试回调：验证码并注册聊天，返回是否成功 */
   onPairAttempt?: (

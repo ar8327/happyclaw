@@ -48,6 +48,24 @@ const MAIN_SESSION_ID_PREFIX = 'main:';
 const WORKER_SESSION_ID_PREFIX = 'worker:';
 const MEMORY_SESSION_ID_PREFIX = 'memory:';
 
+type SessionChannelRow = {
+  jid: string;
+  session_id: string;
+  name: string;
+  created_at: string;
+  container_config: string | null;
+  custom_cwd: string | null;
+  init_source_path: string | null;
+  init_git_url: string | null;
+  selected_skills: string | null;
+  mcp_mode: string | null;
+  selected_mcps: string | null;
+  model: string | null;
+  thinking_effort: string | null;
+  context_compression: string | null;
+  knowledge_extraction: number | null;
+};
+
 function tableExists(tableName: string): boolean {
   const row = db
     .prepare(
@@ -75,26 +93,35 @@ function ensureColumn(
   );
 }
 
+function resolveFolderFromSessionId(sessionId: string): string {
+  if (sessionId.startsWith(MAIN_SESSION_ID_PREFIX)) {
+    return sessionId.slice(MAIN_SESSION_ID_PREFIX.length);
+  }
+  const session = getSessionRecord(sessionId);
+  if (session?.parent_session_id?.startsWith(MAIN_SESSION_ID_PREFIX)) {
+    return session.parent_session_id.slice(MAIN_SESSION_ID_PREFIX.length);
+  }
+  if (session) {
+    return path.basename(session.cwd);
+  }
+  return '';
+}
+
 function resolveLegacyMainSessionId(targetMainJid: string): string | null {
   const trimmed = targetMainJid.trim();
   if (!trimmed) return null;
   if (trimmed.startsWith(MAIN_SESSION_ID_PREFIX)) return trimmed;
 
   const direct = db
-    .prepare('SELECT folder FROM registered_groups WHERE jid = ? LIMIT 1')
-    .get(trimmed) as { folder: string } | undefined;
-  if (direct?.folder) return buildMainSessionId(direct.folder);
+    .prepare('SELECT session_id FROM session_channels WHERE jid = ? LIMIT 1')
+    .get(trimmed) as { session_id: string } | undefined;
+  if (direct?.session_id) return direct.session_id;
 
   if (!trimmed.startsWith('web:')) return null;
   const folder = trimmed.slice(4).trim();
   if (!folder) return null;
 
-  const resolved = db
-    .prepare(
-      "SELECT folder FROM registered_groups WHERE folder = ? AND jid LIKE 'web:%' LIMIT 1",
-    )
-    .get(folder) as { folder: string } | undefined;
-  return buildMainSessionId(resolved?.folder || folder);
+  return buildMainSessionId(folder);
 }
 
 function migrateLegacyRegisteredGroupBindings(): void {
@@ -181,55 +208,6 @@ function migrateLegacyRegisteredGroupBindings(): void {
   });
 
   tx();
-}
-
-function dropLegacyRegisteredGroupBindingColumns(): void {
-  if (
-    !hasColumn('registered_groups', 'reply_policy')
-    && !hasColumn('registered_groups', 'require_mention')
-    && !hasColumn('registered_groups', 'activation_mode')
-    && !hasColumn('registered_groups', 'target_agent_id')
-    && !hasColumn('registered_groups', 'target_main_jid')
-  ) {
-    return;
-  }
-
-  db.transaction(() => {
-    db.exec(`
-      CREATE TABLE registered_groups_new (
-        jid TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        folder TEXT NOT NULL,
-        added_at TEXT NOT NULL,
-        container_config TEXT,
-        custom_cwd TEXT,
-        init_source_path TEXT,
-        init_git_url TEXT,
-        created_by TEXT,
-        selected_skills TEXT,
-        mcp_mode TEXT DEFAULT 'inherit',
-        selected_mcps TEXT,
-        model TEXT,
-        thinking_effort TEXT,
-        context_compression TEXT DEFAULT 'off',
-        knowledge_extraction INTEGER DEFAULT 0
-      );
-      INSERT INTO registered_groups_new (
-        jid, name, folder, added_at, container_config, custom_cwd,
-        init_source_path, init_git_url, created_by, selected_skills,
-        mcp_mode, selected_mcps, model, thinking_effort, context_compression,
-        knowledge_extraction
-      )
-      SELECT
-        jid, name, folder, added_at, container_config, custom_cwd,
-        init_source_path, init_git_url, created_by, selected_skills,
-        mcp_mode, selected_mcps, model, thinking_effort, context_compression,
-        knowledge_extraction
-      FROM registered_groups;
-      DROP TABLE registered_groups;
-      ALTER TABLE registered_groups_new RENAME TO registered_groups;
-    `);
-  })();
 }
 
 function backfillLegacyGroupOwnersIntoSessions(): void {
@@ -325,89 +303,117 @@ function backfillLegacyGroupOwnersIntoSessions(): void {
   }
 }
 
-function dropLegacyRegisteredGroupCompatibilityColumns(): void {
-  if (
-    !hasColumn('registered_groups', 'created_by')
-    && !hasColumn('registered_groups', 'is_home')
-  ) {
-    return;
-  }
+function migrateRegisteredGroupsToSessionChannels(): void {
+  if (!tableExists('registered_groups')) return;
 
-  db.transaction(() => {
-    db.exec(`
-      CREATE TABLE registered_groups_new (
-        jid TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        folder TEXT NOT NULL,
-        added_at TEXT NOT NULL,
-        container_config TEXT,
-        custom_cwd TEXT,
-        init_source_path TEXT,
-        init_git_url TEXT,
-        selected_skills TEXT,
-        mcp_mode TEXT DEFAULT 'inherit',
-        selected_mcps TEXT,
-        model TEXT,
-        thinking_effort TEXT,
-        context_compression TEXT DEFAULT 'off',
-        knowledge_extraction INTEGER DEFAULT 0
+  const hasCustomCwd = hasColumn('registered_groups', 'custom_cwd');
+  const hasInitSourcePath = hasColumn('registered_groups', 'init_source_path');
+  const hasInitGitUrl = hasColumn('registered_groups', 'init_git_url');
+  const hasSelectedSkills = hasColumn('registered_groups', 'selected_skills');
+  const hasMcpMode = hasColumn('registered_groups', 'mcp_mode');
+  const hasSelectedMcps = hasColumn('registered_groups', 'selected_mcps');
+  const hasModel = hasColumn('registered_groups', 'model');
+  const hasThinkingEffort = hasColumn('registered_groups', 'thinking_effort');
+  const hasContextCompression = hasColumn(
+    'registered_groups',
+    'context_compression',
+  );
+  const hasKnowledgeExtraction = hasColumn(
+    'registered_groups',
+    'knowledge_extraction',
+  );
+
+  const rows = db
+    .prepare(
+      `SELECT jid, name, folder, added_at, container_config${
+        hasCustomCwd ? ', custom_cwd' : ', NULL AS custom_cwd'
+      }${
+        hasInitSourcePath ? ', init_source_path' : ', NULL AS init_source_path'
+      }${
+        hasInitGitUrl ? ', init_git_url' : ', NULL AS init_git_url'
+      }${
+        hasSelectedSkills ? ', selected_skills' : ', NULL AS selected_skills'
+      }${hasMcpMode ? ', mcp_mode' : ", 'inherit' AS mcp_mode"}${
+        hasSelectedMcps ? ', selected_mcps' : ', NULL AS selected_mcps'
+      }${hasModel ? ', model' : ', NULL AS model'}${
+        hasThinkingEffort ? ', thinking_effort' : ', NULL AS thinking_effort'
+      }${
+        hasContextCompression
+          ? ', context_compression'
+          : ", 'off' AS context_compression"
+      }${
+        hasKnowledgeExtraction
+          ? ', knowledge_extraction'
+          : ', 0 AS knowledge_extraction'
+      }
+       FROM registered_groups`,
+    )
+    .all() as Array<{
+      jid: string;
+      name: string;
+      folder: string;
+      added_at: string;
+      container_config: string | null;
+      custom_cwd: string | null;
+      init_source_path: string | null;
+      init_git_url: string | null;
+      selected_skills: string | null;
+      mcp_mode: string | null;
+      selected_mcps: string | null;
+      model: string | null;
+      thinking_effort: string | null;
+      context_compression: string | null;
+      knowledge_extraction: number | null;
+    }>;
+
+  const tx = db.transaction(() => {
+    for (const row of rows) {
+      const sessionId = buildMainSessionId(row.folder);
+      db.prepare(
+        `INSERT INTO session_channels (
+          jid, session_id, name, created_at, container_config, custom_cwd,
+          init_source_path, init_git_url, selected_skills, mcp_mode,
+          selected_mcps, model, thinking_effort, context_compression,
+          knowledge_extraction
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(jid) DO UPDATE SET
+          session_id = excluded.session_id,
+          name = excluded.name,
+          created_at = excluded.created_at,
+          container_config = excluded.container_config,
+          custom_cwd = excluded.custom_cwd,
+          init_source_path = excluded.init_source_path,
+          init_git_url = excluded.init_git_url,
+          selected_skills = excluded.selected_skills,
+          mcp_mode = excluded.mcp_mode,
+          selected_mcps = excluded.selected_mcps,
+          model = excluded.model,
+          thinking_effort = excluded.thinking_effort,
+          context_compression = excluded.context_compression,
+          knowledge_extraction = excluded.knowledge_extraction`,
+      ).run(
+        row.jid,
+        sessionId,
+        row.name,
+        row.added_at,
+        row.container_config,
+        row.custom_cwd,
+        row.init_source_path,
+        row.init_git_url,
+        row.selected_skills,
+        row.mcp_mode || 'inherit',
+        row.selected_mcps,
+        row.model,
+        row.thinking_effort,
+        row.context_compression || 'off',
+        row.knowledge_extraction ?? 0,
       );
-      INSERT INTO registered_groups_new (
-        jid, name, folder, added_at, container_config, custom_cwd,
-        init_source_path, init_git_url, selected_skills,
-        mcp_mode, selected_mcps, model, thinking_effort,
-        context_compression, knowledge_extraction
-      )
-      SELECT
-        jid, name, folder, added_at, container_config, custom_cwd,
-        init_source_path, init_git_url, selected_skills,
-        mcp_mode, selected_mcps, model, thinking_effort,
-        context_compression, knowledge_extraction
-      FROM registered_groups;
-      DROP TABLE registered_groups;
-      ALTER TABLE registered_groups_new RENAME TO registered_groups;
-    `);
-  })();
-}
+    }
 
-function dropLegacyRegisteredGroupRunnerColumn(): void {
-  if (!hasColumn('registered_groups', 'llm_provider')) return;
+    db.exec('DROP TABLE registered_groups');
+  });
 
-  db.transaction(() => {
-    db.exec(`
-      CREATE TABLE registered_groups_new (
-        jid TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        folder TEXT NOT NULL,
-        added_at TEXT NOT NULL,
-        container_config TEXT,
-        custom_cwd TEXT,
-        init_source_path TEXT,
-        init_git_url TEXT,
-        selected_skills TEXT,
-        mcp_mode TEXT DEFAULT 'inherit',
-        selected_mcps TEXT,
-        model TEXT,
-        thinking_effort TEXT,
-        context_compression TEXT DEFAULT 'off',
-        knowledge_extraction INTEGER DEFAULT 0
-      );
-      INSERT INTO registered_groups_new (
-        jid, name, folder, added_at, container_config, custom_cwd,
-        init_source_path, init_git_url, selected_skills,
-        mcp_mode, selected_mcps, model, thinking_effort,
-        context_compression, knowledge_extraction
-      )
-      SELECT
-        jid, name, folder, added_at, container_config, custom_cwd,
-        init_source_path, init_git_url, selected_skills,
-        mcp_mode, selected_mcps, model, thinking_effort,
-        context_compression, knowledge_extraction
-      FROM registered_groups;
-      DROP TABLE registered_groups;
-      ALTER TABLE registered_groups_new RENAME TO registered_groups;
-    `);
-  })();
+  tx();
 }
 
 function dropLegacySessionRuntimeModeColumn(): void {
@@ -655,12 +661,15 @@ export function initDatabase(): void {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
-    CREATE TABLE IF NOT EXISTS registered_groups (
+    CREATE TABLE IF NOT EXISTS session_channels (
       jid TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
       name TEXT NOT NULL,
-      folder TEXT NOT NULL,
-      added_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
       container_config TEXT,
+      custom_cwd TEXT,
+      init_source_path TEXT,
+      init_git_url TEXT,
       selected_skills TEXT,
       mcp_mode TEXT DEFAULT 'inherit',
       selected_mcps TEXT,
@@ -669,6 +678,8 @@ export function initDatabase(): void {
       context_compression TEXT DEFAULT 'off',
       knowledge_extraction INTEGER DEFAULT 0
     );
+    CREATE INDEX IF NOT EXISTS idx_session_channels_session
+      ON session_channels(session_id);
   `);
 
   // Auth tables
@@ -823,6 +834,9 @@ export function initDatabase(): void {
   `);
 
   dropLegacySessionRuntimeModeColumn();
+  migrateLegacyRegisteredGroupBindings();
+  backfillLegacyGroupOwnersIntoSessions();
+  migrateRegisteredGroupsToSessionChannels();
 
   // Lightweight migrations for existing DBs
   ensureColumn('users', 'permissions', "TEXT NOT NULL DEFAULT '[]'");
@@ -832,9 +846,6 @@ export function initDatabase(): void {
   ensureColumn('users', 'deleted_at', 'TEXT');
   ensureColumn('users', 'avatar_emoji', 'TEXT');
   ensureColumn('users', 'avatar_color', 'TEXT');
-  ensureColumn('registered_groups', 'custom_cwd', 'TEXT');
-  ensureColumn('registered_groups', 'init_source_path', 'TEXT');
-  ensureColumn('registered_groups', 'init_git_url', 'TEXT');
   ensureColumn('messages', 'attachments', 'TEXT');
   ensureColumn('messages', 'source_jid', 'TEXT');
   ensureColumn('users', 'ai_name', 'TEXT');
@@ -845,13 +856,16 @@ export function initDatabase(): void {
   ensureColumn('scheduled_tasks', 'session_id', 'TEXT');
   ensureColumn('scheduled_tasks', 'execution_type', "TEXT DEFAULT 'agent'");
   ensureColumn('scheduled_tasks', 'script_command', 'TEXT');
-  ensureColumn('registered_groups', 'selected_skills', 'TEXT');
-  ensureColumn('registered_groups', 'mcp_mode', "TEXT DEFAULT 'inherit'");
-  ensureColumn('registered_groups', 'selected_mcps', 'TEXT');
-  ensureColumn('registered_groups', 'model', 'TEXT');
-  ensureColumn('registered_groups', 'thinking_effort', 'TEXT');
-  ensureColumn('registered_groups', 'context_compression', "TEXT DEFAULT 'off'");
-  ensureColumn('registered_groups', 'knowledge_extraction', 'INTEGER DEFAULT 0');
+  ensureColumn('session_channels', 'custom_cwd', 'TEXT');
+  ensureColumn('session_channels', 'init_source_path', 'TEXT');
+  ensureColumn('session_channels', 'init_git_url', 'TEXT');
+  ensureColumn('session_channels', 'selected_skills', 'TEXT');
+  ensureColumn('session_channels', 'mcp_mode', "TEXT DEFAULT 'inherit'");
+  ensureColumn('session_channels', 'selected_mcps', 'TEXT');
+  ensureColumn('session_channels', 'model', 'TEXT');
+  ensureColumn('session_channels', 'thinking_effort', 'TEXT');
+  ensureColumn('session_channels', 'context_compression', "TEXT DEFAULT 'off'");
+  ensureColumn('session_channels', 'knowledge_extraction', 'INTEGER DEFAULT 0');
   ensureColumn('scheduled_tasks', 'model', 'TEXT');
   db.prepare(
     `UPDATE scheduled_tasks
@@ -875,101 +889,6 @@ export function initDatabase(): void {
   `);
   ensureColumn('messages', 'token_usage', 'TEXT');
 
-  // Migration: remove UNIQUE constraint from registered_groups.folder
-  // Multiple groups (web:main + feishu chats) share folder='main' by design.
-  // The old UNIQUE constraint caused INSERT OR REPLACE to silently delete
-  // the conflicting row, making web:main and feishu groups mutually exclusive.
-  const hasUniqueFolder =
-    (
-      db
-        .prepare(
-          `SELECT COUNT(*) as cnt FROM sqlite_master
-         WHERE type='index' AND tbl_name='registered_groups'
-         AND name='sqlite_autoindex_registered_groups_2'`,
-        )
-        .get() as { cnt: number }
-    ).cnt > 0;
-  if (hasUniqueFolder) {
-    db.transaction(() => {
-      db.exec(`
-        CREATE TABLE registered_groups_new (
-          jid TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          folder TEXT NOT NULL,
-          added_at TEXT NOT NULL,
-          container_config TEXT,
-          custom_cwd TEXT,
-          init_source_path TEXT,
-          init_git_url TEXT,
-          created_by TEXT,
-          selected_skills TEXT,
-          mcp_mode TEXT DEFAULT 'inherit',
-          selected_mcps TEXT,
-          model TEXT,
-          thinking_effort TEXT,
-          context_compression TEXT DEFAULT 'off',
-          knowledge_extraction INTEGER DEFAULT 0
-        );
-        INSERT INTO registered_groups_new (
-          jid, name, folder, added_at, container_config, custom_cwd,
-          init_source_path, init_git_url, created_by, selected_skills,
-          mcp_mode, selected_mcps, model, thinking_effort,
-          context_compression, knowledge_extraction
-        )
-        SELECT
-          jid, name, folder, added_at, container_config, custom_cwd,
-          NULL, NULL, NULL, NULL, 'inherit', NULL, NULL, NULL, 'off', 0
-        FROM registered_groups;
-        DROP TABLE registered_groups;
-        ALTER TABLE registered_groups_new RENAME TO registered_groups;
-      `);
-    })();
-  }
-
-  if (hasColumn('registered_groups', 'execution_mode')) {
-    db.transaction(() => {
-      db.exec(`
-        CREATE TABLE registered_groups_new (
-          jid TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          folder TEXT NOT NULL,
-          added_at TEXT NOT NULL,
-          container_config TEXT,
-          custom_cwd TEXT,
-          init_source_path TEXT,
-          init_git_url TEXT,
-          created_by TEXT,
-          selected_skills TEXT,
-          mcp_mode TEXT DEFAULT 'inherit',
-          selected_mcps TEXT,
-          model TEXT,
-          thinking_effort TEXT,
-          context_compression TEXT DEFAULT 'off',
-          knowledge_extraction INTEGER DEFAULT 0
-        );
-        INSERT INTO registered_groups_new (
-          jid, name, folder, added_at, container_config, custom_cwd,
-          init_source_path, init_git_url, created_by, selected_skills,
-          mcp_mode, selected_mcps, model, thinking_effort,
-          context_compression, knowledge_extraction
-        )
-        SELECT
-          jid, name, folder, added_at, container_config, custom_cwd,
-          init_source_path, init_git_url, created_by, selected_skills,
-          mcp_mode, selected_mcps, model, thinking_effort,
-          context_compression, knowledge_extraction
-        FROM registered_groups;
-        DROP TABLE registered_groups;
-        ALTER TABLE registered_groups_new RENAME TO registered_groups;
-      `);
-    })();
-  }
-
-  migrateLegacyRegisteredGroupBindings();
-  dropLegacyRegisteredGroupBindingColumns();
-  backfillLegacyGroupOwnersIntoSessions();
-  dropLegacyRegisteredGroupCompatibilityColumns();
-  dropLegacyRegisteredGroupRunnerColumn();
   dropLegacyUnusedAuthTables();
   dropLegacyBillingCompatibility();
   dropLegacyGroupAccessTables();
@@ -1008,12 +927,12 @@ export function initDatabase(): void {
     'model',
   ]);
   assertSchema(
-    'registered_groups',
+    'session_channels',
     [
       'jid',
+      'session_id',
       'name',
-      'folder',
-      'added_at',
+      'created_at',
       'container_config',
       'custom_cwd',
       'init_source_path',
@@ -1026,7 +945,6 @@ export function initDatabase(): void {
       'context_compression',
       'knowledge_extraction',
     ],
-    ['trigger_pattern', 'requires_trigger', 'llm_provider'],
   );
 
   assertSchema('users', [
@@ -1078,7 +996,7 @@ export function initDatabase(): void {
         SELECT
           lower(hex(randomblob(16))),
           COALESCE(ms.owner_key, 'system'),
-          COALESCE(rg.folder, m.chat_jid),
+          COALESCE(substr(sc.session_id, 6), m.chat_jid),
           m.id,
           COALESCE(jme.key, 'unknown'),
           COALESCE(json_extract(jme.value, '$.inputTokens'), 0),
@@ -1091,8 +1009,8 @@ export function initDatabase(): void {
           m.timestamp
         FROM messages m
           JOIN json_each(json_extract(m.token_usage, '$.modelUsage')) jme
-          LEFT JOIN registered_groups rg ON rg.jid = m.chat_jid
-          LEFT JOIN sessions ms ON ms.id = 'main:' || rg.folder
+          LEFT JOIN session_channels sc ON sc.jid = m.chat_jid
+          LEFT JOIN sessions ms ON ms.id = sc.session_id
         WHERE m.token_usage IS NOT NULL
           AND json_extract(m.token_usage, '$.modelUsage') IS NOT NULL
       `);
@@ -1105,7 +1023,7 @@ export function initDatabase(): void {
         SELECT
           lower(hex(randomblob(16))),
           COALESCE(ms.owner_key, 'system'),
-          COALESCE(rg.folder, m.chat_jid),
+          COALESCE(substr(sc.session_id, 6), m.chat_jid),
           m.id,
           'legacy-unknown',
           COALESCE(json_extract(m.token_usage, '$.inputTokens'), 0),
@@ -1118,8 +1036,8 @@ export function initDatabase(): void {
           'agent',
           m.timestamp
         FROM messages m
-          LEFT JOIN registered_groups rg ON rg.jid = m.chat_jid
-          LEFT JOIN sessions ms ON ms.id = 'main:' || rg.folder
+          LEFT JOIN session_channels sc ON sc.jid = m.chat_jid
+          LEFT JOIN sessions ms ON ms.id = sc.session_id
         WHERE m.token_usage IS NOT NULL
           AND (json_extract(m.token_usage, '$.modelUsage') IS NULL
                OR json_type(json_extract(m.token_usage, '$.modelUsage')) != 'object')
@@ -1214,7 +1132,7 @@ export function initDatabase(): void {
 
   syncSessionWorkbenchProjection();
 
-  const SCHEMA_VERSION = '41';
+  const SCHEMA_VERSION = '42';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -2987,43 +2905,24 @@ export function deleteSessionRuntimeState(sessionId: string): void {
   db.prepare('DELETE FROM session_state WHERE session_id = ?').run(sessionId);
 }
 
-// --- Registered group accessors ---
+// --- Session channel accessors ---
 
-/** Raw row shape from registered_groups table — single source of truth for column mapping. */
-type RegisteredGroupRow = {
-  jid: string;
-  name: string;
-  folder: string;
-  added_at: string;
-  container_config: string | null;
-  custom_cwd: string | null;
-  init_source_path: string | null;
-  init_git_url: string | null;
-  selected_skills: string | null;
-  mcp_mode: string | null;
-  selected_mcps: string | null;
-  model: string | null;
-  thinking_effort: string | null;
-  context_compression: string | null;
-  knowledge_extraction: number | null;
-};
-
-/** Convert a raw DB row into a RegisteredGroup domain object. */
 function parseGroupRow(
-  row: RegisteredGroupRow,
+  row: SessionChannelRow,
 ): RegisteredGroup & { jid: string } {
+  const folder = resolveFolderFromSessionId(row.session_id);
   const group: RegisteredGroup & { jid: string } = {
     jid: row.jid,
     name: row.name,
-    folder: row.folder,
-    added_at: row.added_at,
+    folder,
+    added_at: row.created_at,
     containerConfig: row.container_config
       ? JSON.parse(row.container_config)
       : undefined,
     customCwd: row.custom_cwd ?? undefined,
     initSourcePath: row.init_source_path ?? undefined,
     initGitUrl: row.init_git_url ?? undefined,
-    is_home: isCompatibilityHomeGroup(row.jid, row.folder),
+    is_home: isCompatibilityHomeGroup(row.jid, folder),
     selected_skills: row.selected_skills
       ? JSON.parse(row.selected_skills)
       : null,
@@ -3100,20 +2999,24 @@ export function getRegisteredGroup(
   jid: string,
 ): (RegisteredGroup & { jid: string }) | undefined {
   const row = db
-    .prepare('SELECT * FROM registered_groups WHERE jid = ?')
-    .get(jid) as RegisteredGroupRow | undefined;
+    .prepare('SELECT * FROM session_channels WHERE jid = ?')
+    .get(jid) as SessionChannelRow | undefined;
   if (!row) return undefined;
   return parseGroupRow(row);
 }
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, custom_cwd, init_source_path, init_git_url, selected_skills, mcp_mode, selected_mcps, model, thinking_effort, context_compression, knowledge_extraction)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO session_channels (
+      jid, session_id, name, created_at, container_config, custom_cwd,
+      init_source_path, init_git_url, selected_skills, mcp_mode,
+      selected_mcps, model, thinking_effort, context_compression,
+      knowledge_extraction
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
+    buildMainSessionId(group.folder),
     group.name,
-    group.folder,
     group.added_at,
     group.containerConfig ? JSON.stringify(group.containerConfig) : null,
     group.customCwd ?? null,
@@ -3163,21 +3066,22 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
 export function deleteRegisteredGroup(jid: string): void {
   deleteSessionProjectionForGroup(jid);
   db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(jid);
-  db.prepare('DELETE FROM registered_groups WHERE jid = ?').run(jid);
+  db.prepare('DELETE FROM session_channels WHERE jid = ?').run(jid);
 }
 
 /** Get all JIDs that share the same folder (e.g., all JIDs with folder='main'). */
 export function getJidsByFolder(folder: string): string[] {
+  const sessionId = buildMainSessionId(folder);
   const rows = db
-    .prepare('SELECT jid FROM registered_groups WHERE folder = ?')
-    .all(folder) as Array<{ jid: string }>;
+    .prepare('SELECT jid FROM session_channels WHERE session_id = ?')
+    .all(sessionId) as Array<{ jid: string }>;
   return rows.map((r) => r.jid);
 }
 
 export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
   const rows = db
-    .prepare('SELECT * FROM registered_groups')
-    .all() as RegisteredGroupRow[];
+    .prepare('SELECT * FROM session_channels')
+    .all() as SessionChannelRow[];
   const result: Record<string, RegisteredGroup> = {};
   for (const row of rows) {
     result[row.jid] = parseGroupRow(row);
@@ -3320,12 +3224,12 @@ export function getGroupsByTargetAgent(
   const sessionId = buildWorkerSessionId(agentId);
   const rows = db
     .prepare(
-      `SELECT rg.*
+      `SELECT sc.*
        FROM session_bindings sb
-       JOIN registered_groups rg ON rg.jid = sb.channel_jid
+       JOIN session_channels sc ON sc.jid = sb.channel_jid
        WHERE sb.session_id = ?`,
     )
-    .all(sessionId) as RegisteredGroupRow[];
+    .all(sessionId) as SessionChannelRow[];
   return rows.map((row) => ({ jid: row.jid, group: parseGroupRow(row) }));
 }
 
@@ -3335,17 +3239,18 @@ export function getGroupsByTargetAgent(
 export function getGroupsByTargetMainJid(
   webJid: string,
 ): Array<{ jid: string; group: RegisteredGroup }> {
-  const targetGroup = getRegisteredGroup(webJid);
-  if (!targetGroup) return [];
-  const sessionId = buildMainSessionId(targetGroup.folder);
+  const targetChannel = db
+    .prepare('SELECT session_id FROM session_channels WHERE jid = ?')
+    .get(webJid) as { session_id: string } | undefined;
+  if (!targetChannel?.session_id) return [];
   const rows = db
     .prepare(
-      `SELECT rg.*
+      `SELECT sc.*
        FROM session_bindings sb
-       JOIN registered_groups rg ON rg.jid = sb.channel_jid
+       JOIN session_channels sc ON sc.jid = sb.channel_jid
        WHERE sb.session_id = ?`,
     )
-    .all(sessionId) as RegisteredGroupRow[];
+    .all(targetChannel.session_id) as SessionChannelRow[];
   return rows.map((row) => ({ jid: row.jid, group: parseGroupRow(row) }));
 }
 
@@ -3360,9 +3265,9 @@ export function getHomeGroupByFolder(
   if (!session || session.kind !== 'main') return undefined;
   const row = db
     .prepare(
-      "SELECT * FROM registered_groups WHERE folder = ? AND jid LIKE 'web:%' LIMIT 1",
+      "SELECT * FROM session_channels WHERE session_id = ? AND jid LIKE 'web:%' LIMIT 1",
     )
-    .get(folder) as RegisteredGroupRow | undefined;
+    .get(buildMainSessionId(folder)) as SessionChannelRow | undefined;
   if (!row) return undefined;
   return parseGroupRow(row);
 }
@@ -3532,7 +3437,7 @@ export function deleteGroupData(jid: string, folder: string): void {
       folder,
     );
     // 2. 删除注册信息
-    db.prepare('DELETE FROM registered_groups WHERE jid = ?').run(jid);
+    db.prepare('DELETE FROM session_channels WHERE jid = ?').run(jid);
     // 3. 删除会话
     deleteAllSessionsForFolder(folder);
     db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(jid);
