@@ -220,7 +220,6 @@ function dropLegacyRegisteredGroupBindingColumns(): void {
         init_source_path TEXT,
         init_git_url TEXT,
         created_by TEXT,
-        is_home INTEGER DEFAULT 0,
         selected_skills TEXT,
         mcp_mode TEXT DEFAULT 'inherit',
         selected_mcps TEXT,
@@ -232,15 +231,120 @@ function dropLegacyRegisteredGroupBindingColumns(): void {
       );
       INSERT INTO registered_groups_new (
         jid, name, folder, added_at, container_config, custom_cwd,
-        init_source_path, init_git_url, created_by, is_home, selected_skills,
+        init_source_path, init_git_url, created_by, selected_skills,
         mcp_mode, selected_mcps, llm_provider, model, thinking_effort, context_compression,
         knowledge_extraction
       )
       SELECT
         jid, name, folder, added_at, container_config, custom_cwd,
-        init_source_path, init_git_url, created_by, is_home, selected_skills,
+        init_source_path, init_git_url, created_by, selected_skills,
         mcp_mode, selected_mcps, llm_provider, model, thinking_effort, context_compression,
         knowledge_extraction
+      FROM registered_groups;
+      DROP TABLE registered_groups;
+      ALTER TABLE registered_groups_new RENAME TO registered_groups;
+    `);
+  })();
+}
+
+function migrateLegacyHomeGroupKinds(): void {
+  if (!hasColumn('registered_groups', 'is_home')) return;
+
+  const rows = db
+    .prepare(`
+      SELECT jid, name, folder, added_at, container_config, custom_cwd,
+             init_source_path, init_git_url, created_by, selected_skills,
+             mcp_mode, selected_mcps, llm_provider, model, thinking_effort,
+             context_compression, knowledge_extraction
+      FROM registered_groups
+      WHERE jid LIKE 'web:%' AND is_home = 1
+    `)
+    .all() as Array<Record<string, unknown>>;
+
+  for (const row of rows) {
+    ensureSessionRecordFromGroup(String(row.jid), {
+      name: String(row.name),
+      folder: String(row.folder),
+      added_at: String(row.added_at),
+      containerConfig:
+        typeof row.container_config === 'string'
+          ? JSON.parse(row.container_config)
+          : undefined,
+      customCwd:
+        typeof row.custom_cwd === 'string' ? row.custom_cwd : undefined,
+      initSourcePath:
+        typeof row.init_source_path === 'string'
+          ? row.init_source_path
+          : undefined,
+      initGitUrl:
+        typeof row.init_git_url === 'string' ? row.init_git_url : undefined,
+      created_by:
+        typeof row.created_by === 'string' ? row.created_by : undefined,
+      is_home: true,
+      selected_skills:
+        typeof row.selected_skills === 'string'
+          ? JSON.parse(row.selected_skills)
+          : null,
+      mcp_mode: row.mcp_mode === 'custom' ? 'custom' : 'inherit',
+      selected_mcps:
+        typeof row.selected_mcps === 'string'
+          ? JSON.parse(row.selected_mcps)
+          : null,
+      llm_provider:
+        row.llm_provider === 'openai'
+          ? 'openai'
+          : row.llm_provider === 'claude'
+            ? 'claude'
+            : undefined,
+      model: typeof row.model === 'string' ? row.model : undefined,
+      thinking_effort: parseThinkingEffort(
+        typeof row.thinking_effort === 'string' ? row.thinking_effort : null,
+      ),
+      context_compression: parseCompressionMode(
+        typeof row.context_compression === 'string'
+          ? row.context_compression
+          : null,
+      ),
+      knowledge_extraction: Number(row.knowledge_extraction || 0) === 1,
+    });
+  }
+}
+
+function dropLegacyRegisteredGroupHomeColumn(): void {
+  if (!hasColumn('registered_groups', 'is_home')) return;
+
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE registered_groups_new (
+        jid TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        folder TEXT NOT NULL,
+        added_at TEXT NOT NULL,
+        container_config TEXT,
+        custom_cwd TEXT,
+        init_source_path TEXT,
+        init_git_url TEXT,
+        created_by TEXT,
+        selected_skills TEXT,
+        mcp_mode TEXT DEFAULT 'inherit',
+        selected_mcps TEXT,
+        llm_provider TEXT DEFAULT 'claude',
+        model TEXT,
+        thinking_effort TEXT,
+        context_compression TEXT DEFAULT 'off',
+        knowledge_extraction INTEGER DEFAULT 0
+      );
+      INSERT INTO registered_groups_new (
+        jid, name, folder, added_at, container_config, custom_cwd,
+        init_source_path, init_git_url, created_by, selected_skills,
+        mcp_mode, selected_mcps, llm_provider, model, thinking_effort,
+        context_compression, knowledge_extraction
+      )
+      SELECT
+        jid, name, folder, added_at, container_config, custom_cwd,
+        init_source_path, init_git_url, created_by, selected_skills,
+        mcp_mode, selected_mcps, llm_provider, model, thinking_effort,
+        context_compression, knowledge_extraction
       FROM registered_groups;
       DROP TABLE registered_groups;
       ALTER TABLE registered_groups_new RENAME TO registered_groups;
@@ -421,7 +525,14 @@ export function initDatabase(): void {
       added_at TEXT NOT NULL,
       container_config TEXT,
       created_by TEXT,
-      is_home INTEGER DEFAULT 0
+      selected_skills TEXT,
+      mcp_mode TEXT DEFAULT 'inherit',
+      selected_mcps TEXT,
+      llm_provider TEXT DEFAULT 'claude',
+      model TEXT,
+      thinking_effort TEXT,
+      context_compression TEXT DEFAULT 'off',
+      knowledge_extraction INTEGER DEFAULT 0
     );
   `);
 
@@ -805,7 +916,6 @@ export function initDatabase(): void {
   ensureColumn('messages', 'attachments', 'TEXT');
   ensureColumn('messages', 'source_jid', 'TEXT');
   ensureColumn('registered_groups', 'created_by', 'TEXT');
-  ensureColumn('registered_groups', 'is_home', 'INTEGER DEFAULT 0');
   ensureColumn('users', 'ai_name', 'TEXT');
   ensureColumn('users', 'ai_avatar_emoji', 'TEXT');
   ensureColumn('users', 'ai_avatar_color', 'TEXT');
@@ -872,9 +982,25 @@ export function initDatabase(): void {
           init_source_path TEXT,
           init_git_url TEXT,
           created_by TEXT,
-          is_home INTEGER DEFAULT 0
+          selected_skills TEXT,
+          mcp_mode TEXT DEFAULT 'inherit',
+          selected_mcps TEXT,
+          llm_provider TEXT DEFAULT 'claude',
+          model TEXT,
+          thinking_effort TEXT,
+          context_compression TEXT DEFAULT 'off',
+          knowledge_extraction INTEGER DEFAULT 0
         );
-        INSERT INTO registered_groups_new SELECT jid, name, folder, added_at, container_config, custom_cwd, NULL, NULL, NULL, 0 FROM registered_groups;
+        INSERT INTO registered_groups_new (
+          jid, name, folder, added_at, container_config, custom_cwd,
+          init_source_path, init_git_url, created_by, selected_skills,
+          mcp_mode, selected_mcps, llm_provider, model, thinking_effort,
+          context_compression, knowledge_extraction
+        )
+        SELECT
+          jid, name, folder, added_at, container_config, custom_cwd,
+          NULL, NULL, NULL, NULL, 'inherit', NULL, 'claude', NULL, NULL, 'off', 0
+        FROM registered_groups;
         DROP TABLE registered_groups;
         ALTER TABLE registered_groups_new RENAME TO registered_groups;
       `);
@@ -894,7 +1020,6 @@ export function initDatabase(): void {
           init_source_path TEXT,
           init_git_url TEXT,
           created_by TEXT,
-          is_home INTEGER DEFAULT 0,
           selected_skills TEXT,
           mcp_mode TEXT DEFAULT 'inherit',
           selected_mcps TEXT,
@@ -906,13 +1031,13 @@ export function initDatabase(): void {
         );
         INSERT INTO registered_groups_new (
           jid, name, folder, added_at, container_config, custom_cwd,
-          init_source_path, init_git_url, created_by, is_home, selected_skills,
+          init_source_path, init_git_url, created_by, selected_skills,
           mcp_mode, selected_mcps, llm_provider, model, thinking_effort,
           context_compression, knowledge_extraction
         )
         SELECT
           jid, name, folder, added_at, container_config, custom_cwd,
-          init_source_path, init_git_url, created_by, is_home, selected_skills,
+          init_source_path, init_git_url, created_by, selected_skills,
           mcp_mode, selected_mcps, llm_provider, model, thinking_effort,
           context_compression, knowledge_extraction
         FROM registered_groups;
@@ -924,6 +1049,8 @@ export function initDatabase(): void {
 
   migrateLegacyRegisteredGroupBindings();
   dropLegacyRegisteredGroupBindingColumns();
+  migrateLegacyHomeGroupKinds();
+  dropLegacyRegisteredGroupHomeColumn();
 
   // v19→v20 migration: add token_usage column to messages
   ensureColumn('messages', 'token_usage', 'TEXT');
@@ -970,7 +1097,6 @@ export function initDatabase(): void {
       'init_source_path',
       'init_git_url',
       'created_by',
-      'is_home',
       'selected_skills',
       'mcp_mode',
       'selected_mcps',
@@ -1070,12 +1196,6 @@ export function initDatabase(): void {
         WHERE rg3.folder = registered_groups.folder
           AND rg3.created_by IS NOT NULL
       ) = 1
-  `);
-
-  // v13 migration: mark existing web:main group as is_home=1
-  db.exec(`
-    UPDATE registered_groups SET is_home = 1
-    WHERE jid = 'web:main' AND folder = 'main' AND is_home = 0
   `);
 
   // v15 migration: backfill group_members for existing web groups
@@ -1383,7 +1503,7 @@ export function initDatabase(): void {
 
   syncSessionWorkbenchProjection();
 
-  const SCHEMA_VERSION = '35';
+  const SCHEMA_VERSION = '36';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -2640,6 +2760,11 @@ function deriveSessionKind(group: RegisteredGroup): SessionKind {
   return 'workspace';
 }
 
+function isCompatibilityHomeGroup(jid: string, folder: string): boolean {
+  if (!jid.startsWith('web:')) return false;
+  return getSessionRecord(buildMainSessionId(folder))?.kind === 'main';
+}
+
 function deriveSessionCwd(group: RegisteredGroup): string {
   if (group.customCwd && path.isAbsolute(group.customCwd)) return group.customCwd;
   return path.join(GROUPS_DIR, group.folder);
@@ -3185,7 +3310,6 @@ type RegisteredGroupRow = {
   init_source_path: string | null;
   init_git_url: string | null;
   created_by: string | null;
-  is_home: number;
   selected_skills: string | null;
   mcp_mode: string | null;
   selected_mcps: string | null;
@@ -3212,7 +3336,7 @@ function parseGroupRow(
     initSourcePath: row.init_source_path ?? undefined,
     initGitUrl: row.init_git_url ?? undefined,
     created_by: row.created_by ?? undefined,
-    is_home: row.is_home === 1,
+    is_home: isCompatibilityHomeGroup(row.jid, row.folder),
     selected_skills: row.selected_skills
       ? JSON.parse(row.selected_skills)
       : null,
@@ -3280,8 +3404,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, mcp_mode, selected_mcps, llm_provider, model, thinking_effort, context_compression, knowledge_extraction)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, custom_cwd, init_source_path, init_git_url, created_by, selected_skills, mcp_mode, selected_mcps, llm_provider, model, thinking_effort, context_compression, knowledge_extraction)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -3292,7 +3416,6 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.initSourcePath ?? null,
     group.initGitUrl ?? null,
     group.created_by ?? null,
-    group.is_home ? 1 : 0,
     group.selected_skills ? JSON.stringify(group.selected_skills) : null,
     group.mcp_mode ?? 'inherit',
     group.selected_mcps ? JSON.stringify(group.selected_mcps) : null,
@@ -3525,9 +3648,11 @@ export function getGroupsByTargetMainJid(
 export function getHomeGroupByFolder(
   folder: string,
 ): (RegisteredGroup & { jid: string }) | undefined {
+  const session = getSessionRecord(buildMainSessionId(folder));
+  if (!session || session.kind !== 'main') return undefined;
   const row = db
     .prepare(
-      'SELECT * FROM registered_groups WHERE folder = ? AND is_home = 1 LIMIT 1',
+      "SELECT * FROM registered_groups WHERE folder = ? AND jid LIKE 'web:%' LIMIT 1",
     )
     .get(folder) as RegisteredGroupRow | undefined;
   if (!row) return undefined;
@@ -3542,30 +3667,29 @@ export function getHomeGroupByFolder(
 export function getUserHomeGroup(
   userId: string,
 ): (RegisteredGroup & { jid: string }) | undefined {
-  // First try exact match: is_home=1 AND created_by=userId
-  let row = db
+  const session = db
     .prepare(
-      'SELECT * FROM registered_groups WHERE is_home = 1 AND created_by = ?',
+      `SELECT * FROM sessions
+       WHERE kind = 'main' AND owner_key = ?
+       ORDER BY updated_at DESC, id ASC
+       LIMIT 1`,
     )
-    .get(userId) as RegisteredGroupRow | undefined;
-
-  // Fallback for admin users: all admins share web:main (folder=main).
-  // If no exact match, check if the user is an admin and web:main exists.
-  if (!row) {
-    const user = db
-      .prepare("SELECT role FROM users WHERE id = ? AND status = 'active'")
-      .get(userId) as { role: string } | undefined;
-    if (user?.role === 'admin') {
-      row = db
-        .prepare(
-          "SELECT * FROM registered_groups WHERE jid = 'web:main' AND is_home = 1",
-        )
-        .get() as RegisteredGroupRow | undefined;
+    .get(userId) as Record<string, unknown> | undefined;
+  if (session) {
+    const parsed = parseSessionRecord(session);
+    const folder = parsed.id.startsWith(MAIN_SESSION_ID_PREFIX)
+      ? parsed.id.slice(MAIN_SESSION_ID_PREFIX.length)
+      : null;
+    if (folder) {
+      return getHomeGroupByFolder(folder);
     }
   }
 
-  if (!row) return undefined;
-  return parseGroupRow(row);
+  const user = db
+    .prepare("SELECT role FROM users WHERE id = ? AND status = 'active'")
+    .get(userId) as { role: string } | undefined;
+  if (user?.role !== 'admin') return undefined;
+  return getHomeGroupByFolder('main');
 }
 
 /**
@@ -4006,37 +4130,9 @@ export function getGroupsByOwner(
 ): Array<RegisteredGroup & { jid: string }> {
   const rows = db
     .prepare('SELECT * FROM registered_groups WHERE created_by = ?')
-    .all(userId) as Array<{
-    jid: string;
-    name: string;
-    folder: string;
-    added_at: string;
-    container_config: string | null;
-    custom_cwd: string | null;
-    init_source_path: string | null;
-    init_git_url: string | null;
-    created_by: string | null;
-    is_home: number;
-    selected_skills: string | null;
-  }>;
+    .all(userId) as RegisteredGroupRow[];
 
-  return rows.map((row) => ({
-    jid: row.jid,
-    name: row.name,
-    folder: row.folder,
-    added_at: row.added_at,
-    containerConfig: row.container_config
-      ? JSON.parse(row.container_config)
-      : undefined,
-    customCwd: row.custom_cwd ?? undefined,
-    initSourcePath: row.init_source_path ?? undefined,
-    initGitUrl: row.init_git_url ?? undefined,
-    created_by: row.created_by ?? undefined,
-    is_home: row.is_home === 1,
-    selected_skills: row.selected_skills
-      ? JSON.parse(row.selected_skills)
-      : null,
-  }));
+  return rows.map(parseGroupRow);
 }
 
 // ===================== Auth CRUD =====================
