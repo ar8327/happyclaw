@@ -609,7 +609,6 @@ function ensureMemorySessionProjection(
     runner_id: runnerId,
     runner_profile_id:
       primarySession?.runner_id === runnerId ? primarySession.runner_profile_id ?? null : null,
-    runtime_mode: 'local',
     model: primarySession?.runner_id === runnerId ? primarySession?.model ?? null : null,
     thinking_effort:
       primarySession?.runner_id === runnerId ? primarySession?.thinking_effort ?? null : null,

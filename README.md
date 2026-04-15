@@ -296,7 +296,7 @@ make start
 | **Claude** | 原生支持更完整的 session resume、hook 与 observability | 聊天、记忆、IM、观测均为 full |
 | **Codex** | 聊天主链路可用，但记忆和观测存在降级 | 聊天可用，memory 与 observability 为 degraded 或 synthetic |
 
-当前所有 Session 都通过本地 runtime 启动。`runtime_mode` 与 `execution_mode` 已不再作为 Session 接口字段返回；如果请求体继续携带这两个旧字段，`/api/sessions` 会直接拒绝。`execution_mode` 只在旧数据库迁移时被识别并清理。
+当前所有 Session 都通过本地 runtime 启动。`runtime_mode` 与 `execution_mode` 已不再作为 Session 接口字段返回；如果请求体继续携带这两个旧字段，`/api/sessions` 会直接拒绝。这两个旧字段只在历史数据库迁移时被识别并清理。
 
 ## 技术架构
 

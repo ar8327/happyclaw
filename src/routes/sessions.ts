@@ -1122,7 +1122,6 @@ sessionRoutes.post('/', authMiddleware, async (c) => {
     cwd: sessionDir,
     runner_id: getDefaultRunnerId(),
     runner_profile_id: null,
-    runtime_mode: 'local',
     model: null,
     thinking_effort: null,
     context_compression: 'off',

@@ -243,6 +243,48 @@ function dropLegacyRegisteredGroupBindingColumns(): void {
   })();
 }
 
+function dropLegacySessionRuntimeModeColumn(): void {
+  if (!hasColumn('sessions', 'runtime_mode')) return;
+
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE sessions_new (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        parent_session_id TEXT,
+        cwd TEXT NOT NULL,
+        runner_id TEXT NOT NULL,
+        runner_profile_id TEXT,
+        model TEXT,
+        thinking_effort TEXT,
+        context_compression TEXT NOT NULL DEFAULT 'off',
+        knowledge_extraction INTEGER NOT NULL DEFAULT 0,
+        is_pinned INTEGER NOT NULL DEFAULT 0,
+        archived INTEGER NOT NULL DEFAULT 0,
+        owner_key TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO sessions_new (
+        id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
+        model, thinking_effort, context_compression, knowledge_extraction,
+        is_pinned, archived, owner_key, created_at, updated_at
+      )
+      SELECT
+        id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
+        model, thinking_effort, COALESCE(context_compression, 'off'),
+        COALESCE(knowledge_extraction, 0), COALESCE(is_pinned, 0),
+        COALESCE(archived, 0), owner_key, created_at, updated_at
+      FROM sessions;
+      DROP TABLE sessions;
+      ALTER TABLE sessions_new RENAME TO sessions;
+      CREATE INDEX IF NOT EXISTS idx_sessions_kind ON sessions(kind);
+      CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
+    `);
+  })();
+}
+
 function assertSchema(
   tableName: string,
   requiredColumns: string[],
@@ -675,7 +717,6 @@ export function initDatabase(): void {
       cwd TEXT NOT NULL,
       runner_id TEXT NOT NULL,
       runner_profile_id TEXT,
-      runtime_mode TEXT NOT NULL DEFAULT 'local',
       model TEXT,
       thinking_effort TEXT,
       context_compression TEXT NOT NULL DEFAULT 'off',
@@ -740,6 +781,8 @@ export function initDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_worker_parent ON worker_sessions(parent_session_id);
     CREATE INDEX IF NOT EXISTS idx_profiles_runner ON runner_profiles(runner_id);
   `);
+
+  dropLegacySessionRuntimeModeColumn();
 
   // Lightweight migrations for existing DBs
   ensureColumn('users', 'permissions', "TEXT NOT NULL DEFAULT '[]'");
@@ -2498,7 +2541,6 @@ function parseSessionRecord(row: Record<string, unknown>): SessionRecord {
     runner_id: normalizeStoredRunnerId(row.runner_id),
     runner_profile_id:
       typeof row.runner_profile_id === 'string' ? row.runner_profile_id : null,
-    runtime_mode: 'local',
     model: typeof row.model === 'string' ? row.model : null,
     thinking_effort:
       row.thinking_effort === 'low' ||
@@ -2666,12 +2708,6 @@ function normalizeStoredRunnerId(
   return runnerId || fallback;
 }
 
-function deriveRuntimeMode(
-  _group?: RegisteredGroup | null,
-): SessionRecord['runtime_mode'] {
-  return 'local';
-}
-
 function deriveSessionKind(group: RegisteredGroup): SessionKind {
   if (group.is_home || group.folder === 'main') return 'main';
   return 'workspace';
@@ -2701,15 +2737,14 @@ function ensureSessionRecordFromGroup(
   db.prepare(
     `INSERT INTO sessions (
       id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
-      runtime_mode, model, thinking_effort, context_compression,
-      knowledge_extraction, is_pinned, archived, owner_key, created_at, updated_at
-    ) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+      model, thinking_effort, context_compression, knowledge_extraction,
+      is_pinned, archived, owner_key, created_at, updated_at
+    ) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, ?, 0, 0, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       kind = excluded.kind,
       cwd = excluded.cwd,
       runner_id = excluded.runner_id,
-      runtime_mode = excluded.runtime_mode,
       model = excluded.model,
       thinking_effort = excluded.thinking_effort,
       context_compression = excluded.context_compression,
@@ -2722,7 +2757,6 @@ function ensureSessionRecordFromGroup(
     deriveSessionKind(group),
     deriveSessionCwd(group),
     deriveRunnerId(group),
-    deriveRuntimeMode(group),
     group.model ?? null,
     group.thinking_effort ?? null,
     group.context_compression ?? 'off',
@@ -2746,9 +2780,9 @@ function ensureSessionRecordForLegacyKey(
     db.prepare(
       `INSERT OR IGNORE INTO sessions (
         id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
-        runtime_mode, model, thinking_effort, context_compression,
-        knowledge_extraction, is_pinned, archived, owner_key, created_at, updated_at
-      ) VALUES (?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?)`,
+        model, thinking_effort, context_compression, knowledge_extraction,
+        is_pinned, archived, owner_key, created_at, updated_at
+      ) VALUES (?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?)`,
     ).run(
       sessionId,
       agentId,
@@ -2756,7 +2790,6 @@ function ensureSessionRecordForLegacyKey(
       parentSession?.cwd || path.join(GROUPS_DIR, groupFolder),
       parentSession?.runner_id || deriveRunnerId(folderGroup || null),
       parentSession?.runner_profile_id || null,
-      parentSession?.runtime_mode || deriveRuntimeMode(folderGroup),
       parentSession?.model || null,
       parentSession?.thinking_effort || null,
       parentSession?.context_compression || 'off',
@@ -2769,15 +2802,14 @@ function ensureSessionRecordForLegacyKey(
   db.prepare(
     `INSERT OR IGNORE INTO sessions (
       id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
-      runtime_mode, model, thinking_effort, context_compression,
-      knowledge_extraction, is_pinned, archived, owner_key, created_at, updated_at
-    ) VALUES (?, ?, 'workspace', NULL, ?, ?, NULL, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?)`,
+      model, thinking_effort, context_compression, knowledge_extraction,
+      is_pinned, archived, owner_key, created_at, updated_at
+    ) VALUES (?, ?, 'workspace', NULL, ?, ?, NULL, ?, ?, ?, 0, 0, 0, ?, ?, ?)`,
   ).run(
     sessionId,
     groupFolder,
     folderGroup ? deriveSessionCwd(folderGroup) : path.join(GROUPS_DIR, groupFolder),
     deriveRunnerId(folderGroup || null),
-    deriveRuntimeMode(folderGroup),
     folderGroup?.model ?? null,
     folderGroup?.thinking_effort ?? null,
     folderGroup?.context_compression ?? 'off',
@@ -2957,9 +2989,9 @@ export function saveSessionRecord(session: SessionRecord): void {
   db.prepare(
     `INSERT INTO sessions (
       id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
-      runtime_mode, model, thinking_effort, context_compression,
-      knowledge_extraction, is_pinned, archived, owner_key, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      model, thinking_effort, context_compression, knowledge_extraction,
+      is_pinned, archived, owner_key, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       kind = excluded.kind,
@@ -2967,7 +2999,6 @@ export function saveSessionRecord(session: SessionRecord): void {
       cwd = excluded.cwd,
       runner_id = excluded.runner_id,
       runner_profile_id = excluded.runner_profile_id,
-      runtime_mode = excluded.runtime_mode,
       model = excluded.model,
       thinking_effort = excluded.thinking_effort,
       context_compression = excluded.context_compression,
@@ -2984,7 +3015,6 @@ export function saveSessionRecord(session: SessionRecord): void {
     session.cwd,
     session.runner_id,
     session.runner_profile_id,
-    session.runtime_mode,
     session.model,
     session.thinking_effort,
     session.context_compression,
@@ -3463,9 +3493,9 @@ function syncMemorySessionProjectionForOwner(ownerKey: string): void {
   db.prepare(
     `INSERT INTO sessions (
       id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
-      runtime_mode, model, thinking_effort, context_compression,
-      knowledge_extraction, is_pinned, archived, owner_key, created_at, updated_at
-    ) VALUES (?, ?, 'memory', ?, ?, ?, ?, 'local', ?, ?, ?, ?, 0, 0, ?, ?, ?)
+      model, thinking_effort, context_compression, knowledge_extraction,
+      is_pinned, archived, owner_key, created_at, updated_at
+    ) VALUES (?, ?, 'memory', ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       parent_session_id = excluded.parent_session_id,
@@ -5072,16 +5102,15 @@ function syncWorkerSession(agent: SubAgent): void {
   db.prepare(
     `INSERT INTO sessions (
       id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
-      runtime_mode, model, thinking_effort, context_compression,
-      knowledge_extraction, is_pinned, archived, owner_key, created_at, updated_at
-    ) VALUES (?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?)
+      model, thinking_effort, context_compression, knowledge_extraction,
+      is_pinned, archived, owner_key, created_at, updated_at
+    ) VALUES (?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       parent_session_id = excluded.parent_session_id,
       cwd = excluded.cwd,
       runner_id = excluded.runner_id,
       runner_profile_id = excluded.runner_profile_id,
-      runtime_mode = excluded.runtime_mode,
       model = excluded.model,
       thinking_effort = excluded.thinking_effort,
       context_compression = excluded.context_compression,
@@ -5094,7 +5123,6 @@ function syncWorkerSession(agent: SubAgent): void {
     parentSession?.cwd || path.join(GROUPS_DIR, agent.group_folder),
     parentSession?.runner_id || deriveRunnerId(parentGroup || null),
     parentSession?.runner_profile_id || null,
-    parentSession?.runtime_mode || deriveRuntimeMode(parentGroup),
     parentSession?.model || null,
     parentSession?.thinking_effort || null,
     parentSession?.context_compression || 'off',

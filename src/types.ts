@@ -279,7 +279,6 @@ export interface SubAgent {
 // --- Session workbench types ---
 
 export type SessionKind = 'main' | 'workspace' | 'worker' | 'memory';
-export type SessionRuntimeMode = 'local';
 export type SessionBindingMode = 'direct' | 'source_only' | 'mirror';
 export type RunnerId = string;
 export type ResumeStrength = 'none' | 'weak' | 'strong';
@@ -315,7 +314,6 @@ export interface SessionRecord {
   cwd: string;
   runner_id: RunnerId;
   runner_profile_id: string | null;
-  runtime_mode: SessionRuntimeMode;
   model: string | null;
   thinking_effort: 'low' | 'medium' | 'high' | null;
   context_compression: 'off' | 'auto' | 'manual';
