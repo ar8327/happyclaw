@@ -41,7 +41,7 @@ export interface RegisteredGroup {
   customCwd?: string; // 本地 Runtime 的自定义工作目录
   initSourcePath?: string; // 初始化时复制来源的本机绝对路径
   initGitUrl?: string; // 初始化时 clone 来源的 Git URL
-  is_home?: boolean; // 用户主容器标记
+  is_home?: boolean; // 主 Session 的兼容投影标记
   selected_skills?: string[] | null; // null = 全部启用
   reply_policy?: 'source_only' | 'mirror'; // IM 绑定的回复策略
   require_mention?: boolean; // 群聊是否需要 @机器人 才响应（默认 false）

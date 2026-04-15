@@ -138,7 +138,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const isHome = group?.kind === 'main';
   const visibleTabs = SIDEBAR_TABS;
 
-  // Fetch IM connection status for home groups
+  // Fetch IM connection status for the main session.
   const isOwnHome =
     isHome &&
     !!currentUser;

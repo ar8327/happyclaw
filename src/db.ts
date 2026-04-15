@@ -3249,8 +3249,8 @@ export function getGroupsByTargetMainJid(
 }
 
 /**
- * Find the home group for a given folder (is_home=1).
- * Used to resolve the owner of IM channels that share a folder with a home group.
+ * Find the main-session web compatibility channel for a folder.
+ * Used to resolve the owner of IM channels that share a folder with that main session.
  */
 export function getHomeGroupByFolder(
   folder: string,
@@ -3267,7 +3267,7 @@ export function getHomeGroupByFolder(
 }
 
 /**
- * Find a user's home group from the single-user main session owner mapping.
+ * Find a user's main-session web compatibility channel from the owner mapping.
  * For admin users, also matches web:main as a final compatibility fallback.
  */
 export function getUserHomeGroup(
@@ -3299,9 +3299,9 @@ export function getUserHomeGroup(
 }
 
 /**
- * Ensure a user has a home group. If not, create one.
- * Single-user migration keeps a web compatibility row backed by a main session.
- * Returns the JID of the home group.
+ * Ensure a user has a main-session web compatibility channel. If not, create one.
+ * Single-user migration keeps this web row backed by a main session.
+ * Returns the compatibility channel JID.
  */
 export function ensureUserHomeGroup(
   userId: string,
@@ -3587,7 +3587,7 @@ export interface SearchResult {
 
 /**
  * Search messages by content using FTS5.
- * Supports single or multiple JIDs (for home group merging).
+ * Supports single or multiple JIDs for compatibility channel aggregation.
  * @param sinceTs - Optional ISO timestamp to limit results to messages after this time
  */
 export function searchMessages(

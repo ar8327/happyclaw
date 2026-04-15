@@ -86,13 +86,13 @@ export function useImBindings() {
     loadGroups();
   }, [loadGroups]);
 
-  // When homeJid changes (derived from groups), reload bindings and targets
+  // When the main-session web channel changes, reload bindings and targets.
   useEffect(() => {
     if (homeJid) {
       loadBindings();
       loadTargets();
     } else {
-      // No home group — clear loading state to avoid perpetual spinner
+      // No main-session web channel available, so stop the loading indicators.
       setLoading(false);
       setTargetsLoading(false);
     }

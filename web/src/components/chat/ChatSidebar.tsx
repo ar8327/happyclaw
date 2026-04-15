@@ -70,7 +70,7 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
     loadGroups();
   }, [loadGroups]);
 
-  // Separate home group from others, sort by time
+  // Keep the main session pinned above other sessions, then sort the rest by activity.
   const { mainGroup, otherGroups } = useMemo(() => {
     let main: (typeof groups)[string] & { jid: string } | null = null;
     const others: ((typeof groups)[string] & { jid: string })[] = [];
