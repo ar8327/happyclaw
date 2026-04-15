@@ -15,7 +15,7 @@ export interface MountAllowlist {
   allowedRoots: AllowedRoot[];
   // Glob patterns for paths that should never be mounted (e.g., ".ssh", ".gnupg")
   blockedPatterns: string[];
-  // If true, non-admin-home groups can only mount read-only regardless of config
+  // If true, non-primary Session workspaces can only mount read-only regardless of config
   nonMainReadOnly: boolean;
 }
 

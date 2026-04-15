@@ -84,7 +84,7 @@
 | **QQ** | WebSocket (Bot API v2) | 纯文本 | 私聊 + 群聊 @Bot、图片消息（Vision）、配对码绑定 |
 | **Web** | WebSocket 实时通信 | 流式 Markdown | 图片粘贴/拖拽上传、虚拟滚动 |
 
-当前部署模型默认只有一个本地操作者。IM 渠道配置属于这一个操作者，渠道最终绑定到 Session，而不是绑定到多用户 home group。
+当前部署模型默认只有一个本地操作者。IM 渠道配置属于这一个操作者，渠道最终绑定到 Session，而不是绑定到旧多用户时代的 home group。
 
 **Fork 特有的显式路由模型**：Agent 的 stdout（流式输出）仅显示在 Web 端。IM 用户看不到思考过程和工具调用——Agent 通过 `send_message(channel=...)` MCP 工具主动向 IM 发送最终结果，`channel` 值取自消息的 `source` 属性。
 

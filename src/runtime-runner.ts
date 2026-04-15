@@ -184,8 +184,8 @@ export interface AvailableGroup {
 
 /**
  * Write available groups snapshot for the runtime to read.
- * Only admin home can see all available groups (for activation).
- * Other groups see nothing (they can't activate groups).
+ * Only the primary Session workspace gets the full activation target list.
+ * Other workspaces see nothing because they cannot activate arbitrary groups.
  */
 export function writeGroupsSnapshot(
   groupFolder: string,
@@ -196,7 +196,7 @@ export function writeGroupsSnapshot(
   const groupIpcDir = path.join(DATA_DIR, 'ipc', groupFolder);
   fs.mkdirSync(groupIpcDir, { recursive: true });
 
-  // Admin home sees all groups; others see nothing (they can't activate groups)
+  // The primary Session workspace sees all groups; others see nothing.
   const visibleGroups = isAdminHome ? groups : [];
 
   const groupsFile = path.join(groupIpcDir, 'available_groups.json');

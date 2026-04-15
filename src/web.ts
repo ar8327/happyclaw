@@ -333,9 +333,9 @@ async function handleWebUserMessage(
     shared,
   );
 
-  // IPC-inject the message into the running agent process.  For home groups,
-  // the reply route is dynamically updated via activeRouteUpdaters so we no
-  // longer need to kill and restart the process (#99).
+  // IPC-inject the message into the running agent process. For Session-backed
+  // web workspaces, the reply route is updated dynamically via
+  // activeRouteUpdaters so we no longer need to kill and restart the process.
   let pipedToActive = false;
   const images = toAgentImages(normalizedAttachments);
   const intent = analyzeIntent(content);
@@ -345,7 +345,7 @@ async function handleWebUserMessage(
     images,
     intent,
     () => {
-      // IPC write succeeded — update reply route for home groups.
+      // IPC write succeeded — update the reply route for Session-backed web workspaces.
       // Web messages have no IM source, so clear the IM route.
     },
   );

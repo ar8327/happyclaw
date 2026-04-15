@@ -284,13 +284,13 @@ export function validateMount(
 
   if (requestedReadWrite) {
     if (!isAdminHome && allowlist.nonMainReadOnly) {
-      // Non-admin-home groups forced to read-only
+      // Non-primary Session workspaces are forced to stay read-only.
       effectiveReadonly = true;
       logger.info(
         {
           mount: mount.hostPath,
         },
-        'Mount forced to read-only for non-admin-home group',
+        'Mount forced to read-only for non-primary Session workspace',
       );
     } else if (!allowedRoot.allowReadWrite) {
       // Root doesn't allow read-write

@@ -713,8 +713,9 @@ function resolveEffectiveFolder(chatJid: string): string | undefined {
 }
 
 /**
- * Resolve the effective group for a non-home group by finding its sibling home group.
- * Non-home groups use their own local runtime metadata and customCwd.
+ * Resolve the effective compatibility group for a non-primary alias by using the
+ * sibling home-style projection for the same Session folder.
+ * Non-home aliases keep their own local runtime metadata and customCwd.
  * Populates registeredGroups cache as a side-effect.
  */
 function resolveEffectiveGroup(group: RegisteredGroup): {
@@ -1698,7 +1699,7 @@ function loadState(): void {
     }
   }
 
-  // Single-user mode keeps exactly one local operator home group.
+  // Single-user mode keeps exactly one local operator primary-session alias.
   try {
     const operator = getLocalWorkbenchUserPublic();
     const homeJid = ensureUserHomeGroup(
@@ -1714,10 +1715,10 @@ function loadState(): void {
       registeredGroups = getAllRegisteredGroups();
     }
   } catch (err) {
-    logger.warn({ err }, 'Failed to ensure local operator home group');
+    logger.warn({ err }, 'Failed to ensure local operator primary Session alias');
   }
 
-  // Normalize legacy home groups onto the single local-runtime compatibility shape.
+  // Normalize legacy home-style aliases onto the single local-runtime compatibility shape.
   for (const [jid, group] of Object.entries(registeredGroups)) {
     if (!group.is_home) continue;
     registeredGroups[jid] = group;
@@ -2985,7 +2986,7 @@ async function runAgent(
     })),
   );
 
-  // Update available groups snapshot (admin home only can see all groups)
+  // Refresh the activation target snapshot. Only the primary Session gets the full list.
   const availableGroups = getAvailableGroups();
   writeGroupsSnapshot(
     group.folder,
@@ -3145,9 +3146,9 @@ async function sendMessage(
 
 /**
  * Check if a source group is authorized to send IPC messages to a target group.
- * - Admin home can send to any group.
- * - Non-home groups can only send to groups sharing the same folder.
- * - Member home groups can send to groups created by the same user.
+ * - The primary Session workspace can send to any registered group.
+ * - Other workspaces can only send to groups sharing the same folder.
+ * - Compatibility home aliases can also send to groups owned by the same operator.
  */
 function canSendCrossGroupMessage(
   isAdminHome: boolean,
@@ -3192,7 +3193,7 @@ function startIpcWatcher(): void {
     }
 
     for (const sourceGroup of groupFolders) {
-      // Determine if this IPC directory belongs to an admin home group
+      // Determine whether this IPC directory belongs to the primary Session workspace.
       const sourceGroupEntry = Object.values(registeredGroups).find(
         (g) => g.folder === sourceGroup,
       );
@@ -3564,8 +3565,8 @@ async function processTaskIpc(
     targetChannel?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
-  isAdminHome: boolean, // Whether source is admin home container
-  isHome: boolean, // Whether source is a home container
+  isAdminHome: boolean, // Compatibility flag: whether source is the primary Session runtime
+  isHome: boolean, // Compatibility flag: whether source maps to a home-style alias
   sourceGroupEntry: RegisteredGroup | undefined, // Source group's registered entry
 ): Promise<void> {
   switch (data.type) {
@@ -3586,7 +3587,7 @@ async function processTaskIpc(
           break;
         }
 
-        // Only admin home can create script tasks
+        // Only the primary Session runtime can create script tasks.
         if (execType === 'script' && !isAdminHome) {
           logger.warn(
             { sourceGroup },
@@ -3609,7 +3610,7 @@ async function processTaskIpc(
 
         const targetFolder = targetGroupEntry.folder;
 
-        // Authorization: non-admin-home groups can only schedule for themselves
+        // Non-primary Session workspaces can only schedule within their own folder.
         if (!isAdminHome && targetFolder !== sourceGroup) {
           logger.warn(
             { sourceGroup, targetFolder },
@@ -3739,7 +3740,7 @@ async function processTaskIpc(
       break;
 
     case 'refresh_groups':
-      // Only admin home group can request a refresh
+      // Only the primary Session workspace can request a refresh.
       if (isAdminHome) {
         logger.info(
           { sourceGroup },
@@ -3763,7 +3764,7 @@ async function processTaskIpc(
       break;
 
     case 'register_group':
-      // Only admin home group can register new groups
+      // Only the primary Session workspace can register new groups.
       if (!isAdminHome) {
         logger.warn(
           { sourceGroup },
@@ -4553,11 +4554,10 @@ function recoverPendingMessages(): void {
 
 /**
  * Build the onNewChat callback for IM connections.
- * Feishu/Telegram chats auto-register to the user's home group folder.
+ * Feishu/Telegram chats auto-register to the operator's primary Session folder.
  *
- * When the same Feishu app is transferred between users (e.g., admin disables
- * their channel and a member enables the same credentials), existing chats
- * are re-routed to the new user's home folder on first message receipt.
+ * Legacy compatibility still allows an existing chat projection to be moved
+ * onto a different owner folder when the underlying IM credentials change.
  */
 function buildOnNewChat(
   userId: string,
@@ -5319,7 +5319,7 @@ async function main(): Promise<void> {
     if (!homeGroup) {
       logger.warn(
         { userId, channel },
-        'No home group found for user IM reload',
+        'No primary Session alias found for user IM reload',
       );
       return false;
     }
@@ -5650,7 +5650,7 @@ async function main(): Promise<void> {
   if (!homeGroup) {
     logger.warn(
       { operatorId: operator.id },
-      'No home group found for local operator IM startup',
+      'No primary Session alias found for local operator IM startup',
     );
   } else {
     const userFeishu = getUserFeishuConfig(operator.id);

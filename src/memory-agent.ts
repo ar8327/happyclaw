@@ -344,7 +344,7 @@ function formatTranscriptMarkdown(
 }
 
 /**
- * Export transcripts for a user's home group and trigger session_wrapup.
+ * Export transcripts for the owner's primary Session folder and trigger session_wrapup.
  * Extracted from index.ts so it can be called from both container exit listener and manual trigger.
  */
 export async function exportTranscriptsForUser(

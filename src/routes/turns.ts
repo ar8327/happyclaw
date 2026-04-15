@@ -62,7 +62,7 @@ turnsRoutes.get('/:jid/turns', (c) => {
   const limit = Math.min(parseInt(c.req.query('limit') || '50', 10) || 50, 200);
   const offset = parseInt(c.req.query('offset') || '0', 10) || 0;
 
-  // Query by folder so all IM channels sharing the same home group are included
+  // Query by folder so all IM channels mapped into the same Session workspace are included.
   const turns = getTurnsByFolder(resolved.group.folder, limit, offset);
   return c.json({
     turns: turns.map((t) => ({
