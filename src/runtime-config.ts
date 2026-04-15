@@ -2194,68 +2194,6 @@ export function mergeClaudeEnvConfig(
   };
 }
 
-// ─── Registration config (plain JSON, no encryption) ─────────────
-
-const REGISTRATION_CONFIG_FILE = path.join(
-  CLAUDE_CONFIG_DIR,
-  'registration.json',
-);
-
-export interface RegistrationConfig {
-  allowRegistration: boolean;
-  requireInviteCode: boolean;
-  updatedAt: string | null;
-}
-
-const DEFAULT_REGISTRATION_CONFIG: RegistrationConfig = {
-  allowRegistration: true,
-  requireInviteCode: true,
-  updatedAt: null,
-};
-
-export function getRegistrationConfig(): RegistrationConfig {
-  try {
-    if (!fs.existsSync(REGISTRATION_CONFIG_FILE)) {
-      return { ...DEFAULT_REGISTRATION_CONFIG };
-    }
-    const raw = JSON.parse(
-      fs.readFileSync(REGISTRATION_CONFIG_FILE, 'utf-8'),
-    ) as Record<string, unknown>;
-    return {
-      allowRegistration:
-        typeof raw.allowRegistration === 'boolean'
-          ? raw.allowRegistration
-          : true,
-      requireInviteCode:
-        typeof raw.requireInviteCode === 'boolean'
-          ? raw.requireInviteCode
-          : true,
-      updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : null,
-    };
-  } catch (err) {
-    logger.warn(
-      { err },
-      'Failed to read registration config, returning defaults',
-    );
-    return { ...DEFAULT_REGISTRATION_CONFIG };
-  }
-}
-
-export function saveRegistrationConfig(
-  next: Pick<RegistrationConfig, 'allowRegistration' | 'requireInviteCode'>,
-): RegistrationConfig {
-  const config: RegistrationConfig = {
-    allowRegistration: next.allowRegistration,
-    requireInviteCode: next.requireInviteCode,
-    updatedAt: new Date().toISOString(),
-  };
-  fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
-  const tmp = `${REGISTRATION_CONFIG_FILE}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', 'utf-8');
-  fs.renameSync(tmp, REGISTRATION_CONFIG_FILE);
-  return config;
-}
-
 /**
  * Build full env lines: merged Claude config + custom env vars.
  */

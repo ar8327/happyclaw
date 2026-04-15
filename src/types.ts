@@ -131,9 +131,7 @@ export type Permission =
 
 export type PermissionTemplateKey =
   | 'admin_full'
-  | 'member_basic'
-  | 'ops_manager'
-  | 'user_admin';
+  | 'ops_manager';
 
 export interface User {
   id: string;
@@ -178,72 +176,6 @@ export interface UserPublic {
   last_login_at: string | null;
   last_active_at: string | null;
   deleted_at: string | null;
-}
-
-export interface UserSession {
-  id: string;
-  user_id: string;
-  ip_address: string | null;
-  user_agent: string | null;
-  created_at: string;
-  expires_at: string;
-  last_active_at: string;
-}
-
-export interface UserSessionWithUser extends UserSession {
-  username: string;
-  role: UserRole;
-  status: UserStatus;
-  display_name: string;
-  permissions: Permission[];
-  must_change_password: boolean;
-}
-
-export interface InviteCode {
-  code: string;
-  created_by: string;
-  role: UserRole;
-  permission_template: PermissionTemplateKey | null;
-  permissions: Permission[];
-  max_uses: number;
-  used_count: number;
-  expires_at: string | null;
-  created_at: string;
-}
-
-export interface InviteCodeWithCreator extends InviteCode {
-  creator_username: string;
-}
-
-export type AuthEventType =
-  | 'login_success'
-  | 'login_failed'
-  | 'logout'
-  | 'password_changed'
-  | 'profile_updated'
-  | 'user_created'
-  | 'user_disabled'
-  | 'user_enabled'
-  | 'user_deleted'
-  | 'user_restored'
-  | 'user_updated'
-  | 'role_changed'
-  | 'session_revoked'
-  | 'invite_created'
-  | 'invite_deleted'
-  | 'invite_used'
-  | 'recovery_reset'
-  | 'register_success';
-
-export interface AuthAuditLog {
-  id: number;
-  event_type: AuthEventType;
-  username: string;
-  actor_username: string | null;
-  ip_address: string | null;
-  user_agent: string | null;
-  details: Record<string, unknown> | null;
-  created_at: string;
 }
 
 // --- Sub-Agent types ---

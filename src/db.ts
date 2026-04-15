@@ -12,10 +12,6 @@ import {
 import {
   AgentKind,
   AgentStatus,
-  AuthAuditLog,
-  AuthEventType,
-  InviteCode,
-  InviteCodeWithCreator,
   NewMessage,
   DbMessage,
   MessageCursor,
@@ -37,8 +33,6 @@ import {
   UserPublic,
   UserStatus,
   UserRole,
-  UserSession,
-  UserSessionWithUser,
 } from './types.js';
 import { getDefaultPermissions, normalizePermissions } from './permissions.js';
 
@@ -4173,132 +4167,8 @@ export function restoreUser(id: string): void {
   ).run(new Date().toISOString(), id);
 }
 
-// --- User Sessions ---
-
-export function createUserSession(_session: UserSession): void {}
-
-export function getSessionWithUser(
-  _sessionId: string,
-): UserSessionWithUser | undefined {
-  return undefined;
-}
-
-export function getUserSessions(_userId: string): UserSession[] {
-  return [];
-}
-
-export function deleteUserSession(_sessionId: string): void {}
-
-export function deleteUserSessionsByUserId(_userId: string): void {}
-
-export function updateSessionLastActive(_sessionId: string): void {}
-
 export function deleteExpiredSessions(): number {
   return 0;
-}
-
-// --- Invite Codes ---
-
-export function createInviteCode(_invite: InviteCode): void {}
-
-export function getInviteCode(_code: string): InviteCode | undefined {
-  return undefined;
-}
-
-export type RegisterUserWithInviteResult =
-  | { ok: true; role: UserRole; permissions: Permission[] }
-  | {
-      ok: false;
-      reason:
-        | 'invalid_or_expired_invite'
-        | 'invite_exhausted'
-        | 'username_taken';
-    };
-
-export function registerUserWithInvite(input: {
-  id: string;
-  username: string;
-  password_hash: string;
-  display_name: string;
-  invite_code: string;
-  created_at: string;
-  updated_at: string;
-}): RegisterUserWithInviteResult {
-  void input;
-  return { ok: false, reason: 'invalid_or_expired_invite' };
-}
-
-export type RegisterUserWithoutInviteResult =
-  | { ok: true; role: UserRole; permissions: Permission[] }
-  | { ok: false; reason: 'username_taken' };
-
-export function registerUserWithoutInvite(input: {
-  id: string;
-  username: string;
-  password_hash: string;
-  display_name: string;
-  created_at: string;
-  updated_at: string;
-}): RegisterUserWithoutInviteResult {
-  void input;
-  return { ok: false, reason: 'username_taken' };
-}
-
-export function getAllInviteCodes(): InviteCodeWithCreator[] {
-  return [];
-}
-
-export function deleteInviteCode(_code: string): void {}
-
-// --- Auth Audit Log ---
-
-export function logAuthEvent(event: {
-  event_type: AuthEventType;
-  username: string;
-  actor_username?: string | null;
-  ip_address?: string | null;
-  user_agent?: string | null;
-  details?: Record<string, unknown> | null;
-}): void {
-  void event;
-}
-
-export interface AuthAuditLogQuery {
-  limit?: number;
-  offset?: number;
-  event_type?: AuthEventType | 'all';
-  username?: string;
-  actor_username?: string;
-  from?: string;
-  to?: string;
-}
-
-export interface AuthAuditLogPage {
-  logs: AuthAuditLog[];
-  total: number;
-  limit: number;
-  offset: number;
-}
-
-export function queryAuthAuditLogs(
-  query: AuthAuditLogQuery = {},
-): AuthAuditLogPage {
-  const limit = Math.min(500, Math.max(1, Math.floor(query.limit || 100)));
-  const offset = Math.max(0, Math.floor(query.offset || 0));
-  return { logs: [], total: 0, limit, offset };
-}
-
-export function getAuthAuditLogs(limit = 100, offset = 0): AuthAuditLog[] {
-  return queryAuthAuditLogs({ limit, offset }).logs;
-}
-
-export function checkLoginRateLimitFromAudit(
-  _username: string,
-  _ip: string,
-  _maxAttempts: number,
-  _lockoutMinutes: number,
-): { allowed: boolean; retryAfterSeconds?: number; attempts: number } {
-  return { allowed: true, attempts: 0 };
 }
 
 // ===================== Sub-Agent CRUD =====================

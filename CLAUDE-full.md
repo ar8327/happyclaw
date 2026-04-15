@@ -44,7 +44,6 @@
 | `src/memory-agent.ts` | `MemoryOrchestrator`：记忆子进程生命周期、stdin/stdout JSON-line 通信、idle 超时清理、global_sleep 调度 |
 | `src/routes/tasks.ts` | 定时任务 CRUD + 执行日志查询 |
 | `src/routes/skills.ts` | Skills 文件系统发现、启用/禁用、主机同步 |
-| `src/routes/admin.ts` | 用户管理、邀请码、审计日志、注册设置 |
 | `src/routes/browse.ts` | 目录浏览 API（`GET/POST /api/browse/directories`，受挂载白名单约束） |
 | `src/routes/agents.ts` | Sub-Agent CRUD（`GET/POST/DELETE /api/sessions/:id/agents`） |
 | `src/routes/mcp-servers.ts` | MCP Servers 管理（CRUD + `POST /api/mcp-servers/sync-host`），当前 operator 作用域 |
@@ -63,7 +62,6 @@
 | `src/file-manager.ts` | 文件安全：路径遍历防护、符号链接检测、系统路径保护（`logs/`、`CLAUDE.md`、`.claude/`、`conversations/`） |
 | `src/mount-security.ts` | 挂载安全：白名单校验、黑名单模式匹配（`.ssh`、`.gnupg` 等）、非主会话只读强制 |
 | `src/db.ts` | 数据层：SQLite WAL 模式、Session/Binding/Worker 投影与兼容迁移 |
-| `src/auth.ts` | 密码工具：bcrypt 哈希/验证、Session Token 生成、用户名/密码校验 |
 | `src/permissions.ts` | 权限常量和模板定义（`ALL_PERMISSIONS`、`PERMISSION_TEMPLATES`） |
 | `src/schemas.ts` | Zod v4 校验 schema：API 请求体校验 |
 | `src/utils.ts` | 工具函数：`getClientIp()`（TRUST_PROXY 感知） |
@@ -113,7 +111,6 @@
 | `/settings` | `SettingsPage` — 系统设置（懒加载） | 登录后 |
 | `/mcp-servers` | `McpServersPage` — MCP Servers 管理 | 登录后 |
 | `/logs` | `LogsPage` — Agent 执行日志（懒加载） | 登录后 |
-| `/users` | `UsersPage` — 用户管理 | `manage_users` / `manage_invites` / `view_audit_log` |
 
 ### 2.3 本地 Runtime 执行
 
@@ -343,27 +340,18 @@ StreamEvent 类型以 `shared/stream-event.ts` 为单一真相源，构建时通
 - `POST /api/auth/setup`、`/login`、`/register`、`/logout`、`GET /api/auth/sessions` 等只保留兼容外形
 - `data/config/session-secret.key` 与 `SESSION_COOKIE_NAME` 仍保留，用于兼容 WebSocket session 标识和旧客户端行为
 
-### 4.2 RBAC 权限
+### 4.2 当前权限模型
 
-角色：`admin`（管理员）、`member`（普通成员）
-
-5 种权限：
+角色仍保留 `admin` 与 `member` 两种兼容值，但当前单用户 workbench 只会注入固定本地 operator。正式仍在使用的权限只有两项：
 
 | 权限 | 说明 |
 |------|------|
-| `manage_system_config` | 管理系统配置（Claude / 飞书） |
+| `manage_system_config` | 管理系统配置与 Runner provider 配置 |
 | `manage_group_env` | 管理 Session 级 runtime 环境变量 |
-| `manage_users` | 用户管理（创建 / 禁用 / 删除） |
-| `manage_invites` | 邀请码管理 |
-| `view_audit_log` | 查看审计日志 |
 
-权限模板：`admin_full`、`member_basic`、`ops_manager`、`user_admin`
+权限模板当前只保留 `admin_full` 与 `ops_manager` 两项兼容定义。
 
-### 4.3 审计事件
-
-完整的审计事件类型（`AuthEventType`）：`login_success`、`login_failed`、`logout`、`password_changed`、`profile_updated`、`user_created`、`user_disabled`、`user_enabled`、`user_deleted`、`user_restored`、`user_updated`、`role_changed`、`session_revoked`、`invite_created`、`invite_deleted`、`invite_used`、`recovery_reset`、`register_success`
-
-### 4.4 当前隔离模型
+### 4.3 当前隔离模型
 
 当前默认模型是**单用户单 operator**。正式运行语义已经切到：
 
@@ -428,7 +416,6 @@ data/
   config/user-im/{userId}/feishu.json      # 用户级飞书 IM 配置（AES-256-GCM 加密）
   config/user-im/{userId}/telegram.json    # 用户级 Telegram IM 配置（AES-256-GCM 加密）
   config/user-im/{userId}/qq.json          # 用户级 QQ IM 配置（AES-256-GCM 加密）
-  config/registration.json                 # 注册设置（开关、邀请码要求）
   config/session-secret.key                # 会话签名密钥（0600 权限）
   config/system-settings.json              # 系统运行参数（runtime 超时、并发限制等）
   skills/{userId}/                         # 用户级 Skills 数据

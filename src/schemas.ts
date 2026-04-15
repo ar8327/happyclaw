@@ -183,23 +183,6 @@ export const ClaudeThirdPartyProfileSecretsSchema = z
     { message: 'At least one secret field must be provided' },
   );
 
-export const LoginSchema = z.object({
-  username: z.string().min(1),
-  password: z.string().min(1),
-});
-
-export const RegisterSchema = z.object({
-  username: z.string().min(3).max(32),
-  password: z.string().min(8).max(128),
-  display_name: z.string().max(64).optional(),
-  invite_code: z.string().min(1).optional(),
-});
-
-export const RegistrationConfigSchema = z.object({
-  allowRegistration: z.boolean(),
-  requireInviteCode: z.boolean(),
-});
-
 export const SystemSettingsSchema = z.object({
   runtimeTimeout: z.number().int().min(60000).max(86400000).optional(),
   idleTimeout: z.number().int().min(60000).max(86400000).optional(),
