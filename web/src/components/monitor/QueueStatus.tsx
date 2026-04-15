@@ -33,11 +33,11 @@ export function QueueStatus({ status }: QueueStatusProps) {
           <div className="mt-3 space-y-1">
             {sessionsWithQueue.slice(0, 3).map((session) => (
               <div
-                key={session.jid}
+                key={session.runtime_key}
                 className="flex items-center justify-between text-xs"
               >
                 <span className="text-slate-600 truncate">
-                  {session.session_id || session.jid}
+                  {session.session_name || session.session_id || '未知会话'}
                 </span>
                 <span className="text-foreground font-medium ml-2">
                   {session.pendingTasks}{session.pendingMessages ? ' + 消息' : ''}

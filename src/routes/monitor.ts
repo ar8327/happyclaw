@@ -78,8 +78,9 @@ async function getClaudeCodeVersion(): Promise<string | null> {
 function resolveRuntimeAccess(
   runtimeJid: string,
 ): {
-  accessJid: string;
+  accessJid: string | null;
   sessionId: string | null;
+  sessionName: string | null;
   runnerId: string;
 } | null {
   const defaultRunnerId = getDefaultRunnerId();
@@ -99,6 +100,7 @@ function resolveRuntimeAccess(
     return {
       accessJid,
       sessionId: workerSession.id,
+      sessionName: workerSession.name,
       runnerId: workerSession.runner_id || parentSession?.runner_id || defaultRunnerId,
     };
   }
@@ -116,7 +118,31 @@ function resolveRuntimeAccess(
     return {
       accessJid,
       sessionId: workerSession.id,
+      sessionName: workerSession.name,
       runnerId: workerSession.runner_id || parentSession?.runner_id || defaultRunnerId,
+    };
+  }
+
+  const directSession = getSessionRecord(runtimeJid);
+  if (directSession) {
+    const accessJid =
+      directSession.kind === 'main' || directSession.kind === 'workspace'
+        ? (() => {
+            const folder = directSession.id.startsWith('main:')
+              ? directSession.id.slice('main:'.length)
+              : directSession.parent_session_id?.startsWith('main:')
+                ? directSession.parent_session_id.slice('main:'.length)
+                : null;
+            return folder
+              ? getJidsByFolder(folder).find((jid) => jid.startsWith('web:')) || null
+              : null;
+          })()
+        : null;
+    return {
+      accessJid,
+      sessionId: directSession.id,
+      sessionName: directSession.name,
+      runnerId: directSession.runner_id || defaultRunnerId,
     };
   }
 
@@ -126,6 +152,7 @@ function resolveRuntimeAccess(
   return {
     accessJid: runtimeJid,
     sessionId: session?.id || null,
+    sessionName: session?.name || group.name,
     runnerId:
       session?.runner_id
         || resolveLegacyRunnerId(group.llm_provider, defaultRunnerId),
@@ -206,7 +233,13 @@ monitorRoutes.get('/status', authMiddleware, async (c) => {
     ? queueStatus.groups
     : queueStatus.groups.filter((g) => {
         const resolved = resolveRuntimeAccess(g.jid);
-        if (!resolved) return false;
+        if (!resolved?.sessionId) return false;
+        const session = getSessionRecord(resolved.sessionId);
+        if (!session) return false;
+        if (session.kind === 'memory') {
+          return !!session.owner_key && session.owner_key === authUser.id;
+        }
+        if (!resolved.accessJid) return false;
         const group = getRegisteredGroup(resolved.accessJid);
         if (!group) return false;
         return canAccessGroup(
@@ -218,9 +251,12 @@ monitorRoutes.get('/status', authMiddleware, async (c) => {
   const runtimeSessions = visibleRuntimes.map((runtime) => {
     const resolved = resolveRuntimeAccess(runtime.jid);
     return {
-      ...runtime,
-      jid: resolved?.accessJid || runtime.jid,
+      runtime_key: runtime.jid,
+      active: runtime.active,
+      pendingMessages: runtime.pendingMessages,
+      pendingTasks: runtime.pendingTasks,
       session_id: resolved?.sessionId || null,
+      session_name: resolved?.sessionName || null,
       runner_id: resolved?.runnerId || defaultRunnerId,
       runtime_identifier: normalizeRuntimeLabel(runtime.runtimeIdentifier),
       runtime_label: normalizeRuntimeLabel(runtime.runtimeLabel),
@@ -236,7 +272,13 @@ monitorRoutes.get('/status', authMiddleware, async (c) => {
     ? queueStatus.waitingCount
     : queueStatus.waitingGroupJids.filter((jid) => {
         const resolved = resolveRuntimeAccess(jid);
-        if (!resolved) return false;
+        if (!resolved?.sessionId) return false;
+        const session = getSessionRecord(resolved.sessionId);
+        if (!session) return false;
+        if (session.kind === 'memory') {
+          return !!session.owner_key && session.owner_key === authUser.id;
+        }
+        if (!resolved.accessJid) return false;
         const group = getRegisteredGroup(resolved.accessJid);
         if (!group) return false;
         return canAccessGroup(

@@ -60,7 +60,7 @@ export function MonitorPage() {
                 {/* 移动端：卡片列表 */}
                 <div className="lg:hidden space-y-3">
                   {status.sessions.map((session) => (
-                    <SessionStatusCard key={session.jid} session={session} />
+                    <SessionStatusCard key={session.runtime_key} session={session} />
                   ))}
                 </div>
 
@@ -71,6 +71,9 @@ export function MonitorPage() {
                       <tr>
                         <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">
                           会话
+                        </th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">
+                          Session ID
                         </th>
                         <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">
                           Runner
@@ -88,9 +91,12 @@ export function MonitorPage() {
                     </thead>
                     <tbody className="divide-y divide-border">
                       {status.sessions.map((session) => (
-                        <tr key={session.jid} className="hover:bg-muted/50">
+                        <tr key={session.runtime_key} className="hover:bg-muted/50">
                           <td className="px-4 py-3 text-sm font-medium text-foreground">
-                            {session.session_id || session.jid}
+                            {session.session_name || session.session_id || '未知会话'}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-slate-600 font-mono">
+                            {session.session_id || '-'}
                           </td>
                           <td className="px-4 py-3 text-sm text-slate-600">
                             {session.runner_id || '-'}

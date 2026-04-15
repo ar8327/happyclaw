@@ -2,8 +2,9 @@ import { create } from 'zustand';
 import { api } from '../api/client';
 
 export interface RuntimeSessionStatus {
-  jid: string;
+  runtime_key: string;
   session_id?: string | null;
+  session_name?: string | null;
   active: boolean;
   pendingMessages: boolean;
   pendingTasks: number;
