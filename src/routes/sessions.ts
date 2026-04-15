@@ -475,7 +475,11 @@ function isImplicitDefaultSessionBinding(
   binding: ReturnType<typeof getSessionBinding> | undefined,
 ): boolean {
   return !!binding
-    && binding.session_id === `main:${imGroup.folder}`;
+    && binding.session_id === `main:${imGroup.folder}`
+    && binding.binding_mode === 'source_only'
+    && binding.reply_policy === 'source_only'
+    && binding.activation_mode === 'auto'
+    && binding.require_mention !== true;
 }
 
 function getExplicitSessionBinding(
@@ -504,8 +508,13 @@ function syncExplicitSessionBinding(
     options.requireMention !== undefined
       ? options.requireMention
       : imGroup.require_mention === true;
+  const defaultSessionId = `main:${imGroup.folder}`;
+  const isDefaultPolicy =
+    nextReplyPolicy === 'source_only'
+    && nextActivationMode === 'auto'
+    && !nextRequireMention;
 
-  if (!sessionId) {
+  if (!sessionId || (sessionId === defaultSessionId && isDefaultPolicy)) {
     deleteSessionBinding(channelJid);
     return;
   }
@@ -811,11 +820,7 @@ sessionRoutes.put('/bindings/:channelJid', authMiddleware, async (c) => {
     });
     setRegisteredGroup(channelJid, updated);
     syncRegisteredGroupCache(channelJid, updated);
-    const explicitSessionId =
-      targetSession
-      && targetSession.id !== `main:${updated.folder}`
-        ? targetSession.id
-        : null;
+    const explicitSessionId = targetSession?.id || null;
     syncExplicitSessionBinding(channelJid, updated, explicitSessionId, {
       replyPolicy,
       activationMode,

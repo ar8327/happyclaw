@@ -7,7 +7,6 @@ import { getWebDeps } from '../web-context.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { canAccessGroup } from '../web-context.js';
 import {
-  deleteSessionBinding,
   getRegisteredGroup,
   getAllRegisteredGroups,
   getSessionBinding,
@@ -76,7 +75,11 @@ function isImplicitDefaultSessionBinding(
   binding: ReturnType<typeof getSessionBinding> | undefined,
 ): boolean {
   return !!binding
-    && binding.session_id === `main:${imGroup.folder}`;
+    && binding.session_id === `main:${imGroup.folder}`
+    && binding.binding_mode === 'source_only'
+    && binding.reply_policy === 'source_only'
+    && binding.activation_mode === 'auto'
+    && binding.require_mention !== true;
 }
 
 function getExplicitSessionBinding(
@@ -591,7 +594,7 @@ router.delete(
       activation_mode: 'disabled' as const,
     };
     setRegisteredGroup(imJid, updated);
-    deleteSessionBinding(imJid);
+    upsertImBinding(imJid, updated, `main:${updated.folder}`, 'source_only');
     syncImGroupCache(imJid, updated);
 
     logger.info(
@@ -694,7 +697,7 @@ router.delete('/:jid/im-binding/:imJid', authMiddleware, async (c) => {
     activation_mode: 'disabled' as const,
   };
   setRegisteredGroup(imJid, updated);
-  deleteSessionBinding(imJid);
+  upsertImBinding(imJid, updated, `main:${updated.folder}`, 'source_only');
   syncImGroupCache(imJid, updated);
 
   logger.info(

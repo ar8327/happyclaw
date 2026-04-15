@@ -1345,7 +1345,11 @@ function isImplicitDefaultSessionBinding(
   binding: ReturnType<typeof getSessionBinding> | undefined,
 ): boolean {
   return !!binding
-    && binding.session_id === resolveDefaultBindingSessionId(imGroup);
+    && binding.session_id === resolveDefaultBindingSessionId(imGroup)
+    && binding.binding_mode === 'source_only'
+    && binding.reply_policy === 'source_only'
+    && binding.activation_mode === 'auto'
+    && binding.require_mention !== true;
 }
 
 function getExplicitSessionBinding(
@@ -1374,8 +1378,18 @@ function applyExplicitSessionBinding(
     updates.require_mention !== undefined
       ? updates.require_mention
       : imGroup.require_mention === true;
+  const isDefaultPolicy =
+    nextReplyPolicy === 'source_only'
+    && nextActivationMode === 'auto'
+    && !nextRequireMention;
 
-  if (!sessionId || sessionId === resolveDefaultBindingSessionId(imGroup)) {
+  if (
+    !sessionId
+    || (
+      sessionId === resolveDefaultBindingSessionId(imGroup)
+      && isDefaultPolicy
+    )
+  ) {
     deleteSessionBinding(imJid);
     return;
   }
@@ -2868,7 +2882,12 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
           : imGroup.require_mention,
     };
     applyBindingUpdate(imJid, updated);
-    applyExplicitSessionBinding(imJid, null, updated, {});
+    applyExplicitSessionBinding(
+      imJid,
+      resolveDefaultBindingSessionId(updated),
+      updated,
+      {},
+    );
     logger.info({ imJid, userId: user.id }, 'IM group unbound (bindings page)');
     return c.json({ success: true });
   }

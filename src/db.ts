@@ -112,13 +112,30 @@ function resolveLegacyMainSessionId(targetMainJid: string): string | null {
 }
 
 function migrateLegacyRegisteredGroupBindings(): void {
+  const hasReplyPolicy = hasColumn('registered_groups', 'reply_policy');
+  const hasActivationMode = hasColumn('registered_groups', 'activation_mode');
+  const hasRequireMention = hasColumn('registered_groups', 'require_mention');
   const hasTargetAgent = hasColumn('registered_groups', 'target_agent_id');
   const hasTargetMain = hasColumn('registered_groups', 'target_main_jid');
-  if (!hasTargetAgent && !hasTargetMain) return;
+  if (
+    !hasReplyPolicy
+    && !hasActivationMode
+    && !hasRequireMention
+    && !hasTargetAgent
+    && !hasTargetMain
+  ) {
+    return;
+  }
 
   const rows = db
     .prepare(
-      `SELECT jid, name, folder, added_at, reply_policy, activation_mode, require_mention${
+      `SELECT jid, name, folder, added_at${
+        hasReplyPolicy ? ', reply_policy' : ", 'source_only' AS reply_policy"
+      }${
+        hasActivationMode ? ', activation_mode' : ", 'auto' AS activation_mode"
+      }${
+        hasRequireMention ? ', require_mention' : ', 0 AS require_mention'
+      }${
         hasTargetAgent ? ', target_agent_id' : ", NULL AS target_agent_id"
       }${hasTargetMain ? ', target_main_jid' : ", NULL AS target_main_jid"}
        FROM registered_groups`,
@@ -144,24 +161,14 @@ function migrateLegacyRegisteredGroupBindings(): void {
 
       const targetAgentId = row.target_agent_id?.trim() || null;
       const targetMainJid = row.target_main_jid?.trim() || null;
-      if (!targetAgentId && !targetMainJid) continue;
-
       const defaultSessionId = buildMainSessionId(row.folder);
+      const current = getSessionBinding(row.jid);
       const sessionId = targetAgentId
         ? buildWorkerSessionId(targetAgentId)
-        : resolveLegacyMainSessionId(targetMainJid || '');
+        : resolveLegacyMainSessionId(targetMainJid || '')
+          || current?.session_id
+          || defaultSessionId;
       if (!sessionId) continue;
-
-      const current = getSessionBinding(row.jid);
-      const currentIsImplicitDefault = current?.session_id === defaultSessionId;
-      if (current && !currentIsImplicitDefault) continue;
-
-      if (sessionId === defaultSessionId) {
-        if (currentIsImplicitDefault) {
-          db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(row.jid);
-        }
-        continue;
-      }
 
       const session = getSessionRecord(sessionId);
       const now = new Date().toISOString();
@@ -192,7 +199,10 @@ function migrateLegacyRegisteredGroupBindings(): void {
 
 function dropLegacyRegisteredGroupBindingColumns(): void {
   if (
-    !hasColumn('registered_groups', 'target_agent_id')
+    !hasColumn('registered_groups', 'reply_policy')
+    && !hasColumn('registered_groups', 'require_mention')
+    && !hasColumn('registered_groups', 'activation_mode')
+    && !hasColumn('registered_groups', 'target_agent_id')
     && !hasColumn('registered_groups', 'target_main_jid')
   ) {
     return;
@@ -212,9 +222,6 @@ function dropLegacyRegisteredGroupBindingColumns(): void {
         created_by TEXT,
         is_home INTEGER DEFAULT 0,
         selected_skills TEXT,
-        reply_policy TEXT DEFAULT 'source_only',
-        require_mention INTEGER DEFAULT 0,
-        activation_mode TEXT DEFAULT 'auto',
         mcp_mode TEXT DEFAULT 'inherit',
         selected_mcps TEXT,
         llm_provider TEXT DEFAULT 'claude',
@@ -226,15 +233,13 @@ function dropLegacyRegisteredGroupBindingColumns(): void {
       INSERT INTO registered_groups_new (
         jid, name, folder, added_at, container_config, custom_cwd,
         init_source_path, init_git_url, created_by, is_home, selected_skills,
-        reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps,
-        llm_provider, model, thinking_effort, context_compression,
+        mcp_mode, selected_mcps, llm_provider, model, thinking_effort, context_compression,
         knowledge_extraction
       )
       SELECT
         jid, name, folder, added_at, container_config, custom_cwd,
         init_source_path, init_git_url, created_by, is_home, selected_skills,
-        reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps,
-        llm_provider, model, thinking_effort, context_compression,
+        mcp_mode, selected_mcps, llm_provider, model, thinking_effort, context_compression,
         knowledge_extraction
       FROM registered_groups;
       DROP TABLE registered_groups;
@@ -810,15 +815,8 @@ export function initDatabase(): void {
   ensureColumn('scheduled_tasks', 'execution_type', "TEXT DEFAULT 'agent'");
   ensureColumn('scheduled_tasks', 'script_command', 'TEXT');
   ensureColumn('registered_groups', 'selected_skills', 'TEXT');
-  ensureColumn(
-    'registered_groups',
-    'reply_policy',
-    "TEXT DEFAULT 'source_only'",
-  );
-  ensureColumn('registered_groups', 'require_mention', 'INTEGER DEFAULT 0');
   ensureColumn('registered_groups', 'mcp_mode', "TEXT DEFAULT 'inherit'");
   ensureColumn('registered_groups', 'selected_mcps', 'TEXT');
-  ensureColumn('registered_groups', 'activation_mode', "TEXT DEFAULT 'auto'");
   ensureColumn('registered_groups', 'llm_provider', "TEXT DEFAULT 'claude'");
   ensureColumn('registered_groups', 'model', 'TEXT');
   ensureColumn('registered_groups', 'thinking_effort', 'TEXT');
@@ -898,9 +896,6 @@ export function initDatabase(): void {
           created_by TEXT,
           is_home INTEGER DEFAULT 0,
           selected_skills TEXT,
-          reply_policy TEXT DEFAULT 'source_only',
-          require_mention INTEGER DEFAULT 0,
-          activation_mode TEXT DEFAULT 'auto',
           mcp_mode TEXT DEFAULT 'inherit',
           selected_mcps TEXT,
           llm_provider TEXT DEFAULT 'claude',
@@ -912,15 +907,13 @@ export function initDatabase(): void {
         INSERT INTO registered_groups_new (
           jid, name, folder, added_at, container_config, custom_cwd,
           init_source_path, init_git_url, created_by, is_home, selected_skills,
-          reply_policy, require_mention, activation_mode, mcp_mode,
-          selected_mcps, llm_provider, model, thinking_effort,
+          mcp_mode, selected_mcps, llm_provider, model, thinking_effort,
           context_compression, knowledge_extraction
         )
         SELECT
           jid, name, folder, added_at, container_config, custom_cwd,
           init_source_path, init_git_url, created_by, is_home, selected_skills,
-          reply_policy, require_mention, activation_mode, mcp_mode,
-          selected_mcps, llm_provider, model, thinking_effort,
+          mcp_mode, selected_mcps, llm_provider, model, thinking_effort,
           context_compression, knowledge_extraction
         FROM registered_groups;
         DROP TABLE registered_groups;
@@ -979,14 +972,15 @@ export function initDatabase(): void {
       'created_by',
       'is_home',
       'selected_skills',
-      'reply_policy',
+      'mcp_mode',
+      'selected_mcps',
+      'llm_provider',
+      'model',
+      'thinking_effort',
+      'context_compression',
+      'knowledge_extraction',
     ],
-    [
-      'trigger_pattern',
-      'requires_trigger',
-      'target_agent_id',
-      'target_main_jid',
-    ],
+    ['trigger_pattern', 'requires_trigger'],
   );
 
   assertSchema('users', [
@@ -1101,42 +1095,6 @@ export function initDatabase(): void {
         ).run(g.folder, g.created_by, new Date().toISOString(), g.created_by);
       }
     })();
-  }
-
-  const curVer = getRouterStateInternal('schema_version');
-
-  // v22: Fix legacy target_main_jid before route data is migrated away.
-  if (
-    hasColumn('registered_groups', 'target_main_jid')
-    && curVer
-    && parseInt(curVer, 10) < 22
-  ) {
-    const rows = db
-      .prepare(
-        "SELECT jid, target_main_jid FROM registered_groups WHERE target_main_jid IS NOT NULL AND target_main_jid != ''",
-      )
-      .all() as Array<{ jid: string; target_main_jid: string }>;
-    for (const row of rows) {
-      const targetJid = row.target_main_jid;
-      // Check if target_main_jid is a real registered group JID
-      const exists = db
-        .prepare('SELECT 1 FROM registered_groups WHERE jid = ?')
-        .get(targetJid);
-      if (exists) continue;
-      // Not a valid JID — try to resolve via folder
-      if (!targetJid.startsWith('web:')) continue;
-      const folder = targetJid.slice(4);
-      const candidates = db
-        .prepare(
-          "SELECT jid FROM registered_groups WHERE folder = ? AND jid LIKE 'web:%'",
-        )
-        .all(folder) as Array<{ jid: string }>;
-      if (candidates.length === 1) {
-        db.prepare(
-          'UPDATE registered_groups SET target_main_jid = ? WHERE jid = ?',
-        ).run(candidates[0].jid, row.jid);
-      }
-    }
   }
 
   // v23→v24 migration: billing system initialization
@@ -1363,37 +1321,6 @@ export function initDatabase(): void {
     })();
   }
 
-  // v29: Legacy auto-route backfill before session_bindings became canonical.
-  if (
-    hasColumn('registered_groups', 'target_main_jid')
-    && hasColumn('registered_groups', 'target_agent_id')
-    && curVer
-    && parseInt(curVer, 10) < 29
-  ) {
-    db.exec(`
-      UPDATE registered_groups
-      SET target_main_jid = (
-        SELECT home.jid FROM registered_groups AS home
-        WHERE home.folder = registered_groups.folder
-          AND home.is_home = 1
-          AND home.jid LIKE 'web:%'
-        LIMIT 1
-      )
-      WHERE jid NOT LIKE 'web:%'
-        AND target_main_jid IS NULL
-        AND target_agent_id IS NULL
-        AND is_home = 0
-        AND EXISTS (
-          SELECT 1 FROM registered_groups AS home
-          WHERE home.folder = registered_groups.folder
-            AND home.is_home = 1
-        )
-    `);
-    logger.info(
-      'Migration v28→v29: set legacy target_main_jid for auto-registered IM groups',
-    );
-  }
-
   // v30: turns table for Turn-based message routing
   db.exec(`
     CREATE TABLE IF NOT EXISTS turns (
@@ -1456,7 +1383,7 @@ export function initDatabase(): void {
 
   syncSessionWorkbenchProjection();
 
-  const SCHEMA_VERSION = '34';
+  const SCHEMA_VERSION = '35';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -3260,9 +3187,6 @@ type RegisteredGroupRow = {
   created_by: string | null;
   is_home: number;
   selected_skills: string | null;
-  reply_policy: string | null;
-  require_mention: number;
-  activation_mode: string | null;
   mcp_mode: string | null;
   selected_mcps: string | null;
   llm_provider: string | null;
@@ -3276,7 +3200,7 @@ type RegisteredGroupRow = {
 function parseGroupRow(
   row: RegisteredGroupRow,
 ): RegisteredGroup & { jid: string } {
-  return {
+  const group: RegisteredGroup & { jid: string } = {
     jid: row.jid,
     name: row.name,
     folder: row.folder,
@@ -3292,9 +3216,6 @@ function parseGroupRow(
     selected_skills: row.selected_skills
       ? JSON.parse(row.selected_skills)
       : null,
-    reply_policy: row.reply_policy === 'mirror' ? 'mirror' : 'source_only',
-    require_mention: row.require_mention === 1,
-    activation_mode: parseActivationMode(row.activation_mode),
     mcp_mode: row.mcp_mode === 'custom' ? 'custom' : 'inherit',
     selected_mcps: row.selected_mcps ? JSON.parse(row.selected_mcps) : null,
     llm_provider:
@@ -3308,6 +3229,13 @@ function parseGroupRow(
     context_compression: parseCompressionMode(row.context_compression),
     knowledge_extraction: row.knowledge_extraction === 1,
   };
+  if (!row.jid.startsWith('web:')) {
+    const binding = getSessionBinding(row.jid);
+    group.reply_policy = binding?.reply_policy ?? 'source_only';
+    group.require_mention = binding?.require_mention === true;
+    group.activation_mode = binding?.activation_mode ?? 'auto';
+  }
+  return group;
 }
 
 function parseThinkingEffort(
@@ -3352,8 +3280,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps, llm_provider, model, thinking_effort, context_compression, knowledge_extraction)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, mcp_mode, selected_mcps, llm_provider, model, thinking_effort, context_compression, knowledge_extraction)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -3366,9 +3294,6 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.created_by ?? null,
     group.is_home ? 1 : 0,
     group.selected_skills ? JSON.stringify(group.selected_skills) : null,
-    group.reply_policy ?? 'source_only',
-    group.require_mention === true ? 1 : 0,
-    group.activation_mode ?? 'auto',
     group.mcp_mode ?? 'inherit',
     group.selected_mcps ? JSON.stringify(group.selected_mcps) : null,
     group.llm_provider ?? null,
@@ -3377,6 +3302,32 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.context_compression ?? 'off',
     group.knowledge_extraction ? 1 : 0,
   );
+  if (!jid.startsWith('web:')) {
+    const currentBinding = getSessionBinding(jid);
+    const sessionId = currentBinding?.session_id || buildMainSessionId(group.folder);
+    const session = getSessionRecord(sessionId);
+    const now = new Date().toISOString();
+    const replyPolicy = group.reply_policy ?? currentBinding?.reply_policy ?? 'source_only';
+    const activationMode = group.activation_mode ?? currentBinding?.activation_mode ?? 'auto';
+    const requireMention =
+      group.require_mention ?? currentBinding?.require_mention ?? false;
+    saveSessionBinding({
+      channel_jid: jid,
+      session_id: sessionId,
+      binding_mode:
+        replyPolicy === 'mirror'
+          ? 'mirror'
+          : session?.kind === 'worker'
+            ? 'direct'
+            : 'source_only',
+      activation_mode: activationMode,
+      require_mention: requireMention,
+      display_name: group.name,
+      reply_policy: replyPolicy,
+      created_at: currentBinding?.created_at || group.added_at || now,
+      updated_at: now,
+    });
+  }
   syncSessionProjectionForGroup(jid, group);
   if (group.created_by) {
     syncMemorySessionProjectionForOwner(group.created_by);

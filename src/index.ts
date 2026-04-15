@@ -411,9 +411,12 @@ function isImplicitDefaultSessionBinding(
   binding: ReturnType<typeof getSessionBinding> | undefined,
 ): boolean {
   if (!group || !binding) return false;
-  if (group.activation_mode === 'disabled') return false;
   if (chatJid.startsWith('web:')) return false;
-  return binding.session_id === `main:${group.folder}`;
+  return binding.session_id === `main:${group.folder}`
+    && binding.binding_mode === 'source_only'
+    && binding.reply_policy === 'source_only'
+    && binding.activation_mode === 'auto'
+    && binding.require_mention !== true;
 }
 
 function getExplicitSessionBinding(
@@ -588,11 +591,15 @@ function applyExplicitChatBinding(
 ): void {
   const current = getSessionBinding(chatJid);
   const now = new Date().toISOString();
-  const implicitDefaultSessionId =
-    group.activation_mode === 'disabled' || chatJid.startsWith('web:')
-      ? null
-      : `main:${group.folder}`;
-  if (!sessionId || sessionId === implicitDefaultSessionId) {
+  const nextActivationMode = group.activation_mode ?? 'auto';
+  const nextRequireMention = group.require_mention === true;
+  const defaultSessionId = chatJid.startsWith('web:') ? null : `main:${group.folder}`;
+  const isDefaultBinding = !!defaultSessionId && sessionId === defaultSessionId;
+  const isDefaultPolicy =
+    nextActivationMode === 'auto'
+    && !nextRequireMention
+    && replyPolicy === 'source_only';
+  if (!sessionId || (isDefaultBinding && isDefaultPolicy)) {
     deleteSessionBinding(chatJid);
     return;
   }
@@ -606,8 +613,8 @@ function applyExplicitChatBinding(
         : session?.kind === 'worker'
           ? 'direct'
           : 'source_only',
-    activation_mode: group.activation_mode ?? 'auto',
-    require_mention: group.require_mention === true,
+    activation_mode: nextActivationMode,
+    require_mention: nextRequireMention,
     display_name: group.name,
     reply_policy: replyPolicy,
     created_at: current?.created_at || group.added_at || now,
@@ -619,7 +626,6 @@ function resolveDefaultSessionBinding(
   chatJid: string,
   group: RegisteredGroup,
 ): string | null {
-  if (group.activation_mode === 'disabled') return null;
   if (chatJid.startsWith('web:')) return null;
   return `main:${group.folder}`;
 }
@@ -647,7 +653,22 @@ function unbindImGroup(jid: string, reason: string): void {
   const storedBinding = getSessionBinding(jid);
   const binding = getExplicitSessionBinding(jid, group);
   if (!binding) {
-    if (storedBinding) deleteSessionBinding(jid);
+    if (storedBinding) {
+      const disabledGroup = {
+        ...(group || {
+          name: storedBinding.display_name || jid,
+          folder: storedBinding.session_id.startsWith('main:')
+            ? storedBinding.session_id.slice('main:'.length)
+            : MAIN_GROUP_FOLDER,
+          added_at: storedBinding.created_at,
+        }),
+        reply_policy: 'source_only' as const,
+        activation_mode: 'disabled' as const,
+      };
+      setRegisteredGroup(jid, disabledGroup);
+      applyExplicitChatBinding(jid, disabledGroup, `main:${disabledGroup.folder}`);
+      registeredGroups[jid] = disabledGroup;
+    }
     return;
   }
   if (!group) {
@@ -664,7 +685,7 @@ function unbindImGroup(jid: string, reason: string): void {
     activation_mode: 'disabled' as const,
   };
   setRegisteredGroup(jid, updated);
-  deleteSessionBinding(jid);
+  applyExplicitChatBinding(jid, updated, `main:${updated.folder}`);
   registeredGroups[jid] = updated;
   imSendFailCounts.delete(jid);
   imHealthCheckFailCounts.delete(jid);
