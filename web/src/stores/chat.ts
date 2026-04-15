@@ -1898,6 +1898,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const resolvedKind = kind || (idx >= 0 ? existing[idx].kind : 'task');
       const agentInfo: AgentInfo = {
         id: agentId,
+        session_id:
+          resolvedKind === 'conversation'
+            ? existing[idx]?.session_id || `worker:${agentId}`
+            : undefined,
         name,
         prompt,
         status,

@@ -130,6 +130,7 @@ router.get('/:jid/agents', authMiddleware, async (c) => {
     agents: agents.map((a) => {
       const base = {
         id: a.id,
+        session_id: a.kind === 'conversation' ? buildWorkerSessionId(a.id) : undefined,
         name: a.name,
         prompt: a.prompt,
         status: a.status,
@@ -234,6 +235,7 @@ router.post('/:jid/agents', authMiddleware, async (c) => {
   return c.json({
     agent: {
       id: agent.id,
+      session_id: buildWorkerSessionId(agent.id),
       name: agent.name,
       prompt: agent.prompt,
       status: agent.status,
@@ -382,9 +384,8 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
     jid: string;
     name: string;
     bound_session_id: string | null;
+    bound_session_kind: 'main' | 'workspace' | 'worker' | 'memory' | null;
     binding_mode: 'direct' | 'source_only' | 'mirror';
-    bound_agent_id: string | null;
-    bound_main_jid: string | null;
     reply_policy: 'source_only' | 'mirror';
     activation_mode: 'auto' | 'always' | 'when_mentioned' | 'disabled';
     require_mention: boolean;
@@ -400,13 +401,15 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
   for (const j of imJids) {
     const g = allGroups[j];
     const binding = getExplicitSessionBinding(j, g);
+    const boundSession = binding?.session_id
+      ? getSessionRecord(binding.session_id)
+      : null;
 
     // Resolve bound target name for display
     let boundTargetName: string | null = null;
     let boundWorkspaceName: string | null = null;
-    if (binding?.session_id) {
-      const boundSession = getSessionRecord(binding.session_id);
-      if (boundSession?.kind === 'worker') {
+    if (boundSession) {
+      if (boundSession.kind === 'worker') {
         const agentId = extractAgentIdFromWorkerSessionId(boundSession.id) || '';
         const boundAgent = agentId ? getAgent(agentId) : undefined;
         if (boundAgent) {
@@ -415,7 +418,6 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
           if (ownerGroup) boundWorkspaceName = ownerGroup.name;
         }
       } else if (
-        boundSession &&
         (boundSession.kind === 'main' || boundSession.kind === 'workspace')
       ) {
         const backingJid = boundSession.id.startsWith('main:')
@@ -432,14 +434,8 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
       jid: j,
       name: g.name,
       bound_session_id: binding?.session_id || null,
+      bound_session_kind: boundSession?.kind || null,
       binding_mode: binding?.binding_mode || 'source_only',
-      bound_agent_id: extractAgentIdFromWorkerSessionId(binding?.session_id),
-      bound_main_jid:
-        binding?.session_id?.startsWith('main:')
-          ? getJidsByFolder(binding.session_id.slice('main:'.length)).find((jid) =>
-              jid.startsWith('web:'),
-            ) || `web:${binding.session_id.slice('main:'.length)}`
-          : null,
       reply_policy: binding?.reply_policy || 'source_only',
       activation_mode: binding?.activation_mode || g.activation_mode || 'auto',
       require_mention: binding?.require_mention ?? g.require_mention === true,

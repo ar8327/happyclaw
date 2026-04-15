@@ -987,6 +987,11 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         <ImBindingDialog
           open={!!bindingAgentId}
           groupJid={groupJid}
+          targetSessionId={
+            bindingAgentId === MAIN_BINDING
+              ? group?.id ?? null
+              : agents.find((a) => a.id === bindingAgentId)?.session_id ?? null
+          }
           agentId={bindingAgentId === MAIN_BINDING ? null : bindingAgentId}
           agent={bindingAgentId !== MAIN_BINDING ? agents.find((a) => a.id === bindingAgentId) : undefined}
           onClose={() => setBindingAgentId(null)}

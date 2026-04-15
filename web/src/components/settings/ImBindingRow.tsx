@@ -25,15 +25,15 @@ export function ImBindingRow({
   onUnbind,
   onUpdatePolicy,
 }: ImBindingRowProps) {
-  const hasBound = !!group.bound_agent_id || !!group.bound_main_jid;
+  const hasBound = !!group.bound_session_id;
 
   const bindingLabel = (): string => {
-    if (group.bound_agent_id && group.bound_target_name) {
+    if (group.bound_session_kind === 'worker' && group.bound_target_name) {
       return group.bound_workspace_name && group.bound_workspace_name !== group.bound_target_name
         ? `${group.bound_workspace_name} / ${group.bound_target_name}`
         : group.bound_target_name;
     }
-    if (group.bound_main_jid && group.bound_target_name) {
+    if (group.bound_session_id && group.bound_target_name) {
       return `${group.bound_target_name} / 主会话`;
     }
     return '默认（主会话）';

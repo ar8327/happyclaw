@@ -31,6 +31,7 @@ export type GroupInfo = SessionInfo;
 
 export interface AgentInfo {
   id: string;
+  session_id?: string;
   name: string;
   prompt: string;
   status: 'idle' | 'running' | 'completed' | 'error';
@@ -45,9 +46,8 @@ export interface AvailableImChannel {
   jid: string;
   name: string;
   bound_session_id: string | null;
+  bound_session_kind?: 'main' | 'workspace' | 'worker' | 'memory' | null;
   binding_mode?: 'direct' | 'source_only' | 'mirror';
-  bound_agent_id: string | null;
-  bound_main_jid: string | null;
   bound_target_name: string | null;
   bound_workspace_name: string | null;
   reply_policy?: 'source_only' | 'mirror';
