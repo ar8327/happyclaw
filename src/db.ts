@@ -14,7 +14,6 @@ import {
   AgentStatus,
   AuthAuditLog,
   AuthEventType,
-  GroupMember,
   InviteCode,
   InviteCodeWithCreator,
   NewMessage,
@@ -493,6 +492,13 @@ function dropLegacyBillingCompatibility(): void {
   })();
 }
 
+function dropLegacyGroupAccessTables(): void {
+  for (const tableName of ['group_members', 'user_pinned_groups']) {
+    if (!tableExists(tableName)) continue;
+    db.exec(`DROP TABLE ${tableName}`);
+  }
+}
+
 function assertSchema(
   tableName: string,
   requiredColumns: string[],
@@ -660,29 +666,6 @@ export function initDatabase(): void {
     );
     CREATE INDEX IF NOT EXISTS idx_users_status_role ON users(status, role);
     CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at);
-  `);
-
-  // Group members table for shared workspaces
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS group_members (
-      group_folder TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'member',
-      added_at TEXT NOT NULL,
-      added_by TEXT,
-      PRIMARY KEY (group_folder, user_id)
-    );
-    CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(user_id);
-  `);
-
-  // User pinned groups (per-user workspace pinning)
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS user_pinned_groups (
-      user_id TEXT NOT NULL,
-      jid TEXT NOT NULL,
-      pinned_at TEXT NOT NULL,
-      PRIMARY KEY (user_id, jid)
-    );
   `);
 
   // Token usage tracking tables
@@ -960,6 +943,7 @@ export function initDatabase(): void {
   dropLegacyRegisteredGroupCompatibilityColumns();
   dropLegacyUnusedAuthTables();
   dropLegacyBillingCompatibility();
+  dropLegacyGroupAccessTables();
 
   // v19→v20 migration: add token_usage column to messages
   ensureColumn('messages', 'token_usage', 'TEXT');
@@ -1202,7 +1186,7 @@ export function initDatabase(): void {
 
   syncSessionWorkbenchProjection();
 
-  const SCHEMA_VERSION = '39';
+  const SCHEMA_VERSION = '40';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -3530,45 +3514,16 @@ export function deleteGroupData(jid: string, folder: string): void {
     db.prepare('DELETE FROM scheduled_tasks WHERE group_folder = ?').run(
       folder,
     );
-    // 2. 删除成员记录
-    db.prepare('DELETE FROM group_members WHERE group_folder = ?').run(folder);
-    // 3. 删除注册信息
+    // 2. 删除注册信息
     db.prepare('DELETE FROM registered_groups WHERE jid = ?').run(jid);
-    // 4. 删除会话
+    // 3. 删除会话
     deleteAllSessionsForFolder(folder);
     db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(jid);
-    // 5. 删除聊天记录
+    // 4. 删除聊天记录
     db.prepare('DELETE FROM messages WHERE chat_jid = ?').run(jid);
     db.prepare('DELETE FROM chats WHERE jid = ?').run(jid);
-    // 6. 删除 pin 记录
-    db.prepare('DELETE FROM user_pinned_groups WHERE jid = ?').run(jid);
   });
   tx();
-}
-
-// --- User pinned groups ---
-
-export function getUserPinnedGroups(userId: string): Record<string, string> {
-  const rows = db
-    .prepare('SELECT jid, pinned_at FROM user_pinned_groups WHERE user_id = ?')
-    .all(userId) as Array<{ jid: string; pinned_at: string }>;
-  const result: Record<string, string> = {};
-  for (const row of rows) result[row.jid] = row.pinned_at;
-  return result;
-}
-
-export function pinGroup(userId: string, jid: string): string {
-  const pinned_at = new Date().toISOString();
-  db.prepare(
-    'INSERT OR REPLACE INTO user_pinned_groups (user_id, jid, pinned_at) VALUES (?, ?, ?)',
-  ).run(userId, jid, pinned_at);
-  return pinned_at;
-}
-
-export function unpinGroup(userId: string, jid: string): void {
-  db.prepare(
-    'DELETE FROM user_pinned_groups WHERE user_id = ? AND jid = ?',
-  ).run(userId, jid);
 }
 
 // --- Web API accessors ---
@@ -4430,84 +4385,6 @@ export function checkLoginRateLimitFromAudit(
   return { allowed: true, attempts: 0 };
 }
 
-// ===================== Group Members =====================
-
-export function addGroupMember(
-  groupFolder: string,
-  userId: string,
-  role: 'owner' | 'member',
-  addedBy?: string,
-): void {
-  db.prepare(
-    `INSERT INTO group_members (group_folder, user_id, role, added_at, added_by)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(group_folder, user_id) DO UPDATE SET
-       role = CASE WHEN excluded.role = 'owner' THEN 'owner'
-                   WHEN group_members.role = 'owner' THEN 'owner'
-                   ELSE excluded.role END,
-       added_by = COALESCE(excluded.added_by, group_members.added_by)`,
-  ).run(groupFolder, userId, role, new Date().toISOString(), addedBy ?? null);
-}
-
-export function removeGroupMember(groupFolder: string, userId: string): void {
-  db.prepare(
-    'DELETE FROM group_members WHERE group_folder = ? AND user_id = ?',
-  ).run(groupFolder, userId);
-}
-
-export function getGroupMembers(groupFolder: string): GroupMember[] {
-  const rows = db
-    .prepare(
-      `SELECT gm.user_id, gm.role, gm.added_at, gm.added_by,
-              u.username, COALESCE(u.display_name, '') as display_name
-       FROM group_members gm
-       JOIN users u ON gm.user_id = u.id
-       WHERE gm.group_folder = ?
-       ORDER BY gm.role DESC, gm.added_at ASC`,
-    )
-    .all(groupFolder) as Array<{
-    user_id: string;
-    role: string;
-    added_at: string;
-    added_by: string | null;
-    username: string;
-    display_name: string;
-  }>;
-  return rows.map((r) => ({
-    user_id: r.user_id,
-    role: r.role as 'owner' | 'member',
-    added_at: r.added_at,
-    added_by: r.added_by ?? undefined,
-    username: r.username,
-    display_name: r.display_name,
-  }));
-}
-
-export function getGroupMemberRole(
-  groupFolder: string,
-  userId: string,
-): 'owner' | 'member' | null {
-  const row = db
-    .prepare(
-      'SELECT role FROM group_members WHERE group_folder = ? AND user_id = ?',
-    )
-    .get(groupFolder, userId) as { role: string } | undefined;
-  if (!row) return null;
-  return row.role as 'owner' | 'member';
-}
-
-export function getUserMemberFolders(
-  userId: string,
-): Array<{ group_folder: string; role: 'owner' | 'member' }> {
-  const rows = db
-    .prepare('SELECT group_folder, role FROM group_members WHERE user_id = ?')
-    .all(userId) as Array<{ group_folder: string; role: string }>;
-  return rows.map((r) => ({
-    group_folder: r.group_folder,
-    role: r.role as 'owner' | 'member',
-  }));
-}
-
 // ===================== Sub-Agent CRUD =====================
 
 function syncWorkerSession(agent: SubAgent): void {
@@ -4772,13 +4649,6 @@ export function deleteMessage(chatJid: string, messageId: string): boolean {
     .prepare('DELETE FROM messages WHERE id = ? AND chat_jid = ?')
     .run(messageId, chatJid);
   return result.changes > 0;
-}
-
-export function isGroupShared(groupFolder: string): boolean {
-  const row = db
-    .prepare('SELECT COUNT(*) as cnt FROM group_members WHERE group_folder = ?')
-    .get(groupFolder) as { cnt: number };
-  return row.cnt > 1;
 }
 
 // ───────────────── Turns ─────────────────

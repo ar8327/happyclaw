@@ -62,7 +62,6 @@ import {
   getSessionRecord,
   storeMessageDirect,
   getAgent,
-  isGroupShared,
 } from './db.js';
 import type {
   NewMessage,
@@ -313,7 +312,7 @@ async function handleWebUserMessage(
     attachments: attachmentsStr,
   });
 
-  const shared = !group.is_home && isGroupShared(group.folder);
+  const shared = false;
   const formatted = deps.formatMessages(
     [
       {
@@ -1000,7 +999,7 @@ function safeBroadcast(
       continue;
     }
 
-    // Group isolation: only allowed users (owner + shared members) can see this group's events
+    // Single-user isolation: only the local operator can see this group's events
     // allowedUserIds === null means ownership unresolvable → default-deny (admin-only)
     if (allowedUserIds !== undefined) {
       if (allowedUserIds === null || !allowedUserIds.has(clientInfo.userId)) {
@@ -1018,11 +1017,10 @@ function safeBroadcast(
 
 /**
  * Get the set of user IDs allowed to receive broadcasts for a group.
- * Includes the owner and all shared members. Admin is NOT automatically included
- * — they must be the owner or a shared member to receive broadcasts.
+ * In single-user mode this is always the local operator.
  *
  * Returns:
- * - Set<string>: allowed user IDs (owner + shared members)
+ * - Set<string>: allowed user IDs
  * - null: ownership unresolvable → default-deny (admin-only)
  */
 const allowedUserIdsCache = new Map<
@@ -1048,7 +1046,7 @@ function getGroupAllowedUserIds(chatJid: string): Set<string> | null {
 export function invalidateAllowedUserCache(chatJid: string): void {
   allowedUserIdsCache.delete(chatJid);
   // Also clear cache for sibling JIDs sharing the same folder,
-  // since membership is per-folder, not per-JID.
+  // so all aliases of the same session stay consistent.
   const group = getRegisteredGroup(chatJid);
   if (group) {
     const siblingJids = getJidsByFolder(group.folder);

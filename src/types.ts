@@ -55,15 +55,6 @@ export interface RegisteredGroup {
   knowledge_extraction?: boolean; // 压缩时是否萃取知识到记忆系统（默认 false）
 }
 
-export interface GroupMember {
-  user_id: string;
-  role: 'owner' | 'member';
-  added_at: string;
-  added_by?: string;
-  username: string;
-  display_name: string;
-}
-
 export interface NewMessage {
   rowid?: number;
   id: string;

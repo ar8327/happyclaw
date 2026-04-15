@@ -133,10 +133,6 @@ export const SessionCreateSchema = z.object({
     .transform((val) => (val && val.trim() ? val.trim() : undefined)),
 });
 
-export const GroupMemberAddSchema = z.object({
-  user_id: z.string().min(1),
-});
-
 export const MemoryFileSchema = z.object({
   path: z.string().min(1),
   content: z.string(),

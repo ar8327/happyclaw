@@ -142,15 +142,6 @@ export function canModifyGroup(
   return canAccessGroup(user, group);
 }
 
-export function canManageGroupMembers(
-  user: { id: string; role: UserRole },
-  group: RegisteredGroup & { jid: string },
-): boolean {
-  void user;
-  void group;
-  return false;
-}
-
 export function canDeleteGroup(
   user: { id: string; role: UserRole },
   group: RegisteredGroup & { jid: string },

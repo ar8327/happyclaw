@@ -48,7 +48,6 @@ import {
   getUserHomeGroup,
   getLastInboundMessage,
   initDatabase,
-  isGroupShared,
   getSessionBinding,
   getSessionRecord,
   getSessionRuntimeState,
@@ -77,7 +76,6 @@ import {
   listAgentsByJid,
   getGroupsByOwner,
   getMessagesPage,
-  addGroupMember,
   insertUsageRecord,
   getTranscriptMessagesSince,
   markStaleTurnsAsError,
@@ -1354,7 +1352,6 @@ function createOwnedWorkspace(
   registerGroup(jid, group);
   ensureChatExists(jid);
   updateChatName(jid, name);
-  addGroupMember(folder, ownerKey, 'owner', ownerKey);
   return group;
 }
 
@@ -2064,7 +2061,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   }
 
-  const shared = isGroupShared(group.folder);
+  const shared = false;
   // Check if this user has Feishu agent-reply mode enabled
   const feishuAgentReply = ownerUserId
     ? getUserFeishuConfig(ownerUserId)?.replyThreadingMode === 'agent'
@@ -4290,7 +4287,7 @@ async function startMessageLoop(): Promise<void> {
           }
 
           // action === 'start_new' or 'inject'
-          const shared = !group.is_home && isGroupShared(group.folder);
+          const shared = false;
           const formatted = formatMessages(messagesToSend, shared);
 
           const images = collectMessageImages(chatJid, messagesToSend);
