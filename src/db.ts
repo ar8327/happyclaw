@@ -2782,7 +2782,7 @@ function ensureSessionRecordForLegacyKey(
         id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
         model, thinking_effort, context_compression, knowledge_extraction,
         is_pinned, archived, owner_key, created_at, updated_at
-      ) VALUES (?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?)`,
+      ) VALUES (?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
     ).run(
       sessionId,
       agentId,
@@ -2793,6 +2793,7 @@ function ensureSessionRecordForLegacyKey(
       parentSession?.model || null,
       parentSession?.thinking_effort || null,
       parentSession?.context_compression || 'off',
+      parentSession?.knowledge_extraction ? 1 : 0,
       parentSession?.owner_key || folderGroup?.created_by || null,
       now,
       now,
@@ -2804,7 +2805,7 @@ function ensureSessionRecordForLegacyKey(
       id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
       model, thinking_effort, context_compression, knowledge_extraction,
       is_pinned, archived, owner_key, created_at, updated_at
-    ) VALUES (?, ?, 'workspace', NULL, ?, ?, NULL, ?, ?, ?, 0, 0, 0, ?, ?, ?)`,
+    ) VALUES (?, ?, 'workspace', NULL, ?, ?, NULL, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
   ).run(
     sessionId,
     groupFolder,
@@ -2813,6 +2814,7 @@ function ensureSessionRecordForLegacyKey(
     folderGroup?.model ?? null,
     folderGroup?.thinking_effort ?? null,
     folderGroup?.context_compression ?? 'off',
+    folderGroup?.knowledge_extraction ? 1 : 0,
     folderGroup?.created_by ?? null,
     now,
     now,
@@ -3495,7 +3497,7 @@ function syncMemorySessionProjectionForOwner(ownerKey: string): void {
       id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
       model, thinking_effort, context_compression, knowledge_extraction,
       is_pinned, archived, owner_key, created_at, updated_at
-    ) VALUES (?, ?, 'memory', ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+    ) VALUES (?, ?, 'memory', ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       parent_session_id = excluded.parent_session_id,
@@ -5104,7 +5106,7 @@ function syncWorkerSession(agent: SubAgent): void {
       id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
       model, thinking_effort, context_compression, knowledge_extraction,
       is_pinned, archived, owner_key, created_at, updated_at
-    ) VALUES (?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?)
+    ) VALUES (?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       parent_session_id = excluded.parent_session_id,
@@ -5114,6 +5116,7 @@ function syncWorkerSession(agent: SubAgent): void {
       model = excluded.model,
       thinking_effort = excluded.thinking_effort,
       context_compression = excluded.context_compression,
+      knowledge_extraction = excluded.knowledge_extraction,
       owner_key = excluded.owner_key,
       updated_at = excluded.updated_at`,
   ).run(
@@ -5126,6 +5129,7 @@ function syncWorkerSession(agent: SubAgent): void {
     parentSession?.model || null,
     parentSession?.thinking_effort || null,
     parentSession?.context_compression || 'off',
+    parentSession?.knowledge_extraction ? 1 : 0,
     agent.created_by ?? parentSession?.owner_key ?? parentGroup?.created_by ?? null,
     agent.created_at || now,
     now,
