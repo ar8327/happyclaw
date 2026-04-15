@@ -8,6 +8,7 @@ import path from 'path';
 import {
   deleteSession,
   getJidsByFolder,
+  listSessionRecords,
   storeMessageDirect,
   ensureChatExists,
 } from './db.js';
@@ -17,6 +18,7 @@ import type { NewMessage, MessageCursor } from './types.js';
 import {
   buildWorkerConversationJid,
   buildWorkerSessionId,
+  isWorkerSessionId,
 } from './worker-session.js';
 
 // ─── Types ──────────────────────────────────────────────────────
@@ -53,6 +55,22 @@ function clearSessionFiles(folder: string, agentId?: string): void {
   }
 }
 
+function getWorkerRuntimeJidsForFolder(folder: string): string[] {
+  const parentSessionId = `main:${folder}`;
+  return Array.from(
+    new Set(
+      listSessionRecords()
+        .filter(
+          (session) =>
+            session.parent_session_id === parentSessionId
+            && session.kind === 'worker'
+            && isWorkerSessionId(session.id),
+        )
+        .map((session) => session.id),
+    ),
+  );
+}
+
 // ─── Core reset ─────────────────────────────────────────────────
 
 export async function executeSessionReset(
@@ -66,8 +84,11 @@ export async function executeSessionReset(
   } else {
     // Main session reset: stop all processes for this folder
     const siblingJids = getJidsByFolder(folder);
+    const workerRuntimeJids = getWorkerRuntimeJidsForFolder(folder);
     await Promise.all(
-      siblingJids.map((j) => deps.queue.stopSession(j, { force: true })),
+      [...siblingJids, ...workerRuntimeJids].map((j) =>
+        deps.queue.stopSession(j, { force: true })
+      ),
     );
   }
 
