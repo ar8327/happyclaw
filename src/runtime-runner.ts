@@ -461,6 +461,7 @@ export async function runHostAgent(
   const hostEnv: Record<string, string> = {
     ...(process.env as Record<string, string>),
   };
+  const settings = getSystemSettings();
 
   const effectiveRunnerId =
     sessionRecord?.runner_id
@@ -609,6 +610,7 @@ export async function runHostAgent(
   }
   hostEnv['HAPPYCLAW_PROJECT_SKILLS_DIR'] = path.join(process.cwd(), 'container', 'skills');
   hostEnv['CLAUDE_CONFIG_DIR'] = groupSessionsDir;
+  hostEnv['HAPPYCLAW_WORKSPACE_SESSION'] = path.dirname(groupSessionsDir);
   // Cross-provider invoke_agent: share home session dir for fresh OAuth tokens
   // (same pattern as memory-agent.ts — avoids stale refresh tokens)
   const homeClaudeDir = path.join(
@@ -618,6 +620,18 @@ export async function runHostAgent(
     '.claude',
   );
   hostEnv['HAPPYCLAW_CLAUDE_CREDENTIALS_DIR'] = homeClaudeDir;
+  hostEnv['HAPPYCLAW_QUERY_ACTIVITY_TIMEOUT_MS'] = String(
+    settings.queryActivityTimeoutMs,
+  );
+  hostEnv['HAPPYCLAW_TOOL_CALL_HARD_TIMEOUT_MS'] = String(
+    settings.toolCallHardTimeoutMs,
+  );
+  hostEnv['HAPPYCLAW_CODEX_ARCHIVE_THRESHOLD'] = String(
+    settings.codexArchiveThreshold,
+  );
+  hostEnv['HAPPYCLAW_MEMORY_SEND_TIMEOUT'] = String(
+    settings.memorySendTimeout,
+  );
 
   // Memory Agent env vars
   if (ownerId) {
@@ -631,7 +645,6 @@ export async function runHostAgent(
       'memory',
       ownerId,
     );
-    const settings = getSystemSettings();
     hostEnv['HAPPYCLAW_MEMORY_QUERY_TIMEOUT'] = String(
       settings.memoryQueryTimeout,
     );

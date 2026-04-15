@@ -114,10 +114,10 @@ function createUnifiedIpcPoller(opts: IpcPollerOptions): IpcPollerState {
 
     // 4. Messages and mode changes
     const { messages, modeChange } = drainIpcInput(opts.ipcPaths, opts.log);
-    if (modeChange && opts.onModeChange) {
+    if (modeChange) {
       opts.state.currentPermissionMode = modeChange;
       opts.log(`Mode change via IPC: ${modeChange}`);
-      opts.onModeChange(modeChange);
+      opts.onModeChange?.(modeChange);
     }
     for (const msg of messages) {
       opts.log(`IPC message (${msg.text.length} chars, ${msg.images?.length || 0} images)`);
@@ -149,9 +149,15 @@ async function consumeQueryStream(
   log: LogFn,
   writeOutput: WriteOutputFn,
 ): Promise<QueryResult> {
-  const ACTIVITY_TIMEOUT_MS = 300_000; // 5 minutes
+  const ACTIVITY_TIMEOUT_MS = parseInt(
+    process.env.HAPPYCLAW_QUERY_ACTIVITY_TIMEOUT_MS || '300000',
+    10,
+  );
   const TOOL_HARD_TIMEOUT_MS = parseInt(
-    process.env.TOOL_CALL_HARD_TIMEOUT_MS || '1200000', 10,
+    process.env.HAPPYCLAW_TOOL_CALL_HARD_TIMEOUT_MS
+      || process.env.TOOL_CALL_HARD_TIMEOUT_MS
+      || '1200000',
+    10,
   ); // 20 minutes
 
   const gen = runner.runQuery(config);
@@ -208,7 +214,7 @@ async function consumeQueryStream(
       case 'session_init':
         newSessionId = msg.sessionId;
         log(`Session initialized: ${newSessionId}`);
-        emitRuntimeState(writeOutput, state, {
+        emitRuntimeState(writeOutput, runner, state, {
           providerSessionId: newSessionId,
           resumeAnchor,
         });
@@ -216,14 +222,14 @@ async function consumeQueryStream(
 
       case 'resume_anchor':
         resumeAnchor = msg.anchor;
-        emitRuntimeState(writeOutput, state, {
+        emitRuntimeState(writeOutput, runner, state, {
           providerSessionId: newSessionId,
           resumeAnchor,
         });
         break;
 
       case 'result':
-        emitRuntimeState(writeOutput, state, {
+        emitRuntimeState(writeOutput, runner, state, {
           providerSessionId: newSessionId,
           resumeAnchor,
         });
@@ -273,6 +279,7 @@ function mergeImages(messages: IpcMessage[]): Array<{ data: string; mimeType?: s
 
 function emitRuntimeState(
   writeOutput: WriteOutputFn,
+  runner: AgentRunner,
   state: SessionState,
   overrides?: {
     providerSessionId?: string;
@@ -285,17 +292,36 @@ function emitRuntimeState(
     providerState?: Record<string, unknown>;
     lastMessageCursor?: string | null;
   } = {};
+  const providerSnapshot = runner.getRuntimePersistenceSnapshot?.();
   if (overrides && Object.prototype.hasOwnProperty.call(overrides, 'providerState')) {
     runtimeSnapshot.providerState = overrides.providerState;
+  } else if (
+    providerSnapshot
+    && Object.prototype.hasOwnProperty.call(providerSnapshot, 'providerState')
+  ) {
+    runtimeSnapshot.providerState = providerSnapshot.providerState;
   }
   if (overrides && Object.prototype.hasOwnProperty.call(overrides, 'lastMessageCursor')) {
     runtimeSnapshot.lastMessageCursor = overrides.lastMessageCursor;
+  } else if (
+    providerSnapshot
+    && Object.prototype.hasOwnProperty.call(providerSnapshot, 'lastMessageCursor')
+  ) {
+    runtimeSnapshot.lastMessageCursor = providerSnapshot.lastMessageCursor ?? null;
   }
   state.applyRuntimeSnapshot(runtimeSnapshot);
   writeOutput({
     status: 'stream',
     result: null,
-    runtimeState: state.snapshot(overrides),
+    runtimeState: state.snapshot({
+      ...overrides,
+      ...(Object.prototype.hasOwnProperty.call(runtimeSnapshot, 'providerState')
+        ? { providerState: runtimeSnapshot.providerState }
+        : {}),
+      ...(Object.prototype.hasOwnProperty.call(runtimeSnapshot, 'lastMessageCursor')
+        ? { lastMessageCursor: runtimeSnapshot.lastMessageCursor }
+        : {}),
+    }),
   });
 }
 
@@ -311,7 +337,7 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
   let pendingMessages: IpcMessage[] = [];
   const handleIdleDrain = async (): Promise<void> => {
     await runner.cleanup?.();
-    emitRuntimeState(writeOutput, state, {
+    emitRuntimeState(writeOutput, runner, state, {
       providerSessionId: sessionId,
       resumeAnchor,
     });
@@ -378,7 +404,7 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
     // Update session state
     if (result.newSessionId) sessionId = result.newSessionId;
     if (result.resumeAnchor) resumeAnchor = result.resumeAnchor;
-    emitRuntimeState(writeOutput, state, {
+    emitRuntimeState(writeOutput, runner, state, {
       providerSessionId: sessionId,
       resumeAnchor,
     });
@@ -447,7 +473,7 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
     }
     if (result.drainDetectedDuringQuery || shouldDrain(ipcPaths)) {
       await runner.cleanup?.();
-      emitRuntimeState(writeOutput, state, {
+      emitRuntimeState(writeOutput, runner, state, {
         providerSessionId: sessionId,
         resumeAnchor,
       });
@@ -468,7 +494,7 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
     }
 
     // Wait for next message
-    emitRuntimeState(writeOutput, state, {
+    emitRuntimeState(writeOutput, runner, state, {
       providerSessionId: sessionId,
       resumeAnchor,
     });

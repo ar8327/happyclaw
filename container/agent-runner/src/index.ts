@@ -73,19 +73,27 @@ async function readStdin(): Promise<string> {
 // ---------------------------------------------------------------------------
 
 function loadUserMcpServers(): Record<string, unknown> {
-  const settingsDir = process.env.HAPPYCLAW_WORKSPACE_SESSION
-    ? path.join(process.env.HAPPYCLAW_WORKSPACE_SESSION, '.claude')
-    : null;
-  if (!settingsDir) return {};
-  const settingsFile = path.join(settingsDir, 'settings.json');
-  try {
-    if (fs.existsSync(settingsFile)) {
-      const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
-      if (settings.mcpServers && typeof settings.mcpServers === 'object') {
-        return settings.mcpServers;
+  const candidateFiles = [
+    process.env.HAPPYCLAW_WORKSPACE_SESSION
+      ? path.join(process.env.HAPPYCLAW_WORKSPACE_SESSION, '.claude', 'settings.json')
+      : null,
+    process.env.CLAUDE_CONFIG_DIR
+      ? path.join(process.env.CLAUDE_CONFIG_DIR, 'settings.json')
+      : null,
+  ].filter((value): value is string => !!value);
+
+  for (const settingsFile of candidateFiles) {
+    try {
+      if (fs.existsSync(settingsFile)) {
+        const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
+        if (settings.mcpServers && typeof settings.mcpServers === 'object') {
+          return settings.mcpServers;
+        }
       }
+    } catch {
+      /* ignore parse errors */
     }
-  } catch { /* ignore parse errors */ }
+  }
   return {};
 }
 

@@ -9,6 +9,7 @@ import type {
   QueryResult,
   NormalizedMessage,
   ActivityReport,
+  RuntimePersistenceSnapshot,
 } from '../../runner-interface.js';
 import type { ContainerInput, ContainerOutput } from '../../types.js';
 import { StreamEventProcessor } from './claude-stream-processor.js';
@@ -84,7 +85,7 @@ function isInterruptedResult(message: Record<string, unknown>, session: ClaudeSe
 
 export class ClaudeRunner implements AgentRunner {
   readonly ipcCapabilities: IpcCapabilities = {
-    supportsMidQueryPush: false,
+    supportsMidQueryPush: true,
     supportsRuntimeModeSwitch: false,
   };
 
@@ -96,6 +97,7 @@ export class ClaudeRunner implements AgentRunner {
   private readonly opts: ClaudeRunnerOptions;
   private toolCallStartedAt: number | null = null;
   private pendingRoutingReminder: string | null = null;
+  private lastMessageCursor: string | null = null;
 
   constructor(opts: ClaudeRunnerOptions) {
     this.opts = opts;
@@ -142,6 +144,14 @@ export class ClaudeRunner implements AgentRunner {
     };
 
     this.session = new ClaudeSession(this.opts.log);
+    const persistedState = this.opts.state.getProviderState<{
+      pendingRoutingReminder?: unknown;
+    }>();
+    this.pendingRoutingReminder =
+      typeof persistedState?.pendingRoutingReminder === 'string'
+        ? persistedState.pendingRoutingReminder
+        : null;
+    this.lastMessageCursor = this.opts.state.getLastMessageCursor();
   }
 
   private createProcessor(streamEventQueue: NormalizedMessage[]): StreamEventProcessor {
@@ -337,6 +347,7 @@ export class ClaudeRunner implements AgentRunner {
               : typeof content === 'string';
             if (hasText) {
               lastResumeUuid = (message as any).uuid as string;
+              this.lastMessageCursor = lastResumeUuid;
               yield { kind: 'resume_anchor', anchor: lastResumeUuid };
             }
             this.processor.processAssistantMessage(message as any);
@@ -349,6 +360,7 @@ export class ClaudeRunner implements AgentRunner {
               && content.some((block: { type: string }) => block.type === 'tool_result');
             if (hasToolResult) {
               lastResumeUuid = (message as any).uuid as string;
+              this.lastMessageCursor = lastResumeUuid;
               yield { kind: 'resume_anchor', anchor: lastResumeUuid };
             }
           }
@@ -586,6 +598,17 @@ export class ClaudeRunner implements AgentRunner {
         ? Date.now() - this.toolCallStartedAt
         : 0,
       hasPendingBackgroundTasks: (this.processor?.pendingBackgroundTaskCount ?? 0) > 0,
+    };
+  }
+
+  getRuntimePersistenceSnapshot(): RuntimePersistenceSnapshot {
+    return {
+      providerState: {
+        pendingRoutingReminder: this.pendingRoutingReminder,
+        currentSessionId: this.session.getCurrentSessionId() || null,
+        currentTranscriptPath: this.session.getCurrentTranscriptPath(),
+      },
+      lastMessageCursor: this.lastMessageCursor,
     };
   }
 

@@ -9,7 +9,7 @@ export const RUNNER_REGISTRY: Record<RunnerDescriptor['id'], RunnerDescriptor> =
       interrupt: 'strong',
       imageInput: true,
       usage: 'exact',
-      midQueryPush: false,
+      midQueryPush: true,
       runtimeModeSwitch: false,
       toolStreaming: 'fine',
       backgroundTasks: true,
@@ -101,6 +101,44 @@ export function canServeAsMemoryRunner(descriptor: RunnerDescriptor): boolean {
     return false;
   }
   return descriptor.lifecycle.archivalTrigger.length > 0;
+}
+
+export function listMemoryRunnerDescriptors(): RunnerDescriptor[] {
+  return listRunnerDescriptors().filter((descriptor) =>
+    canServeAsMemoryRunner(descriptor),
+  );
+}
+
+export function getDefaultMemoryRunnerDescriptor(
+  preferredId?: RunnerDescriptor['id'] | null,
+): RunnerDescriptor | undefined {
+  const preferred =
+    preferredId && getRunnerDescriptor(preferredId)
+      ? getRunnerDescriptor(preferredId)
+      : undefined;
+  if (preferred && canServeAsMemoryRunner(preferred)) {
+    return preferred;
+  }
+  return listMemoryRunnerDescriptors()[0] || getDefaultRunnerDescriptor();
+}
+
+export function getDefaultMemoryRunnerId(
+  preferredId?: RunnerDescriptor['id'] | null,
+): RunnerDescriptor['id'] {
+  return getDefaultMemoryRunnerDescriptor(preferredId)?.id || getDefaultRunnerId();
+}
+
+export function resolveMemoryRunnerId(
+  candidateId?: RunnerDescriptor['id'] | null,
+): RunnerDescriptor['id'] {
+  const candidate =
+    candidateId && getRunnerDescriptor(candidateId)
+      ? getRunnerDescriptor(candidateId)
+      : undefined;
+  if (candidate && canServeAsMemoryRunner(candidate)) {
+    return candidate.id;
+  }
+  return getDefaultMemoryRunnerId(candidateId);
 }
 
 export function explainRunnerDegradation(

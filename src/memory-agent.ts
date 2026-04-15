@@ -25,7 +25,7 @@ import {
 } from './db.js';
 import { SessionRuntimeManager } from './session-runtime-manager.js';
 import { logger } from './logger.js';
-import { getDefaultRunnerId } from './runner-registry.js';
+import { resolveMemoryRunnerId } from './runner-registry.js';
 import { getSystemSettings } from './runtime-config.js';
 import type { MessageCursor, SessionRecord } from './types.js';
 import { runSessionAgent } from './session-launcher.js';
@@ -560,6 +560,14 @@ function resolvePrimarySessionFolder(userId: string): string {
   if (primary?.id.startsWith('main:')) {
     return primary.id.slice('main:'.length);
   }
+  const memorySession = getSessionRecord(buildMemorySessionId(userId));
+  if (memorySession?.parent_session_id?.startsWith('main:')) {
+    return memorySession.parent_session_id.slice('main:'.length);
+  }
+  const ownedFolders = listOwnedPrimaryFolders(userId);
+  if (ownedFolders.length > 0) {
+    return ownedFolders[0];
+  }
   throw new Error(`No primary session found for memory user ${userId}`);
 }
 
@@ -590,17 +598,20 @@ function ensureMemorySessionProjection(
 ): SessionRecord {
   if (existing) return existing;
   const now = new Date().toISOString();
+  const runnerId = resolveMemoryRunnerId(primarySession?.runner_id || null);
   const session: SessionRecord = {
     id: buildMemorySessionId(userId),
     name: `memory:${userId}`,
     kind: 'memory',
     parent_session_id: primarySession?.id ?? null,
     cwd: memDir,
-    runner_id: primarySession?.runner_id || getDefaultRunnerId(),
-    runner_profile_id: null,
+    runner_id: runnerId,
+    runner_profile_id:
+      primarySession?.runner_id === runnerId ? primarySession.runner_profile_id ?? null : null,
     runtime_mode: 'local',
-    model: primarySession?.model ?? null,
-    thinking_effort: primarySession?.thinking_effort ?? null,
+    model: primarySession?.runner_id === runnerId ? primarySession?.model ?? null : null,
+    thinking_effort:
+      primarySession?.runner_id === runnerId ? primarySession?.thinking_effort ?? null : null,
     context_compression: primarySession?.context_compression ?? 'off',
     knowledge_extraction: primarySession?.knowledge_extraction ?? false,
     is_pinned: false,

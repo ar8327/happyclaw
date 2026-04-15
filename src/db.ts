@@ -5,7 +5,10 @@ import path from 'path';
 
 import { DATA_DIR, STORE_DIR, GROUPS_DIR } from './config.js';
 import { logger } from './logger.js';
-import { getDefaultRunnerId } from './runner-registry.js';
+import {
+  getDefaultRunnerId,
+  resolveMemoryRunnerId,
+} from './runner-registry.js';
 import {
   AgentKind,
   AgentStatus,
@@ -3164,6 +3167,10 @@ export function upsertSessionRuntimeState(
   );
 }
 
+export function deleteSessionRuntimeState(sessionId: string): void {
+  db.prepare('DELETE FROM session_state WHERE session_id = ?').run(sessionId);
+}
+
 // --- Registered group accessors ---
 
 function parseExecutionMode(
@@ -3406,20 +3413,47 @@ function syncSessionWorkbenchProjection(): void {
 function syncMemorySessionProjectionForOwner(ownerKey: string): void {
   const sessionId = buildMemorySessionId(ownerKey);
   const primarySession = getPrimarySessionForOwner(ownerKey);
-  const homeGroup = getUserHomeGroup(ownerKey);
   const existing = getSessionRecord(sessionId);
   const now = new Date().toISOString();
+  const resolvedRunnerId = resolveMemoryRunnerId(
+    existing?.runner_id || primarySession?.runner_id || null,
+  );
+  const runnerProfileId =
+    existing?.runner_id === resolvedRunnerId
+      ? existing.runner_profile_id
+      : primarySession?.runner_id === resolvedRunnerId
+        ? primarySession.runner_profile_id
+        : null;
+  const model =
+    existing?.runner_id === resolvedRunnerId
+      ? existing.model
+      : primarySession?.runner_id === resolvedRunnerId
+        ? primarySession.model
+        : null;
+  const thinkingEffort =
+    existing?.runner_id === resolvedRunnerId
+      ? existing.thinking_effort
+      : primarySession?.runner_id === resolvedRunnerId
+        ? primarySession.thinking_effort
+        : null;
+  const contextCompression =
+    existing?.context_compression
+      || primarySession?.context_compression
+      || 'off';
+  const knowledgeExtraction =
+    existing?.knowledge_extraction ?? primarySession?.knowledge_extraction ?? false;
   db.prepare(
     `INSERT INTO sessions (
       id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
       runtime_mode, model, thinking_effort, context_compression,
       knowledge_extraction, is_pinned, archived, owner_key, created_at, updated_at
-    ) VALUES (?, ?, 'memory', ?, ?, ?, NULL, 'local', ?, ?, ?, ?, 0, 0, ?, ?, ?)
+    ) VALUES (?, ?, 'memory', ?, ?, ?, ?, 'local', ?, ?, ?, ?, 0, 0, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       parent_session_id = excluded.parent_session_id,
       cwd = excluded.cwd,
       runner_id = excluded.runner_id,
+      runner_profile_id = excluded.runner_profile_id,
       model = excluded.model,
       thinking_effort = excluded.thinking_effort,
       context_compression = excluded.context_compression,
@@ -3431,13 +3465,12 @@ function syncMemorySessionProjectionForOwner(ownerKey: string): void {
     existing?.name || `memory:${ownerKey}`,
     primarySession?.id ?? null,
     path.join(DATA_DIR, 'memory', ownerKey),
-    existing?.runner_id || deriveRunnerId(homeGroup ?? null),
-    existing?.model ?? homeGroup?.model ?? null,
-    existing?.thinking_effort ?? homeGroup?.thinking_effort ?? null,
-    existing?.context_compression ?? homeGroup?.context_compression ?? 'off',
-    existing?.knowledge_extraction
-      ? 1
-      : (homeGroup?.knowledge_extraction ? 1 : 0),
+    resolvedRunnerId,
+    runnerProfileId,
+    model,
+    thinkingEffort,
+    contextCompression,
+    knowledgeExtraction ? 1 : 0,
     ownerKey,
     existing?.created_at || now,
     now,

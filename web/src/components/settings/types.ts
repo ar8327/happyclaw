@@ -72,12 +72,17 @@ export interface SystemSettings {
   maxConcurrentRuntimes: number;
   maxConcurrentScripts: number;
   scriptTimeout: number;
+  queryActivityTimeoutMs: number;
+  toolCallHardTimeoutMs: number;
   memoryQueryTimeout: number;
   memoryGlobalSleepTimeout: number;
   memorySendTimeout: number;
+  codexArchiveThreshold: number;
   turnBatchWindowMs: number;
   turnMaxBatchMs: number;
   traceRetentionDays: number;
+  feishuApiDomain: string;
+  feishuDocDomain: string;
   webPublicUrl: string;
   defaultClaudeModel: string;
 }

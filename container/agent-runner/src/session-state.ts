@@ -175,6 +175,14 @@ export class SessionState {
     }
   }
 
+  getProviderState<T extends Record<string, unknown>>(): T | undefined {
+    return this.providerState as T | undefined;
+  }
+
+  getLastMessageCursor(): string | null {
+    return this.lastMessageCursor;
+  }
+
   snapshot(overrides?: {
     providerSessionId?: string;
     resumeAnchor?: string;

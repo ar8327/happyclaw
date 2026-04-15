@@ -72,6 +72,79 @@ interface RunnerProfileOption {
 interface RunnerOption {
   value: string;
   label: string;
+  canServeMemory?: boolean;
+  compatibility?: {
+    chat: string;
+    memory: string;
+    im: string;
+    observability: string;
+  };
+  capabilities?: {
+    sessionResume: string;
+    interrupt: string;
+    toolStreaming: string;
+    midQueryPush: boolean;
+    backgroundTasks: boolean;
+  };
+  lifecycle?: {
+    archivalTrigger: string[];
+    contextShrinkTrigger: string;
+    hookStreaming: string;
+    postCompactRepair: string;
+  };
+  degradationReasons?: string[];
+}
+
+function RunnerCapabilitySummary({ runner }: { runner: RunnerOption | null }) {
+  if (!runner?.compatibility || !runner.capabilities || !runner.lifecycle) {
+    return null;
+  }
+  return (
+    <div className="rounded-lg border border-border bg-card px-3 py-3 space-y-2">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-medium text-foreground">{runner.label}</div>
+          <div className="text-[11px] text-slate-500 font-mono">{runner.value}</div>
+        </div>
+        <div className="text-[11px] text-slate-500 text-right">
+          <div>chat: {runner.compatibility.chat}</div>
+          <div>memory: {runner.compatibility.memory}</div>
+          <div>IM: {runner.compatibility.im}</div>
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-2 text-[11px]">
+        <div className="rounded border border-border bg-background px-2 py-1.5">
+          恢复: <span className="font-medium text-foreground">{runner.capabilities.sessionResume}</span>
+        </div>
+        <div className="rounded border border-border bg-background px-2 py-1.5">
+          中断: <span className="font-medium text-foreground">{runner.capabilities.interrupt}</span>
+        </div>
+        <div className="rounded border border-border bg-background px-2 py-1.5">
+          工具流: <span className="font-medium text-foreground">{runner.capabilities.toolStreaming}</span>
+        </div>
+        <div className="rounded border border-border bg-background px-2 py-1.5">
+          后台任务: <span className="font-medium text-foreground">{runner.capabilities.backgroundTasks ? '支持' : '不支持'}</span>
+        </div>
+      </div>
+      <div className="text-[11px] text-slate-500 space-y-1">
+        <div>归档触发: {runner.lifecycle.archivalTrigger.join(' / ') || 'none'}</div>
+        <div>上下文收缩: {runner.lifecycle.contextShrinkTrigger}</div>
+        <div>Hook 观测: {runner.lifecycle.hookStreaming}</div>
+        <div>Post-compact 修复: {runner.lifecycle.postCompactRepair}</div>
+        <div>中途注入: {runner.capabilities.midQueryPush ? '支持' : '不支持'}</div>
+      </div>
+      {runner.degradationReasons && runner.degradationReasons.length > 0 && (
+        <div className="rounded border border-amber-200 bg-amber-50 px-2 py-2 space-y-1">
+          <div className="text-[11px] font-medium text-amber-700">退化说明</div>
+          {runner.degradationReasons.map((reason) => (
+            <div key={reason} className="text-[11px] text-amber-700">
+              {reason}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 interface GroupDetailProps {
@@ -153,6 +226,10 @@ export function GroupDetail({ group }: GroupDetailProps) {
     runnerId || group.runner_id,
     group.runner_label,
   );
+  const selectedRunner =
+    runnerSelectOptions.find((option) => option.value === (runnerId || group.runner_id || ''))
+    || null;
+  const isMemorySession = group.session_kind === 'memory';
 
   const formatDate = (timestamp: string | number) => {
     return new Date(timestamp).toLocaleString('zh-CN', {
@@ -184,7 +261,33 @@ export function GroupDetail({ group }: GroupDetailProps) {
   useEffect(() => {
     let cancelled = false;
     api
-      .get<{ runners: Array<{ id: string; label: string }> }>('/api/sessions/runners')
+      .get<{
+        runners: Array<{
+          id: string;
+          label: string;
+          can_serve_memory: boolean;
+          compatibility: {
+            chat: string;
+            memory: string;
+            im: string;
+            observability: string;
+          };
+          capabilities: {
+            sessionResume: string;
+            interrupt: string;
+            toolStreaming: string;
+            midQueryPush: boolean;
+            backgroundTasks: boolean;
+          };
+          lifecycle: {
+            archivalTrigger: string[];
+            contextShrinkTrigger: string;
+            hookStreaming: string;
+            postCompactRepair: string;
+          };
+          degradation_reasons: string[];
+        }>;
+      }>('/api/sessions/runners')
       .then((res) => {
         if (!cancelled) {
           const nextOptions =
@@ -192,6 +295,11 @@ export function GroupDetail({ group }: GroupDetailProps) {
               ? res.runners.map((runner) => ({
                   value: runner.id,
                   label: runner.label,
+                  canServeMemory: runner.can_serve_memory,
+                  compatibility: runner.compatibility,
+                  capabilities: runner.capabilities,
+                  lifecycle: runner.lifecycle,
+                  degradationReasons: runner.degradation_reasons,
                 }))
               : [];
           setRunnerOptions(nextOptions);
@@ -353,6 +461,9 @@ export function GroupDetail({ group }: GroupDetailProps) {
             ))}
           </div>
         )}
+        <div className="mt-3">
+          <RunnerCapabilitySummary runner={selectedRunner} />
+        </div>
       </div>
 
       {group.editable && (
@@ -367,11 +478,19 @@ export function GroupDetail({ group }: GroupDetailProps) {
               }}
             >
               <SelectTrigger className="h-8 text-sm">
-                <SelectValue placeholder="选择运行引擎" />
+              <SelectValue placeholder="选择运行引擎" />
               </SelectTrigger>
               <SelectContent>
                 {runnerSelectOptions.map((opt) => (
-                  <SelectItem key={opt.value} value={opt.value}>
+                  <SelectItem
+                    key={opt.value}
+                    value={opt.value}
+                    disabled={
+                      isMemorySession
+                        ? opt.canServeMemory === false
+                        : opt.compatibility?.chat === 'unsupported'
+                    }
+                  >
                     {opt.label}
                   </SelectItem>
                 ))}

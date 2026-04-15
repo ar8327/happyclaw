@@ -726,6 +726,10 @@ export class ClaudeSession {
     return this.currentSessionId;
   }
 
+  getCurrentTranscriptPath(): string | null {
+    return this.currentTranscriptPath;
+  }
+
   end(): void {
     void this.stopProcess();
   }

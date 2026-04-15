@@ -13,6 +13,7 @@ import {
   type MemorySearchHit,
 } from '../schemas.js';
 import {
+  deleteSessionRuntimeState,
   getJidsByFolder,
   getPrimarySessionForOwner,
   getRunnerProfile,
@@ -91,6 +92,30 @@ function listOwnedSessionFolders(ownerKey: string): string[] {
 
 function getMemorySessionForOwner(ownerKey: string) {
   return getSessionRecord(`memory:${ownerKey}`);
+}
+
+function listOwnedActiveRuntimeJids(
+  queue: SessionRuntimeManager | null,
+  ownerKey: string,
+): string[] {
+  if (!queue) return [];
+  const ownedFolders = new Set(listOwnedSessionFolders(ownerKey));
+  const primaryFolder = resolvePrimarySessionFolderForOwner(ownerKey);
+  if (primaryFolder) ownedFolders.add(primaryFolder);
+  return Array.from(
+    new Set(
+      queue
+        .getRuntimeStatus()
+        .groups
+        .filter(
+          (runtime) =>
+            runtime.active &&
+            typeof runtime.groupFolder === 'string' &&
+            ownedFolders.has(runtime.groupFolder),
+        )
+        .map((runtime) => runtime.jid),
+    ),
+  );
 }
 
 function normalizeRegisteredRunnerId(raw: unknown) {
@@ -763,21 +788,8 @@ memoryRoutes.get('/status', authMiddleware, (c) => {
   const state = readMemoryState(user.id);
   const primaryFolder = resolvePrimarySessionFolderForOwner(user.id);
   const ownedFolders = listOwnedSessionFolders(user.id);
-
-  // Check active sessions
-  let hasActiveSession = false;
-  if (injectedQueue) {
-    const queueStatus = injectedQueue.getRuntimeStatus();
-    const activeJids = new Set(
-      queueStatus.groups.filter((g) => g.active).map((g) => g.jid),
-    );
-    const relevantFolders = primaryFolder
-      ? [primaryFolder, ...ownedFolders.filter((folder) => folder !== primaryFolder)]
-      : ownedFolders;
-    hasActiveSession = relevantFolders.some((folder) =>
-      getJidsByFolder(folder).some((jid) => activeJids.has(jid)),
-    );
-  }
+  const activeRuntimeJids = listOwnedActiveRuntimeJids(injectedQueue, user.id);
+  const hasActiveSession = activeRuntimeJids.length > 0;
 
   const pendingWrapups = (state.pendingWrapups || []) as string[];
 
@@ -790,7 +802,9 @@ memoryRoutes.get('/status', authMiddleware, (c) => {
     canTriggerWrapup:
       (ownedFolders.length > 0 || !!primaryFolder) && !activeWrapups.has(user.id),
     canTriggerGlobalSleep:
-      pendingWrapups.length > 0 && !activeGlobalSleeps.has(user.id),
+      pendingWrapups.length > 0 &&
+      !activeGlobalSleeps.has(user.id) &&
+      !hasActiveSession,
     hasActiveSession,
     wrapupInProgress: activeWrapups.has(user.id),
     globalSleepInProgress: activeGlobalSleeps.has(user.id),
@@ -865,6 +879,9 @@ memoryRoutes.put('/config', authMiddleware, async (c) => {
     knowledge_extraction: body?.knowledge_extraction === true,
     updated_at: new Date().toISOString(),
   });
+  if (runnerId !== existing.runner_id) {
+    deleteSessionRuntimeState(existing.id);
+  }
 
   return c.json(serializeMemoryConfig(user));
 });
@@ -950,6 +967,13 @@ memoryRoutes.post('/trigger-global-sleep', authMiddleware, async (c) => {
   if (pendingWrapups.length === 0) {
     return c.json({ error: '没有待整理的会话记录，无需执行深度整理' }, 400);
   }
+  const activeRuntimeJids = listOwnedActiveRuntimeJids(injectedQueue, user.id);
+  if (activeRuntimeJids.length > 0) {
+    return c.json(
+      { error: '仍有活跃会话运行中，请先停止相关主会话或 worker 会话' },
+      409,
+    );
+  }
 
   activeGlobalSleeps.add(user.id);
   try {
@@ -975,21 +999,7 @@ memoryRoutes.post('/stop-active-sessions', authMiddleware, async (c) => {
   if (!injectedQueue) {
     return c.json({ error: '队列未初始化' }, 503);
   }
-
-  const queueStatus = injectedQueue.getRuntimeStatus();
-  const activeJids = new Set(
-    queueStatus.groups.filter((g) => g.active).map((g) => g.jid),
-  );
-  const primaryFolder = resolvePrimarySessionFolderForOwner(user.id);
-  const ownedFolders = listOwnedSessionFolders(user.id);
-  const candidateFolders = primaryFolder
-    ? [primaryFolder, ...ownedFolders.filter((folder) => folder !== primaryFolder)]
-    : ownedFolders;
-  const activeGroupJids = Array.from(
-    new Set(
-      candidateFolders.flatMap((folder) => getJidsByFolder(folder)),
-    ),
-  ).filter((jid) => activeJids.has(jid));
+  const activeGroupJids = listOwnedActiveRuntimeJids(injectedQueue, user.id);
 
   if (activeGroupJids.length === 0) {
     return c.json({ stopped: 0, message: '没有活跃会话' });

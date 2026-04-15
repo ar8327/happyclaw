@@ -115,11 +115,10 @@ const configRoutes = new Hono<{ Variables: Variables }>();
 
 /**
  * Resolve IM chat owner from session binding or its default main session.
- * Legacy created_by remains as a last-resort compatibility fallback.
  */
 function resolveImGroupOwnerKey(
   jid: string,
-  group?: Pick<RegisteredGroup, 'folder' | 'created_by'>,
+  group?: Pick<RegisteredGroup, 'folder'>,
 ): string | undefined {
   const resolvedGroup = group ?? getRegisteredGroup(jid);
   if (!resolvedGroup) return undefined;
@@ -139,7 +138,7 @@ function resolveImGroupOwnerKey(
     if (mainSession?.owner_key) return mainSession.owner_key;
   }
 
-  return resolvedGroup.created_by ?? undefined;
+  return undefined;
 }
 
 // Inject deps at runtime

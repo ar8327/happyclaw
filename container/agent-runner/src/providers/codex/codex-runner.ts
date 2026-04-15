@@ -26,6 +26,7 @@ import type {
   QueryResult,
   NormalizedMessage,
   ActivityReport,
+  RuntimePersistenceSnapshot,
   UsageInfo,
 } from '../../runner-interface.js';
 import type { ContainerInput, ContainerOutput } from '../../types.js';
@@ -85,6 +86,22 @@ export class CodexRunner implements AgentRunner {
   async initialize(): Promise<void> {
     const { containerInput, groupDir, globalDir, memoryDir } = this.opts;
     const { isHome, isAdminHome } = normalizeHomeFlags(containerInput);
+    const persistedState = this.opts.state.getProviderState<{
+      pendingRoutingReminder?: unknown;
+      startFreshOnNextTurn?: unknown;
+      archiveState?: {
+        cumulativeInputTokens?: unknown;
+        cumulativeOutputTokens?: unknown;
+        turnCount?: unknown;
+        conversationLines?: unknown;
+      };
+    }>();
+    this.pendingRoutingReminder =
+      typeof persistedState?.pendingRoutingReminder === 'string'
+        ? persistedState.pendingRoutingReminder
+        : null;
+    this.startFreshOnNextTurn = persistedState?.startFreshOnNextTurn === true;
+    this.archiveMgr.hydrate(persistedState?.archiveState);
 
     // Create temp directory for instructions file and images
     this.tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'happyclaw-codex-'));
@@ -317,6 +334,19 @@ export class CodexRunner implements AgentRunner {
       hasActiveToolCall: oldestStartedAt > 0,
       activeToolDurationMs: oldestStartedAt > 0 ? Date.now() - oldestStartedAt : 0,
       hasPendingBackgroundTasks: false,
+    };
+  }
+
+  getRuntimePersistenceSnapshot(): RuntimePersistenceSnapshot {
+    const currentThreadId = this.session?.getThreadId?.() || null;
+    return {
+      providerState: {
+        pendingRoutingReminder: this.pendingRoutingReminder,
+        startFreshOnNextTurn: this.startFreshOnNextTurn,
+        archiveState: this.archiveMgr.snapshot(),
+        activeThreadId: currentThreadId,
+      },
+      lastMessageCursor: currentThreadId,
     };
   }
 

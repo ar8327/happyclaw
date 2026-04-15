@@ -51,6 +51,7 @@ import {
   saveSessionRecord,
   searchMessages,
   countSearchResults,
+  deleteSessionRuntimeState,
   setRegisteredGroup,
   storeMessageDirect,
   updateSessionBindingPolicies,
@@ -1286,6 +1287,7 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
     typeof body.cwd === 'string' && body.cwd.trim()
       ? body.cwd.trim()
       : undefined;
+  const runnerChanged = nextRunnerId !== existing.runner_id;
 
   if (existing.kind === 'memory') {
     if (requestedCwd !== undefined) {
@@ -1293,6 +1295,13 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
     }
     if (nextSelectedSkills !== undefined || nextActivationMode !== undefined) {
       return c.json({ error: 'Memory session does not support binding policy fields' }, 400);
+    }
+    const memoryRunnerDescriptor = getRunnerDescriptor(nextRunnerId);
+    if (!memoryRunnerDescriptor || !canServeAsMemoryRunner(memoryRunnerDescriptor)) {
+      return c.json(
+        { error: `Runner "${nextRunnerId}" cannot serve as memory runner` },
+        400,
+      );
     }
     saveSessionRecord({
       ...existing,
@@ -1306,6 +1315,9 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
       is_pinned: nextPinned,
       updated_at: now,
     });
+    if (nextRunnerId !== existing.runner_id) {
+      deleteSessionRuntimeState(existing.id);
+    }
   } else {
     const resolvedBacking = resolveBackingGroupForSession(existing);
     if (!resolvedBacking) {
@@ -1314,6 +1326,20 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
     const { backingJid, backingGroup } = resolvedBacking;
     if (!backingGroup || !canModifyGroup(user, { ...backingGroup, jid: backingJid })) {
       return c.json({ error: 'Forbidden' }, 403);
+    }
+    if (runnerChanged) {
+      try {
+        await deps.queue.stopSession(backingJid, { force: true });
+      } catch (err) {
+        return c.json(
+          {
+            error: `切换 runner 前停止旧 runtime 失败: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          },
+          500,
+        );
+      }
     }
 
     const defaultCwd = path.join(GROUPS_DIR, backingGroup.folder);
@@ -1343,6 +1369,9 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
       updated_at: now,
     };
     saveSessionRecord(updatedSession);
+    if (runnerChanged) {
+      deleteSessionRuntimeState(existing.id);
+    }
 
     const updatedGroup = buildCompatibilityGroupForSession(updatedSession, {
       folder: backingGroup.folder,

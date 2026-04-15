@@ -84,6 +84,11 @@ export interface IpcCapabilities {
   supportsRuntimeModeSwitch: boolean;
 }
 
+export interface RuntimePersistenceSnapshot {
+  providerState?: Record<string, unknown>;
+  lastMessageCursor?: string | null;
+}
+
 // ─── Runner 接口 ────────────────────────────────────────
 
 export interface AgentRunner {
@@ -130,6 +135,12 @@ export interface AgentRunner {
    * 默认实现（不覆盖时）：返回 { hasActiveToolCall: false, activeToolDurationMs: 0, hasPendingBackgroundTasks: false }
    */
   getActivityReport?(): ActivityReport;
+
+  /**
+   * 返回需要写回 session_state 的 provider/runtime 状态。
+   * query-loop 会在关键边界统一回写，避免状态继续散落在 provider 内部。
+   */
+  getRuntimePersistenceSnapshot?(): RuntimePersistenceSnapshot;
 
   /**
    * 两次查询之间的清理 / 重建（如 Claude 的 MCP server rebuild）。

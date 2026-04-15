@@ -186,7 +186,7 @@ function resolveFileOwnerKey(
     const mainSession = getSessionRecord(`main:${group.folder}`);
     if (mainSession?.owner_key) return mainSession.owner_key;
   }
-  return group.created_by || null;
+  return null;
 }
 
 /** Try to resolve a relative path from the user-global directory as fallback. */

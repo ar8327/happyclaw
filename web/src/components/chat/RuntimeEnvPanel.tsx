@@ -44,9 +44,86 @@ interface RunnerProfileOption {
   is_default: boolean;
 }
 
+interface RunnerCompatibility {
+  chat: string;
+  memory: string;
+  im: string;
+  observability: string;
+}
+
+interface RunnerCapabilities {
+  sessionResume: string;
+  interrupt: string;
+  toolStreaming: string;
+  midQueryPush: boolean;
+  backgroundTasks: boolean;
+}
+
+interface RunnerLifecycle {
+  archivalTrigger: string[];
+  contextShrinkTrigger: string;
+  hookStreaming: string;
+  postCompactRepair: string;
+}
+
 interface RunnerOption {
   id: string;
   label: string;
+  can_serve_memory: boolean;
+  compatibility: RunnerCompatibility;
+  capabilities: RunnerCapabilities;
+  lifecycle: RunnerLifecycle;
+  degradation_reasons: string[];
+}
+
+function RunnerCapabilityCard({ runner }: { runner: RunnerOption | null }) {
+  if (!runner) return null;
+  return (
+    <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 space-y-2">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-xs font-medium text-slate-700">{runner.label}</div>
+          <div className="text-[11px] text-slate-500 font-mono">{runner.id}</div>
+        </div>
+        <div className="text-[11px] text-slate-500 text-right">
+          <div>chat: {runner.compatibility.chat}</div>
+          <div>memory: {runner.compatibility.memory}</div>
+          <div>IM: {runner.compatibility.im}</div>
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-2 text-[11px]">
+        <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
+          恢复: <span className="font-medium text-slate-700">{runner.capabilities.sessionResume}</span>
+        </div>
+        <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
+          中断: <span className="font-medium text-slate-700">{runner.capabilities.interrupt}</span>
+        </div>
+        <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
+          工具流: <span className="font-medium text-slate-700">{runner.capabilities.toolStreaming}</span>
+        </div>
+        <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
+          后台任务: <span className="font-medium text-slate-700">{runner.capabilities.backgroundTasks ? '支持' : '不支持'}</span>
+        </div>
+      </div>
+      <div className="text-[11px] text-slate-500 space-y-1">
+        <div>归档触发: {runner.lifecycle.archivalTrigger.join(' / ') || 'none'}</div>
+        <div>上下文收缩: {runner.lifecycle.contextShrinkTrigger}</div>
+        <div>Hook 观测: {runner.lifecycle.hookStreaming}</div>
+        <div>Post-compact 修复: {runner.lifecycle.postCompactRepair}</div>
+        <div>中途注入: {runner.capabilities.midQueryPush ? '支持' : '不支持'}</div>
+      </div>
+      {runner.degradation_reasons.length > 0 && (
+        <div className="rounded border border-amber-200 bg-amber-50 px-2 py-2 space-y-1">
+          <div className="text-[11px] font-medium text-amber-700">退化说明</div>
+          {runner.degradation_reasons.map((reason) => (
+            <div key={reason} className="text-[11px] text-amber-700">
+              {reason}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 const CLAUDE_MODEL_OPTIONS = [
@@ -85,6 +162,8 @@ export function RuntimeEnvPanel({
   const [runnerOptions, setRunnerOptions] = useState<RunnerOption[]>([]);
 
   const currentRunnerId = session?.runner_id || runnerOptions[0]?.id || '';
+  const selectedRunner =
+    runnerOptions.find((runner) => runner.id === currentRunnerId) || null;
   const isCodex = currentRunnerId === 'codex';
   const { models: codexModelOptions, loading: codexModelsLoading } = useCodexModels(isCodex);
 
@@ -373,7 +452,11 @@ export function RuntimeEnvPanel({
               </SelectTrigger>
               <SelectContent>
                 {runnerOptions.map((runner) => (
-                  <SelectItem key={runner.id} value={runner.id}>
+                  <SelectItem
+                    key={runner.id}
+                    value={runner.id}
+                    disabled={runner.compatibility.chat === 'unsupported'}
+                  >
                     {runner.label}
                   </SelectItem>
                 ))}
@@ -385,6 +468,9 @@ export function RuntimeEnvPanel({
               <p className="text-[11px] text-amber-700 leading-relaxed">
                 切换 Runner 会开始新对话，当前上下文不会继承。
               </p>
+            </div>
+            <div className="mt-2">
+              <RunnerCapabilityCard runner={selectedRunner} />
             </div>
           </div>
 

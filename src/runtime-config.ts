@@ -3152,9 +3152,12 @@ export interface SystemSettings {
   maxConcurrentRuntimes: number;
   maxConcurrentScripts: number;
   scriptTimeout: number;
+  queryActivityTimeoutMs: number;
+  toolCallHardTimeoutMs: number;
   memoryQueryTimeout: number;
   memoryGlobalSleepTimeout: number;
   memorySendTimeout: number;
+  codexArchiveThreshold: number;
   turnBatchWindowMs: number;
   turnMaxBatchMs: number;
   traceRetentionDays: number;
@@ -3174,9 +3177,12 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   maxConcurrentRuntimes: 20,
   maxConcurrentScripts: 10,
   scriptTimeout: 60000,
+  queryActivityTimeoutMs: 300000,
+  toolCallHardTimeoutMs: 1200000,
   memoryQueryTimeout: 60000,
   memoryGlobalSleepTimeout: 300000,
   memorySendTimeout: 120000,
+  codexArchiveThreshold: 100000,
   turnBatchWindowMs: 5000,
   turnMaxBatchMs: 30000,
   traceRetentionDays: 7,
@@ -3252,6 +3258,16 @@ function readSystemSettingsFromFile(): SystemSettings | null {
       typeof raw.scriptTimeout === 'number' && raw.scriptTimeout > 0
         ? raw.scriptTimeout
         : DEFAULT_SYSTEM_SETTINGS.scriptTimeout,
+    queryActivityTimeoutMs:
+      typeof raw.queryActivityTimeoutMs === 'number' &&
+      raw.queryActivityTimeoutMs > 0
+        ? raw.queryActivityTimeoutMs
+        : DEFAULT_SYSTEM_SETTINGS.queryActivityTimeoutMs,
+    toolCallHardTimeoutMs:
+      typeof raw.toolCallHardTimeoutMs === 'number' &&
+      raw.toolCallHardTimeoutMs > 0
+        ? raw.toolCallHardTimeoutMs
+        : DEFAULT_SYSTEM_SETTINGS.toolCallHardTimeoutMs,
     memoryQueryTimeout:
       typeof raw.memoryQueryTimeout === 'number' && raw.memoryQueryTimeout > 0
         ? raw.memoryQueryTimeout
@@ -3265,6 +3281,11 @@ function readSystemSettingsFromFile(): SystemSettings | null {
       typeof raw.memorySendTimeout === 'number' && raw.memorySendTimeout > 0
         ? raw.memorySendTimeout
         : DEFAULT_SYSTEM_SETTINGS.memorySendTimeout,
+    codexArchiveThreshold:
+      typeof raw.codexArchiveThreshold === 'number' &&
+      raw.codexArchiveThreshold > 0
+        ? raw.codexArchiveThreshold
+        : DEFAULT_SYSTEM_SETTINGS.codexArchiveThreshold,
     turnBatchWindowMs:
       typeof raw.turnBatchWindowMs === 'number' && raw.turnBatchWindowMs > 0
         ? raw.turnBatchWindowMs
@@ -3334,6 +3355,14 @@ function buildEnvFallbackSettings(): SystemSettings {
       process.env.SCRIPT_TIMEOUT,
       DEFAULT_SYSTEM_SETTINGS.scriptTimeout,
     ),
+    queryActivityTimeoutMs: parseIntEnv(
+      process.env.QUERY_ACTIVITY_TIMEOUT_MS,
+      DEFAULT_SYSTEM_SETTINGS.queryActivityTimeoutMs,
+    ),
+    toolCallHardTimeoutMs: parseIntEnv(
+      process.env.TOOL_CALL_HARD_TIMEOUT_MS,
+      DEFAULT_SYSTEM_SETTINGS.toolCallHardTimeoutMs,
+    ),
     memoryQueryTimeout: parseIntEnv(
       process.env.MEMORY_QUERY_TIMEOUT,
       DEFAULT_SYSTEM_SETTINGS.memoryQueryTimeout,
@@ -3345,6 +3374,10 @@ function buildEnvFallbackSettings(): SystemSettings {
     memorySendTimeout: parseIntEnv(
       process.env.MEMORY_SEND_TIMEOUT,
       DEFAULT_SYSTEM_SETTINGS.memorySendTimeout,
+    ),
+    codexArchiveThreshold: parseIntEnv(
+      process.env.CODEX_ARCHIVE_THRESHOLD,
+      DEFAULT_SYSTEM_SETTINGS.codexArchiveThreshold,
     ),
     turnBatchWindowMs: parseIntEnv(
       process.env.TURN_BATCH_WINDOW_MS,
@@ -3430,6 +3463,14 @@ export function saveSystemSettings(
   if (merged.maxConcurrentScripts > 50) merged.maxConcurrentScripts = 50;
   if (merged.scriptTimeout < 5000) merged.scriptTimeout = 5000; // min 5s
   if (merged.scriptTimeout > 600000) merged.scriptTimeout = 600000; // max 10 min
+  if (merged.queryActivityTimeoutMs < 30000)
+    merged.queryActivityTimeoutMs = 30000; // min 30s
+  if (merged.queryActivityTimeoutMs > 3600000)
+    merged.queryActivityTimeoutMs = 3600000; // max 1 hour
+  if (merged.toolCallHardTimeoutMs < 60000)
+    merged.toolCallHardTimeoutMs = 60000; // min 1 min
+  if (merged.toolCallHardTimeoutMs > 7200000)
+    merged.toolCallHardTimeoutMs = 7200000; // max 2 hours
   if (merged.memoryQueryTimeout < 10000) merged.memoryQueryTimeout = 10000; // min 10s
   if (merged.memoryQueryTimeout > 600000) merged.memoryQueryTimeout = 600000; // max 10 min
   if (merged.memoryGlobalSleepTimeout < 60000)
@@ -3438,6 +3479,10 @@ export function saveSystemSettings(
     merged.memoryGlobalSleepTimeout = 3600000; // max 1 hour
   if (merged.memorySendTimeout < 30000) merged.memorySendTimeout = 30000; // min 30s
   if (merged.memorySendTimeout > 3600000) merged.memorySendTimeout = 3600000; // max 1 hour
+  if (merged.codexArchiveThreshold < 10000)
+    merged.codexArchiveThreshold = 10000;
+  if (merged.codexArchiveThreshold > 2000000)
+    merged.codexArchiveThreshold = 2000000;
   if (merged.turnBatchWindowMs < 1000) merged.turnBatchWindowMs = 1000; // min 1s
   if (merged.turnBatchWindowMs > 60000) merged.turnBatchWindowMs = 60000; // max 60s
   if (merged.turnMaxBatchMs < 5000) merged.turnMaxBatchMs = 5000; // min 5s

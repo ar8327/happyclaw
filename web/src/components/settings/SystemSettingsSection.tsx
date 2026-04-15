@@ -92,6 +92,39 @@ const fields: FieldConfig[] = [
     step: 5,
   },
   {
+    key: 'queryActivityTimeoutMs',
+    label: 'Query 活动 watchdog',
+    description: '单轮 query 在无新事件时的超时阈值',
+    unit: '秒',
+    toDisplay: (v) => Math.round(v / 1000),
+    toStored: (v) => v * 1000,
+    min: 30,
+    max: 3600,
+    step: 5,
+  },
+  {
+    key: 'toolCallHardTimeoutMs',
+    label: '工具硬超时',
+    description: '单个工具调用允许持续的最长时间',
+    unit: '秒',
+    toDisplay: (v) => Math.round(v / 1000),
+    toStored: (v) => v * 1000,
+    min: 60,
+    max: 7200,
+    step: 10,
+  },
+  {
+    key: 'codexArchiveThreshold',
+    label: 'Codex 归档阈值',
+    description: 'Codex synthetic archive 触发所需的累计 token 数',
+    unit: 'tokens',
+    toDisplay: (v) => v,
+    toStored: (v) => v,
+    min: 10000,
+    max: 2000000,
+    step: 10000,
+  },
+  {
     key: 'turnBatchWindowMs',
     label: '消息聚合窗口',
     description: '同渠道消息在此时间窗口内追加到当前 Turn',
@@ -131,6 +164,8 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
 
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [displayValues, setDisplayValues] = useState<Record<string, number>>({});
+  const [feishuApiDomain, setFeishuApiDomain] = useState('');
+  const [feishuDocDomain, setFeishuDocDomain] = useState('');
   const [webPublicUrl, setWebPublicUrl] = useState('');
   const [defaultClaudeModel, setDefaultClaudeModel] = useState('');
   const [loading, setLoading] = useState(true);
@@ -148,6 +183,8 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
           display[f.key] = f.toDisplay(data[f.key] as number);
         }
         setDisplayValues(display);
+        setFeishuApiDomain(data.feishuApiDomain ?? '');
+        setFeishuDocDomain(data.feishuDocDomain ?? '');
         setWebPublicUrl(data.webPublicUrl ?? '');
         setDefaultClaudeModel(data.defaultClaudeModel ?? '');
       } catch (err) {
@@ -164,6 +201,8 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
     setNotice(null);
     try {
       const payload: Partial<SystemSettings> = {
+        feishuApiDomain,
+        feishuDocDomain,
         webPublicUrl,
         defaultClaudeModel,
       };
@@ -180,6 +219,8 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
         display[f.key] = f.toDisplay(data[f.key] as number);
       }
       setDisplayValues(display);
+      setFeishuApiDomain(data.feishuApiDomain ?? '');
+      setFeishuDocDomain(data.feishuDocDomain ?? '');
       setWebPublicUrl(data.webPublicUrl ?? '');
       setDefaultClaudeModel(data.defaultClaudeModel ?? '');
       setNotice('系统参数已保存，新参数将对后续启动的 runtime 生效');
@@ -239,6 +280,43 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
             </p>
           </div>
         ))}
+      </div>
+
+      {/* 飞书设置 */}
+      <div className="border-t border-border pt-6 space-y-5">
+        <h3 className="text-sm font-semibold text-foreground">飞书设置</h3>
+        <div>
+          <label className="block text-sm font-medium text-foreground mb-1">
+            飞书 API 域名
+          </label>
+          <Input
+            type="text"
+            value={feishuApiDomain}
+            onChange={(e) => setFeishuApiDomain(e.target.value)}
+            placeholder="open.feishu.cn"
+            maxLength={100}
+            className="max-w-md font-mono"
+          />
+          <p className="text-xs text-muted-foreground mt-1">
+            OAuth、机器人 API 等请求使用的基础域名。只填域名，不要带协议。
+          </p>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-foreground mb-1">
+            飞书文档域名
+          </label>
+          <Input
+            type="text"
+            value={feishuDocDomain}
+            onChange={(e) => setFeishuDocDomain(e.target.value)}
+            placeholder="bytedance.larkoffice.com"
+            maxLength={100}
+            className="max-w-md font-mono"
+          />
+          <p className="text-xs text-muted-foreground mt-1">
+            文档链接与卡片跳转拼接使用的域名。只填域名，不要带协议。
+          </p>
+        </div>
       </div>
 
       {/* Web 设置 */}

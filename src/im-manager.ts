@@ -2,8 +2,7 @@
  * IM Connection Pool Manager
  *
  * Manages per-owner IM connections using the unified IMChannel interface.
- * Session owner_key is the primary routing source; legacy created_by only
- * remains as a compatibility fallback.
+ * Session owner_key is the only routing source for ownership.
  */
 import {
   type IMChannel,
@@ -306,13 +305,6 @@ class IMConnectionManager {
         const ch = conn?.channels.get(channelType);
         if (ch?.isConnected()) return ch;
       }
-    }
-
-    // Compatibility fallback for legacy groups not yet covered by session owner_key.
-    if (group?.created_by) {
-      const conn = this.connections.get(group.created_by);
-      const ch = conn?.channels.get(channelType);
-      if (ch?.isConnected()) return ch;
     }
 
     return undefined;

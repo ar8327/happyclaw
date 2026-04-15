@@ -11,7 +11,10 @@ import { writeIpcFile } from 'happyclaw-agent-runner-core';
 import type { UsageInfo } from '../../runner-interface.js';
 
 const ARCHIVE_TOKEN_THRESHOLD = parseInt(
-  process.env.HAPPYCLAW_CODEX_ARCHIVE_THRESHOLD || '100000', 10,
+  process.env.HAPPYCLAW_CODEX_ARCHIVE_THRESHOLD
+    || process.env.CODEX_ARCHIVE_THRESHOLD
+    || '100000',
+  10,
 );
 
 const WORKSPACE_GROUP = process.env.HAPPYCLAW_WORKSPACE_GROUP || '/workspace/group';
@@ -26,6 +29,46 @@ export class CodexArchiveManager {
   private cumulativeOutputTokens = 0;
   private turnCount = 0;
   private conversationLines: string[] = [];
+
+  hydrate(snapshot?: {
+    cumulativeInputTokens?: unknown;
+    cumulativeOutputTokens?: unknown;
+    turnCount?: unknown;
+    conversationLines?: unknown;
+  }): void {
+    if (!snapshot || typeof snapshot !== 'object') return;
+    this.cumulativeInputTokens =
+      typeof snapshot.cumulativeInputTokens === 'number'
+      && Number.isFinite(snapshot.cumulativeInputTokens)
+        ? snapshot.cumulativeInputTokens
+        : 0;
+    this.cumulativeOutputTokens =
+      typeof snapshot.cumulativeOutputTokens === 'number'
+      && Number.isFinite(snapshot.cumulativeOutputTokens)
+        ? snapshot.cumulativeOutputTokens
+        : 0;
+    this.turnCount =
+      typeof snapshot.turnCount === 'number' && Number.isFinite(snapshot.turnCount)
+        ? snapshot.turnCount
+        : 0;
+    this.conversationLines = Array.isArray(snapshot.conversationLines)
+      ? snapshot.conversationLines.filter((line): line is string => typeof line === 'string')
+      : [];
+  }
+
+  snapshot(): {
+    cumulativeInputTokens: number;
+    cumulativeOutputTokens: number;
+    turnCount: number;
+    conversationLines: string[];
+  } {
+    return {
+      cumulativeInputTokens: this.cumulativeInputTokens,
+      cumulativeOutputTokens: this.cumulativeOutputTokens,
+      turnCount: this.turnCount,
+      conversationLines: [...this.conversationLines],
+    };
+  }
 
   /**
    * Record a completed turn's usage and final text.
