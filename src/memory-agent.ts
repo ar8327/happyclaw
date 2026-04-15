@@ -487,7 +487,15 @@ function writeMemoryLog(
   },
 ): void {
   try {
-    const logsDir = path.join(GROUPS_DIR, resolvePrimarySessionFolder(userId), 'logs');
+    const logsDir = path.join(
+      GROUPS_DIR,
+      resolvePrimarySessionFolder(
+        userId,
+        getMemorySessionConfig(userId),
+        getPrimarySessionForOwner(userId),
+      ),
+      'logs',
+    );
     fs.mkdirSync(logsDir, { recursive: true });
 
     const duration = Date.now() - opts.startTime;
@@ -556,20 +564,18 @@ function buildMemorySessionId(userId: string): string {
   return `${MEMORY_SESSION_ID_PREFIX}${userId}`;
 }
 
-function resolvePrimarySessionFolder(userId: string): string {
-  const primary = getPrimarySessionForOwner(userId);
-  if (primary?.id.startsWith('main:')) {
-    return primary.id.slice('main:'.length);
-  }
-  const memorySession = getSessionRecord(buildMemorySessionId(userId));
+function resolvePrimarySessionFolder(
+  userId: string,
+  memorySession: SessionRecord | undefined,
+  primarySession?: SessionRecord,
+): string {
   if (memorySession?.parent_session_id?.startsWith('main:')) {
     return memorySession.parent_session_id.slice('main:'.length);
   }
-  const ownedFolders = listOwnedPrimaryFolders(userId);
-  if (ownedFolders.length > 0) {
-    return ownedFolders[0];
+  if (primarySession?.id.startsWith('main:')) {
+    return primarySession.id.slice('main:'.length);
   }
-  throw new Error(`No primary session found for memory user ${userId}`);
+  throw new Error(`No primary session found for memory owner ${userId}`);
 }
 
 function listOwnedPrimaryFolders(userId: string): string[] {
@@ -597,7 +603,25 @@ function ensureMemorySessionProjection(
   primarySession: SessionRecord | undefined,
   existing: SessionRecord | undefined,
 ): SessionRecord {
-  if (existing) return existing;
+  if (existing) {
+    const nextParentSessionId =
+      existing.parent_session_id || primarySession?.id || null;
+    const nextOwnerKey = existing.owner_key || userId;
+    const nextSession =
+      nextParentSessionId !== existing.parent_session_id
+      || nextOwnerKey !== existing.owner_key
+        ? {
+            ...existing,
+            parent_session_id: nextParentSessionId,
+            owner_key: nextOwnerKey,
+            updated_at: new Date().toISOString(),
+          }
+        : existing;
+    if (nextSession !== existing) {
+      saveSessionRecord(nextSession);
+    }
+    return nextSession;
+  }
   const now = new Date().toISOString();
   const runnerId = resolveMemoryRunnerId(primarySession?.runner_id || null);
   const session: SessionRecord = {
@@ -849,7 +873,6 @@ export class MemoryOrchestrator {
     request: MemoryExecutionRequest,
     timeoutMs: number,
   ): Promise<MemoryAgentResponse> {
-    const primaryFolder = resolvePrimarySessionFolder(userId);
     const memorySession = getMemorySessionConfig(userId);
     const primarySession = getPrimarySessionForOwner(userId);
     if (!memorySession && !primarySession) {
@@ -857,7 +880,18 @@ export class MemoryOrchestrator {
     }
 
     const memDir = ensureMemoryDir(userId);
-    const groupDir = memorySession?.cwd || memDir;
+    const effectiveMemorySession = ensureMemorySessionProjection(
+      userId,
+      memDir,
+      primarySession,
+      memorySession,
+    );
+    const primaryFolder = resolvePrimarySessionFolder(
+      userId,
+      effectiveMemorySession,
+      primarySession,
+    );
+    const groupDir = effectiveMemorySession.cwd || memDir;
     fs.mkdirSync(groupDir, { recursive: true });
     fs.mkdirSync(path.join(GROUPS_DIR, 'user-global', userId), {
       recursive: true,
@@ -878,12 +912,6 @@ export class MemoryOrchestrator {
     fs.mkdirSync(ipcInputDir, { recursive: true });
 
     const user = getUserById(userId);
-    const effectiveMemorySession = ensureMemorySessionProjection(
-      userId,
-      memDir,
-      primarySession,
-      memorySession,
-    );
     const memoryProfile = buildMemoryProfile({
       userId,
       runtimeKey,

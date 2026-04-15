@@ -356,6 +356,11 @@ export async function runHostAgent(
     sessionRecord?.owner_key ||
     folderSession?.owner_key ||
     null;
+  if (!sessionOwnerKey) {
+    return localRuntimeSetupError(
+      `Session ${stableSessionId} 缺少 owner_key，无法初始化本地 Runtime`,
+    );
+  }
   const sharedPrimarySessionFolder =
     ownerPrimarySessionFolder ||
     resolvePrimarySessionFolderForOwner(sessionOwnerKey) ||
@@ -363,7 +368,7 @@ export async function runHostAgent(
   const runtimeMemoryDir = path.join(
     DATA_DIR,
     'memory',
-    sessionOwnerKey || group.folder,
+    sessionOwnerKey,
   );
 
   fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
@@ -409,7 +414,7 @@ export async function runHostAgent(
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
   const hostMcpServers = launchProfile?.disableUserMcpServers
     ? {}
-    : resolveGroupMcpServers(group, sessionOwnerKey || undefined);
+    : resolveGroupMcpServers(group, sessionOwnerKey);
   ensureSettingsJson(settingsFile, hostMcpServers);
 
   // 4. Skills 自动链接到 session 目录
@@ -603,15 +608,9 @@ export async function runHostAgent(
   hostEnv['HAPPYCLAW_WORKSPACE_GROUP'] = groupDir;
   // Per-user global memory
   const ownerId = sessionOwnerKey;
-  if (ownerId) {
-    const userGlobalDir = path.join(GROUPS_DIR, 'user-global', ownerId);
-    fs.mkdirSync(userGlobalDir, { recursive: true });
-    hostEnv['HAPPYCLAW_WORKSPACE_GLOBAL'] = userGlobalDir;
-  } else {
-    const legacyGlobalDir = path.join(GROUPS_DIR, 'global');
-    fs.mkdirSync(legacyGlobalDir, { recursive: true });
-    hostEnv['HAPPYCLAW_WORKSPACE_GLOBAL'] = legacyGlobalDir;
-  }
+  const userGlobalDir = path.join(GROUPS_DIR, 'user-global', ownerId);
+  fs.mkdirSync(userGlobalDir, { recursive: true });
+  hostEnv['HAPPYCLAW_WORKSPACE_GLOBAL'] = userGlobalDir;
   hostEnv['HAPPYCLAW_WORKSPACE_MEMORY'] = runtimeMemoryDir;
   hostEnv['HAPPYCLAW_WORKSPACE_IPC'] = groupIpcDir;
   if (ownerId) {

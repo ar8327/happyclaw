@@ -55,6 +55,7 @@ import {
   getWorkerSessionRecord,
   listSessionBindings,
   listSessionRecords,
+  saveSessionRecord,
   setLastGroupSync,
   setRegisteredGroup,
   setRouterState,
@@ -176,6 +177,7 @@ import { injectFeishuApiDeps } from './routes/feishu-api.js';
 import { injectMemoryDeps } from './routes/memory.js';
 import { sendToolCommentary, resetTurnCommentaryTimer } from './im-commentary.js';
 import { getLocalWorkbenchUserPublic } from './local-user.js';
+import { getDefaultRunnerId } from './runner-registry.js';
 
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const execFileAsync = promisify(execFile);
@@ -730,7 +732,6 @@ function resolveEffectiveGroup(group: RegisteredGroup): {
         effectiveGroup: {
           ...group,
           customCwd: sibling.customCwd || group.customCwd,
-          created_by: group.created_by || sibling.created_by,
           is_home: true,
         },
         isHome: true,
@@ -1319,6 +1320,44 @@ function handleBindCommand(chatJid: string, rawSpec: string): string {
   return `已切换到 ${resolved.display}\n🔁 回复策略: source_only`;
 }
 
+function createOwnedWorkspace(
+  jid: string,
+  name: string,
+  folder: string,
+  ownerKey: string,
+  now: string,
+): RegisteredGroup {
+  saveSessionRecord({
+    id: `main:${folder}`,
+    name,
+    kind: 'workspace',
+    parent_session_id: null,
+    cwd: path.join(GROUPS_DIR, folder),
+    runner_id: getDefaultRunnerId(),
+    runner_profile_id: null,
+    model: null,
+    thinking_effort: null,
+    context_compression: 'off',
+    knowledge_extraction: false,
+    is_pinned: false,
+    archived: false,
+    owner_key: ownerKey,
+    created_at: now,
+    updated_at: now,
+  });
+
+  const group: RegisteredGroup = {
+    name,
+    folder,
+    added_at: now,
+  };
+  registerGroup(jid, group);
+  ensureChatExists(jid);
+  updateChatName(jid, name);
+  addGroupMember(folder, ownerKey, 'owner', ownerKey);
+  return group;
+}
+
 function handleNewCommand(chatJid: string, rawName: string): string {
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   if (!group) return '当前 IM 未绑定工作区';
@@ -1334,18 +1373,7 @@ function handleNewCommand(chatJid: string, rawName: string): string {
   const folder = `flow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const now = new Date().toISOString();
 
-  const newGroup: RegisteredGroup = {
-    name,
-    folder,
-    added_at: now,
-    created_by: userId,
-  };
-
-  // Register the workspace
-  registerGroup(newJid, newGroup);
-  ensureChatExists(newJid);
-  updateChatName(newJid, name);
-  addGroupMember(folder, userId, 'owner', userId);
+  createOwnedWorkspace(newJid, name, folder, userId, now);
 
   // Bind the current IM group to the new workspace's main conversation
   const updated: RegisteredGroup = {
@@ -2022,6 +2050,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Admin home is shared as web:main, so select runtime owner from the latest
   // active admin sender to avoid writing global memory into another admin's
   // user-global directory.
+  let ownerUserId = resolveSessionOwnerKey(effectiveGroup.folder);
   if (chatJid === 'web:main' && effectiveGroup.is_home) {
     for (let i = missedMessages.length - 1; i >= 0; i--) {
       const sender = missedMessages[i]?.sender;
@@ -2029,7 +2058,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         continue;
       const senderUser = getUserById(sender);
       if (senderUser?.status === 'active' && senderUser.role === 'admin') {
-        effectiveGroup = { ...effectiveGroup, created_by: senderUser.id };
+        ownerUserId = senderUser.id;
         break;
       }
     }
@@ -2037,12 +2066,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const shared = isGroupShared(group.folder);
   // Check if this user has Feishu agent-reply mode enabled
-  const ownerUserId =
-    ((chatJid === 'web:main' && effectiveGroup.is_home)
-      ? effectiveGroup.created_by
-      : undefined)
-    || resolveSessionOwnerKey(effectiveGroup.folder)
-    || effectiveGroup.created_by;
   const feishuAgentReply = ownerUserId
     ? getUserFeishuConfig(ownerUserId)?.replyThreadingMode === 'agent'
     : false;
@@ -3077,7 +3100,11 @@ async function sendMessage(
         const groupForImages = registeredGroups[jid] ?? getRegisteredGroup(jid);
         const localImagePaths =
           options.localImagePaths ??
-          extractLocalImImagePaths(text, resolveEffectiveFolder(jid), groupForImages?.created_by);
+          extractLocalImImagePaths(
+            text,
+            resolveEffectiveFolder(jid),
+            resolveChatOwnerKey(jid, groupForImages),
+          );
         externalMsgId = await imManager.sendMessage(jid, text, localImagePaths);
       } catch (err) {
         logger.error({ jid, err }, 'Failed to send message to IM channel');
@@ -3132,13 +3159,11 @@ function canSendCrossGroupMessage(
 ): boolean {
   if (isAdminHome) return true;
   if (targetGroup && targetGroup.folder === sourceFolder) return true;
-  if (
-    isHome &&
-    targetGroup &&
-    sourceGroupEntry?.created_by != null &&
-    targetGroup.created_by === sourceGroupEntry.created_by
-  )
-    return true;
+  if (isHome && targetGroup) {
+    const sourceOwnerKey = resolveSessionOwnerKey(sourceFolder);
+    const targetOwnerKey = resolveSessionOwnerKey(targetGroup.folder);
+    if (sourceOwnerKey && sourceOwnerKey === targetOwnerKey) return true;
+  }
   return false;
 }
 
@@ -3748,16 +3773,11 @@ async function processTaskIpc(
         break;
       }
       if (data.jid && data.name && data.folder) {
-        // Keep legacy owner metadata aligned with the target session owner when possible.
-        const sourceEntry = Object.values(registeredGroups).find(
-          (g) => g.folder === sourceGroup,
-        );
         registerGroup(data.jid, {
           name: data.name,
           folder: data.folder,
           added_at: new Date().toISOString(),
           containerConfig: data.containerConfig,
-          created_by: resolveSessionOwnerKey(data.folder) || sourceEntry?.created_by,
         });
       } else {
         logger.warn(
@@ -4380,9 +4400,7 @@ async function startMessageLoop(): Promise<void> {
                 !hasActiveProgressSession(channel)
               ) {
                 const resolved = resolveEffectiveGroup(group);
-                const ownerId =
-                  resolveSessionOwnerKey(resolved.effectiveGroup.folder)
-                  || resolved.effectiveGroup.created_by;
+                const ownerId = resolveSessionOwnerKey(resolved.effectiveGroup.folder);
                 const fc = ownerId ? getUserFeishuConfig(ownerId) : null;
                 if (fc?.streamingCard) {
                   const card = imManager.createProgressCard(channel);
@@ -4621,16 +4639,7 @@ function buildOnNewChat(
       const folder = `flow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
       const now = new Date().toISOString();
 
-      const newGroup: RegisteredGroup = {
-        name: chatName,
-        folder,
-        added_at: now,
-        created_by: userId,
-      };
-      registerGroup(newJid, newGroup);
-      ensureChatExists(newJid);
-      updateChatName(newJid, chatName);
-      addGroupMember(folder, userId, 'owner', userId);
+      createOwnedWorkspace(newJid, chatName, folder, userId, now);
 
       // 2. Register the IM group and bind to the new workspace
       registerGroup(chatJid, {

@@ -38,7 +38,6 @@ export function buildMemoryProfile(params: {
       name: memorySession.name,
       folder: primaryFolder,
       added_at: memorySession.created_at,
-      created_by: userId,
       is_home: false,
       customCwd: groupDir,
       selected_skills: [],

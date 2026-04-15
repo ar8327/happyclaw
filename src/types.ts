@@ -41,7 +41,6 @@ export interface RegisteredGroup {
   customCwd?: string; // 本地 Runtime 的自定义工作目录
   initSourcePath?: string; // 初始化时复制来源的本机绝对路径
   initGitUrl?: string; // 初始化时 clone 来源的 Git URL
-  created_by?: string;
   is_home?: boolean; // 用户主容器标记
   selected_skills?: string[] | null; // null = 全部启用
   reply_policy?: 'source_only' | 'mirror'; // IM 绑定的回复策略

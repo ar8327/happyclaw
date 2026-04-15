@@ -247,24 +247,34 @@ function dropLegacyRegisteredGroupBindingColumns(): void {
   })();
 }
 
-function migrateLegacyHomeGroupKinds(): void {
-  if (!hasColumn('registered_groups', 'is_home')) return;
+function backfillLegacyGroupOwnersIntoSessions(): void {
+  if (!hasColumn('registered_groups', 'created_by')) return;
 
+  const hasIsHome = hasColumn('registered_groups', 'is_home');
   const rows = db
-    .prepare(`
-      SELECT jid, name, folder, added_at, container_config, custom_cwd,
-             init_source_path, init_git_url, created_by, selected_skills,
-             mcp_mode, selected_mcps, llm_provider, model, thinking_effort,
-             context_compression, knowledge_extraction
-      FROM registered_groups
-      WHERE jid LIKE 'web:%' AND is_home = 1
-    `)
+    .prepare(
+      `SELECT jid, name, folder, added_at, container_config, custom_cwd,
+              init_source_path, init_git_url, created_by, selected_skills,
+              mcp_mode, selected_mcps, llm_provider, model, thinking_effort,
+              context_compression, knowledge_extraction${
+                hasIsHome ? ', is_home' : ', 0 AS is_home'
+              }
+       FROM registered_groups
+       WHERE jid LIKE 'web:%'`,
+    )
     .all() as Array<Record<string, unknown>>;
 
   for (const row of rows) {
-    ensureSessionRecordFromGroup(String(row.jid), {
+    const ownerKey =
+      typeof row.created_by === 'string' && row.created_by.trim()
+        ? row.created_by.trim()
+        : null;
+    const folder = String(row.folder);
+    const sessionId = buildMainSessionId(folder);
+    const existing = getSessionRecord(sessionId);
+    const fallbackGroup: RegisteredGroup = {
       name: String(row.name),
-      folder: String(row.folder),
+      folder,
       added_at: String(row.added_at),
       containerConfig:
         typeof row.container_config === 'string'
@@ -278,9 +288,7 @@ function migrateLegacyHomeGroupKinds(): void {
           : undefined,
       initGitUrl:
         typeof row.init_git_url === 'string' ? row.init_git_url : undefined,
-      created_by:
-        typeof row.created_by === 'string' ? row.created_by : undefined,
-      is_home: true,
+      is_home: Number(row.is_home || 0) === 1,
       selected_skills:
         typeof row.selected_skills === 'string'
           ? JSON.parse(row.selected_skills)
@@ -306,12 +314,45 @@ function migrateLegacyHomeGroupKinds(): void {
           : null,
       ),
       knowledge_extraction: Number(row.knowledge_extraction || 0) === 1,
+    };
+    const nextSession: SessionRecord = existing || {
+      id: sessionId,
+      name: fallbackGroup.name,
+      kind: deriveSessionKind(fallbackGroup),
+      parent_session_id: null,
+      cwd: deriveSessionCwd(fallbackGroup),
+      runner_id: deriveRunnerId(fallbackGroup),
+      runner_profile_id: null,
+      model: fallbackGroup.model ?? null,
+      thinking_effort: fallbackGroup.thinking_effort ?? null,
+      context_compression: fallbackGroup.context_compression ?? 'off',
+      knowledge_extraction: fallbackGroup.knowledge_extraction ?? false,
+      is_pinned: false,
+      archived: false,
+      owner_key: null,
+      created_at: fallbackGroup.added_at,
+      updated_at: fallbackGroup.added_at,
+    };
+    if (nextSession.kind !== 'main' && fallbackGroup.is_home) {
+      nextSession.kind = 'main';
+    }
+    if (!nextSession.owner_key && ownerKey) {
+      nextSession.owner_key = ownerKey;
+    }
+    saveSessionRecord({
+      ...nextSession,
+      updated_at: new Date().toISOString(),
     });
   }
 }
 
-function dropLegacyRegisteredGroupHomeColumn(): void {
-  if (!hasColumn('registered_groups', 'is_home')) return;
+function dropLegacyRegisteredGroupCompatibilityColumns(): void {
+  if (
+    !hasColumn('registered_groups', 'created_by')
+    && !hasColumn('registered_groups', 'is_home')
+  ) {
+    return;
+  }
 
   db.transaction(() => {
     db.exec(`
@@ -324,7 +365,6 @@ function dropLegacyRegisteredGroupHomeColumn(): void {
         custom_cwd TEXT,
         init_source_path TEXT,
         init_git_url TEXT,
-        created_by TEXT,
         selected_skills TEXT,
         mcp_mode TEXT DEFAULT 'inherit',
         selected_mcps TEXT,
@@ -336,13 +376,13 @@ function dropLegacyRegisteredGroupHomeColumn(): void {
       );
       INSERT INTO registered_groups_new (
         jid, name, folder, added_at, container_config, custom_cwd,
-        init_source_path, init_git_url, created_by, selected_skills,
+        init_source_path, init_git_url, selected_skills,
         mcp_mode, selected_mcps, llm_provider, model, thinking_effort,
         context_compression, knowledge_extraction
       )
       SELECT
         jid, name, folder, added_at, container_config, custom_cwd,
-        init_source_path, init_git_url, created_by, selected_skills,
+        init_source_path, init_git_url, selected_skills,
         mcp_mode, selected_mcps, llm_provider, model, thinking_effort,
         context_compression, knowledge_extraction
       FROM registered_groups;
@@ -524,7 +564,6 @@ export function initDatabase(): void {
       folder TEXT NOT NULL,
       added_at TEXT NOT NULL,
       container_config TEXT,
-      created_by TEXT,
       selected_skills TEXT,
       mcp_mode TEXT DEFAULT 'inherit',
       selected_mcps TEXT,
@@ -915,7 +954,6 @@ export function initDatabase(): void {
   ensureColumn('registered_groups', 'init_git_url', 'TEXT');
   ensureColumn('messages', 'attachments', 'TEXT');
   ensureColumn('messages', 'source_jid', 'TEXT');
-  ensureColumn('registered_groups', 'created_by', 'TEXT');
   ensureColumn('users', 'ai_name', 'TEXT');
   ensureColumn('users', 'ai_avatar_emoji', 'TEXT');
   ensureColumn('users', 'ai_avatar_color', 'TEXT');
@@ -1049,8 +1087,8 @@ export function initDatabase(): void {
 
   migrateLegacyRegisteredGroupBindings();
   dropLegacyRegisteredGroupBindingColumns();
-  migrateLegacyHomeGroupKinds();
-  dropLegacyRegisteredGroupHomeColumn();
+  backfillLegacyGroupOwnersIntoSessions();
+  dropLegacyRegisteredGroupCompatibilityColumns();
 
   // v19→v20 migration: add token_usage column to messages
   ensureColumn('messages', 'token_usage', 'TEXT');
@@ -1096,7 +1134,6 @@ export function initDatabase(): void {
       'custom_cwd',
       'init_source_path',
       'init_git_url',
-      'created_by',
       'selected_skills',
       'mcp_mode',
       'selected_mcps',
@@ -1162,60 +1199,7 @@ export function initDatabase(): void {
     'created_at',
   ]);
 
-  // Store schema version after all migrations complete
-  // Migrate existing web groups: assign to first admin
-  db.exec(`
-    UPDATE registered_groups SET created_by = (
-      SELECT id FROM users WHERE role = 'admin' AND status = 'active' ORDER BY created_at ASC LIMIT 1
-    ) WHERE jid LIKE 'web:%' AND folder != 'main' AND created_by IS NULL
-  `);
-
-  // Backfill owner for legacy web:main if missing.
-  db.exec(`
-    UPDATE registered_groups SET created_by = (
-      SELECT id FROM users WHERE role = 'admin' AND status = 'active' ORDER BY created_at ASC LIMIT 1
-    ) WHERE jid = 'web:main' AND created_by IS NULL
-  `);
-
-  // Backfill created_by for feishu/telegram groups by matching sibling groups in the same folder.
-  // Only backfill when the folder has exactly one distinct owner; otherwise keep NULL
-  // to avoid misrouting in ambiguous folders (e.g., shared admin main).
-  db.exec(`
-    UPDATE registered_groups
-    SET created_by = (
-      SELECT MIN(rg2.created_by)
-      FROM registered_groups rg2
-      WHERE rg2.folder = registered_groups.folder
-        AND rg2.created_by IS NOT NULL
-    )
-    WHERE (jid LIKE 'feishu:%' OR jid LIKE 'telegram:%')
-      AND created_by IS NULL
-      AND (
-        SELECT COUNT(DISTINCT rg3.created_by)
-        FROM registered_groups rg3
-        WHERE rg3.folder = registered_groups.folder
-          AND rg3.created_by IS NOT NULL
-      ) = 1
-  `);
-
-  // v15 migration: backfill group_members for existing web groups
-  const currentVersion = getRouterStateInternal('schema_version');
-  if (!currentVersion || parseInt(currentVersion, 10) < 15) {
-    db.transaction(() => {
-      // Backfill owner records for all web groups with created_by set
-      const webGroups = db
-        .prepare(
-          "SELECT DISTINCT folder, created_by FROM registered_groups WHERE jid LIKE 'web:%' AND created_by IS NOT NULL",
-        )
-        .all() as Array<{ folder: string; created_by: string }>;
-      for (const g of webGroups) {
-        db.prepare(
-          `INSERT OR IGNORE INTO group_members (group_folder, user_id, role, added_at, added_by)
-           VALUES (?, ?, 'owner', ?, ?)`,
-        ).run(g.folder, g.created_by, new Date().toISOString(), g.created_by);
-      }
-    })();
-  }
+  // Store schema version after all migrations complete.
 
   // v23→v24 migration: billing system initialization
   ensureColumn('users', 'subscription_plan_id', 'TEXT');
@@ -1368,7 +1352,7 @@ export function initDatabase(): void {
           cost_usd, duration_ms, num_turns, source, created_at)
         SELECT
           lower(hex(randomblob(16))),
-          COALESCE(rg.created_by, 'system'),
+          COALESCE(ms.owner_key, 'system'),
           COALESCE(rg.folder, m.chat_jid),
           m.id,
           COALESCE(jme.key, 'unknown'),
@@ -1383,6 +1367,7 @@ export function initDatabase(): void {
         FROM messages m
           JOIN json_each(json_extract(m.token_usage, '$.modelUsage')) jme
           LEFT JOIN registered_groups rg ON rg.jid = m.chat_jid
+          LEFT JOIN sessions ms ON ms.id = 'main:' || rg.folder
         WHERE m.token_usage IS NOT NULL
           AND json_extract(m.token_usage, '$.modelUsage') IS NOT NULL
       `);
@@ -1394,7 +1379,7 @@ export function initDatabase(): void {
           cost_usd, duration_ms, num_turns, source, created_at)
         SELECT
           lower(hex(randomblob(16))),
-          COALESCE(rg.created_by, 'system'),
+          COALESCE(ms.owner_key, 'system'),
           COALESCE(rg.folder, m.chat_jid),
           m.id,
           'legacy-unknown',
@@ -1409,6 +1394,7 @@ export function initDatabase(): void {
           m.timestamp
         FROM messages m
           LEFT JOIN registered_groups rg ON rg.jid = m.chat_jid
+          LEFT JOIN sessions ms ON ms.id = 'main:' || rg.folder
         WHERE m.token_usage IS NOT NULL
           AND (json_extract(m.token_usage, '$.modelUsage') IS NULL
                OR json_type(json_extract(m.token_usage, '$.modelUsage')) != 'object')
@@ -1503,7 +1489,7 @@ export function initDatabase(): void {
 
   syncSessionWorkbenchProjection();
 
-  const SCHEMA_VERSION = '36';
+  const SCHEMA_VERSION = '37';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -2724,12 +2710,7 @@ function mapWorkerAgentRow(row: Record<string, unknown>): SubAgent {
     prompt: String(row.prompt),
     status: (row.status as AgentStatus) || 'idle',
     kind: (row.kind as AgentKind) || 'task',
-    created_by:
-      typeof row.owner_key === 'string'
-        ? row.owner_key
-        : typeof row.created_by === 'string'
-          ? row.created_by
-          : null,
+    created_by: typeof row.owner_key === 'string' ? row.owner_key : null,
     created_at: String(row.created_at),
     completed_at:
       typeof row.completed_at === 'string' ? row.completed_at : null,
@@ -2786,6 +2767,7 @@ function ensureSessionRecordFromGroup(
   if (!jid.startsWith('web:')) return null;
   const now = group.added_at || new Date().toISOString();
   const sessionId = buildMainSessionId(group.folder);
+  const existing = getSessionRecord(sessionId);
   db.prepare(
     `INSERT INTO sessions (
       id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
@@ -2813,7 +2795,7 @@ function ensureSessionRecordFromGroup(
     group.thinking_effort ?? null,
     group.context_compression ?? 'off',
     group.knowledge_extraction ? 1 : 0,
-    group.created_by ?? null,
+    existing?.owner_key ?? null,
     now,
     new Date().toISOString(),
   );
@@ -2829,6 +2811,11 @@ function ensureSessionRecordForLegacyKey(
   const folderGroup = groupFolder ? findPrimaryGroupForFolder(groupFolder) : undefined;
   if (agentId?.trim()) {
     const parentSession = getSessionRecord(buildMainSessionId(groupFolder));
+    if (!parentSession?.owner_key) {
+      throw new Error(
+        `Missing parent session owner for legacy worker session ${agentId} in ${groupFolder}`,
+      );
+    }
     db.prepare(
       `INSERT OR IGNORE INTO sessions (
         id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
@@ -2846,12 +2833,13 @@ function ensureSessionRecordForLegacyKey(
       parentSession?.thinking_effort || null,
       parentSession?.context_compression || 'off',
       parentSession?.knowledge_extraction ? 1 : 0,
-      parentSession?.owner_key || folderGroup?.created_by || null,
+      parentSession.owner_key,
       now,
       now,
     );
     return sessionId;
   }
+  const folderOwnerKey = getSessionRecord(buildMainSessionId(groupFolder))?.owner_key ?? null;
   db.prepare(
     `INSERT OR IGNORE INTO sessions (
       id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
@@ -2867,7 +2855,7 @@ function ensureSessionRecordForLegacyKey(
     folderGroup?.thinking_effort ?? null,
     folderGroup?.context_compression ?? 'off',
     folderGroup?.knowledge_extraction ? 1 : 0,
-    folderGroup?.created_by ?? null,
+    folderOwnerKey,
     now,
     now,
   );
@@ -3309,7 +3297,6 @@ type RegisteredGroupRow = {
   custom_cwd: string | null;
   init_source_path: string | null;
   init_git_url: string | null;
-  created_by: string | null;
   selected_skills: string | null;
   mcp_mode: string | null;
   selected_mcps: string | null;
@@ -3335,7 +3322,6 @@ function parseGroupRow(
     customCwd: row.custom_cwd ?? undefined,
     initSourcePath: row.init_source_path ?? undefined,
     initGitUrl: row.init_git_url ?? undefined,
-    created_by: row.created_by ?? undefined,
     is_home: isCompatibilityHomeGroup(row.jid, row.folder),
     selected_skills: row.selected_skills
       ? JSON.parse(row.selected_skills)
@@ -3392,6 +3378,29 @@ function parseActivationMode(
   return 'auto';
 }
 
+function resolveSessionOwnerKeyFromSessionId(
+  sessionId: string | null | undefined,
+): string | null {
+  if (!sessionId) return null;
+  const session = getSessionRecord(sessionId);
+  if (session?.owner_key) return session.owner_key;
+  if (!session?.parent_session_id) return null;
+  return getSessionRecord(session.parent_session_id)?.owner_key ?? null;
+}
+
+function resolveRegisteredGroupOwnerKey(
+  jid: string,
+  fallbackGroup?: RegisteredGroup,
+): string | null {
+  const binding = getSessionBinding(jid);
+  const boundOwnerKey = resolveSessionOwnerKeyFromSessionId(binding?.session_id);
+  if (boundOwnerKey) return boundOwnerKey;
+
+  const group = fallbackGroup ?? getRegisteredGroup(jid);
+  if (!group) return null;
+  return getSessionRecord(buildMainSessionId(group.folder))?.owner_key ?? null;
+}
+
 export function getRegisteredGroup(
   jid: string,
 ): (RegisteredGroup & { jid: string }) | undefined {
@@ -3404,8 +3413,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, custom_cwd, init_source_path, init_git_url, created_by, selected_skills, mcp_mode, selected_mcps, llm_provider, model, thinking_effort, context_compression, knowledge_extraction)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, custom_cwd, init_source_path, init_git_url, selected_skills, mcp_mode, selected_mcps, llm_provider, model, thinking_effort, context_compression, knowledge_extraction)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -3415,7 +3424,6 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.customCwd ?? null,
     group.initSourcePath ?? null,
     group.initGitUrl ?? null,
-    group.created_by ?? null,
     group.selected_skills ? JSON.stringify(group.selected_skills) : null,
     group.mcp_mode ?? 'inherit',
     group.selected_mcps ? JSON.stringify(group.selected_mcps) : null,
@@ -3452,8 +3460,9 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     });
   }
   syncSessionProjectionForGroup(jid, group);
-  if (group.created_by) {
-    syncMemorySessionProjectionForOwner(group.created_by);
+  const sessionOwnerKey = resolveRegisteredGroupOwnerKey(jid, group);
+  if (sessionOwnerKey) {
+    syncMemorySessionProjectionForOwner(sessionOwnerKey);
   }
 }
 
@@ -3526,10 +3535,15 @@ function syncSessionWorkbenchProjection(): void {
     db.exec('DROP TABLE agents');
   }
 
-  const memoryOwners = new Set<string>();
-  for (const group of Object.values(groups)) {
-    if (group.created_by) memoryOwners.add(group.created_by);
-  }
+  const memoryOwners = new Set(
+    listSessionRecords()
+      .filter(
+        (session) =>
+          session.owner_key &&
+          (session.kind === 'main' || session.kind === 'workspace'),
+      )
+      .map((session) => session.owner_key!),
+  );
   for (const ownerKey of memoryOwners) {
     syncMemorySessionProjectionForOwner(ownerKey);
   }
@@ -3660,9 +3674,8 @@ export function getHomeGroupByFolder(
 }
 
 /**
- * Find a user's home group (is_home=1 + created_by=userId).
- * For admin users, also matches web:main even if created_by differs
- * (all admins share folder=main).
+ * Find a user's home group from the single-user main session owner mapping.
+ * For admin users, also matches web:main as a final compatibility fallback.
  */
 export function getUserHomeGroup(
   userId: string,
@@ -3694,7 +3707,7 @@ export function getUserHomeGroup(
 
 /**
  * Ensure a user has a home group. If not, create one.
- * Single-user migration keeps legacy home groups as compatibility rows.
+ * Single-user migration keeps a web compatibility row backed by a main session.
  * Returns the JID of the home group.
  */
 export function ensureUserHomeGroup(
@@ -3710,21 +3723,37 @@ export function ensureUserHomeGroup(
   const jid = isAdmin ? 'web:main' : `web:home-${userId}`;
   const folder = isAdmin ? 'main' : `home-${userId}`;
 
-  // For admin: check if web:main already exists (created by another admin)
-  // In that case, reuse it rather than overwriting created_by
+  const sessionId = buildMainSessionId(folder);
+
+  // For admin: check if web:main already exists and backfill the main session owner.
   if (isAdmin) {
     const existingMain = getRegisteredGroup(jid);
     if (existingMain) {
-      // web:main already exists.
-      // Ensure is_home and created_by are correct.
+      const existingSession = getSessionRecord(sessionId);
+      if (!existingSession?.owner_key) {
+        saveSessionRecord({
+          id: sessionId,
+          name: existingSession?.name || existingMain.name,
+          kind: 'main',
+          parent_session_id: null,
+          cwd: existingSession?.cwd || path.join(GROUPS_DIR, folder),
+          runner_id: existingSession?.runner_id || getDefaultRunnerId(),
+          runner_profile_id: existingSession?.runner_profile_id ?? null,
+          model: existingSession?.model ?? null,
+          thinking_effort: existingSession?.thinking_effort ?? null,
+          context_compression: existingSession?.context_compression || 'off',
+          knowledge_extraction: existingSession?.knowledge_extraction ?? false,
+          is_pinned: existingSession?.is_pinned ?? false,
+          archived: existingSession?.archived ?? false,
+          owner_key: userId,
+          created_at: existingSession?.created_at || now,
+          updated_at: now,
+        });
+      }
       const patched = { ...existingMain };
       let changed = false;
       if (!patched.is_home) {
         patched.is_home = true;
-        changed = true;
-      }
-      if (!patched.created_by) {
-        patched.created_by = userId;
         changed = true;
       }
       if (changed) {
@@ -3741,10 +3770,27 @@ export function ensureUserHomeGroup(
     name,
     folder,
     added_at: now,
-    created_by: userId,
     is_home: true,
   };
 
+  saveSessionRecord({
+    id: sessionId,
+    name,
+    kind: 'main',
+    parent_session_id: null,
+    cwd: path.join(GROUPS_DIR, folder),
+    runner_id: getDefaultRunnerId(),
+    runner_profile_id: null,
+    model: null,
+    thinking_effort: null,
+    context_compression: 'off',
+    knowledge_extraction: false,
+    is_pinned: false,
+    archived: false,
+    owner_key: userId,
+    created_at: now,
+    updated_at: now,
+  });
   setRegisteredGroup(jid, group);
 
   // Ensure chat row exists
@@ -4128,11 +4174,13 @@ export function getMessagesByTimeRange(
 export function getGroupsByOwner(
   userId: string,
 ): Array<RegisteredGroup & { jid: string }> {
-  const rows = db
-    .prepare('SELECT * FROM registered_groups WHERE created_by = ?')
-    .all(userId) as RegisteredGroupRow[];
-
-  return rows.map(parseGroupRow);
+  const groups = getAllRegisteredGroups() as Record<
+    string,
+    RegisteredGroup & { jid: string }
+  >;
+  return Object.values(groups).filter(
+    (group) => resolveRegisteredGroupOwnerKey(group.jid, group) === userId,
+  );
 }
 
 // ===================== Auth CRUD =====================
@@ -5148,6 +5196,7 @@ function syncWorkerSession(agent: SubAgent): void {
   const parentSessionId = buildMainSessionId(agent.group_folder);
   const parentSession = getSessionRecord(parentSessionId);
   const parentGroup = findPrimaryGroupForFolder(agent.group_folder);
+  const ownerKey = parentSession?.owner_key ?? null;
   const now = new Date().toISOString();
   db.prepare(
     `INSERT INTO sessions (
@@ -5178,7 +5227,7 @@ function syncWorkerSession(agent: SubAgent): void {
     parentSession?.thinking_effort || null,
     parentSession?.context_compression || 'off',
     parentSession?.knowledge_extraction ? 1 : 0,
-    agent.created_by ?? parentSession?.owner_key ?? parentGroup?.created_by ?? null,
+    ownerKey,
     agent.created_at || now,
     now,
   );
@@ -6348,12 +6397,15 @@ export function getBillingAuditLog(
 // --- Billing summary helpers ---
 
 export function getUserGroupCount(userId: string): number {
-  const row = db
-    .prepare(
-      "SELECT COUNT(DISTINCT rg.folder) as cnt FROM registered_groups rg WHERE rg.created_by = ? AND rg.jid LIKE 'web:%'",
-    )
-    .get(userId) as { cnt: number };
-  return row.cnt;
+  return new Set(
+    listSessionRecords()
+      .filter(
+        (session) =>
+          session.owner_key === userId &&
+          (session.kind === 'main' || session.kind === 'workspace'),
+      )
+      .map((session) => session.id),
+  ).size;
 }
 
 export function getAllUserBillingOverview(): Array<{

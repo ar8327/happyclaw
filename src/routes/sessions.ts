@@ -404,7 +404,6 @@ function buildCompatibilityGroupForSession(
     added_at: existing?.added_at || options.addedAt,
     initSourcePath: options.initSourcePath ?? existing?.initSourcePath,
     initGitUrl: options.initGitUrl ?? existing?.initGitUrl,
-    created_by: options.ownerKey ?? existing?.created_by,
     is_home: session.kind === 'main' ? true : existing?.is_home,
     llm_provider: mapLegacyLlmProvider(session.runner_id, existing?.llm_provider),
     model: session.model ?? undefined,
