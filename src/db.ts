@@ -209,7 +209,6 @@ function dropLegacyRegisteredGroupBindingColumns(): void {
         selected_skills TEXT,
         mcp_mode TEXT DEFAULT 'inherit',
         selected_mcps TEXT,
-        llm_provider TEXT DEFAULT 'claude',
         model TEXT,
         thinking_effort TEXT,
         context_compression TEXT DEFAULT 'off',
@@ -218,13 +217,13 @@ function dropLegacyRegisteredGroupBindingColumns(): void {
       INSERT INTO registered_groups_new (
         jid, name, folder, added_at, container_config, custom_cwd,
         init_source_path, init_git_url, created_by, selected_skills,
-        mcp_mode, selected_mcps, llm_provider, model, thinking_effort, context_compression,
+        mcp_mode, selected_mcps, model, thinking_effort, context_compression,
         knowledge_extraction
       )
       SELECT
         jid, name, folder, added_at, container_config, custom_cwd,
         init_source_path, init_git_url, created_by, selected_skills,
-        mcp_mode, selected_mcps, llm_provider, model, thinking_effort, context_compression,
+        mcp_mode, selected_mcps, model, thinking_effort, context_compression,
         knowledge_extraction
       FROM registered_groups;
       DROP TABLE registered_groups;
@@ -241,7 +240,7 @@ function backfillLegacyGroupOwnersIntoSessions(): void {
     .prepare(
       `SELECT jid, name, folder, added_at, container_config, custom_cwd,
               init_source_path, init_git_url, created_by, selected_skills,
-              mcp_mode, selected_mcps, llm_provider, model, thinking_effort,
+              mcp_mode, selected_mcps, model, thinking_effort,
               context_compression, knowledge_extraction${
                 hasIsHome ? ', is_home' : ', 0 AS is_home'
               }
@@ -284,12 +283,6 @@ function backfillLegacyGroupOwnersIntoSessions(): void {
         typeof row.selected_mcps === 'string'
           ? JSON.parse(row.selected_mcps)
           : null,
-      llm_provider:
-        row.llm_provider === 'openai'
-          ? 'openai'
-          : row.llm_provider === 'claude'
-            ? 'claude'
-            : undefined,
       model: typeof row.model === 'string' ? row.model : undefined,
       thinking_effort: parseThinkingEffort(
         typeof row.thinking_effort === 'string' ? row.thinking_effort : null,
@@ -354,7 +347,6 @@ function dropLegacyRegisteredGroupCompatibilityColumns(): void {
         selected_skills TEXT,
         mcp_mode TEXT DEFAULT 'inherit',
         selected_mcps TEXT,
-        llm_provider TEXT DEFAULT 'claude',
         model TEXT,
         thinking_effort TEXT,
         context_compression TEXT DEFAULT 'off',
@@ -363,13 +355,53 @@ function dropLegacyRegisteredGroupCompatibilityColumns(): void {
       INSERT INTO registered_groups_new (
         jid, name, folder, added_at, container_config, custom_cwd,
         init_source_path, init_git_url, selected_skills,
-        mcp_mode, selected_mcps, llm_provider, model, thinking_effort,
+        mcp_mode, selected_mcps, model, thinking_effort,
         context_compression, knowledge_extraction
       )
       SELECT
         jid, name, folder, added_at, container_config, custom_cwd,
         init_source_path, init_git_url, selected_skills,
-        mcp_mode, selected_mcps, llm_provider, model, thinking_effort,
+        mcp_mode, selected_mcps, model, thinking_effort,
+        context_compression, knowledge_extraction
+      FROM registered_groups;
+      DROP TABLE registered_groups;
+      ALTER TABLE registered_groups_new RENAME TO registered_groups;
+    `);
+  })();
+}
+
+function dropLegacyRegisteredGroupRunnerColumn(): void {
+  if (!hasColumn('registered_groups', 'llm_provider')) return;
+
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE registered_groups_new (
+        jid TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        folder TEXT NOT NULL,
+        added_at TEXT NOT NULL,
+        container_config TEXT,
+        custom_cwd TEXT,
+        init_source_path TEXT,
+        init_git_url TEXT,
+        selected_skills TEXT,
+        mcp_mode TEXT DEFAULT 'inherit',
+        selected_mcps TEXT,
+        model TEXT,
+        thinking_effort TEXT,
+        context_compression TEXT DEFAULT 'off',
+        knowledge_extraction INTEGER DEFAULT 0
+      );
+      INSERT INTO registered_groups_new (
+        jid, name, folder, added_at, container_config, custom_cwd,
+        init_source_path, init_git_url, selected_skills,
+        mcp_mode, selected_mcps, model, thinking_effort,
+        context_compression, knowledge_extraction
+      )
+      SELECT
+        jid, name, folder, added_at, container_config, custom_cwd,
+        init_source_path, init_git_url, selected_skills,
+        mcp_mode, selected_mcps, model, thinking_effort,
         context_compression, knowledge_extraction
       FROM registered_groups;
       DROP TABLE registered_groups;
@@ -632,7 +664,6 @@ export function initDatabase(): void {
       selected_skills TEXT,
       mcp_mode TEXT DEFAULT 'inherit',
       selected_mcps TEXT,
-      llm_provider TEXT DEFAULT 'claude',
       model TEXT,
       thinking_effort TEXT,
       context_compression TEXT DEFAULT 'off',
@@ -817,7 +848,6 @@ export function initDatabase(): void {
   ensureColumn('registered_groups', 'selected_skills', 'TEXT');
   ensureColumn('registered_groups', 'mcp_mode', "TEXT DEFAULT 'inherit'");
   ensureColumn('registered_groups', 'selected_mcps', 'TEXT');
-  ensureColumn('registered_groups', 'llm_provider', "TEXT DEFAULT 'claude'");
   ensureColumn('registered_groups', 'model', 'TEXT');
   ensureColumn('registered_groups', 'thinking_effort', 'TEXT');
   ensureColumn('registered_groups', 'context_compression', "TEXT DEFAULT 'off'");
@@ -875,7 +905,6 @@ export function initDatabase(): void {
           selected_skills TEXT,
           mcp_mode TEXT DEFAULT 'inherit',
           selected_mcps TEXT,
-          llm_provider TEXT DEFAULT 'claude',
           model TEXT,
           thinking_effort TEXT,
           context_compression TEXT DEFAULT 'off',
@@ -884,12 +913,12 @@ export function initDatabase(): void {
         INSERT INTO registered_groups_new (
           jid, name, folder, added_at, container_config, custom_cwd,
           init_source_path, init_git_url, created_by, selected_skills,
-          mcp_mode, selected_mcps, llm_provider, model, thinking_effort,
+          mcp_mode, selected_mcps, model, thinking_effort,
           context_compression, knowledge_extraction
         )
         SELECT
           jid, name, folder, added_at, container_config, custom_cwd,
-          NULL, NULL, NULL, NULL, 'inherit', NULL, 'claude', NULL, NULL, 'off', 0
+          NULL, NULL, NULL, NULL, 'inherit', NULL, NULL, NULL, 'off', 0
         FROM registered_groups;
         DROP TABLE registered_groups;
         ALTER TABLE registered_groups_new RENAME TO registered_groups;
@@ -913,7 +942,6 @@ export function initDatabase(): void {
           selected_skills TEXT,
           mcp_mode TEXT DEFAULT 'inherit',
           selected_mcps TEXT,
-          llm_provider TEXT DEFAULT 'claude',
           model TEXT,
           thinking_effort TEXT,
           context_compression TEXT DEFAULT 'off',
@@ -922,13 +950,13 @@ export function initDatabase(): void {
         INSERT INTO registered_groups_new (
           jid, name, folder, added_at, container_config, custom_cwd,
           init_source_path, init_git_url, created_by, selected_skills,
-          mcp_mode, selected_mcps, llm_provider, model, thinking_effort,
+          mcp_mode, selected_mcps, model, thinking_effort,
           context_compression, knowledge_extraction
         )
         SELECT
           jid, name, folder, added_at, container_config, custom_cwd,
           init_source_path, init_git_url, created_by, selected_skills,
-          mcp_mode, selected_mcps, llm_provider, model, thinking_effort,
+          mcp_mode, selected_mcps, model, thinking_effort,
           context_compression, knowledge_extraction
         FROM registered_groups;
         DROP TABLE registered_groups;
@@ -941,6 +969,7 @@ export function initDatabase(): void {
   dropLegacyRegisteredGroupBindingColumns();
   backfillLegacyGroupOwnersIntoSessions();
   dropLegacyRegisteredGroupCompatibilityColumns();
+  dropLegacyRegisteredGroupRunnerColumn();
   dropLegacyUnusedAuthTables();
   dropLegacyBillingCompatibility();
   dropLegacyGroupAccessTables();
@@ -992,13 +1021,12 @@ export function initDatabase(): void {
       'selected_skills',
       'mcp_mode',
       'selected_mcps',
-      'llm_provider',
       'model',
       'thinking_effort',
       'context_compression',
       'knowledge_extraction',
     ],
-    ['trigger_pattern', 'requires_trigger'],
+    ['trigger_pattern', 'requires_trigger', 'llm_provider'],
   );
 
   assertSchema('users', [
@@ -1186,7 +1214,7 @@ export function initDatabase(): void {
 
   syncSessionWorkbenchProjection();
 
-  const SCHEMA_VERSION = '40';
+  const SCHEMA_VERSION = '41';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -2396,11 +2424,8 @@ function mapWorkerAgentRow(row: Record<string, unknown>): SubAgent {
   };
 }
 
-function deriveRunnerId(
-  group: Pick<RegisteredGroup, 'llm_provider'> | null | undefined,
-): SessionRecord['runner_id'] {
-  if (group?.llm_provider === 'openai') return 'codex';
-  if (group?.llm_provider === 'claude') return 'claude';
+function deriveRunnerId(group?: unknown): SessionRecord['runner_id'] {
+  void group;
   return getDefaultRunnerId();
 }
 
@@ -2977,7 +3002,6 @@ type RegisteredGroupRow = {
   selected_skills: string | null;
   mcp_mode: string | null;
   selected_mcps: string | null;
-  llm_provider: string | null;
   model: string | null;
   thinking_effort: string | null;
   context_compression: string | null;
@@ -3005,12 +3029,6 @@ function parseGroupRow(
       : null,
     mcp_mode: row.mcp_mode === 'custom' ? 'custom' : 'inherit',
     selected_mcps: row.selected_mcps ? JSON.parse(row.selected_mcps) : null,
-    llm_provider:
-      row.llm_provider === 'openai'
-        ? 'openai'
-        : row.llm_provider === 'claude'
-          ? 'claude'
-          : undefined,
     model: row.model ?? undefined,
     thinking_effort: parseThinkingEffort(row.thinking_effort),
     context_compression: parseCompressionMode(row.context_compression),
@@ -3090,8 +3108,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, custom_cwd, init_source_path, init_git_url, selected_skills, mcp_mode, selected_mcps, llm_provider, model, thinking_effort, context_compression, knowledge_extraction)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, custom_cwd, init_source_path, init_git_url, selected_skills, mcp_mode, selected_mcps, model, thinking_effort, context_compression, knowledge_extraction)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -3104,7 +3122,6 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.selected_skills ? JSON.stringify(group.selected_skills) : null,
     group.mcp_mode ?? 'inherit',
     group.selected_mcps ? JSON.stringify(group.selected_mcps) : null,
-    group.llm_provider ?? null,
     group.model ?? null,
     group.thinking_effort ?? null,
     group.context_compression ?? 'off',

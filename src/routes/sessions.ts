@@ -188,15 +188,6 @@ function normalizeRunnerId(
   return fallback;
 }
 
-function mapLegacyLlmProvider(
-  runnerId: SessionRecord['runner_id'],
-  fallback?: RegisteredGroup['llm_provider'],
-): RegisteredGroup['llm_provider'] | undefined {
-  if (runnerId === 'codex') return 'openai';
-  if (runnerId === 'claude') return 'claude';
-  return fallback;
-}
-
 function normalizeSelectedSkills(
   raw: unknown,
 ): string[] | null | undefined {
@@ -405,7 +396,6 @@ function buildCompatibilityGroupForSession(
     initSourcePath: options.initSourcePath ?? existing?.initSourcePath,
     initGitUrl: options.initGitUrl ?? existing?.initGitUrl,
     is_home: session.kind === 'main' ? true : existing?.is_home,
-    llm_provider: mapLegacyLlmProvider(session.runner_id, existing?.llm_provider),
     model: session.model ?? undefined,
     thinking_effort: session.thinking_effort ?? undefined,
     context_compression: session.context_compression,

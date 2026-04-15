@@ -477,11 +477,7 @@ export async function runHostAgent(
   };
   const settings = getSystemSettings();
 
-  const effectiveRunnerId =
-    sessionRecord?.runner_id
-      || (group.llm_provider === 'openai'
-        ? 'codex'
-        : (group.llm_provider === 'claude' ? 'claude' : getDefaultRunnerId()));
+  const effectiveRunnerId = sessionRecord?.runner_id || getDefaultRunnerId();
   const effectiveModel = sessionRecord?.model ?? group.model;
   const effectiveThinkingEffort =
     sessionRecord?.thinking_effort ?? group.thinking_effort;
@@ -683,7 +679,7 @@ export async function runHostAgent(
 
   // 6. 编译检查
   const projectRoot = process.cwd();
-  // llm_provider=openai is now supported via Codex provider
+  // runner_id='codex' uses the Codex provider path
 
   const runnerSubdir = 'agent-runner';
   const agentRunnerRoot = path.join(projectRoot, 'container', runnerSubdir);

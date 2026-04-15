@@ -43,10 +43,6 @@ export function buildMemoryProfile(params: {
       selected_skills: [],
       mcp_mode: 'custom',
       selected_mcps: [],
-      llm_provider:
-        memorySession.runner_id === 'codex'
-          ? 'openai'
-          : (memorySession.runner_id === 'claude' ? 'claude' : undefined),
       model: memorySession.model || undefined,
       thinking_effort: memorySession.thinking_effort || undefined,
       context_compression: memorySession.context_compression,
