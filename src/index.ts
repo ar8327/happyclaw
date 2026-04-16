@@ -32,7 +32,7 @@ import {
   deleteExpiredSessions,
   deleteTask,
   ensureChatExists,
-  ensureUserHomeGroup,
+  ensureUserPrimarySessionChannel,
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
@@ -47,7 +47,7 @@ import {
   getRouterState,
   getRowidByCursor,
   getTaskById,
-  getUserHomeGroup,
+  getUserPrimarySessionChannel,
   getLastInboundMessage,
   initDatabase,
   getSessionBinding,
@@ -742,7 +742,6 @@ function resolveEffectiveGroup(
         effectiveGroup: {
           ...group,
           customCwd: sibling.customCwd || group.customCwd,
-          is_home: true,
         },
         isHome: true,
       };
@@ -1711,16 +1710,16 @@ function loadState(): void {
   // Single-user mode keeps exactly one local operator primary-session alias.
   try {
     const operator = getLocalWorkbenchUserPublic();
-    const homeJid = ensureUserHomeGroup(
+    const primarySessionJid = ensureUserPrimarySessionChannel(
       operator.id,
       'admin',
       operator.username,
     );
     // Always refresh this entry from DB to pick up any patches.
-    const freshGroup = getRegisteredGroup(homeJid);
+    const freshGroup = getRegisteredGroup(primarySessionJid);
     if (freshGroup) {
-      registeredGroups[homeJid] = freshGroup;
-    } else if (!registeredGroups[homeJid]) {
+      registeredGroups[primarySessionJid] = freshGroup;
+    } else if (!registeredGroups[primarySessionJid]) {
       registeredGroups = getAllRegisteredGroups();
     }
   } catch (err) {
@@ -2695,7 +2694,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return true;
   }
 
-  // Container closed during query (e.g. home folder drain) without sending a reply:
+  // Container closed during query (e.g. primary Session drain) without sending a reply:
   // don't commit cursor so the message gets retried on the next poll cycle.
   // If sentReply is true the cursor was already committed at line 722, no action needed.
   if (output.status === 'closed' && !sentReply) {
@@ -3054,7 +3053,7 @@ async function runAgent(
       setSession(group.folder, output.newSessionId);
     }
 
-    // Agent was interrupted by _close sentinel (home folder drain).
+    // Agent was interrupted by _close sentinel (primary Session drain).
     // Propagate so processGroupMessages can skip cursor commit.
     if (output.status === 'closed') {
       return { status: 'closed' };
@@ -4552,7 +4551,7 @@ function recoverPendingMessages(): void {
  */
 function buildOnNewChat(
   userId: string,
-  homeFolder: string,
+  primarySessionFolder: string,
 ): (chatJid: string, chatName: string, chatType?: 'p2p' | 'group') => void {
   return (chatJid, chatName, chatType) => {
     const existing = registeredGroups[chatJid];
@@ -4574,7 +4573,7 @@ function buildOnNewChat(
           const targetJid = targetFolder
             ? (findWebJidForFolder(targetFolder) || `web:${targetFolder}`)
             : null;
-          if (targetJid && targetJid !== `web:${homeFolder}`) {
+          if (targetJid && targetJid !== `web:${primarySessionFolder}`) {
             const targetGroup = registeredGroups[targetJid] ?? getRegisteredGroup(targetJid);
             if (targetGroup && (!targetGroup.name || targetGroup.name === '飞书群聊')) {
               // Update the workspace channel projection name kept in session_channels.
@@ -4592,22 +4591,22 @@ function buildOnNewChat(
       if (isWorkerSessionId(binding?.session_id)) return;
 
       // Different user's connection now owns this IM app.
-      // Re-route the chat to the current user's home folder.
+      // Re-route the chat to the current user's primary Session folder.
       // This handles the common case where the same Feishu app credentials
       // are moved from one user to another (e.g., admin → member for testing).
       if (!isPrimarySessionFolder(existing.folder)) {
         const previousFolder = existing.folder;
         const previousOwnerKey = existingOwnerKey;
-        existing.folder = homeFolder;
+        existing.folder = primarySessionFolder;
         setRegisteredGroup(chatJid, existing);
-        applyExplicitChatBinding(chatJid, existing, `main:${homeFolder}`);
+        applyExplicitChatBinding(chatJid, existing, `main:${primarySessionFolder}`);
         registeredGroups[chatJid] = existing;
         logger.info(
           {
             chatJid,
             chatName,
             userId,
-            homeFolder,
+            primarySessionFolder,
             previousFolder,
             previousOwnerKey,
           },
@@ -4634,7 +4633,7 @@ function buildOnNewChat(
       // 2. Register the IM group and bind to the new workspace
       registerGroup(chatJid, {
         name: chatName,
-        folder: homeFolder,
+        folder: primarySessionFolder,
         added_at: now,
         reply_policy: 'source_only',
       });
@@ -4666,20 +4665,20 @@ function buildOnNewChat(
         );
       }
     } else {
-      // Default: route to home
+      // Default: route to the primary Session
       registerGroup(chatJid, {
         name: chatName,
-        folder: homeFolder,
+        folder: primarySessionFolder,
         added_at: new Date().toISOString(),
       });
       applyExplicitChatBinding(
         chatJid,
         registeredGroups[chatJid] ?? getRegisteredGroup(chatJid)!,
-        `main:${homeFolder}`,
+        `main:${primarySessionFolder}`,
         'source_only',
       );
       logger.info(
-        { chatJid, chatName, userId, homeFolder },
+        { chatJid, chatName, userId, primarySessionFolder },
         'Auto-registered IM chat',
       );
     }
@@ -4707,9 +4706,9 @@ function buildOnBotRemovedFromGroup(): (chatJid: string) => void {
  */
 function buildTelegramBotAddedHandler(
   userId: string,
-  homeFolder: string,
+  primarySessionFolder: string,
 ): (chatJid: string, chatName: string) => void {
-  const onNewChat = buildOnNewChat(userId, homeFolder);
+  const onNewChat = buildOnNewChat(userId, primarySessionFolder);
   return (chatJid: string, chatName: string) => {
     onNewChat(chatJid, chatName, 'group'); // bot-added is always a group
     const welcome =
@@ -4743,9 +4742,9 @@ function buildOnPairAttempt(
     const result = verifyPairingCode(code);
     if (!result) return false;
     if (result.userId !== userId) return false;
-    const pairingUserHome = getUserHomeGroup(result.userId);
-    if (!pairingUserHome) return false;
-    buildOnNewChat(result.userId, pairingUserHome.folder)(jid, chatName);
+    const pairingPrimarySession = getUserPrimarySessionChannel(result.userId);
+    if (!pairingPrimarySession) return false;
+    buildOnNewChat(result.userId, pairingPrimarySession.folder)(jid, chatName);
     return true;
   };
 }
@@ -4886,14 +4885,14 @@ function handleIMInterruptRequest(
  */
 async function connectUserIMChannels(
   userId: string,
-  homeFolder: string,
+  primarySessionFolder: string,
   feishuConfig?: FeishuConnectConfig | null,
   telegramConfig?: TelegramConnectConfig | null,
   qqConfig?: QQConnectConfig | null,
   wechatConfig?: WeChatConnectConfig | null,
   ignoreMessagesBefore?: number,
 ): Promise<{ feishu: boolean; telegram: boolean; qq: boolean; wechat: boolean }> {
-  const onNewChat = buildOnNewChat(userId, homeFolder);
+  const onNewChat = buildOnNewChat(userId, primarySessionFolder);
   const resolveGroupFolder = (chatJid: string): string | undefined => {
     return resolveEffectiveFolder(chatJid);
   };
@@ -4948,7 +4947,7 @@ async function connectUserIMChannels(
         resolveGroupFolder,
         resolveEffectiveChatJid,
         onAgentMessage,
-        onBotAddedToGroup: buildTelegramBotAddedHandler(userId, homeFolder),
+        onBotAddedToGroup: buildTelegramBotAddedHandler(userId, primarySessionFolder),
         onBotRemovedFromGroup,
         onInterruptRequest: handleIMInterruptRequest,
       },
@@ -5226,9 +5225,10 @@ async function main(): Promise<void> {
     }
 
     if (config.enabled !== false && config.appId && config.appSecret) {
-      const homeGroup = getUserHomeGroup(operator.id);
-      const homeFolder = homeGroup?.folder || MAIN_GROUP_FOLDER;
-      const onNewChat = buildOnNewChat(operator.id, homeFolder);
+      const primarySessionChannel = getUserPrimarySessionChannel(operator.id);
+      const primarySessionFolder =
+        primarySessionChannel?.folder || MAIN_GROUP_FOLDER;
+      const onNewChat = buildOnNewChat(operator.id, primarySessionFolder);
       const connected = await imManager.connectUserFeishu(
         operator.id,
         config,
@@ -5273,9 +5273,10 @@ async function main(): Promise<void> {
     await imManager.disconnectUserTelegram(operator.id);
 
     if (config.enabled !== false && config.botToken) {
-      const homeGroup = getUserHomeGroup(operator.id);
-      const homeFolder = homeGroup?.folder || MAIN_GROUP_FOLDER;
-      const onNewChat = buildOnNewChat(operator.id, homeFolder);
+      const primarySessionChannel = getUserPrimarySessionChannel(operator.id);
+      const primarySessionFolder =
+        primarySessionChannel?.folder || MAIN_GROUP_FOLDER;
+      const onNewChat = buildOnNewChat(operator.id, primarySessionFolder);
       const connected = await imManager.connectUserTelegram(
         operator.id,
         config,
@@ -5289,7 +5290,7 @@ async function main(): Promise<void> {
           onAgentMessage: buildOnAgentMessage(),
           onBotAddedToGroup: buildTelegramBotAddedHandler(
             operator.id,
-            homeFolder,
+            primarySessionFolder,
           ),
           onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),
           onInterruptRequest: handleIMInterruptRequest,
@@ -5306,16 +5307,16 @@ async function main(): Promise<void> {
     userId: string,
     channel: 'feishu' | 'telegram' | 'qq' | 'wechat',
   ): Promise<boolean> => {
-    const homeGroup = getUserHomeGroup(userId);
-    if (!homeGroup) {
+    const primarySessionChannel = getUserPrimarySessionChannel(userId);
+    if (!primarySessionChannel) {
       logger.warn(
         { userId, channel },
         'No primary Session alias found for user IM reload',
       );
       return false;
     }
-    const homeFolder = homeGroup.folder;
-    const onNewChat = buildOnNewChat(userId, homeFolder);
+    const primarySessionFolder = primarySessionChannel.folder;
+    const onNewChat = buildOnNewChat(userId, primarySessionFolder);
     const ignoreMessagesBefore = Date.now();
 
     if (channel === 'feishu') {
@@ -5373,7 +5374,10 @@ async function main(): Promise<void> {
               resolveEffectiveFolder(chatJid),
             resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
             onAgentMessage: buildOnAgentMessage(),
-            onBotAddedToGroup: buildTelegramBotAddedHandler(userId, homeFolder),
+            onBotAddedToGroup: buildTelegramBotAddedHandler(
+              userId,
+              primarySessionFolder,
+            ),
             onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),
             onInterruptRequest: handleIMInterruptRequest,
           },
@@ -5637,8 +5641,8 @@ async function main(): Promise<void> {
   imManager.registerAdminUser(operator.id);
 
   let anyFeishuConnected = false;
-  const homeGroup = getUserHomeGroup(operator.id);
-  if (!homeGroup) {
+  const primarySessionChannel = getUserPrimarySessionChannel(operator.id);
+  if (!primarySessionChannel) {
     logger.warn(
       { operatorId: operator.id },
       'No primary Session alias found for local operator IM startup',
@@ -5711,7 +5715,7 @@ async function main(): Promise<void> {
       try {
         const result = await connectUserIMChannels(
           operator.id,
-          homeGroup.folder,
+          primarySessionChannel.folder,
           effectiveFeishu,
           effectiveTelegram,
           effectiveQQ,

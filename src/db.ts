@@ -222,6 +222,7 @@ function backfillLegacyGroupOwnersIntoSessions(): void {
     .all() as Array<Record<string, unknown>>;
 
   for (const row of rows) {
+    const legacyIsPrimarySession = Number(row.is_home || 0) === 1;
     const ownerKey =
       typeof row.created_by === 'string' && row.created_by.trim()
         ? row.created_by.trim()
@@ -245,7 +246,7 @@ function backfillLegacyGroupOwnersIntoSessions(): void {
           : undefined,
       initGitUrl:
         typeof row.init_git_url === 'string' ? row.init_git_url : undefined,
-      is_home: Number(row.is_home || 0) === 1,
+      is_home: legacyIsPrimarySession,
       selected_skills:
         typeof row.selected_skills === 'string'
           ? JSON.parse(row.selected_skills)
@@ -269,7 +270,8 @@ function backfillLegacyGroupOwnersIntoSessions(): void {
     const nextSession: SessionRecord = existing || {
       id: sessionId,
       name: fallbackGroup.name,
-      kind: deriveSessionKind(fallbackGroup),
+      kind:
+        legacyIsPrimarySession || folder === 'main' ? 'main' : 'workspace',
       parent_session_id: null,
       cwd: deriveSessionCwd(fallbackGroup),
       runner_id: deriveRunnerId(fallbackGroup),
@@ -284,7 +286,7 @@ function backfillLegacyGroupOwnersIntoSessions(): void {
       created_at: fallbackGroup.added_at,
       updated_at: fallbackGroup.added_at,
     };
-    if (nextSession.kind !== 'main' && fallbackGroup.is_home) {
+    if (legacyIsPrimarySession && nextSession.kind !== 'main') {
       nextSession.kind = 'main';
     }
     if (!nextSession.owner_key && ownerKey) {
@@ -2351,7 +2353,9 @@ function normalizeStoredRunnerId(
 }
 
 function deriveSessionKind(group: RegisteredGroup): SessionKind {
-  if (group.is_home || group.folder === 'main') return 'main';
+  if (isPrimarySessionFolder(group.folder) || group.folder === 'main') {
+    return 'main';
+  }
   return 'workspace';
 }
 
@@ -2365,13 +2369,15 @@ function deriveSessionCwd(group: RegisteredGroup): string {
   return path.join(GROUPS_DIR, group.folder);
 }
 
-function findPrimaryGroupForFolder(groupFolder: string): RegisteredGroup | undefined {
+function findPrimarySessionChannelForFolder(
+  groupFolder: string,
+): RegisteredGroup | undefined {
+  const primary = getPrimarySessionChannelByFolder(groupFolder);
+  if (primary) return primary;
   const candidates = getJidsByFolder(groupFolder)
     .map((jid) => getRegisteredGroup(jid))
     .filter((group): group is RegisteredGroup & { jid: string } => group != null);
-  return candidates.find((group) => group.is_home)
-    || candidates.find((group) => group.name.length > 0)
-    || candidates[0];
+  return candidates.find((group) => group.name.length > 0) || candidates[0];
 }
 
 function ensureSessionRecordFromGroup(
@@ -2422,7 +2428,9 @@ function ensureSessionRecordForLegacyKey(
 ): string {
   const now = new Date().toISOString();
   const sessionId = resolveLegacySessionKey(groupFolder, agentId);
-  const folderGroup = groupFolder ? findPrimaryGroupForFolder(groupFolder) : undefined;
+  const folderGroup = groupFolder
+    ? findPrimarySessionChannelForFolder(groupFolder)
+    : undefined;
   if (agentId?.trim()) {
     const parentSession = getSessionRecord(buildMainSessionId(groupFolder));
     if (!parentSession?.owner_key) {
@@ -3253,10 +3261,10 @@ export function getGroupsByTargetMainJid(
 }
 
 /**
- * Find the main-session web compatibility channel for a folder.
- * Used to resolve the owner of IM channels that share a folder with that main session.
+ * Find the primary-session web compatibility channel for a folder.
+ * Used to resolve the owner of IM channels that share that Session workspace.
  */
-export function getHomeGroupByFolder(
+export function getPrimarySessionChannelByFolder(
   folder: string,
 ): (RegisteredGroup & { jid: string }) | undefined {
   const session = getSessionRecord(buildMainSessionId(folder));
@@ -3271,10 +3279,10 @@ export function getHomeGroupByFolder(
 }
 
 /**
- * Find a user's main-session web compatibility channel from the owner mapping.
+ * Find a user's primary-session web compatibility channel from the owner mapping.
  * For admin users, also matches web:main as a final compatibility fallback.
  */
-export function getUserHomeGroup(
+export function getUserPrimarySessionChannel(
   userId: string,
 ): (RegisteredGroup & { jid: string }) | undefined {
   const session = db
@@ -3291,7 +3299,7 @@ export function getUserHomeGroup(
       ? parsed.id.slice(MAIN_SESSION_ID_PREFIX.length)
       : null;
     if (folder) {
-      return getHomeGroupByFolder(folder);
+      return getPrimarySessionChannelByFolder(folder);
     }
   }
 
@@ -3299,20 +3307,20 @@ export function getUserHomeGroup(
     .prepare("SELECT role FROM users WHERE id = ? AND status = 'active'")
     .get(userId) as { role: string } | undefined;
   if (user?.role !== 'admin') return undefined;
-  return getHomeGroupByFolder('main');
+  return getPrimarySessionChannelByFolder('main');
 }
 
 /**
- * Ensure a user has a main-session web compatibility channel. If not, create one.
+ * Ensure a user has a primary-session web compatibility channel. If not, create one.
  * Single-user migration keeps this web row backed by a main session.
  * Returns the compatibility channel JID.
  */
-export function ensureUserHomeGroup(
+export function ensureUserPrimarySessionChannel(
   userId: string,
   role: 'admin' | 'member',
   username?: string,
 ): string {
-  const existing = getUserHomeGroup(userId);
+  const existing = getUserPrimarySessionChannel(userId);
   if (existing) return existing.jid;
 
   const now = new Date().toISOString();
@@ -3347,15 +3355,6 @@ export function ensureUserHomeGroup(
           updated_at: now,
         });
       }
-      const patched = { ...existingMain };
-      let changed = false;
-      if (!patched.is_home) {
-        patched.is_home = true;
-        changed = true;
-      }
-      if (changed) {
-        setRegisteredGroup(jid, patched);
-      }
       ensureChatExists(jid);
       return jid;
     }
@@ -3367,7 +3366,6 @@ export function ensureUserHomeGroup(
     name,
     folder,
     added_at: now,
-    is_home: true,
   };
 
   saveSessionRecord({
@@ -4181,7 +4179,7 @@ function syncWorkerSession(agent: SubAgent): void {
   const sessionId = buildWorkerSessionId(agent.id);
   const parentSessionId = buildMainSessionId(agent.group_folder);
   const parentSession = getSessionRecord(parentSessionId);
-  const parentGroup = findPrimaryGroupForFolder(agent.group_folder);
+  const parentGroup = findPrimarySessionChannelForFolder(agent.group_folder);
   const ownerKey = parentSession?.owner_key ?? null;
   const now = new Date().toISOString();
   db.prepare(
