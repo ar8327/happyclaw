@@ -76,6 +76,30 @@ function hasColumn(tableName: string, columnName: string): boolean {
   return columns.some((column) => column.name === columnName);
 }
 
+function getTableColumns(tableName: string): string[] {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{
+    name: string;
+  }>;
+  return columns.map((column) => column.name);
+}
+
+function withForeignKeysDisabled<T>(fn: () => T): T {
+  const foreignKeysEnabled = db.pragma('foreign_keys', {
+    simple: true,
+  }) as number;
+  if (foreignKeysEnabled) {
+    db.pragma('foreign_keys = OFF');
+  }
+
+  try {
+    return fn();
+  } finally {
+    if (foreignKeysEnabled) {
+      db.pragma('foreign_keys = ON');
+    }
+  }
+}
+
 function ensureColumn(
   tableName: string,
   columnName: string,
@@ -461,69 +485,173 @@ function dropLegacyUnusedAuthTables(): void {
   }
 }
 
-function dropLegacyBillingCompatibility(): void {
-  for (const tableName of [
-    'billing_plans',
-    'user_subscriptions',
-    'user_balances',
-    'balance_transactions',
-    'monthly_usage',
-    'redeem_codes',
-    'redeem_code_usage',
-    'billing_audit_log',
-    'daily_usage',
-    'user_quotas',
-  ]) {
-    if (!tableExists(tableName)) continue;
-    db.exec(`DROP TABLE ${tableName}`);
-  }
+const LEGACY_BILLING_TABLES = [
+  'billing_plans',
+  'user_subscriptions',
+  'user_balances',
+  'balance_transactions',
+  'monthly_usage',
+  'redeem_codes',
+  'redeem_code_usage',
+  'billing_audit_log',
+  'daily_usage',
+  'user_quotas',
+] as const;
 
-  if (!hasColumn('users', 'subscription_plan_id')) {
+function archiveLegacyBillingData(): void {
+  const existingTables = LEGACY_BILLING_TABLES.filter((tableName) =>
+    tableExists(tableName),
+  );
+  const hasLegacyUsersColumn = hasColumn('users', 'subscription_plan_id');
+  if (existingTables.length === 0 && !hasLegacyUsersColumn) {
     return;
   }
 
-  db.transaction(() => {
-    db.exec(`
-      CREATE TABLE users_new (
-        id TEXT PRIMARY KEY,
-        username TEXT NOT NULL UNIQUE,
-        password_hash TEXT NOT NULL,
-        display_name TEXT NOT NULL DEFAULT '',
-        role TEXT NOT NULL DEFAULT 'member',
-        status TEXT NOT NULL DEFAULT 'active',
-        permissions TEXT NOT NULL DEFAULT '[]',
-        must_change_password INTEGER NOT NULL DEFAULT 0,
-        disable_reason TEXT,
-        notes TEXT,
-        avatar_emoji TEXT,
-        avatar_color TEXT,
-        ai_name TEXT,
-        ai_avatar_emoji TEXT,
-        ai_avatar_color TEXT,
-        ai_avatar_url TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        last_login_at TEXT,
-        deleted_at TEXT
-      );
-      INSERT INTO users_new (
-        id, username, password_hash, display_name, role, status, permissions,
-        must_change_password, disable_reason, notes, avatar_emoji,
-        avatar_color, ai_name, ai_avatar_emoji, ai_avatar_color,
-        ai_avatar_url, created_at, updated_at, last_login_at, deleted_at
-      )
-      SELECT
-        id, username, password_hash, display_name, role, status, permissions,
-        must_change_password, disable_reason, notes, avatar_emoji,
-        avatar_color, ai_name, ai_avatar_emoji, ai_avatar_color,
-        ai_avatar_url, created_at, updated_at, last_login_at, deleted_at
-      FROM users;
-      DROP TABLE users;
-      ALTER TABLE users_new RENAME TO users;
-      CREATE INDEX IF NOT EXISTS idx_users_status_role ON users(status, role);
-      CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at);
-    `);
-  })();
+  const archivePath = path.join(STORE_DIR, 'legacy-billing-archive.json');
+  if (fs.existsSync(archivePath)) {
+    return;
+  }
+
+  const archive: Record<string, unknown> = {
+    archived_at: new Date().toISOString(),
+    schema_version: getRouterStateInternal('schema_version') ?? null,
+    tables: {},
+  };
+
+  for (const tableName of existingTables) {
+    const rowCount = (
+      db.prepare(`SELECT COUNT(*) AS cnt FROM ${tableName}`).get() as {
+        cnt: number;
+      }
+    ).cnt;
+    const columns = getTableColumns(tableName);
+    const rows = db.prepare(`SELECT * FROM ${tableName}`).all();
+    (archive.tables as Record<string, unknown>)[tableName] = {
+      columns,
+      row_count: rowCount,
+      rows,
+    };
+  }
+
+  if (hasLegacyUsersColumn) {
+    archive.users = {
+      columns: getTableColumns('users'),
+      rows: db
+        .prepare('SELECT * FROM users WHERE subscription_plan_id IS NOT NULL')
+        .all(),
+    };
+  }
+
+  fs.writeFileSync(archivePath, JSON.stringify(archive, null, 2), 'utf8');
+}
+
+function migrateLegacyBillingUsageSummary(): void {
+  if (!tableExists('daily_usage')) {
+    return;
+  }
+
+  db.exec(`
+    INSERT INTO usage_daily_summary (
+      user_id,
+      model,
+      date,
+      total_input_tokens,
+      total_output_tokens,
+      total_cache_read_tokens,
+      total_cache_creation_tokens,
+      total_cost_usd,
+      request_count,
+      updated_at
+    )
+    SELECT
+      du.user_id,
+      'legacy-billing-total',
+      du.date,
+      du.total_input_tokens,
+      du.total_output_tokens,
+      0,
+      0,
+      du.total_cost_usd,
+      du.message_count,
+      datetime('now')
+    FROM daily_usage du
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM usage_daily_summary uds
+      WHERE uds.user_id = du.user_id
+        AND uds.date = du.date
+    )
+  `);
+}
+
+function dropLegacyBillingCompatibility(): void {
+  archiveLegacyBillingData();
+  migrateLegacyBillingUsageSummary();
+
+  withForeignKeysDisabled(() => {
+    for (const tableName of [
+      'user_subscriptions',
+      'user_balances',
+      'balance_transactions',
+      'redeem_code_usage',
+      'redeem_codes',
+      'monthly_usage',
+      'billing_audit_log',
+      'daily_usage',
+      'user_quotas',
+      'billing_plans',
+    ]) {
+      if (!tableExists(tableName)) continue;
+      db.exec(`DROP TABLE ${tableName}`);
+    }
+
+    if (!hasColumn('users', 'subscription_plan_id')) {
+      return;
+    }
+
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE users_new (
+          id TEXT PRIMARY KEY,
+          username TEXT NOT NULL UNIQUE,
+          password_hash TEXT NOT NULL,
+          display_name TEXT NOT NULL DEFAULT '',
+          role TEXT NOT NULL DEFAULT 'member',
+          status TEXT NOT NULL DEFAULT 'active',
+          permissions TEXT NOT NULL DEFAULT '[]',
+          must_change_password INTEGER NOT NULL DEFAULT 0,
+          disable_reason TEXT,
+          notes TEXT,
+          avatar_emoji TEXT,
+          avatar_color TEXT,
+          ai_name TEXT,
+          ai_avatar_emoji TEXT,
+          ai_avatar_color TEXT,
+          ai_avatar_url TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          last_login_at TEXT,
+          deleted_at TEXT
+        );
+        INSERT INTO users_new (
+          id, username, password_hash, display_name, role, status, permissions,
+          must_change_password, disable_reason, notes, avatar_emoji,
+          avatar_color, ai_name, ai_avatar_emoji, ai_avatar_color,
+          ai_avatar_url, created_at, updated_at, last_login_at, deleted_at
+        )
+        SELECT
+          id, username, password_hash, display_name, role, status, permissions,
+          must_change_password, disable_reason, notes, avatar_emoji,
+          avatar_color, ai_name, ai_avatar_emoji, ai_avatar_color,
+          ai_avatar_url, created_at, updated_at, last_login_at, deleted_at
+        FROM users;
+        DROP TABLE users;
+        ALTER TABLE users_new RENAME TO users;
+        CREATE INDEX IF NOT EXISTS idx_users_status_role ON users(status, role);
+        CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at);
+      `);
+    })();
+  });
 }
 
 function dropLegacyGroupAccessTables(): void {
@@ -2388,6 +2516,7 @@ function ensureSessionRecordFromGroup(
   const now = group.added_at || new Date().toISOString();
   const sessionId = buildMainSessionId(group.folder);
   const existing = getSessionRecord(sessionId);
+  const resolvedRunnerId = existing?.runner_id || deriveRunnerId(group);
   db.prepare(
     `INSERT INTO sessions (
       id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
@@ -2410,7 +2539,7 @@ function ensureSessionRecordFromGroup(
     group.name,
     deriveSessionKind(group),
     deriveSessionCwd(group),
-    deriveRunnerId(group),
+    resolvedRunnerId,
     group.model ?? null,
     group.thinking_effort ?? null,
     group.context_compression ?? 'off',
