@@ -101,8 +101,8 @@ function loadUserMcpServers(): Record<string, unknown> {
 // Provider selection
 // ---------------------------------------------------------------------------
 
-function selectProvider(): 'claude' | 'codex' {
-  const provider = process.env.HAPPYCLAW_LLM_PROVIDER?.toLowerCase();
+function selectProvider(input: ContainerInput): 'claude' | 'codex' {
+  const provider = input.runnerId?.toLowerCase();
   if (provider === 'codex') return 'codex';
   return 'claude';
 }
@@ -133,7 +133,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const provider = selectProvider();
+  const provider = selectProvider(containerInput);
   const sessionRecordId = buildSessionRecordId(containerInput);
   log(`Provider: ${provider}`);
 

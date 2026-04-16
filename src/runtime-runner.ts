@@ -123,6 +123,10 @@ export interface RuntimeLaunchProfile {
   disableUserMcpServers?: boolean;
 }
 
+export interface ContainerInput extends RuntimeInput {
+  runnerId: string;
+}
+
 export interface RuntimeOutput {
   status: 'success' | 'error' | 'stream' | 'closed' | 'drained';
   result: string | null;
@@ -140,7 +144,6 @@ export interface RuntimeOutput {
   };
 }
 
-export type ContainerInput = RuntimeInput;
 export type ContainerOutput = RuntimeOutput;
 
 export function writeTasksSnapshot(
@@ -516,10 +519,6 @@ export async function runHostAgent(
     hostEnv['HAPPYCLAW_MODEL'] = effectiveModel;
   }
 
-  // LLM provider selection for local runtime
-  const hostLlmProvider = effectiveRunnerId;
-  hostEnv['HAPPYCLAW_LLM_PROVIDER'] = hostLlmProvider;
-
   // Codex provider config for local runtime
   const hostCodexConfig = getCodexProviderConfig();
   const hostCodexProfile = hostCodexConfig.mode === 'api_key' ? hostCodexConfig.activeProfile : null;
@@ -543,7 +542,7 @@ export async function runHostAgent(
   if (hostOpenaiKey) hostEnv['OPENAI_API_KEY'] = hostOpenaiKey;
   if (hostCodexBaseUrl) hostEnv['OPENAI_BASE_URL'] = hostCodexBaseUrl;
 
-  if (hostLlmProvider === 'codex') {
+  if (effectiveRunnerId === 'codex') {
     // Pass workspace model as Codex model (separate from HAPPYCLAW_MODEL used by Claude)
     if (effectiveModel) {
       hostEnv['HAPPYCLAW_CODEX_MODEL'] = effectiveModel;
@@ -777,7 +776,11 @@ export async function runHostAgent(
       logger.error({ group: group.name, err }, 'Local runtime stdin write failed');
       killProcessTree(proc);
     });
-    proc.stdin.write(JSON.stringify(input));
+    const containerInput: ContainerInput = {
+      ...input,
+      runnerId: effectiveRunnerId,
+    };
+    proc.stdin.write(JSON.stringify(containerInput));
     proc.stdin.end();
 
     // 9. 超时管理

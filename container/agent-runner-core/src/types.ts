@@ -66,6 +66,7 @@ export interface StreamEvent {
 
 export interface ContainerInput {
   prompt: string;
+  runnerId: string;
   sessionId?: string;
   groupFolder: string;
   chatJid: string;

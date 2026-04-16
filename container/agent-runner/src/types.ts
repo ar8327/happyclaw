@@ -10,6 +10,7 @@ import type { StreamEvent } from './stream-event.types.js';
 
 export interface ContainerInput {
   prompt: string;
+  runnerId: string;
   sessionId?: string;
   resumeAnchor?: string;
   groupFolder: string;
