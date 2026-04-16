@@ -21,7 +21,7 @@ export function GroupMcpPanel({ sessionId }: GroupMcpPanelProps) {
   const loadMcpServers = useMcpServersStore(s => s.loadServers);
   const enabledMcpServers = mcpServers.filter(s => s.enabled);
 
-  // 加载 MCP servers 和 group MCP 配置
+  // 加载 MCP servers 和 session MCP 配置
   useEffect(() => {
     setLoading(true);
     Promise.all([

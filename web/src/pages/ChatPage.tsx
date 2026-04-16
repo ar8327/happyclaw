@@ -10,55 +10,73 @@ import { useSwipeBack } from '../hooks/useSwipeBack';
 export function ChatPage() {
   const { sessionSlug } = useParams<{ sessionSlug?: string }>();
   const navigate = useNavigate();
-  const { groups, currentGroup, selectGroup } = useChatStore();
-  const routeSessionJid = useMemo(() => {
+  const {
+    groups: sessions,
+    currentGroup: currentSession,
+    selectGroup: selectSession,
+  } = useChatStore();
+  const routeSessionId = useMemo(() => {
     if (!sessionSlug) return null;
     const entry =
-      Object.entries(groups).find(([_, info]) => info.id === sessionSlug) ||
-      Object.entries(groups).find(
-        ([jid, info]) =>
+      Object.entries(sessions).find(([_, info]) => info.id === sessionSlug) ||
+      Object.entries(sessions).find(
+        ([sessionId, info]) =>
           info.folder === sessionSlug &&
-          jid.startsWith('web:') &&
+          sessionId.startsWith('web:') &&
           info.kind === 'main',
       ) ||
-      Object.entries(groups).find(
-        ([jid, info]) => info.folder === sessionSlug && jid.startsWith('web:'),
+      Object.entries(sessions).find(
+        ([sessionId, info]) =>
+          info.folder === sessionSlug && sessionId.startsWith('web:'),
       ) ||
-      Object.entries(groups).find(([_, info]) => info.folder === sessionSlug);
+      Object.entries(sessions).find(([_, info]) => info.folder === sessionSlug);
     return entry?.[0] || null;
-  }, [groups, sessionSlug]);
+  }, [sessions, sessionSlug]);
   const [searchParams, setSearchParams] = useSearchParams();
   const highlightId = searchParams.get('highlightId');
   const highlightTs = searchParams.get('ts');
   const appearance = useAuthStore((s) => s.appearance);
-  const hasGroups = Object.keys(groups).length > 0;
+  const hasSessions = Object.keys(sessions).length > 0;
 
-  // Sync URL param to store selection. No auto-redirect to home container —
-  // users land on the welcome screen and choose a container manually.
+  // Sync URL param to store selection. No auto-redirect to the main session.
+  // Users land on the welcome screen and choose a session manually.
   useEffect(() => {
     if (!sessionSlug) return;
-    if (routeSessionJid && currentGroup !== routeSessionJid) {
-      selectGroup(routeSessionJid);
+    if (routeSessionId && currentSession !== routeSessionId) {
+      selectSession(routeSessionId);
       return;
     }
-    if (hasGroups && !routeSessionJid) {
+    if (hasSessions && !routeSessionId) {
       navigate('/chat', { replace: true });
     }
-  }, [sessionSlug, routeSessionJid, hasGroups, currentGroup, selectGroup, navigate]);
+  }, [
+    sessionSlug,
+    routeSessionId,
+    hasSessions,
+    currentSession,
+    selectSession,
+    navigate,
+  ]);
 
-  const activeSessionJid = sessionSlug ? routeSessionJid : currentGroup;
+  const activeSessionId = sessionSlug ? routeSessionId : currentSession;
   const chatViewRef = useRef<HTMLDivElement>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const loadMessagesAroundTimestamp = useChatStore((s) => s.loadMessagesAroundTimestamp);
 
   // Handle search highlight: load messages around the target and clear URL params
   useEffect(() => {
-    if (highlightId && highlightTs && activeSessionJid) {
-      loadMessagesAroundTimestamp(activeSessionJid, highlightTs, highlightId);
+    if (highlightId && highlightTs && activeSessionId) {
+      loadMessagesAroundTimestamp(activeSessionId, highlightTs, highlightId);
       // Clear URL params to avoid re-triggering on refresh
       setSearchParams({}, { replace: true });
     }
-  }, [highlightId, highlightTs, activeSessionJid, loadMessagesAroundTimestamp, setSearchParams]);
+  }, [
+    highlightId,
+    highlightTs,
+    activeSessionId,
+    loadMessagesAroundTimestamp,
+    setSearchParams,
+  ]);
 
   const handleBackToList = () => {
     navigate('/chat');
@@ -73,11 +91,11 @@ export function ChatPage() {
         <ChatSidebar onToggleCollapse={() => setSidebarCollapsed(true)} />
       </div>
 
-      {/* Chat View - Desktop: visible when active group exists, Mobile: only in detail route */}
-      {activeSessionJid ? (
+      {/* Chat View - Desktop: visible when a session is active, Mobile: only in detail route */}
+      {activeSessionId ? (
         <div ref={chatViewRef} className={`${sessionSlug ? 'flex-1' : 'hidden lg:block flex-1'}`}>
           <ChatView
-            sessionId={activeSessionJid}
+            sessionId={activeSessionId}
             onBack={handleBackToList}
             headerLeft={sidebarCollapsed ? (
               <button

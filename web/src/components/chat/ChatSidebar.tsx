@@ -13,10 +13,10 @@ import { SkeletonCardList } from '@/components/common/Skeletons';
 import { cn } from '@/lib/utils';
 import type { SessionInfo } from '../../types';
 
-type GroupEntry = SessionInfo & { jid: string };
-type DateSection = { label: string; items: GroupEntry[] };
+type SessionEntry = SessionInfo & { jid: string };
+type DateSection = { label: string; items: SessionEntry[] };
 
-function groupByDate(items: GroupEntry[]): DateSection[] {
+function groupByDate(items: SessionEntry[]): DateSection[] {
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const weekAgo = new Date(today.getTime() - 7 * 86400000);
@@ -55,10 +55,10 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
   const [clearLoading, setClearLoading] = useState(false);
 
   const {
-    groups,
-    currentGroup,
-    selectGroup,
-    loadGroups,
+    groups: sessions,
+    currentGroup: currentSession,
+    selectGroup: selectSession,
+    loadGroups: loadSessions,
     loading,
     deleteFlow,
     clearHistory,
@@ -67,15 +67,15 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
   const navigate = useNavigate();
 
   useEffect(() => {
-    loadGroups();
-  }, [loadGroups]);
+    loadSessions();
+  }, [loadSessions]);
 
   // Keep the main session pinned above other sessions, then sort the rest by activity.
-  const { mainGroup, otherGroups } = useMemo(() => {
-    let main: (typeof groups)[string] & { jid: string } | null = null;
-    const others: ((typeof groups)[string] & { jid: string })[] = [];
+  const { mainSession, otherSessions } = useMemo(() => {
+    let main: (typeof sessions)[string] & { jid: string } | null = null;
+    const others: ((typeof sessions)[string] & { jid: string })[] = [];
 
-    for (const [jid, info] of Object.entries(groups)) {
+    for (const [jid, info] of Object.entries(sessions)) {
       const entry = { jid, ...info };
       if (info.kind === 'main') {
         main = entry;
@@ -90,16 +90,18 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
       return new Date(timeB).getTime() - new Date(timeA).getTime();
     });
 
-    return { mainGroup: main, otherGroups: others };
-  }, [groups]);
+    return { mainSession: main, otherSessions: others };
+  }, [sessions]);
 
-  const { pinnedGroups, workspaceSections } = useMemo(() => {
+  const { pinnedSessions, workspaceSections } = useMemo(() => {
     const filtered = searchQuery.trim()
-      ? otherGroups.filter((g) => g.name.toLowerCase().includes(searchQuery.toLowerCase()))
-      : otherGroups;
+      ? otherSessions.filter((entry) =>
+          entry.name.toLowerCase().includes(searchQuery.toLowerCase()),
+        )
+      : otherSessions;
 
-    const pinned: typeof otherGroups = [];
-    const workspaces: typeof otherGroups = [];
+    const pinned: typeof otherSessions = [];
+    const workspaces: typeof otherSessions = [];
 
     filtered.forEach((g) => {
       if (g.pinned_at) {
@@ -112,11 +114,11 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
     // Sort pinned by pinned_at ascending (earliest pinned first = stable top)
     pinned.sort((a, b) => (a.pinned_at || '').localeCompare(b.pinned_at || ''));
 
-    return { pinnedGroups: pinned, workspaceSections: groupByDate(workspaces) };
-  }, [otherGroups, searchQuery]);
+    return { pinnedSessions: pinned, workspaceSections: groupByDate(workspaces) };
+  }, [otherSessions, searchQuery]);
 
   const handleSessionSelect = (jid: string, sessionSlug: string) => {
-    selectGroup(jid);
+    selectSession(jid);
     navigate(`/chat/${sessionSlug}`);
   };
 
@@ -124,7 +126,7 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
   const appName = appearance?.appName || 'HappyClaw';
 
   const handleCreated = (jid: string, sessionSlug: string) => {
-    selectGroup(jid);
+    selectSession(jid);
     navigate(`/chat/${sessionSlug}`);
   };
 
@@ -133,9 +135,11 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
     try {
       await deleteFlow(deleteState.jid);
       setDeleteState({ open: false, jid: '', name: '' });
-      // Navigate to the auto-selected next group, or list view if none remain
-      const nextJid = useChatStore.getState().currentGroup;
-      const nextFolder = nextJid ? useChatStore.getState().groups[nextJid]?.folder : null;
+      // Navigate to the auto-selected next session, or list view if none remain
+      const nextSessionId = useChatStore.getState().currentGroup;
+      const nextFolder = nextSessionId
+        ? useChatStore.getState().groups[nextSessionId]?.folder
+        : null;
       navigate(nextFolder ? `/chat/${nextFolder}` : '/chat');
     } catch (err: unknown) {
       const typed = err as { boundAgents?: Array<{ agentName: string; imGroups: Array<{ name: string }> }> };
@@ -164,7 +168,7 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
     }
   };
 
-  const allGroups = mainGroup ? [mainGroup, ...otherGroups] : otherGroups;
+  const allSessions = mainSession ? [mainSession, ...otherSessions] : otherSessions;
 
   const renderSections = (sections: DateSection[]) =>
     sections.map((section) => (
@@ -181,7 +185,7 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
             name={g.name}
             sessionSlug={g.folder}
             lastMessage={g.lastMessage}
-            isActive={currentGroup === g.jid}
+            isActive={currentSession === g.jid}
             isHome={false}
             runnerLabel={g.runner_label}
             model={g.model}
@@ -239,12 +243,12 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
 
       {/* Groups List */}
       <div className="flex-1 overflow-y-auto px-2">
-        {loading && allGroups.length === 0 ? (
+        {loading && allSessions.length === 0 ? (
           <SkeletonCardList count={6} compact />
         ) : (
           <>
             {/* Section: Home container */}
-            {mainGroup && (
+            {mainSession && (
               <div className="mb-1">
                 <div className="px-2 pt-1 pb-1.5">
                   <span className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">
@@ -252,14 +256,14 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
                   </span>
                 </div>
                 <ChatGroupItem
-                  jid={mainGroup.jid}
-                  name={mainGroup.name}
-                  sessionSlug={mainGroup.folder}
-                  lastMessage={mainGroup.lastMessage}
-                  isActive={currentGroup === mainGroup.jid}
+                  jid={mainSession.jid}
+                  name={mainSession.name}
+                  sessionSlug={mainSession.folder}
+                  lastMessage={mainSession.lastMessage}
+                  isActive={currentSession === mainSession.jid}
                   isHome
-                  runnerLabel={mainGroup.runner_label}
-                  model={mainGroup.model}
+                  runnerLabel={mainSession.runner_label}
+                  model={mainSession.model}
                   editable
                   onSelect={handleSessionSelect}
                   onRename={(jid, name) => setRenameState({ open: true, jid, name })}
@@ -269,27 +273,27 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
             )}
 
             {/* Section: Pinned workspaces */}
-            {pinnedGroups.length > 0 && (
+            {pinnedSessions.length > 0 && (
               <div className="mb-1">
                 <div className="px-2 pt-3 pb-1.5">
                   <span className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">
                     已固定
                   </span>
                 </div>
-                {pinnedGroups.map((g) => (
+                {pinnedSessions.map((session) => (
                   <ChatGroupItem
-                    key={g.jid}
-                    jid={g.jid}
-                    name={g.name}
-                    sessionSlug={g.folder}
-                    lastMessage={g.lastMessage}
-                    isActive={currentGroup === g.jid}
+                    key={session.jid}
+                    jid={session.jid}
+                    name={session.name}
+                    sessionSlug={session.folder}
+                    lastMessage={session.lastMessage}
+                    isActive={currentSession === session.jid}
                     isHome={false}
                     isPinned
-                    runnerLabel={g.runner_label}
-                    model={g.model}
-                    editable={g.editable}
-                    deletable={g.deletable}
+                    runnerLabel={session.runner_label}
+                    model={session.model}
+                    editable={session.editable}
+                    deletable={session.deletable}
                     onSelect={handleSessionSelect}
                     onRename={(jid, name) => setRenameState({ open: true, jid, name })}
                     onClearHistory={(jid, name) => setClearState({ open: true, jid, name })}
@@ -301,7 +305,7 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
             )}
 
             {/* Section: My workspaces + Collaborative workspaces */}
-            {workspaceSections.length === 0 && pinnedGroups.length === 0 && !mainGroup ? (
+            {workspaceSections.length === 0 && pinnedSessions.length === 0 && !mainSession ? (
               <div className="flex flex-col items-center justify-center h-32 px-4">
                 <p className="text-sm text-muted-foreground text-center">
                   {searchQuery ? '未找到匹配的会话' : '暂无会话'}

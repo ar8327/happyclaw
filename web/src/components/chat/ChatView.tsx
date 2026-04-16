@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getRouteJid, resolveStoreJid, useChatStore } from '../../stores/chat';
+import {
+  getRouteSessionId,
+  resolveStoreSessionId,
+  useChatStore,
+} from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
@@ -84,7 +88,7 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
   const [mobileActionsOpen, setMobileActionsOpen] = useState(false);
   // null = dialog closed; MAIN_BINDING = main conversation; other = agent id
   const [bindingAgentId, setBindingAgentId] = useState<string | null>(null);
-  // Code / Plan mode toggle (per group)
+  // Code / Plan mode toggle (per session)
   const [permissionMode, setPermissionMode] = useState<'bypassPermissions' | 'plan'>('bypassPermissions');
   const [imStatus, setImStatus] = useState<{ feishu: boolean; telegram: boolean } | null>(null);
   const [imBannerDismissed, setImBannerDismissed] = useState(() =>
@@ -99,9 +103,9 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
   const dragStartHeightRef = useRef(0);
 
   // Individual selectors: avoid re-renders from unrelated store changes (e.g. streaming)
-  const group = useChatStore(s => s.groups[sessionId]);
-  const groupMessages = useChatStore(s => s.messages[sessionId]);
-  const groupTurns = useChatStore(s => s.turns[sessionId]);
+  const session = useChatStore(s => s.groups[sessionId]);
+  const sessionMessages = useChatStore(s => s.messages[sessionId]);
+  const sessionTurns = useChatStore(s => s.turns[sessionId]);
   const isWaiting = useChatStore(s => !!s.waiting[sessionId]);
   const hasMoreMessages = useChatStore(s => !!s.hasMore[sessionId]);
   const loading = useChatStore(s => s.loading);
@@ -132,10 +136,10 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
   const agentHasMore = useChatStore(s => s.agentHasMore);
 
   const currentUser = useAuthStore(s => s.user);
-  const canUseTerminal = !!group;
+  const canUseTerminal = !!session;
   const pollRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
-  const isHome = group?.kind === 'main';
+  const isHome = session?.kind === 'main';
   const visibleTabs = SIDEBAR_TABS;
 
   // Fetch IM connection status for the main session.
@@ -155,15 +159,15 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
     return () => { active = false; clearInterval(timer); };
   }, [isOwnHome]);
 
-  // Load messages on group select
-  const hasMessages = !!groupMessages;
+  // Load messages on session select
+  const hasMessages = !!sessionMessages;
   useEffect(() => {
     if (sessionId && !hasMessages) {
       loadMessages(sessionId);
     }
   }, [sessionId, hasMessages, loadMessages]);
 
-  const hasTurns = !!groupTurns;
+  const hasTurns = !!sessionTurns;
   useEffect(() => {
     if (sessionId && !hasTurns) {
       loadTurns(sessionId);
@@ -233,7 +237,7 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
   const isConversationTab = activeAgent?.kind === 'conversation';
   const isSdkTask = !!activeAgentTab && !!sdkTasks[activeAgentTab];
 
-  // Load sub-agents for this group
+  // Load sub-agents for this session
   useEffect(() => {
     loadAgents(sessionId);
   }, [sessionId, loadAgents]);
@@ -251,7 +255,7 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
   // 监听 WebSocket 流式事件
   useEffect(() => {
     const unsub1 = wsManager.on('stream_event', (data: any) => {
-      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === sessionId) {
+      if (resolveStoreSessionId(useChatStore.getState().groups, data.chatJid) === sessionId) {
         handleStreamEvent(sessionId, data.event, data.agentId);
         // Sync permission mode when agent calls ExitPlanMode/EnterPlanMode
         if (data.event?.eventType === 'mode_change' && data.event?.permissionMode) {
@@ -262,23 +266,23 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
     });
     // agent_reply 作为 fallback：如果 new_message 已处理则为 no-op
     const unsub2 = wsManager.on('agent_reply', (data: any) => {
-      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === sessionId) clearStreaming(sessionId);
+      if (resolveStoreSessionId(useChatStore.getState().groups, data.chatJid) === sessionId) clearStreaming(sessionId);
     });
     // 通过 new_message 立即添加消息到本地状态（消除轮询延迟导致的消息"丢失"）
     const unsub3 = wsManager.on('new_message', (data: any) => {
-      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === sessionId && data.message) {
+      if (resolveStoreSessionId(useChatStore.getState().groups, data.chatJid) === sessionId && data.message) {
         handleWsNewMessage(sessionId, data.message, data.agentId);
       }
     });
     // 子 Agent 状态变更
     const unsub4 = wsManager.on('agent_status', (data: any) => {
-      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === sessionId) {
+      if (resolveStoreSessionId(useChatStore.getState().groups, data.chatJid) === sessionId) {
         handleAgentStatus(sessionId, data.agentId, data.status, data.name, data.prompt, data.resultSummary, data.kind);
       }
     });
     // Agent 生命周期状态（queued / capacity_wait / starting）
     const unsub5 = wsManager.on('runner_state', (data: any) => {
-      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === sessionId) {
+      if (resolveStoreSessionId(useChatStore.getState().groups, data.chatJid) === sessionId) {
         handleRunnerState(sessionId, data.state, data.detail);
       }
     });
@@ -311,7 +315,7 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
     setPermissionMode(newMode);
     try {
       const res = await api.put<{ success: boolean; mode: string; applied: boolean }>(
-        `/api/sessions/${encodeURIComponent(getRouteJid(useChatStore.getState().groups, sessionId))}/mode`, { mode: newMode },
+        `/api/sessions/${encodeURIComponent(getRouteSessionId(useChatStore.getState().groups, sessionId))}/mode`, { mode: newMode },
       );
       if (res.applied === false) {
         const label = newMode === 'plan' ? 'Plan' : 'Code';
@@ -390,14 +394,14 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
     }
   }, [canUseTerminal, terminalMounted]);
 
-  // Switching groups should not carry terminal UI/session into the next page.
+  // Switching sessions should not carry terminal UI/session into the next page.
   useEffect(() => {
     setTerminalVisible(false);
     setTerminalMounted(false);
     setMobileTerminal(false);
   }, [sessionId]);
 
-  // If the current group disappears, force-close any mounted terminal.
+  // If the current session disappears, force-close any mounted terminal.
   useEffect(() => {
     if (canUseTerminal) return;
     setTerminalVisible(false);
@@ -415,7 +419,7 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
     setMobilePanel('env');
   };
 
-  if (!group) {
+  if (!session) {
     return (
       <div className="h-full flex items-center justify-center bg-background">
         <div className="text-center">
@@ -440,10 +444,10 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
         )}
         {headerLeft}
         <div className="flex-1 min-w-0">
-          <h2 className="font-semibold text-slate-900 text-[15px] truncate">{group.name}</h2>
+          <h2 className="font-semibold text-slate-900 text-[15px] truncate">{session.name}</h2>
           <div className="flex items-center gap-1.5 text-xs text-slate-500">
             <span>{isWaiting ? '正在思考...' : isHome ? '主会话' : '工作会话'}</span>
-            {!isWaiting && group && (
+            {!isWaiting && session && (
               <>
                 <span className="text-slate-300">·</span>
                 <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-medium bg-emerald-100 text-emerald-700">
@@ -688,7 +692,7 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
                 /* DB Task: read-only — show agent's messages from main chat */
                 <MessageList
                   key={`task-${activeAgentTab}`}
-                  messages={(groupMessages || []).filter(
+                  messages={(sessionMessages || []).filter(
                     (m) => m.sender === `agent:${activeAgentTab}`,
                   )}
                   loading={false}
@@ -738,7 +742,7 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
             <>
               <MessageList
                 key={`main-${sessionId}`}
-                messages={groupMessages || []}
+                messages={sessionMessages || []}
                 loading={loading}
                 hasMore={hasMoreMessages}
                 onLoadMore={handleLoadMore}
@@ -804,7 +808,7 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
             ) : sidebarTab === 'files' ? (
               <FilePanel sessionId={sessionId} />
             ) : sidebarTab === 'env' ? (
-              <RuntimeEnvPanel sessionId={sessionId} session={group} />
+              <RuntimeEnvPanel sessionId={sessionId} session={session} />
             ) : sidebarTab === 'mcp' ? (
               <GroupMcpPanel sessionId={sessionId} />
             ) : (
@@ -871,7 +875,7 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
           <div className="flex-1 overflow-hidden h-[calc(80dvh-56px)]">
             <RuntimeEnvPanel
               sessionId={sessionId}
-              session={group}
+              session={session}
               onClose={() => setMobilePanel(null)}
             />
           </div>
@@ -989,7 +993,7 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
           sessionId={sessionId}
           targetSessionId={
             bindingAgentId === MAIN_BINDING
-              ? group?.id ?? null
+              ? session?.id ?? null
               : agents.find((a) => a.id === bindingAgentId)?.session_id ?? null
           }
           agentId={bindingAgentId === MAIN_BINDING ? null : bindingAgentId}

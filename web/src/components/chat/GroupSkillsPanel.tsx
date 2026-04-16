@@ -26,14 +26,14 @@ interface GroupSkillsPanelProps {
 }
 
 export function GroupSkillsPanel({ sessionId }: GroupSkillsPanelProps) {
-  const group = useChatStore(s => s.groups[sessionId]);
+  const session = useChatStore(s => s.groups[sessionId]);
   const [allSkills, setAllSkills] = useState<Skill[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string> | null>(null); // null = 全部选中
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
-  const [activationMode, setActivationMode] = useState(group?.activation_mode ?? 'auto');
+  const [activationMode, setActivationMode] = useState(session?.activation_mode ?? 'auto');
   const [savingMode, setSavingMode] = useState(false);
 
   // 加载可用 skills
@@ -49,8 +49,8 @@ export function GroupSkillsPanel({ sessionId }: GroupSkillsPanelProps) {
 
   // 同步 activation_mode
   useEffect(() => {
-    if (group?.activation_mode) setActivationMode(group.activation_mode);
-  }, [group?.activation_mode]);
+    if (session?.activation_mode) setActivationMode(session.activation_mode);
+  }, [session?.activation_mode]);
 
   const handleActivationModeChange = async (mode: string) => {
     setActivationMode(mode as typeof activationMode);
@@ -66,17 +66,17 @@ export function GroupSkillsPanel({ sessionId }: GroupSkillsPanelProps) {
     finally { setSavingMode(false); }
   };
 
-  // 从群组数据初始化选中状态
+  // 从会话数据初始化选中状态
   useEffect(() => {
-    if (!group) return;
-    const ss = group.selected_skills;
+    if (!session) return;
+    const ss = session.selected_skills;
     if (ss === null || ss === undefined) {
       setSelectedIds(null); // 全部选中
     } else {
       setSelectedIds(new Set(ss));
     }
     setDirty(false);
-  }, [group?.selected_skills]);
+  }, [session?.selected_skills]);
 
   const allSelected = selectedIds === null;
 

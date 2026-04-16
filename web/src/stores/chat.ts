@@ -125,26 +125,41 @@ function mergeMessagesChronologically(
   });
 }
 
+export function getRouteSessionId(
+  sessions: Record<string, SessionInfo>,
+  sessionId: string,
+): string {
+  return sessions[sessionId]?.id || sessionId;
+}
+
 export function getRouteJid(
   groups: Record<string, SessionInfo>,
   jid: string,
 ): string {
-  return groups[jid]?.id || jid;
+  return getRouteSessionId(groups, jid);
+}
+
+export function resolveStoreSessionId(
+  sessions: Record<string, SessionInfo>,
+  rawSessionId: string,
+): string {
+  const agentSep = rawSessionId.indexOf('#agent:');
+  const baseSessionId =
+    agentSep >= 0 ? rawSessionId.slice(0, agentSep) : rawSessionId;
+  if (sessions[baseSessionId]) return baseSessionId;
+  for (const [storeSessionId, session] of Object.entries(sessions)) {
+    if (session.id === baseSessionId || session.backing_jid === baseSessionId) {
+      return storeSessionId;
+    }
+  }
+  return baseSessionId;
 }
 
 export function resolveStoreJid(
   groups: Record<string, SessionInfo>,
   rawJid: string,
 ): string {
-  const agentSep = rawJid.indexOf('#agent:');
-  const baseJid = agentSep >= 0 ? rawJid.slice(0, agentSep) : rawJid;
-  if (groups[baseJid]) return baseJid;
-  for (const [storeJid, group] of Object.entries(groups)) {
-    if (group.id === baseJid || group.backing_jid === baseJid) {
-      return storeJid;
-    }
-  }
-  return baseJid;
+  return resolveStoreSessionId(groups, rawJid);
 }
 
 function remapGroupScopedRecord<T>(
