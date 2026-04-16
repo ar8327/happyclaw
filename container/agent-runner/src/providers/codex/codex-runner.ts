@@ -193,7 +193,8 @@ export class CodexRunner implements AgentRunner {
       : config.prompt;
     this.pendingRoutingReminder = null;
 
-    // Update instructions file each turn (dynamic content may change)
+    // This depends on @openai/codex-sdk re-reading model_instructions_file on each run.
+    // Keep the SDK version pinned until that behavior is re-verified during upgrades.
     this.ctxMgr.updateDynamicContext({
       recentImChannels: opts.state.recentImChannels,
       contextSummary: opts.containerInput.contextSummary,
