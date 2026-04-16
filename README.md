@@ -93,12 +93,16 @@
 
 主运行链路由 `src/runtime-runner.ts` 驱动，本地启动 `container/agent-runner` 中的 Claude 或 Codex provider，并统一向外暴露 Session 语义。
 
+更细的 runner 契约说明见 [docs/agent-runner-contract.md](docs/agent-runner-contract.md)。
+
 - **Session 是一等对象** — 主会话、workspace、worker、memory 都经由 `/api/sessions` 投影和管理
 - **统一本地 runtime** — 新 Session 固定走本地 runtime；`runtime_mode`、`execution_mode` 和 `llm_provider` 旧字段都已退出对外 Session 契约
 - **Runner 可切换** — 当前支持 Claude 与 Codex，runner profile、模型、thinking effort、环境变量都能在 Session 级别配置
 - **多 Session 并发** — Runtime 队列按 Session 调度，并通过 `/api/status` 统一暴露运行与排队状态
 - **工作目录可初始化** — 新建 Session 可从本地目录复制或从 Git 仓库初始化，再在设置中单独调整 cwd
 - **失败自动恢复** — 保留指数退避重试、上下文压缩和历史归档能力
+- **声明先握手再运行** — 主进程会把 descriptor 里的 `declaredIpcCapabilities` 传给 container，启动时与 runner 实例的 `ipcCapabilities` 对拍，不一致直接失败
+- **Codex 版本需谨慎升级** — `@openai/codex-sdk` 目前锁定精确版本，升级前必须复验 `model_instructions_file` 仍会在每个 turn 重新读取
 
 
 ### 实时流式体验
@@ -425,6 +429,8 @@ happyclaw/
 │   ├── agent-runner/             #   本地 runtime 复用的执行引擎
 │   │   └── src/
 │   │       ├── index.ts          #     Agent 主循环 + 流式事件
+│   │       ├── runner-interface.ts #   AgentRunner 契约与 QueryConfig
+│   │       ├── system-prompt.ts  #     共享 system prompt 构造
 │   │       ├── happyclaw-mcp-server.ts # 共用 MCP server 入口
 │   │       └── providers/        #     Claude / Codex provider 实现
 │   ├── memory-agent/             #   Memory Agent 子进程（Fork 特有）

@@ -116,7 +116,9 @@
 
 当前主链路只有**本地 unified runtime**。`src/session-launcher.ts` 提供启动门面，`src/runtime-runner.ts` 负责准备环境、目录边界、子进程与日志处理，然后启动 `container/agent-runner/` 中的 Claude 或 Codex provider。
 
-- **输入协议**：stdin 接收初始 JSON，主字段包含 `prompt`、`runnerId`、`sessionId`、`resumeAnchor`、`workspaceFolder`、`chatJid`、bootstrap state 等；`groupFolder` 仅作为过渡期兼容别名继续接受，后续消息通过 IPC 文件注入
+更细的 runner 契约说明见 `docs/agent-runner-contract.md`。
+
+- **输入协议**：stdin 接收初始 JSON，主字段包含 `prompt`、`runnerId`、`sessionId`、`resumeAnchor`、`workspaceFolder`、`chatJid`、bootstrap state、`declaredIpcCapabilities` 等；`groupFolder` 仅作为过渡期兼容别名继续接受，后续消息通过 IPC 文件注入
 - **输出协议**：stdout 输出 `OUTPUT_START_MARKER...OUTPUT_END_MARKER` 包裹的 JSON，主进程解析为 `RuntimeOutput`
 - **流式事件**：`text_delta`、`thinking_delta`、`tool_use_start/end`、`tool_progress`、`hook_started/progress/response`、`task_start`、`task_notification`、`status`、`init` 统一通过 WebSocket `stream_event` 广播到 Web 端
 - **文本缓冲**：`text_delta` 累积到 200 字符后刷新，避免高频小包
@@ -124,6 +126,8 @@
 - **MCP Server**：工具通过独立 stdio MCP server 暴露，Memory runtime 会额外应用 `MemoryProfile` 白名单与目录边界
 - **消息路由**：stdout 仅输出到 Web 端；IM 消息必须通过 `send_message(channel=...)` 显式发送
 - **敏感数据过滤**：StreamEvent 中的 `toolInputSummary` 会过滤 `ANTHROPIC_API_KEY` 等环境变量名
+- **能力声明校验**：container 启动时会用 `declaredIpcCapabilities` 对拍 runner 实例的 `ipcCapabilities`，声明和实现不一致直接 fail-fast
+- **Codex 升级约束**：`container/agent-runner/package.json` 里的 `@openai/codex-sdk` 已锁定精确版本。升级前必须复验 `model_instructions_file` 逐 turn 重读仍然成立
 
 **Agent Runner 模块结构**（`container/agent-runner/src/`）：
 
@@ -131,6 +135,8 @@
 |------|------|
 | `index.ts` | 主入口：stdin 读取、provider 选择、query loop 启动 |
 | `types.ts` | 共享类型定义（Runtime 输入输出等），re-export StreamEvent |
+| `runner-interface.ts` | AgentRunner 抽象接口、`QueryConfig.systemPrompt` 和 runtime 行为边界 |
+| `system-prompt.ts` | 共享的 system prompt builder，负责每 turn 刷新动态上下文与 source channel 提取 |
 | `utils.ts` | 纯工具函数（字符串截断、敏感数据脱敏、文件名清理等） |
 | `query-loop.ts` | provider 无关的查询编排、IPC polling、overflow / interrupt / drain 处理 |
 | `happyclaw-mcp-server.ts` | Claude / Codex 共用的 stdio MCP server 入口 |

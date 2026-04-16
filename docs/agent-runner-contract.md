@@ -30,6 +30,16 @@
 - Claude 把它当 append prompt 使用。
 - Codex 把它写入 `model_instructions_file` 后再启动本轮。
 
+## Descriptor 握手契约
+
+- 主进程会把 runner descriptor 里的 IPC 能力声明写进 `ContainerInput.declaredIpcCapabilities`。
+- container 启动后会在 `initialize()` 前对拍 `runner.ipcCapabilities`。
+- 当前只校验两个可运行时验证的字段：
+  - `midQueryPush`
+  - `runtimeModeSwitch`
+- 任一字段不一致都必须直接 fail-fast，不能带着错误声明继续运行。
+- `lifecycle` 和 `promptContract` 目前仍是静态契约，新增 runner 时需要靠文档和回归验证一起守住。
+
 ## Resume Anchor 契约
 
 - `resume_anchor` 表示“从这里继续最稳妥”的 provider 私有锚点。
@@ -77,6 +87,7 @@
 - 确认 `getActivityReport()` 的统计粒度不会误导看门狗。
 - 确认 `recoverable` 错误只覆盖 query-loop 真能恢复的分支。
 - 确认 `tool_use_start / tool_use_end / task_*` 的 parent 关系能被前端正确还原。
+- 如果修改 Codex SDK 版本，先验证 `model_instructions_file` 仍会在每个 turn 重新读取。
 - 跑 `make typecheck`。
 - 手动验证 Claude 和 Codex 链路至少各一次。
   - 基本发消息
