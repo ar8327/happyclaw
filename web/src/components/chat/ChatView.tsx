@@ -150,7 +150,7 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
     if (!isOwnHome) { setImStatus(null); return; }
     let active = true;
     const fetchStatus = () => {
-      api.get<{ feishu: boolean; telegram: boolean }>('/api/config/user-im/status')
+      api.get<{ feishu: boolean; telegram: boolean }>('/api/config/im/status')
         .then((data) => { if (active) setImStatus(data); })
         .catch(() => {});
     };

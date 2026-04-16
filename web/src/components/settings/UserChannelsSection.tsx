@@ -21,7 +21,7 @@ export function UserChannelsSection({ setNotice, setError }: UserChannelsSection
 
   useEffect(() => {
     api
-      .get<UserIMPreferences>('/api/config/user-im/preferences')
+      .get<UserIMPreferences>('/api/config/im/preferences')
       .then((prefs) => {
         setAutoCreate(prefs.autoCreateWorkspaceForGroups === true);
       })
@@ -32,7 +32,7 @@ export function UserChannelsSection({ setNotice, setError }: UserChannelsSection
   const savePref = useCallback(
     async (patch: Partial<UserIMPreferences>) => {
       try {
-        await api.put('/api/config/user-im/preferences', patch);
+        await api.put('/api/config/im/preferences', patch);
         return true;
       } catch {
         setError('保存偏好失败');

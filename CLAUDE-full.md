@@ -326,7 +326,7 @@ StreamEvent 类型以 `shared/stream-event.ts` 为单一真相源，构建时通
 - 当前 workbench 只围绕本地 operator 配置飞书、Telegram 和 QQ 连接
 - `feishu.ts`、`telegram.ts`、`qq.ts` 均为工厂模式（`createFeishuConnection()`、`createTelegramConnection()`、`createQQConnection()`），返回无状态的连接实例
 - 系统启动时只围绕本地 operator 建立连接，不再遍历 legacy `users`
-- 系统级 API（`/api/config/feishu`、`/api/config/telegram`）只应视为兼容入口，新代码应使用 `/api/config/user-im/*`
+- 系统级 API（`/api/config/feishu`、`/api/config/telegram`）只应视为兼容入口，新代码应使用 `/api/config/im/*`
 - 收到 IM 消息时，会根据 `session_bindings` 或默认 folder 路由到对应 Session
 - 支持热重连（`ignoreMessagesBefore` 过滤渠道关闭期间的堆积消息）
 - 优雅关闭时 `disconnectAll()` 批量断开所有连接
@@ -413,9 +413,9 @@ data/
   config/feishu-provider.json              # 飞书配置
   config/claude-custom-env.json            # 自定义环境变量
   config/container-env/{folder}.json       # 群组级环境变量覆盖
-  config/user-im/{userId}/feishu.json      # 用户级飞书 IM 配置（AES-256-GCM 加密）
-  config/user-im/{userId}/telegram.json    # 用户级 Telegram IM 配置（AES-256-GCM 加密）
-  config/user-im/{userId}/qq.json          # 用户级 QQ IM 配置（AES-256-GCM 加密）
+  config/im/feishu.json                    # 全局飞书 IM 配置（AES-256-GCM 加密）
+  config/im/telegram.json                  # 全局 Telegram IM 配置（AES-256-GCM 加密）
+  config/im/qq.json                        # 全局 QQ IM 配置（AES-256-GCM 加密）
   config/session-secret.key                # 会话签名密钥（0600 权限）
   config/system-settings.json              # 系统运行参数（runtime 超时、并发限制等）
   skills/{userId}/                         # 用户级 Skills 数据
@@ -472,19 +472,20 @@ scripts/                      # 构建辅助脚本
 - `GET|PUT /api/config/claude` · `PUT /api/config/claude/secrets`
 - `GET|PUT /api/config/claude/custom-env`
 - `POST /api/config/claude/test`（连通性测试） · `POST /api/config/claude/apply`（应用到所有 Session runtime）
-- `GET|PUT /api/config/feishu`（**deprecated**，使用 `/api/config/user-im/feishu` 代替）
-- `GET|PUT /api/config/telegram` · `POST /api/config/telegram/test`（**deprecated**，使用 `/api/config/user-im/telegram` 代替）
+- `GET|PUT /api/config/feishu`（**deprecated**，使用 `/api/config/im/feishu` 代替）
+- `GET|PUT /api/config/telegram` · `POST /api/config/telegram/test`（**deprecated**，使用 `/api/config/im/telegram` 代替）
 - `GET|PUT /api/config/appearance` · `GET /api/config/appearance/public`（外观配置，public 端点无需认证）
 - `GET|PUT /api/config/system` — 系统运行参数（runtime 超时、并发限制等），需要 `manage_system_config` 权限
-- `GET /api/config/user-im/status`（所有渠道连接状态，含 QQ）
-- `GET|PUT /api/config/user-im/feishu`（用户级飞书 IM 配置，GET 返回 `connected` 字段）
-- `GET|PUT /api/config/user-im/telegram`（用户级 Telegram IM 配置，GET 返回 `connected`、`effectiveProxyUrl`、`proxySource`，PUT 支持 `proxyUrl`/`clearProxyUrl`）
-- `POST /api/config/user-im/telegram/test`（Telegram Bot Token 连通性测试，使用当前 operator 的 proxyUrl）
-- `GET|PUT /api/config/user-im/qq`（用户级 QQ IM 配置，GET 返回 `connected` 字段）
-- `POST /api/config/user-im/qq/test`（QQ 凭据连通性测试）
-- `POST /api/config/user-im/qq/pairing-code`（生成 QQ 配对码）
-- `GET /api/config/user-im/qq/paired-chats`（已配对的 QQ 聊天列表）
-- `DELETE /api/config/user-im/qq/paired-chats/:jid`（移除 QQ 配对）
+- `GET /api/config/im/status`（所有渠道连接状态，含 QQ 与微信）
+- `GET|PUT /api/config/im/feishu`（全局飞书 IM 配置，GET 返回 `connected` 字段）
+- `GET /api/config/im/feishu/oauth-status` · `GET /api/config/im/feishu/oauth-url` · `POST /api/config/im/feishu/oauth-callback` · `DELETE /api/config/im/feishu/oauth-revoke`
+- `GET|PUT /api/config/im/telegram`（全局 Telegram IM 配置，GET 返回 `connected`、`effectiveProxyUrl`、`proxySource`，PUT 支持 `proxyUrl`/`clearProxyUrl`）
+- `POST /api/config/im/telegram/test`（Telegram Bot Token 连通性测试，使用当前 operator 的 proxyUrl）
+- `POST /api/config/im/telegram/pairing-code` · `GET /api/config/im/telegram/paired-chats` · `DELETE /api/config/im/telegram/paired-chats/:jid`
+- `GET|PUT /api/config/im/qq`（全局 QQ IM 配置，GET 返回 `connected` 字段）
+- `POST /api/config/im/qq/test` · `POST /api/config/im/qq/pairing-code` · `GET /api/config/im/qq/paired-chats` · `DELETE /api/config/im/qq/paired-chats/:jid`
+- `GET|PUT /api/config/im/general` · `GET|PUT /api/config/im/preferences`
+- `GET|PUT /api/config/im/wechat` · `POST /api/config/im/wechat/qrcode` · `GET /api/config/im/wechat/qrcode-status` · `POST /api/config/im/wechat/disconnect`
 
 ### 任务
 - `GET /api/tasks` · `POST /api/tasks` · `PATCH /api/tasks/:id` · `DELETE /api/tasks/:id`
@@ -591,9 +592,9 @@ Session runtime 收尾 → export transcripts
 
 ### 8.11 IM 通道热管理
 
-通过 `PUT /api/config/user-im/feishu`、`PUT /api/config/user-im/telegram` 或 `PUT /api/config/user-im/qq` 更新 IM 配置后：
-- 保存配置到 `data/config/user-im/{userId}/` 目录（AES-256-GCM 加密）
-- 断开该用户的旧连接
+通过 `PUT /api/config/im/feishu`、`PUT /api/config/im/telegram` 或 `PUT /api/config/im/qq` 更新 IM 配置后：
+- 保存配置到 `data/config/im/` 目录（AES-256-GCM 加密）
+- 断开当前全局连接
 - 如果新配置有效（`enabled=true` 且凭据非空），立即建立新连接
 - `ignoreMessagesBefore` 设为当前时间戳，避免处理堆积消息
 
@@ -740,7 +741,7 @@ make help          # 列出所有可用的 make 命令
 
 1. 在 `src/` 目录下创建新的连接工厂模块（参考 `feishu.ts`、`telegram.ts`、`qq.ts` 的接口模式）
 2. 在 `src/im-manager.ts` 中添加 `connectUser{Channel}()` / `disconnectUser{Channel}()` 方法
-3. 在 `src/routes/config.ts` 中添加 `/api/config/user-im/{channel}` 路由（GET/PUT）
+3. 在 `src/routes/config.ts` 中添加 `/api/config/im/{channel}` 路由（GET/PUT）
 4. 在 `src/index.ts` 的启动链路里围绕本地 operator 加载新渠道
 5. 前端设置页对应分区和必要的兼容跳转中补充新渠道配置入口
 

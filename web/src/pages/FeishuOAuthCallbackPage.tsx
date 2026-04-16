@@ -35,7 +35,7 @@ export function FeishuOAuthCallbackPage() {
     const redirectUri = `${window.location.origin}/feishu-oauth-callback`;
 
     api
-      .post('/api/config/user-im/feishu/oauth-callback', {
+      .post('/api/config/im/feishu/oauth-callback', {
         code,
         state,
         redirectUri,

@@ -38,16 +38,15 @@ export interface WebDeps {
     botToken: string;
     enabled?: boolean;
   }) => Promise<boolean>;
-  reloadUserIMConfig?: (
-    userId: string,
+  reloadIMConfig?: (
     channel: 'feishu' | 'telegram' | 'qq' | 'wechat',
   ) => Promise<boolean>;
   isFeishuConnected?: () => boolean;
   isTelegramConnected?: () => boolean;
-  isUserFeishuConnected?: (userId: string) => boolean;
-  isUserTelegramConnected?: (userId: string) => boolean;
-  isUserQQConnected?: (userId: string) => boolean;
-  isUserWeChatConnected?: (userId: string) => boolean;
+  isIMFeishuConnected?: () => boolean;
+  isIMTelegramConnected?: () => boolean;
+  isIMQQConnected?: () => boolean;
+  isIMWeChatConnected?: () => boolean;
   processAgentConversation?: (
     chatJid: string,
     agentId: string,

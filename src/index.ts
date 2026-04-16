@@ -122,16 +122,17 @@ import {
   getFeishuProviderConfigWithSource,
   getTelegramProviderConfig,
   getTelegramProviderConfigWithSource,
-  getUserFeishuConfig,
-  getUserTelegramConfig,
-  getUserQQConfig,
-  getUserWeChatConfig,
+  getImFeishuConfig,
+  getImTelegramConfig,
+  getImQQConfig,
+  getImWeChatConfig,
   getSystemSettings,
-  saveUserFeishuConfig,
-  saveUserTelegramConfig,
+  saveImFeishuConfig,
+  saveImTelegramConfig,
   updateAllSessionCredentials,
-  getUserIMPreferences,
-  getUserImGeneralConfig,
+  getImPreferences,
+  getImGeneralConfig,
+  migrateLegacyUserImConfigToGlobal,
 } from './runtime-config.js';
 import type {
   FeishuConnectConfig,
@@ -695,12 +696,12 @@ function unbindImGroup(jid: string, reason: string): void {
   logger.info({ jid, sessionId: binding.session_id }, reason);
 }
 
-/** Check per-user IM setting to decide whether auto-unbind on failure is enabled. */
+/** Check global IM setting to decide whether auto-unbind on failure is enabled. */
 function shouldAutoUnbindOnFailure(jid: string): boolean {
   const group = registeredGroups[jid] ?? getRegisteredGroup(jid);
   const ownerKey = resolveChatOwnerKey(jid, group);
   if (!ownerKey) return true;
-  return getUserImGeneralConfig(ownerKey).autoUnbindOnSendFailure;
+  return getImGeneralConfig().autoUnbindOnSendFailure;
 }
 
 /**
@@ -1586,23 +1587,22 @@ interface SendMessageOptions {
  * One-time migration: copy system-level IM config → local operator config.
  * Safe to call repeatedly — writes a flag file after first successful run.
  */
-function migrateSystemIMToPerUser(): void {
+function migrateSystemIMToGlobal(): void {
   const flagFile = path.join(DATA_DIR, 'config', '.im-config-migrated');
-  if (fs.existsSync(flagFile)) return;
+  const hasGlobalImConfig = !!getImFeishuConfig() || !!getImTelegramConfig();
+  if (fs.existsSync(flagFile) && hasGlobalImConfig) return;
 
   try {
-    const operator = getLocalWorkbenchUserPublic();
-
     let migratedFeishu = false;
     let migratedTelegram = false;
 
-    // Feishu: copy system config → local operator per-user config when missing.
-    const existingUserFeishu = getUserFeishuConfig(operator.id);
+    // Feishu: copy system config → global IM config when missing.
+    const existingUserFeishu = getImFeishuConfig();
     if (!existingUserFeishu) {
       const { config: sysFeishu, source: feishuSource } =
         getFeishuProviderConfigWithSource();
       if (feishuSource !== 'none' && sysFeishu.appId && sysFeishu.appSecret) {
-        saveUserFeishuConfig(operator.id, {
+        saveImFeishuConfig({
           appId: sysFeishu.appId,
           appSecret: sysFeishu.appSecret,
           enabled: sysFeishu.enabled,
@@ -1611,13 +1611,13 @@ function migrateSystemIMToPerUser(): void {
       }
     }
 
-    // Telegram: copy system config → local operator per-user config when missing.
-    const existingUserTelegram = getUserTelegramConfig(operator.id);
+    // Telegram: copy system config → global IM config when missing.
+    const existingUserTelegram = getImTelegramConfig();
     if (!existingUserTelegram) {
       const { config: sysTelegram, source: telegramSource } =
         getTelegramProviderConfigWithSource();
       if (telegramSource !== 'none' && sysTelegram.botToken) {
-        saveUserTelegramConfig(operator.id, {
+        saveImTelegramConfig({
           botToken: sysTelegram.botToken,
           proxyUrl: sysTelegram.proxyUrl,
           enabled: sysTelegram.enabled,
@@ -1633,17 +1633,16 @@ function migrateSystemIMToPerUser(): void {
     if (migratedFeishu || migratedTelegram) {
       logger.info(
         {
-          operatorId: operator.id,
           feishu: migratedFeishu,
           telegram: migratedTelegram,
         },
-        'Migrated system-level IM config to local operator config',
+        'Migrated system-level IM config to global IM config',
       );
     }
   } catch (err) {
     logger.warn(
       { err },
-      'Failed to migrate system-level IM config (non-fatal)',
+      'Failed to migrate system-level IM config into global IM config',
     );
   }
 }
@@ -2069,7 +2068,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const shared = false;
   // Check if this user has Feishu agent-reply mode enabled
   const feishuAgentReply = ownerUserId
-    ? getUserFeishuConfig(ownerUserId)?.replyThreadingMode === 'agent'
+    ? getImFeishuConfig()?.replyThreadingMode === 'agent'
     : false;
   const prompt = formatMessages(missedMessages, shared, feishuAgentReply);
 
@@ -2274,7 +2273,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let progressCard: ProgressCardController | undefined;
   const sourceChannel = resolveChannel(missedMessages);
   const sourceChannelType = getChannelType(sourceChannel);
-  const feishuConfig = ownerUserId ? getUserFeishuConfig(ownerUserId) : null;
+  const feishuConfig = ownerUserId ? getImFeishuConfig() : null;
   if (
     ownerUserId &&
     sourceChannelType === 'feishu' &&
@@ -3254,7 +3253,7 @@ function startIpcWatcher(): void {
                       const isFeishuTarget = data.targetChannel.startsWith('feishu:');
                       const ownerUserId = resolveSessionOwnerKey(sourceGroup);
                       const agentReplyMode = isFeishuTarget && ownerUserId
-                        ? getUserFeishuConfig(ownerUserId)?.replyThreadingMode === 'agent'
+                        ? getImFeishuConfig()?.replyThreadingMode === 'agent'
                         : false;
                       const triggerMap = triggerMessagesByFolder.get(sourceGroup);
                       const triggerMsg = triggerMap?.get(data.targetChannel);
@@ -3355,7 +3354,7 @@ function startIpcWatcher(): void {
                         if (isFeishuTarget) {
                           const ownerUserId = resolveSessionOwnerKey(sourceGroup);
                           const agentReplyMode = ownerUserId
-                            ? getUserFeishuConfig(ownerUserId)?.replyThreadingMode === 'agent'
+                            ? getImFeishuConfig()?.replyThreadingMode === 'agent'
                             : false;
                           if (agentReplyMode && data.replyToMsgId) {
                             imageReplyToMsgId = data.replyToMsgId;
@@ -4397,7 +4396,7 @@ async function startMessageLoop(): Promise<void> {
               ) {
                 const resolved = resolveEffectiveGroup(chatJid, group);
                 const ownerId = resolveSessionOwnerKey(resolved.effectiveGroup.folder);
-                const fc = ownerId ? getUserFeishuConfig(ownerId) : null;
+                const fc = ownerId ? getImFeishuConfig() : null;
                 if (fc?.streamingCard) {
                   const card = imManager.createProgressCard(channel);
                   if (card) {
@@ -4623,7 +4622,7 @@ function buildOnNewChat(
     }
 
     // Auto-create independent workspace for group chats if preference is on
-    const prefs = getUserIMPreferences(userId);
+    const prefs = getImPreferences();
     const shouldAutoCreate =
       chatType === 'group' &&
       prefs.autoCreateWorkspaceForGroups === true;
@@ -5108,8 +5107,9 @@ async function main(): Promise<void> {
     logger.warn({ err }, 'Failed to mark stale running tasks at startup');
   }
 
-  // Migrate system-level IM config → admin's per-user config (one-time)
-  migrateSystemIMToPerUser();
+  migrateLegacyUserImConfigToGlobal();
+  // Migrate system-level IM config → global IM config (one-time)
+  migrateSystemIMToGlobal();
 
   loadState();
 
@@ -5308,16 +5308,17 @@ async function main(): Promise<void> {
     return false;
   };
 
-  // Reload a per-user IM channel (hot-reload on user-im config save)
-  const reloadUserIMConfig = async (
-    userId: string,
+  // Reload the global IM channel set after IM config changes.
+  const reloadIMConfig = async (
     channel: 'feishu' | 'telegram' | 'qq' | 'wechat',
   ): Promise<boolean> => {
+    const operator = getLocalWorkbenchUserPublic();
+    const userId = operator.id;
     const primarySessionChannel = getUserPrimarySessionChannel(userId);
     if (!primarySessionChannel) {
       logger.warn(
         { userId, channel },
-        'No primary Session alias found for user IM reload',
+        'No primary Session alias found for global IM reload',
       );
       return false;
     }
@@ -5327,7 +5328,7 @@ async function main(): Promise<void> {
 
     if (channel === 'feishu') {
       await imManager.disconnectUserFeishu(userId);
-      const config = getUserFeishuConfig(userId);
+      const config = getImFeishuConfig();
       if (
         config &&
         config.enabled !== false &&
@@ -5362,7 +5363,7 @@ async function main(): Promise<void> {
       return false;
     } else if (channel === 'telegram') {
       await imManager.disconnectUserTelegram(userId);
-      const config = getUserTelegramConfig(userId);
+      const config = getImTelegramConfig();
       const globalTelegramConfig = getTelegramProviderConfig();
       if (config && config.enabled !== false && config.botToken) {
         const connected = await imManager.connectUserTelegram(
@@ -5398,7 +5399,7 @@ async function main(): Promise<void> {
       return false;
     } else if (channel === 'qq') {
       await imManager.disconnectUserQQ(userId);
-      const config = getUserQQConfig(userId);
+      const config = getImQQConfig();
       if (
         config &&
         config.enabled !== false &&
@@ -5428,7 +5429,7 @@ async function main(): Promise<void> {
     } else {
       // WeChat
       await imManager.disconnectUserWeChat(userId);
-      const config = getUserWeChatConfig(userId);
+      const config = getImWeChatConfig();
       if (
         config &&
         config.enabled !== false &&
@@ -5486,16 +5487,13 @@ async function main(): Promise<void> {
     trackIpcDelivery,
     reloadFeishuConnection,
     reloadTelegramConnection,
-    reloadUserIMConfig,
+    reloadIMConfig,
     isFeishuConnected: () => imManager.isAnyFeishuConnected(),
     isTelegramConnected: () => imManager.isAnyTelegramConnected(),
-    isUserFeishuConnected: (userId: string) =>
-      imManager.isFeishuConnected(userId),
-    isUserTelegramConnected: (userId: string) =>
-      imManager.isTelegramConnected(userId),
-    isUserQQConnected: (userId: string) => imManager.isQQConnected(userId),
-    isUserWeChatConnected: (userId: string) =>
-      imManager.isWeChatConnected(userId),
+    isIMFeishuConnected: () => imManager.isAnyFeishuConnected(),
+    isIMTelegramConnected: () => imManager.isAnyTelegramConnected(),
+    isIMQQConnected: () => imManager.isAnyQQConnected(),
+    isIMWeChatConnected: () => imManager.isAnyWeChatConnected(),
     processAgentConversation,
     getFeishuChatInfo: (userId: string, chatId: string) =>
       imManager.getFeishuChatInfo(userId, chatId),
@@ -5654,10 +5652,10 @@ async function main(): Promise<void> {
       'No primary Session alias found for local operator IM startup',
     );
   } else {
-    const userFeishu = getUserFeishuConfig(operator.id);
-    const userTelegram = getUserTelegramConfig(operator.id);
-    const userQQ = getUserQQConfig(operator.id);
-    const userWeChat = getUserWeChatConfig(operator.id);
+    const userFeishu = getImFeishuConfig();
+    const userTelegram = getImTelegramConfig();
+    const userQQ = getImQQConfig();
+    const userWeChat = getImWeChatConfig();
 
     let effectiveFeishu: FeishuConnectConfig | null = null;
     if (userFeishu && userFeishu.appId && userFeishu.appSecret) {

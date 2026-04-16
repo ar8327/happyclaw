@@ -43,12 +43,12 @@ export function TelegramChannelCard({ setNotice, setError }: TelegramChannelCard
   const enabled = config?.enabled ?? false;
 
   const pairing = usePairingCode({
-    endpoint: '/api/config/user-im/telegram/pairing-code',
+    endpoint: '/api/config/im/telegram/pairing-code',
     setNotice,
     setError,
   });
   const paired = usePairedChats({
-    endpoint: '/api/config/user-im/telegram/paired-chats',
+    endpoint: '/api/config/im/telegram/paired-chats',
     setNotice,
     setError,
   });
@@ -56,7 +56,7 @@ export function TelegramChannelCard({ setNotice, setError }: TelegramChannelCard
   const loadConfig = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await api.get<UserTelegramConfig>('/api/config/user-im/telegram');
+      const data = await api.get<UserTelegramConfig>('/api/config/im/telegram');
       setConfig(data);
       setBotToken('');
       setProxyUrl(data.proxyUrl || '');
@@ -77,7 +77,7 @@ export function TelegramChannelCard({ setNotice, setError }: TelegramChannelCard
     setNotice(null);
     setError(null);
     try {
-      const data = await api.put<UserTelegramConfig>('/api/config/user-im/telegram', { enabled: newEnabled });
+      const data = await api.put<UserTelegramConfig>('/api/config/im/telegram', { enabled: newEnabled });
       setConfig(data);
       setNotice(`Telegram 渠道已${newEnabled ? '启用' : '停用'}`);
     } catch (err) {
@@ -105,7 +105,7 @@ export function TelegramChannelCard({ setNotice, setError }: TelegramChannelCard
       if (proxy) payload.proxyUrl = proxy;
       else if (!proxy && config?.proxyUrl) payload.clearProxyUrl = true;
 
-      const data = await api.put<UserTelegramConfig>('/api/config/user-im/telegram', payload);
+      const data = await api.put<UserTelegramConfig>('/api/config/im/telegram', payload);
       setConfig(data);
       setBotToken('');
       setProxyUrl(data.proxyUrl || '');
@@ -122,7 +122,7 @@ export function TelegramChannelCard({ setNotice, setError }: TelegramChannelCard
     setNotice(null);
     setError(null);
     try {
-      const result = await api.post<TelegramTestResult>('/api/config/user-im/telegram/test');
+      const result = await api.post<TelegramTestResult>('/api/config/im/telegram/test');
       if (result.success) {
         setNotice(`Telegram 连接成功！Bot: @${result.bot_username} (${result.bot_name})`);
       } else {

@@ -73,24 +73,24 @@ import {
   saveAppearanceConfig,
   getSystemSettings,
   saveSystemSettings,
-  getUserFeishuConfig,
-  saveUserFeishuConfig,
-  getUserFeishuOAuthTokens,
-  saveUserFeishuOAuthTokens,
-  clearUserFeishuOAuthTokens,
-  getUserTelegramConfig,
-  saveUserTelegramConfig,
-  getUserQQConfig,
-  saveUserQQConfig,
-  getUserImGeneralConfig,
-  saveUserImGeneralConfig,
-  getUserWeChatConfig,
-  saveUserWeChatConfig,
+  getImFeishuConfig,
+  saveImFeishuConfig,
+  getImFeishuOAuthTokens,
+  saveImFeishuOAuthTokens,
+  clearImFeishuOAuthTokens,
+  getImTelegramConfig,
+  saveImTelegramConfig,
+  getImQQConfig,
+  saveImQQConfig,
+  getImGeneralConfig,
+  saveImGeneralConfig,
+  getImWeChatConfig,
+  saveImWeChatConfig,
   updateAllSessionCredentials,
   detectLocalClaudeCode,
   importLocalClaudeCredentials,
-  getUserIMPreferences,
-  saveUserIMPreferences,
+  getImPreferences,
+  saveImPreferences,
   getCodexMode,
   setCodexMode,
   getCodexProviderConfig,
@@ -1442,7 +1442,7 @@ function resolveSessionBindingAccessTarget(sessionId: string): {
 configRoutes.get('/feishu', authMiddleware, systemConfigMiddleware, (c) => {
   logDeprecationOnce(
     'GET /api/config/feishu',
-    'GET /api/config/user-im/feishu',
+    'GET /api/config/im/feishu',
   );
   try {
     const { config, source } = getFeishuProviderConfigWithSource();
@@ -1518,7 +1518,7 @@ configRoutes.put(
 configRoutes.get('/telegram', authMiddleware, systemConfigMiddleware, (c) => {
   logDeprecationOnce(
     'GET /api/config/telegram',
-    'GET /api/config/user-im/telegram',
+    'GET /api/config/im/telegram',
   );
   try {
     const { config, source } = getTelegramProviderConfigWithSource();
@@ -1741,25 +1741,23 @@ configRoutes.put(
   },
 );
 
-// ─── Per-user IM connection status ──────────────────────────────────
+// ─── Global IM connection status ───────────────────────────────────
 
-configRoutes.get('/user-im/status', authMiddleware, (c) => {
-  const user = c.get('user') as AuthUser;
+configRoutes.get('/im/status', authMiddleware, (c) => {
   return c.json({
-    feishu: deps?.isUserFeishuConnected?.(user.id) ?? false,
-    telegram: deps?.isUserTelegramConnected?.(user.id) ?? false,
-    qq: deps?.isUserQQConnected?.(user.id) ?? false,
-    wechat: deps?.isUserWeChatConnected?.(user.id) ?? false,
+    feishu: deps?.isIMFeishuConnected?.() ?? false,
+    telegram: deps?.isIMTelegramConnected?.() ?? false,
+    qq: deps?.isIMQQConnected?.() ?? false,
+    wechat: deps?.isIMWeChatConnected?.() ?? false,
   });
 });
 
-// ─── Per-user IM config (all logged-in users) ─────────────────────
+// ─── Global IM config ─────────────────────────────────────────────
 
-configRoutes.get('/user-im/feishu', authMiddleware, (c) => {
-  const user = c.get('user') as AuthUser;
+configRoutes.get('/im/feishu', authMiddleware, (c) => {
   try {
-    const config = getUserFeishuConfig(user.id);
-    const connected = deps?.isUserFeishuConnected?.(user.id) ?? false;
+    const config = getImFeishuConfig();
+    const connected = deps?.isIMFeishuConnected?.() ?? false;
     if (!config) {
       return c.json({
         appId: '',
@@ -1781,13 +1779,12 @@ configRoutes.get('/user-im/feishu', authMiddleware, (c) => {
       imCommentary: config.imCommentary ?? false,
     });
   } catch (err) {
-    logger.error({ err }, 'Failed to load user Feishu config');
-    return c.json({ error: 'Failed to load user Feishu config' }, 500);
+    logger.error({ err }, 'Failed to load Feishu IM config');
+    return c.json({ error: 'Failed to load Feishu IM config' }, 500);
   }
 });
 
-configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
-  const user = c.get('user') as AuthUser;
+configRoutes.put('/im/feishu', authMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const validation = FeishuConfigSchema.safeParse(body);
   if (!validation.success) {
@@ -1797,7 +1794,7 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
     );
   }
 
-  const current = getUserFeishuConfig(user.id);
+  const current = getImFeishuConfig();
   const next: { appId: string; appSecret: string; enabled: boolean; updatedAt: string | null; replyThreadingMode?: 'auto' | 'agent'; streamingCard?: boolean; imCommentary?: boolean } = {
     appId: current?.appId || '',
     appSecret: current?.appSecret || '',
@@ -1834,7 +1831,7 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
   }
 
   try {
-    const saved = saveUserFeishuConfig(user.id, {
+    const saved = saveImFeishuConfig({
       appId: next.appId,
       appSecret: next.appSecret,
       enabled: next.enabled,
@@ -1844,18 +1841,15 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
     });
 
     // Hot-reload: reconnect user's Feishu channel
-    if (deps?.reloadUserIMConfig) {
+    if (deps?.reloadIMConfig) {
       try {
-        await deps.reloadUserIMConfig(user.id, 'feishu');
+        await deps.reloadIMConfig('feishu');
       } catch (err) {
-        logger.warn(
-          { err, userId: user.id },
-          'Failed to hot-reload user Feishu connection',
-        );
+        logger.warn({ err }, 'Failed to hot-reload Feishu connection');
       }
     }
 
-    const connected = deps?.isUserFeishuConnected?.(user.id) ?? false;
+    const connected = deps?.isIMFeishuConnected?.() ?? false;
     return c.json({
       ...toPublicFeishuProviderConfig(saved, 'runtime'),
       connected,
@@ -1866,7 +1860,7 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
   } catch (err) {
     const message =
       err instanceof Error ? err.message : 'Invalid Feishu config payload';
-    logger.warn({ err }, 'Invalid user Feishu config payload');
+    logger.warn({ err }, 'Invalid Feishu IM config payload');
     return c.json({ error: message }, 400);
   }
 });
@@ -1874,16 +1868,15 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
 // ─── Feishu OAuth Document Access ────────────────────────────────────
 
 /**
- * GET /api/config/user-im/feishu/oauth-status
- * Returns the current OAuth authorization status for the user.
+ * GET /api/config/im/feishu/oauth-status
+ * Returns the current OAuth authorization status for the global IM config.
  */
 configRoutes.get(
-  '/user-im/feishu/oauth-status',
+  '/im/feishu/oauth-status',
   authMiddleware,
   (c) => {
-    const user = c.get('user') as AuthUser;
-    const tokens = getUserFeishuOAuthTokens(user.id);
-    const config = getUserFeishuConfig(user.id);
+    const tokens = getImFeishuOAuthTokens();
+    const config = getImFeishuConfig();
 
     if (!tokens) {
       return c.json({
@@ -1904,16 +1897,16 @@ configRoutes.get(
 );
 
 /**
- * GET /api/config/user-im/feishu/oauth-url
- * Generates a Feishu OAuth authorization URL for the user.
+ * GET /api/config/im/feishu/oauth-url
+ * Generates a Feishu OAuth authorization URL for the current auth session.
  * Requires existing Feishu app credentials (appId + appSecret).
  */
 configRoutes.get(
-  '/user-im/feishu/oauth-url',
+  '/im/feishu/oauth-url',
   authMiddleware,
   (c) => {
-    const user = c.get('user') as AuthUser;
-    const config = getUserFeishuConfig(user.id);
+    const config = getImFeishuConfig();
+    const sessionId = c.get('sessionId') as string;
 
     if (!config?.appId || !config?.appSecret) {
       return c.json(
@@ -1929,7 +1922,7 @@ configRoutes.get(
     }
     const redirectUri = `${origin}/feishu-oauth-callback`;
 
-    const state = createOAuthState(user.id);
+    const state = createOAuthState(sessionId);
     const url = buildOAuthUrl(config.appId, redirectUri, state);
 
     return c.json({ url, state, redirectUri });
@@ -1937,15 +1930,15 @@ configRoutes.get(
 );
 
 /**
- * POST /api/config/user-im/feishu/oauth-callback
+ * POST /api/config/im/feishu/oauth-callback
  * Exchanges the authorization code for access + refresh tokens.
  * Body: { code: string, state: string, redirectUri: string }
  */
 configRoutes.post(
-  '/user-im/feishu/oauth-callback',
+  '/im/feishu/oauth-callback',
   authMiddleware,
   async (c) => {
-    const user = c.get('user') as AuthUser;
+    const sessionId = c.get('sessionId') as string;
     const body = await c.req.json().catch(() => ({}));
 
     const { code, state, redirectUri } = body as {
@@ -1958,14 +1951,13 @@ configRoutes.post(
       return c.json({ error: 'Missing required fields: code, state, redirectUri' }, 400);
     }
 
-    // Validate state — peek first, consume only after userId match
-    const stateUserId = consumeOAuthState(state, user.id);
-    if (!stateUserId) {
+    // Validate state against the current auth session before consuming it.
+    if (!consumeOAuthState(state, sessionId)) {
       return c.json({ error: '授权状态已过期或不匹配，请重新发起授权' }, 400);
     }
 
     // Get app credentials
-    const config = getUserFeishuConfig(user.id);
+    const config = getImFeishuConfig();
     if (!config?.appId || !config?.appSecret) {
       return c.json({ error: '飞书应用凭据缺失' }, 400);
     }
@@ -1978,17 +1970,14 @@ configRoutes.post(
         redirectUri,
       );
 
-      saveUserFeishuOAuthTokens(user.id, {
+      saveImFeishuOAuthTokens({
         accessToken: tokens.accessToken,
         refreshToken: tokens.refreshToken,
         expiresAt: tokens.expiresAt,
         scopes: tokens.scopes,
       });
 
-      logger.info(
-        { userId: user.id, scopes: tokens.scopes },
-        'Feishu OAuth authorized successfully',
-      );
+      logger.info({ scopes: tokens.scopes }, 'Feishu OAuth authorized successfully');
 
       return c.json({
         success: true,
@@ -1998,36 +1987,33 @@ configRoutes.post(
     } catch (err) {
       const message =
         err instanceof Error ? err.message : 'OAuth 授权失败';
-      logger.error({ err, userId: user.id }, 'Feishu OAuth callback failed');
+      logger.error({ err }, 'Feishu OAuth callback failed');
       return c.json({ error: message }, 500);
     }
   },
 );
 
 /**
- * DELETE /api/config/user-im/feishu/oauth-revoke
- * Revokes the user's OAuth authorization (clears stored tokens).
+ * DELETE /api/config/im/feishu/oauth-revoke
+ * Revokes the current OAuth authorization from the global IM config.
  */
 configRoutes.delete(
-  '/user-im/feishu/oauth-revoke',
+  '/im/feishu/oauth-revoke',
   authMiddleware,
   (c) => {
-    const user = c.get('user') as AuthUser;
-
-    clearUserFeishuOAuthTokens(user.id);
-    logger.info({ userId: user.id }, 'Feishu OAuth authorization revoked');
+    clearImFeishuOAuthTokens();
+    logger.info('Feishu OAuth authorization revoked');
 
     return c.json({ success: true });
   },
 );
 
-// ─── Telegram per-user config ─────────────────────────────────────
+// ─── Telegram IM config ───────────────────────────────────────────
 
-configRoutes.get('/user-im/telegram', authMiddleware, (c) => {
-  const user = c.get('user') as AuthUser;
+configRoutes.get('/im/telegram', authMiddleware, (c) => {
   try {
-    const config = getUserTelegramConfig(user.id);
-    const connected = deps?.isUserTelegramConnected?.(user.id) ?? false;
+    const config = getImTelegramConfig();
+    const connected = deps?.isIMTelegramConnected?.() ?? false;
     const globalConfig = getTelegramProviderConfig();
     const userProxy = config?.proxyUrl || '';
     const sysProxy = globalConfig.proxyUrl || '';
@@ -2050,13 +2036,12 @@ configRoutes.get('/user-im/telegram', authMiddleware, (c) => {
       ...proxy,
     });
   } catch (err) {
-    logger.error({ err }, 'Failed to load user Telegram config');
-    return c.json({ error: 'Failed to load user Telegram config' }, 500);
+    logger.error({ err }, 'Failed to load Telegram IM config');
+    return c.json({ error: 'Failed to load Telegram IM config' }, 500);
   }
 });
 
-configRoutes.put('/user-im/telegram', authMiddleware, async (c) => {
-  const user = c.get('user') as AuthUser;
+configRoutes.put('/im/telegram', authMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const validation = TelegramConfigSchema.safeParse(body);
   if (!validation.success) {
@@ -2066,7 +2051,7 @@ configRoutes.put('/user-im/telegram', authMiddleware, async (c) => {
     );
   }
 
-  const current = getUserTelegramConfig(user.id);
+  const current = getImTelegramConfig();
   const next = {
     botToken: current?.botToken || '',
     proxyUrl: current?.proxyUrl || '',
@@ -2092,25 +2077,21 @@ configRoutes.put('/user-im/telegram', authMiddleware, async (c) => {
   }
 
   try {
-    const saved = saveUserTelegramConfig(user.id, {
+    const saved = saveImTelegramConfig({
       botToken: next.botToken,
       proxyUrl: next.proxyUrl || undefined,
       enabled: next.enabled,
     });
 
-    // Hot-reload: reconnect user's Telegram channel
-    if (deps?.reloadUserIMConfig) {
+    if (deps?.reloadIMConfig) {
       try {
-        await deps.reloadUserIMConfig(user.id, 'telegram');
+        await deps.reloadIMConfig('telegram');
       } catch (err) {
-        logger.warn(
-          { err, userId: user.id },
-          'Failed to hot-reload user Telegram connection',
-        );
+        logger.warn({ err }, 'Failed to hot-reload Telegram connection');
       }
     }
 
-    const connected = deps?.isUserTelegramConnected?.(user.id) ?? false;
+    const connected = deps?.isIMTelegramConnected?.() ?? false;
     const userProxy = saved.proxyUrl || '';
     const sysProxy = getTelegramProviderConfig().proxyUrl || '';
     return c.json({
@@ -2122,14 +2103,13 @@ configRoutes.put('/user-im/telegram', authMiddleware, async (c) => {
   } catch (err) {
     const message =
       err instanceof Error ? err.message : 'Invalid Telegram config payload';
-    logger.warn({ err }, 'Invalid user Telegram config payload');
+    logger.warn({ err }, 'Invalid Telegram IM config payload');
     return c.json({ error: message }, 400);
   }
 });
 
-configRoutes.post('/user-im/telegram/test', authMiddleware, async (c) => {
-  const user = c.get('user') as AuthUser;
-  const config = getUserTelegramConfig(user.id);
+configRoutes.post('/im/telegram/test', authMiddleware, async (c) => {
+  const config = getImTelegramConfig();
   if (!config?.botToken) {
     return c.json({ error: 'Telegram bot token not configured' }, 400);
   }
@@ -2157,7 +2137,7 @@ configRoutes.post('/user-im/telegram/test', authMiddleware, async (c) => {
   } catch (err) {
     const message =
       err instanceof Error ? err.message : 'Failed to connect to Telegram';
-    logger.warn({ err }, 'Failed to test user Telegram connection');
+    logger.warn({ err }, 'Failed to test Telegram connection');
     return c.json({ error: message }, 400);
   } finally {
     destroyTelegramApiAgent(agent);
@@ -2165,11 +2145,11 @@ configRoutes.post('/user-im/telegram/test', authMiddleware, async (c) => {
 });
 
 configRoutes.post(
-  '/user-im/telegram/pairing-code',
+  '/im/telegram/pairing-code',
   authMiddleware,
   async (c) => {
     const user = c.get('user') as AuthUser;
-    const config = getUserTelegramConfig(user.id);
+    const config = getImTelegramConfig();
     if (!config?.botToken) {
       return c.json({ error: 'Telegram bot token not configured' }, 400);
     }
@@ -2188,7 +2168,7 @@ configRoutes.post(
 );
 
 // List Telegram paired chats for the current user
-configRoutes.get('/user-im/telegram/paired-chats', authMiddleware, (c) => {
+configRoutes.get('/im/telegram/paired-chats', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
   const groups = (deps?.getRegisteredGroups() ?? {}) as Record<
     string,
@@ -2208,7 +2188,7 @@ configRoutes.get('/user-im/telegram/paired-chats', authMiddleware, (c) => {
 
 // Remove (unpair) a Telegram chat
 configRoutes.delete(
-  '/user-im/telegram/paired-chats/:jid',
+  '/im/telegram/paired-chats/:jid',
   authMiddleware,
   (c) => {
     const user = c.get('user') as AuthUser;
@@ -2235,7 +2215,7 @@ configRoutes.delete(
   },
 );
 
-// ─── QQ User IM Config ──────────────────────────────────────────
+// ─── QQ IM Config ───────────────────────────────────────────────
 
 function maskQQAppSecret(secret: string): string | null {
   if (!secret) return null;
@@ -2243,11 +2223,10 @@ function maskQQAppSecret(secret: string): string | null {
   return secret.slice(0, 4) + '***' + secret.slice(-4);
 }
 
-configRoutes.get('/user-im/qq', authMiddleware, (c) => {
-  const user = c.get('user') as AuthUser;
+configRoutes.get('/im/qq', authMiddleware, (c) => {
   try {
-    const config = getUserQQConfig(user.id);
-    const connected = deps?.isUserQQConnected?.(user.id) ?? false;
+    const config = getImQQConfig();
+    const connected = deps?.isIMQQConnected?.() ?? false;
     if (!config) {
       return c.json({
         appId: '',
@@ -2267,13 +2246,12 @@ configRoutes.get('/user-im/qq', authMiddleware, (c) => {
       connected,
     });
   } catch (err) {
-    logger.error({ err }, 'Failed to load user QQ config');
-    return c.json({ error: 'Failed to load user QQ config' }, 500);
+    logger.error({ err }, 'Failed to load QQ IM config');
+    return c.json({ error: 'Failed to load QQ IM config' }, 500);
   }
 });
 
-configRoutes.put('/user-im/qq', authMiddleware, async (c) => {
-  const user = c.get('user') as AuthUser;
+configRoutes.put('/im/qq', authMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const validation = QQConfigSchema.safeParse(body);
   if (!validation.success) {
@@ -2283,7 +2261,7 @@ configRoutes.put('/user-im/qq', authMiddleware, async (c) => {
     );
   }
 
-  const current = getUserQQConfig(user.id);
+  const current = getImQQConfig();
   const next = {
     appId: current?.appId || '',
     appSecret: current?.appSecret || '',
@@ -2305,25 +2283,21 @@ configRoutes.put('/user-im/qq', authMiddleware, async (c) => {
   }
 
   try {
-    const saved = saveUserQQConfig(user.id, {
+    const saved = saveImQQConfig({
       appId: next.appId,
       appSecret: next.appSecret,
       enabled: next.enabled,
     });
 
-    // Hot-reload: reconnect user's QQ channel
-    if (deps?.reloadUserIMConfig) {
+    if (deps?.reloadIMConfig) {
       try {
-        await deps.reloadUserIMConfig(user.id, 'qq');
+        await deps.reloadIMConfig('qq');
       } catch (err) {
-        logger.warn(
-          { err, userId: user.id },
-          'Failed to hot-reload user QQ connection',
-        );
+        logger.warn({ err }, 'Failed to hot-reload QQ connection');
       }
     }
 
-    const connected = deps?.isUserQQConnected?.(user.id) ?? false;
+    const connected = deps?.isIMQQConnected?.() ?? false;
     return c.json({
       appId: saved.appId,
       hasAppSecret: !!saved.appSecret,
@@ -2335,14 +2309,13 @@ configRoutes.put('/user-im/qq', authMiddleware, async (c) => {
   } catch (err) {
     const message =
       err instanceof Error ? err.message : 'Invalid QQ config payload';
-    logger.warn({ err }, 'Invalid user QQ config payload');
+    logger.warn({ err }, 'Invalid QQ IM config payload');
     return c.json({ error: message }, 400);
   }
 });
 
-configRoutes.post('/user-im/qq/test', authMiddleware, async (c) => {
-  const user = c.get('user') as AuthUser;
-  const config = getUserQQConfig(user.id);
+configRoutes.post('/im/qq/test', authMiddleware, async (c) => {
+  const config = getImQQConfig();
   if (!config?.appId || !config?.appSecret) {
     return c.json({ error: 'QQ App ID and App Secret not configured' }, 400);
   }
@@ -2409,14 +2382,14 @@ configRoutes.post('/user-im/qq/test', authMiddleware, async (c) => {
   } catch (err) {
     const message =
       err instanceof Error ? err.message : 'Failed to connect to QQ';
-    logger.warn({ err }, 'Failed to test user QQ connection');
+    logger.warn({ err }, 'Failed to test QQ connection');
     return c.json({ error: message }, 400);
   }
 });
 
-configRoutes.post('/user-im/qq/pairing-code', authMiddleware, async (c) => {
+configRoutes.post('/im/qq/pairing-code', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
-  const config = getUserQQConfig(user.id);
+  const config = getImQQConfig();
   if (!config?.appId || !config?.appSecret) {
     return c.json({ error: 'QQ App ID and App Secret not configured' }, 400);
   }
@@ -2434,7 +2407,7 @@ configRoutes.post('/user-im/qq/pairing-code', authMiddleware, async (c) => {
 });
 
 // List QQ paired chats for the current user
-configRoutes.get('/user-im/qq/paired-chats', authMiddleware, (c) => {
+configRoutes.get('/im/qq/paired-chats', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
   const groups = (deps?.getRegisteredGroups() ?? {}) as Record<
     string,
@@ -2450,7 +2423,7 @@ configRoutes.get('/user-im/qq/paired-chats', authMiddleware, (c) => {
 });
 
 // Remove (unpair) a QQ chat
-configRoutes.delete('/user-im/qq/paired-chats/:jid', authMiddleware, (c) => {
+configRoutes.delete('/im/qq/paired-chats/:jid', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
   const jid = decodeURIComponent(c.req.param('jid'));
 
@@ -2474,34 +2447,30 @@ configRoutes.delete('/user-im/qq/paired-chats/:jid', authMiddleware, (c) => {
   return c.json({ success: true });
 });
 
-// ─── User IM Preferences ────────────────────────────────────────
+// ─── Global IM Preferences ──────────────────────────────────────
 
-configRoutes.get('/user-im/preferences', authMiddleware, (c) => {
-  const user = c.get('user') as AuthUser;
-  const prefs = getUserIMPreferences(user.id);
+configRoutes.get('/im/preferences', authMiddleware, (c) => {
+  const prefs = getImPreferences();
   return c.json(prefs);
 });
 
-configRoutes.put('/user-im/preferences', authMiddleware, async (c) => {
-  const user = c.get('user') as AuthUser;
+configRoutes.put('/im/preferences', authMiddleware, async (c) => {
   const body = UserIMPreferencesSchema.parse(await c.req.json());
-  const saved = saveUserIMPreferences(user.id, {
+  const saved = saveImPreferences({
     ...body,
     autoCreateExecutionMode: body.autoCreateExecutionMode,
   });
   return c.json(saved);
 });
 
-// ─── Per-user IM general settings ────────────────────────────────
+// ─── Global IM general settings ──────────────────────────────────
 
-configRoutes.get('/user-im/general', authMiddleware, (c) => {
-  const user = c.get('user') as AuthUser;
-  const config = getUserImGeneralConfig(user.id);
+configRoutes.get('/im/general', authMiddleware, (c) => {
+  const config = getImGeneralConfig();
   return c.json(config);
 });
 
-configRoutes.put('/user-im/general', authMiddleware, async (c) => {
-  const user = c.get('user') as AuthUser;
+configRoutes.put('/im/general', authMiddleware, async (c) => {
   const body = await c.req.json();
   const parsed = ImGeneralConfigSchema.safeParse(body);
   if (!parsed.success) {
@@ -2510,12 +2479,12 @@ configRoutes.put('/user-im/general', authMiddleware, async (c) => {
       400,
     );
   }
-  const saved = saveUserImGeneralConfig(user.id, parsed.data);
+  const saved = saveImGeneralConfig(parsed.data);
   return c.json(saved);
 });
 
 
-// ─── Per-user WeChat IM config ──────────────────────────────────
+// ─── WeChat IM config ───────────────────────────────────────────
 
 const WECHAT_API_BASE = 'https://ilinkai.weixin.qq.com';
 const WECHAT_QR_BOT_TYPE = '3';
@@ -2531,11 +2500,10 @@ function maskBotToken(token: string | undefined): string | null {
   return token.slice(0, 4) + '***' + token.slice(-4);
 }
 
-configRoutes.get('/user-im/wechat', authMiddleware, (c) => {
-  const user = c.get('user') as AuthUser;
+configRoutes.get('/im/wechat', authMiddleware, (c) => {
   try {
-    const config = getUserWeChatConfig(user.id);
-    const connected = deps?.isUserWeChatConnected?.(user.id) ?? false;
+    const config = getImWeChatConfig();
+    const connected = deps?.isIMWeChatConnected?.() ?? false;
     if (!config) {
       return c.json({
         ilinkBotId: '',
@@ -2555,13 +2523,12 @@ configRoutes.get('/user-im/wechat', authMiddleware, (c) => {
       connected,
     });
   } catch (err) {
-    logger.error({ err }, 'Failed to load user WeChat config');
-    return c.json({ error: 'Failed to load user WeChat config' }, 500);
+    logger.error({ err }, 'Failed to load WeChat IM config');
+    return c.json({ error: 'Failed to load WeChat IM config' }, 500);
   }
 });
 
-configRoutes.put('/user-im/wechat', authMiddleware, async (c) => {
-  const user = c.get('user') as AuthUser;
+configRoutes.put('/im/wechat', authMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const validation = WeChatConfigSchema.safeParse(body);
   if (!validation.success) {
@@ -2571,7 +2538,7 @@ configRoutes.put('/user-im/wechat', authMiddleware, async (c) => {
     );
   }
 
-  const current = getUserWeChatConfig(user.id);
+  const current = getImWeChatConfig();
   const next = {
     botToken: current?.botToken || '',
     ilinkBotId: current?.ilinkBotId || '',
@@ -2590,21 +2557,17 @@ configRoutes.put('/user-im/wechat', authMiddleware, async (c) => {
   }
 
   try {
-    const saved = saveUserWeChatConfig(user.id, next);
+    const saved = saveImWeChatConfig(next);
 
-    // Hot-reload: reconnect user's WeChat channel
-    if (deps?.reloadUserIMConfig) {
+    if (deps?.reloadIMConfig) {
       try {
-        await deps.reloadUserIMConfig(user.id, 'wechat');
+        await deps.reloadIMConfig('wechat');
       } catch (err) {
-        logger.warn(
-          { err, userId: user.id },
-          'Failed to hot-reload user WeChat connection',
-        );
+        logger.warn({ err }, 'Failed to hot-reload WeChat connection');
       }
     }
 
-    const connected = deps?.isUserWeChatConnected?.(user.id) ?? false;
+    const connected = deps?.isIMWeChatConnected?.() ?? false;
     return c.json({
       ilinkBotId: saved.ilinkBotId || '',
       hasBotToken: !!saved.botToken,
@@ -2616,13 +2579,13 @@ configRoutes.put('/user-im/wechat', authMiddleware, async (c) => {
   } catch (err) {
     const message =
       err instanceof Error ? err.message : 'Invalid WeChat config payload';
-    logger.warn({ err }, 'Invalid user WeChat config payload');
+    logger.warn({ err }, 'Invalid WeChat IM config payload');
     return c.json({ error: message }, 400);
   }
 });
 
 // Generate QR code for WeChat iLink login
-configRoutes.post('/user-im/wechat/qrcode', authMiddleware, async (c) => {
+configRoutes.post('/im/wechat/qrcode', authMiddleware, async (c) => {
   try {
     const url = `${WECHAT_API_BASE}/ilink/bot/get_bot_qrcode?bot_type=${encodeURIComponent(WECHAT_QR_BOT_TYPE)}`;
     const res = await fetch(url);
@@ -2674,10 +2637,9 @@ configRoutes.post('/user-im/wechat/qrcode', authMiddleware, async (c) => {
 
 // Poll QR code scan status
 configRoutes.get(
-  '/user-im/wechat/qrcode-status',
+  '/im/wechat/qrcode-status',
   authMiddleware,
   async (c) => {
-    const user = c.get('user') as AuthUser;
     const qrcode = c.req.query('qrcode');
     if (!qrcode) {
       return c.json({ error: 'qrcode query parameter required' }, 400);
@@ -2723,7 +2685,7 @@ configRoutes.get(
 
       if (data.status === 'confirmed' && data.bot_token && data.ilink_bot_id) {
         // Auto-save credentials and connect
-        const saved = saveUserWeChatConfig(user.id, {
+        const saved = saveImWeChatConfig({
           botToken: data.bot_token,
           ilinkBotId: data.ilink_bot_id.replace(/[^a-zA-Z0-9@._-]/g, ''),
           baseUrl: data.baseurl || undefined,
@@ -2736,14 +2698,11 @@ configRoutes.get(
         // This ensures proper group registration via buildOnNewChat/registerGroup.
 
         // Hot-reload: connect WeChat
-        if (deps?.reloadUserIMConfig) {
+        if (deps?.reloadIMConfig) {
           try {
-            await deps.reloadUserIMConfig(user.id, 'wechat');
+            await deps.reloadIMConfig('wechat');
           } catch (err) {
-            logger.warn(
-              { err, userId: user.id },
-              'Failed to hot-reload WeChat after QR login',
-            );
+            logger.warn({ err }, 'Failed to hot-reload WeChat after QR login');
           }
         }
 
@@ -2766,12 +2725,11 @@ configRoutes.get(
 );
 
 // Disconnect WeChat and clear token
-configRoutes.post('/user-im/wechat/disconnect', authMiddleware, async (c) => {
-  const user = c.get('user') as AuthUser;
+configRoutes.post('/im/wechat/disconnect', authMiddleware, async (c) => {
   try {
-    const current = getUserWeChatConfig(user.id);
+    const current = getImWeChatConfig();
     if (current) {
-      saveUserWeChatConfig(user.id, {
+      saveImWeChatConfig({
         botToken: '',
         ilinkBotId: '',
         enabled: false,
@@ -2780,14 +2738,11 @@ configRoutes.post('/user-im/wechat/disconnect', authMiddleware, async (c) => {
     }
 
     // Disconnect
-    if (deps?.reloadUserIMConfig) {
+    if (deps?.reloadIMConfig) {
       try {
-        await deps.reloadUserIMConfig(user.id, 'wechat');
+        await deps.reloadIMConfig('wechat');
       } catch (err) {
-        logger.warn(
-          { err, userId: user.id },
-          'Failed to disconnect WeChat',
-        );
+        logger.warn({ err }, 'Failed to disconnect WeChat');
       }
     }
 
@@ -2802,7 +2757,7 @@ configRoutes.post('/user-im/wechat/disconnect', authMiddleware, async (c) => {
 
 // ─── IM Binding management (bindings panoramic page) ────────────
 
-configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
+configRoutes.put('/im/bindings/:imJid', authMiddleware, async (c) => {
   const imJid = decodeURIComponent(c.req.param('imJid'));
   const user = c.get('user') as AuthUser;
 

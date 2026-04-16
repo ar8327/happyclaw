@@ -2516,7 +2516,18 @@ export function saveAppearanceConfig(
 
 // ─── Per-user IM config (AES-256-GCM encrypted) ─────────────────
 
-const USER_IM_CONFIG_DIR = path.join(DATA_DIR, 'config', 'user-im');
+const LEGACY_USER_IM_CONFIG_DIR = path.join(DATA_DIR, 'config', 'user-im');
+const GLOBAL_IM_CONFIG_DIR = path.join(DATA_DIR, 'config', 'im');
+const LEGACY_IM_CONFIG_FILES = [
+  'feishu.json',
+  'telegram.json',
+  'qq.json',
+  'wechat.json',
+  'general.json',
+  'preferences.json',
+] as const;
+
+let legacyUserImConfigMigrated = false;
 
 export interface UserFeishuConfig {
   appId: string;
@@ -2565,15 +2576,107 @@ interface QQSecretPayload {
   appSecret: string;
 }
 
-function userImDir(userId: string): string {
-  if (!/^[a-zA-Z0-9_-]+$/.test(userId)) {
-    throw new Error('Invalid userId');
-  }
-  return path.join(USER_IM_CONFIG_DIR, userId);
+function globalImDir(): string {
+  return GLOBAL_IM_CONFIG_DIR;
 }
 
-export function getUserFeishuConfig(userId: string): UserFeishuConfig | null {
-  const filePath = path.join(userImDir(userId), 'feishu.json');
+function globalImFile(fileName: (typeof LEGACY_IM_CONFIG_FILES)[number]): string {
+  return path.join(globalImDir(), fileName);
+}
+
+function movePathWithFallback(src: string, dst: string): void {
+  try {
+    fs.renameSync(src, dst);
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'EXDEV') {
+      fs.cpSync(src, dst, { recursive: true });
+      fs.rmSync(src, { recursive: true, force: true });
+      return;
+    }
+    throw err;
+  }
+}
+
+function cleanupLegacyImDir(dir: string): void {
+  try {
+    const entries = fs.readdirSync(dir);
+    if (entries.length === 0) {
+      fs.rmdirSync(dir);
+    }
+  } catch {
+    // ignore cleanup failures
+  }
+}
+
+export function migrateLegacyUserImConfigToGlobal(): void {
+  if (legacyUserImConfigMigrated) return;
+  legacyUserImConfigMigrated = true;
+
+  if (!fs.existsSync(LEGACY_USER_IM_CONFIG_DIR)) return;
+
+  try {
+    const userDirs = fs
+      .readdirSync(LEGACY_USER_IM_CONFIG_DIR, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort();
+    if (userDirs.length === 0) {
+      cleanupLegacyImDir(LEGACY_USER_IM_CONFIG_DIR);
+      return;
+    }
+
+    fs.mkdirSync(GLOBAL_IM_CONFIG_DIR, { recursive: true });
+
+    const migrated: string[] = [];
+    const skipped = new Map<string, string[]>();
+
+    for (const fileName of LEGACY_IM_CONFIG_FILES) {
+      const target = globalImFile(fileName);
+      if (fs.existsSync(target)) {
+        for (const userId of userDirs) {
+          const source = path.join(LEGACY_USER_IM_CONFIG_DIR, userId, fileName);
+          if (fs.existsSync(source)) {
+            skipped.set(fileName, [...(skipped.get(fileName) ?? []), userId]);
+          }
+        }
+        continue;
+      }
+
+      for (const userId of userDirs) {
+        const source = path.join(LEGACY_USER_IM_CONFIG_DIR, userId, fileName);
+        if (!fs.existsSync(source)) continue;
+        movePathWithFallback(source, target);
+        migrated.push(`${userId}/${fileName}`);
+        break;
+      }
+    }
+
+    for (const userId of userDirs) {
+      cleanupLegacyImDir(path.join(LEGACY_USER_IM_CONFIG_DIR, userId));
+    }
+    cleanupLegacyImDir(LEGACY_USER_IM_CONFIG_DIR);
+
+    if (migrated.length > 0) {
+      logger.info(
+        { migrated, targetDir: GLOBAL_IM_CONFIG_DIR },
+        'Migrated legacy user IM config to global IM config',
+      );
+    }
+    if (skipped.size > 0) {
+      logger.warn(
+        { skipped: Object.fromEntries(skipped), targetDir: GLOBAL_IM_CONFIG_DIR },
+        'Skipped legacy IM config files because global IM config already exists',
+      );
+    }
+  } catch (err) {
+    legacyUserImConfigMigrated = false;
+    logger.warn({ err }, 'Failed to migrate legacy user IM config');
+  }
+}
+
+export function getImFeishuConfig(): UserFeishuConfig | null {
+  migrateLegacyUserImConfigToGlobal();
+  const filePath = globalImFile('feishu.json');
   try {
     if (!fs.existsSync(filePath)) return null;
     const content = fs.readFileSync(filePath, 'utf-8');
@@ -2592,15 +2695,15 @@ export function getUserFeishuConfig(userId: string): UserFeishuConfig | null {
       imCommentary: stored.imCommentary ?? false,
     };
   } catch (err) {
-    logger.warn({ err, userId }, 'Failed to read user Feishu config');
+    logger.warn({ err }, 'Failed to read global Feishu IM config');
     return null;
   }
 }
 
-export function saveUserFeishuConfig(
-  userId: string,
+export function saveImFeishuConfig(
   next: Omit<UserFeishuConfig, 'updatedAt'>,
 ): UserFeishuConfig {
+  migrateLegacyUserImConfigToGlobal();
   const normalized: UserFeishuConfig = {
     appId: normalizeFeishuAppId(next.appId),
     appSecret: normalizeSecret(next.appSecret, 'appSecret'),
@@ -2612,7 +2715,7 @@ export function saveUserFeishuConfig(
   };
 
   // Preserve existing OAuth tokens when saving IM config
-  const existing = readRawFeishuConfig(userId);
+  const existing = readRawFeishuConfig();
 
   const payload: StoredFeishuProviderConfigV1 = {
     version: 1,
@@ -2629,15 +2732,14 @@ export function saveUserFeishuConfig(
       : {}),
   };
 
-  writeFeishuConfigFile(userId, payload);
+  writeFeishuConfigFile(payload);
   return normalized;
 }
 
 /** Read the raw stored config without decryption (for preserving fields). */
-function readRawFeishuConfig(
-  userId: string,
-): StoredFeishuProviderConfigV1 | null {
-  const filePath = path.join(userImDir(userId), 'feishu.json');
+function readRawFeishuConfig(): StoredFeishuProviderConfigV1 | null {
+  migrateLegacyUserImConfigToGlobal();
+  const filePath = globalImFile('feishu.json');
   try {
     if (!fs.existsSync(filePath)) return null;
     const content = fs.readFileSync(filePath, 'utf-8');
@@ -2650,11 +2752,8 @@ function readRawFeishuConfig(
 }
 
 /** Atomic write of feishu.json. */
-function writeFeishuConfigFile(
-  userId: string,
-  payload: StoredFeishuProviderConfigV1,
-): void {
-  const dir = userImDir(userId);
+function writeFeishuConfigFile(payload: StoredFeishuProviderConfigV1): void {
+  const dir = globalImDir();
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, 'feishu.json');
   const tmp = `${filePath}.tmp`;
@@ -2705,11 +2804,9 @@ function decryptFeishuOAuthSecret(
   };
 }
 
-/** Read OAuth tokens for a user. Returns null if not authorized. */
-export function getUserFeishuOAuthTokens(
-  userId: string,
-): UserFeishuOAuthTokens | null {
-  const stored = readRawFeishuConfig(userId);
+/** Read OAuth tokens for the global Feishu IM config. Returns null if not authorized. */
+export function getImFeishuOAuthTokens(): UserFeishuOAuthTokens | null {
+  const stored = readRawFeishuConfig();
   if (!stored?.oauthSecret) return null;
 
   try {
@@ -2721,17 +2818,17 @@ export function getUserFeishuOAuthTokens(
       authorizedAt: stored.oauthAuthorizedAt || null,
     } as UserFeishuOAuthTokens;
   } catch (err) {
-    logger.warn({ err, userId }, 'Failed to decrypt Feishu OAuth tokens');
+    logger.warn({ err }, 'Failed to decrypt Feishu OAuth tokens');
     return null;
   }
 }
 
-/** Save OAuth tokens for a user (preserves existing IM config). */
-export function saveUserFeishuOAuthTokens(
-  userId: string,
+/** Save OAuth tokens for the global Feishu IM config. */
+export function saveImFeishuOAuthTokens(
   tokens: Omit<UserFeishuOAuthTokens, 'authorizedAt'>,
 ): void {
-  const existing = readRawFeishuConfig(userId);
+  migrateLegacyUserImConfigToGlobal();
+  const existing = readRawFeishuConfig();
 
   if (!existing) {
     // No existing config — create minimal config with just OAuth
@@ -2744,7 +2841,7 @@ export function saveUserFeishuOAuthTokens(
       oauthSecret: encryptFeishuOAuthSecret(tokens),
       oauthAuthorizedAt: new Date().toISOString(),
     };
-    writeFeishuConfigFile(userId, payload);
+    writeFeishuConfigFile(payload);
     return;
   }
 
@@ -2754,24 +2851,23 @@ export function saveUserFeishuOAuthTokens(
     existing.oauthAuthorizedAt = new Date().toISOString();
   }
   existing.updatedAt = new Date().toISOString();
-  writeFeishuConfigFile(userId, existing);
+  writeFeishuConfigFile(existing);
 }
 
-/** Clear OAuth tokens for a user (preserves IM config). */
-export function clearUserFeishuOAuthTokens(userId: string): void {
-  const existing = readRawFeishuConfig(userId);
+/** Clear OAuth tokens for the global Feishu IM config. */
+export function clearImFeishuOAuthTokens(): void {
+  const existing = readRawFeishuConfig();
   if (!existing) return;
 
   delete existing.oauthSecret;
   delete existing.oauthAuthorizedAt;
   existing.updatedAt = new Date().toISOString();
-  writeFeishuConfigFile(userId, existing);
+  writeFeishuConfigFile(existing);
 }
 
-export function getUserTelegramConfig(
-  userId: string,
-): UserTelegramConfig | null {
-  const filePath = path.join(userImDir(userId), 'telegram.json');
+export function getImTelegramConfig(): UserTelegramConfig | null {
+  migrateLegacyUserImConfigToGlobal();
+  const filePath = globalImFile('telegram.json');
   try {
     if (!fs.existsSync(filePath)) return null;
     const content = fs.readFileSync(filePath, 'utf-8');
@@ -2787,15 +2883,15 @@ export function getUserTelegramConfig(
       updatedAt: stored.updatedAt || null,
     };
   } catch (err) {
-    logger.warn({ err, userId }, 'Failed to read user Telegram config');
+    logger.warn({ err }, 'Failed to read global Telegram IM config');
     return null;
   }
 }
 
-export function saveUserTelegramConfig(
-  userId: string,
+export function saveImTelegramConfig(
   next: Omit<UserTelegramConfig, 'updatedAt'>,
 ): UserTelegramConfig {
+  migrateLegacyUserImConfigToGlobal();
   const normalizedProxyUrl = next.proxyUrl
     ? normalizeTelegramProxyUrl(next.proxyUrl)
     : '';
@@ -2814,7 +2910,7 @@ export function saveUserTelegramConfig(
     secret: encryptTelegramSecret({ botToken: normalized.botToken }),
   };
 
-  const dir = userImDir(userId);
+  const dir = globalImDir();
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, 'telegram.json');
   const tmp = `${filePath}.tmp`;
@@ -2860,8 +2956,9 @@ function decryptQQSecret(secrets: EncryptedSecrets): QQSecretPayload {
   };
 }
 
-export function getUserQQConfig(userId: string): UserQQConfig | null {
-  const filePath = path.join(userImDir(userId), 'qq.json');
+export function getImQQConfig(): UserQQConfig | null {
+  migrateLegacyUserImConfigToGlobal();
+  const filePath = globalImFile('qq.json');
   try {
     if (!fs.existsSync(filePath)) return null;
     const content = fs.readFileSync(filePath, 'utf-8');
@@ -2877,15 +2974,15 @@ export function getUserQQConfig(userId: string): UserQQConfig | null {
       updatedAt: stored.updatedAt || null,
     };
   } catch (err) {
-    logger.warn({ err, userId }, 'Failed to read user QQ config');
+    logger.warn({ err }, 'Failed to read global QQ IM config');
     return null;
   }
 }
 
-export function saveUserQQConfig(
-  userId: string,
+export function saveImQQConfig(
   next: Omit<UserQQConfig, 'updatedAt'>,
 ): UserQQConfig {
+  migrateLegacyUserImConfigToGlobal();
   const normalized: UserQQConfig = {
     appId: normalizeFeishuAppId(next.appId),
     appSecret: normalizeSecret(next.appSecret, 'appSecret'),
@@ -2901,7 +2998,7 @@ export function saveUserQQConfig(
     secret: encryptQQSecret({ appSecret: normalized.appSecret }),
   };
 
-  const dir = userImDir(userId);
+  const dir = globalImDir();
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, 'qq.json');
   const tmp = `${filePath}.tmp`;
@@ -2917,10 +3014,9 @@ export interface UserImGeneralConfig {
   updatedAt: string | null;
 }
 
-export function getUserImGeneralConfig(
-  userId: string,
-): UserImGeneralConfig {
-  const filePath = path.join(userImDir(userId), 'general.json');
+export function getImGeneralConfig(): UserImGeneralConfig {
+  migrateLegacyUserImConfigToGlobal();
+  const filePath = globalImFile('general.json');
   try {
     if (!fs.existsSync(filePath)) {
       return { autoUnbindOnSendFailure: true, updatedAt: null };
@@ -2933,20 +3029,20 @@ export function getUserImGeneralConfig(
         typeof parsed.updatedAt === 'string' ? parsed.updatedAt : null,
     };
   } catch (err) {
-    logger.warn({ err, userId }, 'Failed to read user IM general config');
+    logger.warn({ err }, 'Failed to read global IM general config');
     return { autoUnbindOnSendFailure: true, updatedAt: null };
   }
 }
 
-export function saveUserImGeneralConfig(
-  userId: string,
+export function saveImGeneralConfig(
   next: Omit<UserImGeneralConfig, 'updatedAt'>,
 ): UserImGeneralConfig {
+  migrateLegacyUserImConfigToGlobal();
   const config: UserImGeneralConfig = {
     autoUnbindOnSendFailure: next.autoUnbindOnSendFailure,
     updatedAt: new Date().toISOString(),
   };
-  const dir = userImDir(userId);
+  const dir = globalImDir();
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, 'general.json');
   const tmp = `${filePath}.tmp`;
@@ -3017,8 +3113,9 @@ function decryptWeChatSecret(secrets: EncryptedSecrets): WeChatSecretPayload {
   };
 }
 
-export function getUserWeChatConfig(userId: string): UserWeChatConfig | null {
-  const filePath = path.join(userImDir(userId), 'wechat.json');
+export function getImWeChatConfig(): UserWeChatConfig | null {
+  migrateLegacyUserImConfigToGlobal();
+  const filePath = globalImFile('wechat.json');
   try {
     if (!fs.existsSync(filePath)) return null;
     const content = fs.readFileSync(filePath, 'utf-8');
@@ -3037,15 +3134,15 @@ export function getUserWeChatConfig(userId: string): UserWeChatConfig | null {
       updatedAt: stored.updatedAt || null,
     };
   } catch (err) {
-    logger.warn({ err, userId }, 'Failed to read user WeChat config');
+    logger.warn({ err }, 'Failed to read global WeChat IM config');
     return null;
   }
 }
 
-export function saveUserWeChatConfig(
-  userId: string,
+export function saveImWeChatConfig(
   next: Omit<UserWeChatConfig, 'updatedAt'>,
 ): UserWeChatConfig {
+  migrateLegacyUserImConfigToGlobal();
   const normalized: UserWeChatConfig = {
     botToken: normalizeSecret(next.botToken, 'botToken'),
     ilinkBotId: (next.ilinkBotId ?? '').trim(),
@@ -3067,7 +3164,7 @@ export function saveUserWeChatConfig(
     secret: encryptWeChatSecret({ botToken: normalized.botToken }),
   };
 
-  const dir = userImDir(userId);
+  const dir = globalImDir();
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, 'wechat.json');
   const tmp = `${filePath}.tmp`;
@@ -3467,8 +3564,9 @@ export interface UserIMPreferences {
   autoCreateExecutionMode?: 'local';
 }
 
-export function getUserIMPreferences(userId: string): UserIMPreferences {
-  const filePath = path.join(userImDir(userId), 'preferences.json');
+export function getImPreferences(): UserIMPreferences {
+  migrateLegacyUserImConfigToGlobal();
+  const filePath = globalImFile('preferences.json');
   try {
     if (!fs.existsSync(filePath)) return {};
     const content = fs.readFileSync(filePath, 'utf-8');
@@ -3482,20 +3580,20 @@ export function getUserIMPreferences(userId: string): UserIMPreferences {
         parsed.autoCreateExecutionMode !== undefined ? 'local' : undefined,
     };
   } catch (err) {
-    logger.warn({ err, userId }, 'Failed to read user IM preferences');
+    logger.warn({ err }, 'Failed to read global IM preferences');
     return {};
   }
 }
 
-export function saveUserIMPreferences(
-  userId: string,
+export function saveImPreferences(
   prefs: UserIMPreferences,
 ): UserIMPreferences {
-  const dir = userImDir(userId);
+  migrateLegacyUserImConfigToGlobal();
+  const dir = globalImDir();
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, 'preferences.json');
   const merged: UserIMPreferences = {
-    ...getUserIMPreferences(userId),
+    ...getImPreferences(),
     ...prefs,
   };
   fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), 'utf-8');

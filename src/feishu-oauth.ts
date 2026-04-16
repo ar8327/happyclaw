@@ -5,15 +5,15 @@
  * using the Feishu Open Platform API.
  *
  * This module is independent from feishu.ts (which handles IM connections).
- * OAuth tokens are stored in the existing per-user IM config infrastructure.
+ * OAuth tokens are stored in the global IM config file.
  */
 
 import crypto from 'crypto';
 import { logger } from './logger.js';
 import {
-  getUserFeishuOAuthTokens,
-  saveUserFeishuOAuthTokens,
-  getUserFeishuConfig,
+  getImFeishuOAuthTokens,
+  saveImFeishuOAuthTokens,
+  getImFeishuConfig,
   getSystemSettings,
 } from './runtime-config.js';
 
@@ -37,15 +37,19 @@ export interface WikiNode {
 // ─── OAuth State Management (in-memory, 10-min expiry) ──────────────
 
 interface OAuthStateEntry {
-  userId: string;
+  sessionHash: string;
   createdAt: number;
 }
 
 const oauthStates = new Map<string, OAuthStateEntry>();
 const STATE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
-/** Generate a new OAuth state token and store it. */
-export function createOAuthState(userId: string): string {
+function hashSessionToken(sessionToken: string): string {
+  return crypto.createHash('sha256').update(sessionToken).digest('hex');
+}
+
+/** Generate a new OAuth state token and bind it to the current auth session. */
+export function createOAuthState(sessionToken: string): string {
   // Cleanup expired states
   const now = Date.now();
   for (const [key, entry] of oauthStates) {
@@ -55,28 +59,35 @@ export function createOAuthState(userId: string): string {
   }
 
   const state = crypto.randomBytes(32).toString('hex');
-  oauthStates.set(state, { userId, createdAt: now });
+  oauthStates.set(state, {
+    sessionHash: hashSessionToken(sessionToken),
+    createdAt: now,
+  });
   return state;
 }
 
-/** Validate and consume an OAuth state token. Returns userId if valid.
- *  When expectedUserId is provided, only consumes the token if it matches —
- *  prevents a mismatched request from destroying a legitimate user's state. */
-export function consumeOAuthState(state: string, expectedUserId?: string): string | null {
+/** Validate and consume an OAuth state token for the current auth session. */
+export function consumeOAuthState(
+  state: string,
+  expectedSessionToken?: string,
+): boolean {
   const entry = oauthStates.get(state);
-  if (!entry) return null;
+  if (!entry) return false;
 
   if (Date.now() - entry.createdAt > STATE_TTL_MS) {
     oauthStates.delete(state); // expired — safe to clean up
-    return null;
+    return false;
   }
 
-  if (expectedUserId && entry.userId !== expectedUserId) {
-    return null; // mismatch — don't consume
+  if (
+    expectedSessionToken
+    && entry.sessionHash !== hashSessionToken(expectedSessionToken)
+  ) {
+    return false; // mismatch — don't consume
   }
 
   oauthStates.delete(state);
-  return entry.userId;
+  return true;
 }
 
 // ─── OAuth URLs & Token Exchange ────────────────────────────────────
@@ -220,9 +231,9 @@ export async function refreshAccessToken(
  * Returns null if the user has not authorized OAuth.
  */
 export async function getValidAccessToken(
-  userId: string,
+  _sessionScope?: string,
 ): Promise<string | null> {
-  const tokens = getUserFeishuOAuthTokens(userId);
+  const tokens = getImFeishuOAuthTokens();
   if (!tokens || !tokens.accessToken) return null;
 
   // Token still valid (with 5-min buffer)
@@ -232,13 +243,13 @@ export async function getValidAccessToken(
 
   // Need to refresh
   if (!tokens.refreshToken) {
-    logger.warn({ userId }, 'Feishu OAuth: token expired and no refresh token');
+    logger.warn('Feishu OAuth: token expired and no refresh token');
     return null;
   }
 
-  const config = getUserFeishuConfig(userId);
+  const config = getImFeishuConfig();
   if (!config?.appId || !config?.appSecret) {
-    logger.warn({ userId }, 'Feishu OAuth: cannot refresh, missing app credentials');
+    logger.warn('Feishu OAuth: cannot refresh, missing app credentials');
     return null;
   }
 
@@ -250,17 +261,17 @@ export async function getValidAccessToken(
     );
 
     // Save the new tokens
-    saveUserFeishuOAuthTokens(userId, {
+    saveImFeishuOAuthTokens({
       accessToken: newTokens.accessToken,
       refreshToken: newTokens.refreshToken,
       expiresAt: newTokens.expiresAt,
       scopes: newTokens.scopes,
     });
 
-    logger.info({ userId }, 'Feishu OAuth: token refreshed successfully');
+    logger.info('Feishu OAuth: token refreshed successfully');
     return newTokens.accessToken;
   } catch (err) {
-    logger.error({ err, userId }, 'Feishu OAuth: token refresh failed');
+    logger.error({ err }, 'Feishu OAuth: token refresh failed');
     return null;
   }
 }

@@ -102,7 +102,7 @@ export function FeishuChannelCard({ setNotice, setError }: FeishuChannelCardProp
   const loadConfig = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await api.get<UserFeishuConfig>('/api/config/user-im/feishu');
+      const data = await api.get<UserFeishuConfig>('/api/config/im/feishu');
       setConfig(data);
       setAppId(data.appId || '');
       setAppSecret('');
@@ -115,7 +115,7 @@ export function FeishuChannelCard({ setNotice, setError }: FeishuChannelCardProp
 
   const loadOAuthStatus = useCallback(async () => {
     try {
-      const data = await api.get<OAuthStatus>('/api/config/user-im/feishu/oauth-status');
+      const data = await api.get<OAuthStatus>('/api/config/im/feishu/oauth-status');
       setOauthStatus(data);
     } catch {
       setOauthStatus(null);
@@ -146,7 +146,7 @@ export function FeishuChannelCard({ setNotice, setError }: FeishuChannelCardProp
     setOauthLoading(true);
     setError(null);
     try {
-      const data = await api.get<{ url: string }>('/api/config/user-im/feishu/oauth-url');
+      const data = await api.get<{ url: string }>('/api/config/im/feishu/oauth-url');
       // Open Feishu OAuth page
       window.location.href = data.url;
     } catch (err) {
@@ -159,7 +159,7 @@ export function FeishuChannelCard({ setNotice, setError }: FeishuChannelCardProp
     setOauthLoading(true);
     setError(null);
     try {
-      await api.delete('/api/config/user-im/feishu/oauth-revoke');
+      await api.delete('/api/config/im/feishu/oauth-revoke');
       setOauthStatus({ authorized: false, hasAppCredentials: oauthStatus?.hasAppCredentials ?? false });
       setNotice('已撤销飞书文档授权');
     } catch (err) {
@@ -174,7 +174,7 @@ export function FeishuChannelCard({ setNotice, setError }: FeishuChannelCardProp
     setNotice(null);
     setError(null);
     try {
-      const data = await api.put<UserFeishuConfig>('/api/config/user-im/feishu', { enabled: newEnabled });
+      const data = await api.put<UserFeishuConfig>('/api/config/im/feishu', { enabled: newEnabled });
       setConfig(data);
       setNotice(`飞书渠道已${newEnabled ? '启用' : '停用'}`);
     } catch (err) {
@@ -211,7 +211,7 @@ export function FeishuChannelCard({ setNotice, setError }: FeishuChannelCardProp
       const payload: Record<string, string | boolean> = { enabled: true };
       if (id) payload.appId = id;
       if (secret) payload.appSecret = secret;
-      const data = await api.put<UserFeishuConfig>('/api/config/user-im/feishu', payload);
+      const data = await api.put<UserFeishuConfig>('/api/config/im/feishu', payload);
       setConfig(data);
       setAppSecret('');
       setNotice('飞书配置已保存');
@@ -352,7 +352,7 @@ export function FeishuChannelCard({ setNotice, setError }: FeishuChannelCardProp
                     setNotice(null);
                     setError(null);
                     try {
-                      const data = await api.put<UserFeishuConfig>('/api/config/user-im/feishu', {
+                      const data = await api.put<UserFeishuConfig>('/api/config/im/feishu', {
                         replyThreadingMode: v ? 'agent' : 'auto',
                       });
                       setConfig(data);
@@ -385,7 +385,7 @@ export function FeishuChannelCard({ setNotice, setError }: FeishuChannelCardProp
                     setNotice(null);
                     setError(null);
                     try {
-                      const data = await api.put<UserFeishuConfig>('/api/config/user-im/feishu', {
+                      const data = await api.put<UserFeishuConfig>('/api/config/im/feishu', {
                         streamingCard: v,
                       });
                       setConfig(data);
@@ -416,7 +416,7 @@ export function FeishuChannelCard({ setNotice, setError }: FeishuChannelCardProp
                     setNotice(null);
                     setError(null);
                     try {
-                      const data = await api.put<UserFeishuConfig>('/api/config/user-im/feishu', {
+                      const data = await api.put<UserFeishuConfig>('/api/config/im/feishu', {
                         imCommentary: v,
                       });
                       setConfig(data);
