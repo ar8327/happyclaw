@@ -69,7 +69,9 @@ memoryAgentRoutes.post('/query', async (c) => {
     // Resolve channel label from chatJid if provided
     let channelLabel: string | undefined;
     const chatJid = body.chatJid as string | undefined;
-    const groupFolder = body.groupFolder as string | undefined;
+    const workspaceFolder =
+      (body.workspaceFolder as string | undefined)
+      || (body.groupFolder as string | undefined);
     if (chatJid) {
       const names = getChatNamesByJids([chatJid]);
       channelLabel = resolveChannelLabel(chatJid, names.get(chatJid));
@@ -79,7 +81,7 @@ memoryAgentRoutes.post('/query', async (c) => {
       query: body.query,
       context: body.context as string | undefined,
       chatJid,
-      groupFolder,
+      workspaceFolder,
       channelLabel,
     });
 
@@ -134,7 +136,9 @@ memoryAgentRoutes.post('/remember', async (c) => {
     // Resolve channel label from chatJid if provided
     let channelLabel: string | undefined;
     const chatJid = body.chatJid as string | undefined;
-    const groupFolder = body.groupFolder as string | undefined;
+    const workspaceFolder =
+      (body.workspaceFolder as string | undefined)
+      || (body.groupFolder as string | undefined);
     if (chatJid) {
       const names = getChatNamesByJids([chatJid]);
       channelLabel = resolveChannelLabel(chatJid, names.get(chatJid));
@@ -145,7 +149,7 @@ memoryAgentRoutes.post('/remember', async (c) => {
       content: body.content,
       importance: body.importance || 'normal',
       chatJid,
-      groupFolder,
+      workspaceFolder,
       channelLabel,
     });
     return c.json({ accepted: true });
@@ -171,10 +175,13 @@ memoryAgentRoutes.post('/session-wrapup', async (c) => {
   }
 
   try {
+    const workspaceFolder =
+      (body.workspaceFolder as string | undefined)
+      || (body.groupFolder as string | undefined);
     await orchestrator.send(body.userId, {
       type: 'session_wrapup',
       transcriptFile: body.transcriptFile,
-      groupFolder: body.groupFolder,
+      workspaceFolder,
       chatJids: body.chatJids,
     });
     return c.json({ accepted: true });

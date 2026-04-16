@@ -2979,6 +2979,7 @@ async function runAgent(
     isAdminHome,
     tasks.map((t) => ({
       id: t.id,
+      workspaceFolder: t.group_folder,
       groupFolder: t.group_folder,
       prompt: t.prompt,
       schedule_type: t.schedule_type,
@@ -3543,6 +3544,7 @@ async function processTaskIpc(
     execution_type?: string;
     script_command?: string;
     model?: string;
+    workspaceFolder?: string;
     groupFolder?: string;
     chatJid?: string;
     targetJid?: string;
@@ -3857,23 +3859,26 @@ async function processTaskIpc(
       break;
 
     case 'session_wrapup':
-      if (
-        data.userId &&
-        data.groupFolder &&
-        memoryOrchestratorRef &&
-        resolveSessionOwnerKey(data.groupFolder) === data.userId
-      ) {
-        const allJids = getJidsByFolder(data.groupFolder);
-        memoryOrchestratorRef.exportTranscripts(
-          data.userId,
-          data.groupFolder,
-          allJids,
-        ).catch((err) => {
-          logger.warn(
-            { groupFolder: data.groupFolder, err },
-            'session_wrapup via PreCompact IPC failed',
-          );
-        });
+      {
+        const workspaceFolder = data.workspaceFolder || data.groupFolder;
+        if (
+          data.userId &&
+          workspaceFolder &&
+          memoryOrchestratorRef &&
+          resolveSessionOwnerKey(workspaceFolder) === data.userId
+        ) {
+          const allJids = getJidsByFolder(workspaceFolder);
+          memoryOrchestratorRef.exportTranscripts(
+            data.userId,
+            workspaceFolder,
+            allJids,
+          ).catch((err) => {
+            logger.warn(
+              { workspaceFolder, err },
+              'session_wrapup via PreCompact IPC failed',
+            );
+          });
+        }
       }
       break;
 
@@ -4107,6 +4112,7 @@ async function processAgentConversation(
       isAdminHome,
       tasks.map((t) => ({
         id: t.id,
+        workspaceFolder: t.group_folder,
         groupFolder: t.group_folder,
         prompt: t.prompt,
         schedule_type: t.schedule_type,

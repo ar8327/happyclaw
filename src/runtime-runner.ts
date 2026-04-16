@@ -148,7 +148,8 @@ export function writeTasksSnapshot(
   isAdminHome: boolean,
   tasks: Array<{
     id: string;
-    groupFolder: string;
+    workspaceFolder: string;
+    groupFolder?: string;
     prompt: string;
     schedule_type: string;
     schedule_value: string;
@@ -163,7 +164,9 @@ export function writeTasksSnapshot(
   // Admin home sees all tasks, others only see their own
   const filteredTasks = isAdminHome
     ? tasks
-    : tasks.filter((t) => t.groupFolder === workspaceFolder);
+    : tasks.filter(
+      (t) => (t.workspaceFolder || t.groupFolder) === workspaceFolder,
+    );
 
   const tasksFile = path.join(groupIpcDir, 'current_tasks.json');
   // 删除后重建：容器创建的文件归属 node(1000) 用户，宿主机进程无法覆写

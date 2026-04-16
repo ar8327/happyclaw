@@ -57,11 +57,18 @@ interface MemoryExecutionRequest {
   content?: string;
   importance?: 'high' | 'normal';
   transcriptFile?: string;
+  workspaceFolder?: string;
   groupFolder?: string;
   chatJids?: string[];
   chatJid?: string;
   channelLabel?: string;
   source?: string;
+}
+
+function resolveRequestWorkspaceFolder(
+  request: Pick<MemoryExecutionRequest, 'workspaceFolder' | 'groupFolder'>,
+): string | undefined {
+  return request.workspaceFolder || request.groupFolder;
 }
 
 // --- Storage directory initialization ---
@@ -459,7 +466,7 @@ export async function exportTranscriptsForUser(
     return await memoryOrchestrator.send(userId, {
       type: 'session_wrapup',
       transcriptFile: transcriptRelPath,
-      groupFolder: folder,
+      workspaceFolder: folder,
       chatJids: Array.from(transcriptChatJids),
     });
   } catch (err) {
@@ -661,6 +668,7 @@ function buildMemoryPrompt(
   request: MemoryExecutionRequest,
   memDir: string,
 ): string {
+  const workspaceFolder = resolveRequestWorkspaceFolder(request);
   const lines: string[] = [
     MEMORY_CORE_INSTRUCTIONS,
     '',
@@ -681,7 +689,7 @@ function buildMemoryPrompt(
       `查询内容: ${request.query || ''}`,
     );
     if (request.context) lines.push(`补充上下文: ${request.context}`);
-    if (request.groupFolder) lines.push(`来源会话: ${request.groupFolder}`);
+    if (workspaceFolder) lines.push(`来源会话: ${workspaceFolder}`);
     if (request.chatJid) lines.push(`来源渠道 JID: ${request.chatJid}`);
     if (request.channelLabel) lines.push(`来源渠道名: ${request.channelLabel}`);
   } else if (request.type === 'remember') {
@@ -697,7 +705,7 @@ function buildMemoryPrompt(
       `重要性: ${request.importance || 'normal'}`,
     );
     if (request.source) lines.push(`来源: ${request.source}`);
-    if (request.groupFolder) lines.push(`来源会话: ${request.groupFolder}`);
+    if (workspaceFolder) lines.push(`来源会话: ${workspaceFolder}`);
     if (request.chatJid) lines.push(`来源渠道 JID: ${request.chatJid}`);
     if (request.channelLabel) lines.push(`来源渠道名: ${request.channelLabel}`);
   } else if (request.type === 'session_wrapup') {
@@ -712,7 +720,7 @@ function buildMemoryPrompt(
       '- 不要修改 state.json',
       '',
       `转录文件: ${request.transcriptFile || ''}`,
-      `所属会话: ${request.groupFolder || ''}`,
+      `所属会话: ${workspaceFolder || ''}`,
     );
     if (request.chatJids?.length) {
       lines.push(`涉及渠道: ${request.chatJids.join(', ')}`);
@@ -1034,7 +1042,7 @@ export class MemoryOrchestrator {
       query: string;
       context?: string;
       chatJid?: string;
-      groupFolder?: string;
+      workspaceFolder?: string;
       channelLabel?: string;
     },
   ): Promise<MemoryAgentResponse> {
@@ -1047,7 +1055,7 @@ export class MemoryOrchestrator {
         query: options.query,
         context: options.context,
         chatJid: options.chatJid,
-        groupFolder: options.groupFolder,
+        workspaceFolder: options.workspaceFolder,
         channelLabel: options.channelLabel,
       }, timeoutMs),
     );
@@ -1103,11 +1111,11 @@ export class MemoryOrchestrator {
 
   sessionWrapup(
     userId: string,
-    groupFolder: string,
+    workspaceFolder: string,
   ): Promise<MemoryAgentResponse> {
     return this.send(userId, {
       type: 'session_wrapup',
-      groupFolder,
+      workspaceFolder,
     });
   }
 
@@ -1117,20 +1125,20 @@ export class MemoryOrchestrator {
 
   exportSessionTranscripts(
     userId: string,
-    groupFolder: string,
+    workspaceFolder: string,
     chatJid: string,
   ): Promise<MemoryAgentResponse | null> {
-    return this.exportTranscripts(userId, groupFolder, [chatJid]);
+    return this.exportTranscripts(userId, workspaceFolder, [chatJid]);
   }
 
   exportTranscripts(
     userId: string,
-    groupFolder: string,
+    workspaceFolder: string,
     chatJids: string[],
   ): Promise<MemoryAgentResponse | null> {
     return exportTranscriptsForUser(
       userId,
-      groupFolder,
+      workspaceFolder,
       chatJids,
       this,
     );

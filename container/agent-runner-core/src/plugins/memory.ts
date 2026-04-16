@@ -52,6 +52,7 @@ export class MemoryPlugin implements ContextPlugin {
             query: args.query,
             context: args.context || '',
             chatJid: (args.channel as string) || ctx.chatJid,
+            workspaceFolder: ctx.groupFolder,
             groupFolder: ctx.groupFolder,
           }, this.opts.queryTimeoutMs);
 
@@ -85,6 +86,7 @@ export class MemoryPlugin implements ContextPlugin {
             content: args.content,
             importance: (args.importance as string) || 'normal',
             chatJid: (args.channel as string) || ctx.chatJid,
+            workspaceFolder: ctx.groupFolder,
             groupFolder: ctx.groupFolder,
           }, this.opts.sendTimeoutMs);
 

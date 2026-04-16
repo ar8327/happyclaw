@@ -98,6 +98,7 @@ export async function runPreCompactHook(
       const tasksDir = path.join(WORKSPACE_IPC, 'tasks');
       writeIpcFile(tasksDir, {
         type: 'session_wrapup',
+        workspaceFolder: options.groupFolder,
         groupFolder: options.groupFolder,
         userId: options.userId,
         timestamp: new Date().toISOString(),

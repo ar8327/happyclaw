@@ -132,6 +132,7 @@ export class CodexArchiveManager {
         const tasksDir = path.join(WORKSPACE_IPC, 'tasks');
         writeIpcFile(tasksDir, {
           type: 'session_wrapup',
+          workspaceFolder: groupFolder,
           groupFolder,
           userId,
           timestamp: new Date().toISOString(),
