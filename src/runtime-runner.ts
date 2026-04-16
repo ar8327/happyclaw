@@ -98,7 +98,7 @@ export interface RuntimeInput {
   sessionId?: string;
   resumeAnchor?: string;
   sessionRecordId?: string;
-  groupFolder: string;
+  workspaceFolder: string;
   chatJid: string;
   isHome: boolean;
   isAdminHome: boolean;
@@ -144,7 +144,7 @@ export type ContainerInput = RuntimeInput;
 export type ContainerOutput = RuntimeOutput;
 
 export function writeTasksSnapshot(
-  groupFolder: string,
+  workspaceFolder: string,
   isAdminHome: boolean,
   tasks: Array<{
     id: string;
@@ -157,13 +157,13 @@ export function writeTasksSnapshot(
   }>,
 ): void {
   // Write filtered tasks to the Session IPC directory
-  const groupIpcDir = path.join(DATA_DIR, 'ipc', groupFolder);
+  const groupIpcDir = path.join(DATA_DIR, 'ipc', workspaceFolder);
   fs.mkdirSync(groupIpcDir, { recursive: true });
 
   // Admin home sees all tasks, others only see their own
   const filteredTasks = isAdminHome
     ? tasks
-    : tasks.filter((t) => t.groupFolder === groupFolder);
+    : tasks.filter((t) => t.groupFolder === workspaceFolder);
 
   const tasksFile = path.join(groupIpcDir, 'current_tasks.json');
   // 删除后重建：容器创建的文件归属 node(1000) 用户，宿主机进程无法覆写
@@ -188,12 +188,12 @@ export interface AvailableGroup {
  * Other workspaces see nothing because they cannot activate arbitrary channels.
  */
 export function writeGroupsSnapshot(
-  groupFolder: string,
+  workspaceFolder: string,
   isAdminHome: boolean,
   groups: AvailableGroup[],
   registeredJids: Set<string>,
 ): void {
-  const groupIpcDir = path.join(DATA_DIR, 'ipc', groupFolder);
+  const groupIpcDir = path.join(DATA_DIR, 'ipc', workspaceFolder);
   fs.mkdirSync(groupIpcDir, { recursive: true });
 
   // The primary Session workspace sees all groups; others see nothing.
@@ -349,9 +349,9 @@ export async function runHostAgent(
 
   const stableSessionId =
     input.sessionRecordId ||
-    (input.agentId ? `worker:${input.agentId}` : `main:${input.groupFolder}`);
+    (input.agentId ? `worker:${input.agentId}` : `main:${input.workspaceFolder}`);
   const sessionRecord = getSessionRecord(stableSessionId);
-  const folderSession = getSessionRecord(`main:${input.groupFolder}`);
+  const folderSession = getSessionRecord(`main:${input.workspaceFolder}`);
   const sessionOwnerKey =
     sessionRecord?.owner_key ||
     folderSession?.owner_key ||

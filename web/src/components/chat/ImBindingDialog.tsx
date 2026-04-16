@@ -16,7 +16,7 @@ import { ChannelBadge } from '../settings/channel-meta';
 
 interface ImBindingDialogProps {
   open: boolean;
-  groupJid: string;
+  sessionId: string;
   targetSessionId: string | null;
   /** agentId for conversation agent binding; null for main conversation binding */
   agentId: string | null;
@@ -25,7 +25,7 @@ interface ImBindingDialogProps {
 }
 export function ImBindingDialog({
   open,
-  groupJid,
+  sessionId,
   targetSessionId,
   agentId,
   agent,
@@ -58,11 +58,11 @@ export function ImBindingDialog({
     setRebindTarget(null);
     setLoading(true);
     setFilter('');
-    loadAvailableImGroups(groupJid).then((groups) => {
+    loadAvailableImGroups(sessionId).then((groups) => {
       setImGroups(groups);
       setLoading(false);
     });
-  }, [open, groupJid, agentId, loadAvailableImGroups]);
+  }, [open, sessionId, agentId, loadAvailableImGroups]);
 
   const filteredGroups = useMemo(() => {
     if (!filter.trim()) return imGroups;
@@ -83,7 +83,7 @@ export function ImBindingDialog({
 
   const reloadGroups = async () => {
     try {
-      const groups = await loadAvailableImGroups(groupJid);
+      const groups = await loadAvailableImGroups(sessionId);
       setImGroups(groups);
     } catch {
       // ignore — stale list is acceptable
@@ -95,9 +95,9 @@ export function ImBindingDialog({
     try {
       let ok: boolean;
       if (isMainMode) {
-        ok = await bindMainImGroup(groupJid, imJid);
+        ok = await bindMainImGroup(sessionId, imJid);
       } else {
-        ok = await bindImGroup(groupJid, agentId, imJid);
+        ok = await bindImGroup(sessionId, agentId, imJid);
       }
       if (ok) {
         await reloadGroups();
@@ -115,9 +115,9 @@ export function ImBindingDialog({
     try {
       let ok: boolean;
       if (isMainMode) {
-        ok = await unbindMainImGroup(groupJid, imJid);
+        ok = await unbindMainImGroup(sessionId, imJid);
       } else {
-        ok = await unbindImGroup(groupJid, agentId!, imJid);
+        ok = await unbindImGroup(sessionId, agentId!, imJid);
       }
       if (ok) {
         await reloadGroups();
@@ -150,9 +150,9 @@ export function ImBindingDialog({
     try {
       let ok: boolean;
       if (isMainMode) {
-        ok = await bindMainImGroup(groupJid, imJid, true);
+        ok = await bindMainImGroup(sessionId, imJid, true);
       } else {
-        ok = await bindImGroup(groupJid, agentId!, imJid, true);
+        ok = await bindImGroup(sessionId, agentId!, imJid, true);
       }
       if (ok) {
         await reloadGroups();

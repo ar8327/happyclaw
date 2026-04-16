@@ -19,7 +19,7 @@ interface MessageListProps {
   /** Increment to force scroll to bottom (e.g. after sending a message) */
   scrollTrigger?: number;
   /** Current group JID — used to save/restore scroll position across group switches */
-  groupJid?: string;
+  sessionId?: string;
   /** Whether the agent is currently processing */
   isWaiting?: boolean;
   /** Callback to interrupt the current agent query */
@@ -48,10 +48,10 @@ const quickPrompts = [
   '帮我调试一个问题',
 ];
 
-export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrigger, groupJid, isWaiting, onInterrupt, agents, onAgentClick, agentId, onSend }: MessageListProps) {
+export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrigger, sessionId, isWaiting, onInterrupt, agents, onAgentClick, agentId, onSend }: MessageListProps) {
   const { mode: displayMode } = useDisplayMode();
   const thinkingCache = useChatStore(s => s.thinkingCache ?? {});
-  const highlightMessageId = useChatStore(s => s.highlightMessageId[groupJid ?? ''] ?? null);
+  const highlightMessageId = useChatStore(s => s.highlightMessageId[sessionId ?? ''] ?? null);
   const clearHighlight = useChatStore(s => s.clearHighlight);
   const isShared = false;
   const currentUser = useAuthStore(s => s.user);
@@ -60,7 +60,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
   const aiEmoji = currentUser?.ai_avatar_emoji || appearance?.aiAvatarEmoji;
   const aiColor = currentUser?.ai_avatar_color || appearance?.aiAvatarColor;
   const aiImageUrl = currentUser?.ai_avatar_url;
-  const turns = useChatStore(s => s.turns[groupJid ?? '']);
+  const turns = useChatStore(s => s.turns[sessionId ?? '']);
   const parentRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const [atTop, setAtTop] = useState(false);
@@ -248,7 +248,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
 
     parent.addEventListener('scroll', handleScroll);
     return () => parent.removeEventListener('scroll', handleScroll);
-  }, [hasMore, loading, onLoadMore, groupJid]);
+  }, [hasMore, loading, onLoadMore, sessionId]);
 
   // 新消息自动滚到底部
   useEffect(() => {
@@ -328,13 +328,13 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
 
     // Auto-clear highlight after 3 seconds
     const timer = setTimeout(() => {
-      if (groupJid) clearHighlight(groupJid);
+      if (sessionId) clearHighlight(sessionId);
     }, 3000);
     return () => clearTimeout(timer);
-  }, [highlightMessageId, flatMessages, virtualizer, groupJid, clearHighlight]);
+  }, [highlightMessageId, flatMessages, virtualizer, sessionId, clearHighlight]);
 
   // Auto-scroll when streaming content updates
-  const streaming = useChatStore(s => agentId ? s.agentStreaming[agentId] : s.streaming[groupJid ?? '']);
+  const streaming = useChatStore(s => agentId ? s.agentStreaming[agentId] : s.streaming[sessionId ?? '']);
   useEffect(() => {
     if (autoScroll && streaming) {
       parentRef.current?.scrollTo({ top: parentRef.current.scrollHeight });
@@ -508,7 +508,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
                 data-index={virtualItem.index}
                 className={isHighlighted ? 'animate-highlight-fade' : undefined}
               >
-                <MessageBubble message={message} showTime={showTime} thinkingContent={thinkingCache[message.id]} chatJid={groupJid || ''} isShared={isShared} />
+                <MessageBubble message={message} showTime={showTime} thinkingContent={thinkingCache[message.id]} chatJid={sessionId || ''} isShared={isShared} />
               </div>
             );
           })}
@@ -553,14 +553,14 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
           </div>
         )}
 
-        {groupJid && !agentId && (
+        {sessionId && !agentId && (
           <>
-            <TurnIndicator chatJid={groupJid} />
-            <StreamingDisplay groupJid={groupJid} isWaiting={!!isWaiting} />
+            <TurnIndicator chatJid={sessionId} />
+            <StreamingDisplay sessionId={sessionId} isWaiting={!!isWaiting} />
           </>
         )}
-        {groupJid && agentId && (
-          <StreamingDisplay groupJid={groupJid} isWaiting={!!isWaiting} agentId={agentId} />
+        {sessionId && agentId && (
+          <StreamingDisplay sessionId={sessionId} isWaiting={!!isWaiting} agentId={agentId} />
         )}
 
         {/* Agent status cards in main conversation (task agents only) */}

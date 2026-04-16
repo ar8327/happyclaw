@@ -27,8 +27,6 @@ export interface SessionInfo {
   degradation_reasons?: string[];
 }
 
-export type GroupInfo = SessionInfo;
-
 export interface AgentInfo {
   id: string;
   session_id?: string;

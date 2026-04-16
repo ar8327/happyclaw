@@ -4,9 +4,9 @@ import { wsManager } from '../api/ws';
 import { useFileStore } from './files';
 import { useAuthStore } from './auth';
 import { showToast, notifyIfHidden, shouldEmitBackgroundTaskNotice } from '../utils/toast';
-import type { GroupInfo, AgentInfo, AvailableImGroup } from '../types';
+import type { SessionInfo, AgentInfo, AvailableImGroup } from '../types';
 
-export type { GroupInfo, AgentInfo };
+export type { SessionInfo, AgentInfo };
 
 export interface Message {
   id: string;
@@ -126,14 +126,14 @@ function mergeMessagesChronologically(
 }
 
 export function getRouteJid(
-  groups: Record<string, GroupInfo>,
+  groups: Record<string, SessionInfo>,
   jid: string,
 ): string {
   return groups[jid]?.id || jid;
 }
 
 export function resolveStoreJid(
-  groups: Record<string, GroupInfo>,
+  groups: Record<string, SessionInfo>,
   rawJid: string,
 ): string {
   const agentSep = rawJid.indexOf('#agent:');
@@ -190,7 +190,7 @@ function retainThinkingCacheForMessages(
 }
 
 interface ChatState {
-  groups: Record<string, GroupInfo>;
+  groups: Record<string, SessionInfo>;
   currentGroup: string | null;
   messages: Record<string, Message[]>;
   waiting: Record<string, boolean>;
@@ -820,7 +820,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ loading: true });
     try {
       const data = await api.get<{
-        sessions: Record<string, GroupInfo>;
+        sessions: Record<string, SessionInfo>;
       }>('/api/sessions');
       const sessionMap = data.sessions;
       const groups = Object.fromEntries(
@@ -1257,7 +1257,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const needsLongTimeout = !!(options?.init_source_path || options?.init_git_url);
       const data = await api.post<{
         success: boolean;
-        session: GroupInfo;
+        session: SessionInfo;
       }>('/api/sessions', body, needsLongTimeout ? 120_000 : undefined);
       if (!data.success) return null;
       const createdSession = data.session;
@@ -1307,7 +1307,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const willPin = !group.pinned_at;
     try {
       const path = `/api/sessions/${encodeURIComponent(getRouteJid(get().groups, jid))}`;
-      const data = await api.patch<{ success: boolean; pinned_at?: string; session?: GroupInfo }>(
+      const data = await api.patch<{ success: boolean; pinned_at?: string; session?: SessionInfo }>(
         path,
         { is_pinned: willPin },
       );

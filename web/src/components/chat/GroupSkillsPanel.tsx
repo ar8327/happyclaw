@@ -21,12 +21,12 @@ interface Skill {
 }
 
 interface GroupSkillsPanelProps {
-  groupJid: string;
+  sessionId: string;
   onClose?: () => void;
 }
 
-export function GroupSkillsPanel({ groupJid }: GroupSkillsPanelProps) {
-  const group = useChatStore(s => s.groups[groupJid]);
+export function GroupSkillsPanel({ sessionId }: GroupSkillsPanelProps) {
+  const group = useChatStore(s => s.groups[sessionId]);
   const [allSkills, setAllSkills] = useState<Skill[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string> | null>(null); // null = 全部选中
   const [loading, setLoading] = useState(true);
@@ -56,11 +56,11 @@ export function GroupSkillsPanel({ groupJid }: GroupSkillsPanelProps) {
     setActivationMode(mode as typeof activationMode);
     setSavingMode(true);
     try {
-      await api.patch(`/api/sessions/${encodeURIComponent(groupJid)}`, { activation_mode: mode });
+      await api.patch(`/api/sessions/${encodeURIComponent(sessionId)}`, { activation_mode: mode });
       useChatStore.setState(s => {
-        const g = s.groups[groupJid];
+        const g = s.groups[sessionId];
         if (!g) return s;
-        return { ...s, groups: { ...s.groups, [groupJid]: { ...g, activation_mode: mode as typeof activationMode } } };
+        return { ...s, groups: { ...s.groups, [sessionId]: { ...g, activation_mode: mode as typeof activationMode } } };
       });
     } catch { /* ignore */ }
     finally { setSavingMode(false); }
@@ -118,14 +118,14 @@ export function GroupSkillsPanel({ groupJid }: GroupSkillsPanelProps) {
     setSaving(true);
     try {
       const payload = allSelected ? null : Array.from(selectedIds!);
-      await api.patch(`/api/sessions/${encodeURIComponent(groupJid)}`, { selected_skills: payload });
+      await api.patch(`/api/sessions/${encodeURIComponent(sessionId)}`, { selected_skills: payload });
       // 更新本地 store
       useChatStore.setState(s => {
-        const g = s.groups[groupJid];
+        const g = s.groups[sessionId];
         if (!g) return s;
         return {
           ...s,
-          groups: { ...s.groups, [groupJid]: { ...g, selected_skills: payload } },
+          groups: { ...s.groups, [sessionId]: { ...g, selected_skills: payload } },
         };
       });
       setDirty(false);

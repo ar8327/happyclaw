@@ -11,9 +11,9 @@ import { CreateWorkspaceDialog } from './CreateWorkspaceDialog';
 import { RenameDialog } from './RenameDialog';
 import { SkeletonCardList } from '@/components/common/Skeletons';
 import { cn } from '@/lib/utils';
-import type { GroupInfo } from '../../types';
+import type { SessionInfo } from '../../types';
 
-type GroupEntry = GroupInfo & { jid: string };
+type GroupEntry = SessionInfo & { jid: string };
 type DateSection = { label: string; items: GroupEntry[] };
 
 function groupByDate(items: GroupEntry[]): DateSection[] {

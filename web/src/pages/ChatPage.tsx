@@ -77,7 +77,7 @@ export function ChatPage() {
       {activeSessionJid ? (
         <div ref={chatViewRef} className={`${sessionSlug ? 'flex-1' : 'hidden lg:block flex-1'}`}>
           <ChatView
-            groupJid={activeSessionJid}
+            sessionId={activeSessionJid}
             onBack={handleBackToList}
             headerLeft={sidebarCollapsed ? (
               <button

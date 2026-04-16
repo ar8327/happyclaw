@@ -10,14 +10,14 @@ import { resolveStoreJid, useChatStore } from '../../stores/chat';
 type ConnectionState = 'idle' | 'connecting' | 'connected' | 'disconnected';
 
 interface TerminalPanelProps {
-  groupJid: string;
+  sessionId: string;
   visible: boolean;
   onHide?: () => void;
   onDelete?: () => void;
 }
 
 export function TerminalPanel({
-  groupJid,
+  sessionId,
   visible,
   onHide,
   onDelete,
@@ -44,11 +44,11 @@ export function TerminalPanel({
       xtermRef.current.focus();
       if (connStateRef.current === 'connected') {
         const { cols, rows } = xtermRef.current;
-        wsManager.send({ type: 'terminal_resize', chatJid: groupJid, cols, rows });
+        wsManager.send({ type: 'terminal_resize', chatJid: sessionId, cols, rows });
       }
     }, 300);
     return () => clearTimeout(timer);
-  }, [visible, groupJid]);
+  }, [visible, sessionId]);
 
   useEffect(() => {
     if (!termRef.current) return;
@@ -101,7 +101,7 @@ export function TerminalPanel({
     const sendStartTerminal = () => {
       const cols = terminal.cols;
       const rows = terminal.rows;
-      wsManager.send({ type: 'terminal_start', chatJid: groupJid, cols, rows });
+      wsManager.send({ type: 'terminal_start', chatJid: sessionId, cols, rows });
     };
 
     const requestStartTerminal = () => {
@@ -115,26 +115,26 @@ export function TerminalPanel({
 
     // 监听 WebSocket 消息
     const unsubOutput = wsManager.on('terminal_output', (data: any) => {
-      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === groupJid) {
+      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === sessionId) {
         terminal.write(data.data);
       }
     });
 
     const unsubStarted = wsManager.on('terminal_started', (data: any) => {
-      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === groupJid) {
+      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === sessionId) {
         syncConnState('connected');
       }
     });
 
     const unsubStopped = wsManager.on('terminal_stopped', (data: any) => {
-      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === groupJid) {
+      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === sessionId) {
         syncConnState('disconnected');
         terminal.write(`\r\n\x1b[33m[${data.reason || '终端已断开'}]\x1b[0m\r\n`);
       }
     });
 
     const unsubError = wsManager.on('terminal_error', (data: any) => {
-      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === groupJid) {
+      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === sessionId) {
         syncConnState('disconnected');
         // 针对工作区未运行的错误给出更友好的提示
         if (data.error?.includes('工作区未运行')) {
@@ -164,7 +164,7 @@ export function TerminalPanel({
     // 用户输入 → WebSocket（仅在已连接时发送）
     const onDataDisposable = terminal.onData((data) => {
       if (connStateRef.current === 'connected') {
-        wsManager.send({ type: 'terminal_input', chatJid: groupJid, data });
+        wsManager.send({ type: 'terminal_input', chatJid: sessionId, data });
       }
     });
 
@@ -176,7 +176,7 @@ export function TerminalPanel({
           fitAddonRef.current.fit();
           if (connStateRef.current === 'connected') {
             const { cols, rows } = xtermRef.current;
-            wsManager.send({ type: 'terminal_resize', chatJid: groupJid, cols, rows });
+            wsManager.send({ type: 'terminal_resize', chatJid: sessionId, cols, rows });
           }
         }
       });
@@ -197,13 +197,13 @@ export function TerminalPanel({
       unsubWsConnected();
       unsubWsDisconnected();
       if (wsManager.isConnected()) {
-        wsManager.send({ type: 'terminal_stop', chatJid: groupJid });
+        wsManager.send({ type: 'terminal_stop', chatJid: sessionId });
       }
       terminal.dispose();
       xtermRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [groupJid]);
+  }, [sessionId]);
 
   return (
     <div className="h-full flex flex-col terminal-panel">
@@ -231,7 +231,7 @@ export function TerminalPanel({
                   const rows = xtermRef.current?.rows || 24;
                   wsManager.send({
                     type: 'terminal_start',
-                    chatJid: groupJid,
+                    chatJid: sessionId,
                     cols,
                     rows,
                   });

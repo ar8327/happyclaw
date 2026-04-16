@@ -397,7 +397,7 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
         {!hasOnlyImages && (
           <div className="min-w-0 overflow-hidden [&>div>*:first-child]:!mt-0">
             {isAI ? (
-              <MarkdownRenderer content={message.content} groupJid={message.chat_jid} variant="chat" />
+              <MarkdownRenderer content={message.content} sessionId={message.chat_jid} variant="chat" />
             ) : (
               <p className="text-[15px] leading-relaxed whitespace-pre-wrap break-words text-foreground">{message.content}</p>
             )}
@@ -640,7 +640,7 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
             {/* Content */}
             {!hasOnlyImages && (
               <div className="max-w-none overflow-hidden">
-                <MarkdownRenderer content={message.content} groupJid={message.chat_jid} variant="chat" />
+                <MarkdownRenderer content={message.content} sessionId={message.chat_jid} variant="chat" />
               </div>
             )}
 

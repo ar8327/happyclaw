@@ -3,10 +3,10 @@ import { Upload, FolderUp } from 'lucide-react';
 import { useFileStore } from '../../stores/files';
 
 interface FileUploadZoneProps {
-  groupJid: string;
+  sessionId: string;
 }
 
-export function FileUploadZone({ groupJid }: FileUploadZoneProps) {
+export function FileUploadZone({ sessionId }: FileUploadZoneProps) {
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -31,14 +31,14 @@ export function FileUploadZone({ groupJid }: FileUploadZoneProps) {
 
     const fileList = e.dataTransfer.files;
     if (fileList.length > 0) {
-      await uploadFiles(groupJid, Array.from(fileList));
+      await uploadFiles(sessionId, Array.from(fileList));
     }
   };
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files;
     if (fileList && fileList.length > 0) {
-      await uploadFiles(groupJid, Array.from(fileList));
+      await uploadFiles(sessionId, Array.from(fileList));
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
@@ -46,7 +46,7 @@ export function FileUploadZone({ groupJid }: FileUploadZoneProps) {
   const handleFolderSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files;
     if (fileList && fileList.length > 0) {
-      await uploadFiles(groupJid, Array.from(fileList));
+      await uploadFiles(sessionId, Array.from(fileList));
       if (folderInputRef.current) folderInputRef.current.value = '';
     }
   };

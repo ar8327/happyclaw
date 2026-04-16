@@ -5,10 +5,10 @@ import { api } from '../../api/client';
 import { useMcpServersStore } from '../../stores/mcp-servers';
 
 interface GroupMcpPanelProps {
-  groupJid: string;
+  sessionId: string;
 }
 
-export function GroupMcpPanel({ groupJid }: GroupMcpPanelProps) {
+export function GroupMcpPanel({ sessionId }: GroupMcpPanelProps) {
   const [mcpMode, setMcpMode] = useState<'inherit' | 'custom'>('inherit');
   const [selectedMcps, setSelectedMcps] = useState<Set<string> | null>(null);
   const [loading, setLoading] = useState(true);
@@ -27,13 +27,13 @@ export function GroupMcpPanel({ groupJid }: GroupMcpPanelProps) {
     Promise.all([
       loadMcpServers(),
       api.get<{ mcp_mode: 'inherit' | 'custom'; selected_mcps: string[] | null }>(
-        `/api/sessions/${encodeURIComponent(groupJid)}/mcp`,
+        `/api/sessions/${encodeURIComponent(sessionId)}/mcp`,
       ).catch(() => ({ mcp_mode: 'inherit' as const, selected_mcps: null })),
     ]).then(([, mcpConfig]) => {
       setMcpMode(mcpConfig.mcp_mode);
       setSelectedMcps(mcpConfig.selected_mcps ? new Set(mcpConfig.selected_mcps) : null);
     }).finally(() => setLoading(false));
-  }, [groupJid]);
+  }, [sessionId]);
 
   const handleModeChange = (mode: 'inherit' | 'custom') => {
     setMcpMode(mode);
@@ -71,7 +71,7 @@ export function GroupMcpPanel({ groupJid }: GroupMcpPanelProps) {
     setError(null);
     try {
       const payload = mcpMode === 'inherit' ? null : (selectedMcps === null ? null : Array.from(selectedMcps));
-      await api.put(`/api/sessions/${encodeURIComponent(groupJid)}/mcp`, {
+      await api.put(`/api/sessions/${encodeURIComponent(sessionId)}/mcp`, {
         mcp_mode: mcpMode,
         selected_mcps: payload,
       });
@@ -87,7 +87,7 @@ export function GroupMcpPanel({ groupJid }: GroupMcpPanelProps) {
     setStopping(true);
     setError(null);
     try {
-      await api.post(`/api/sessions/${encodeURIComponent(groupJid)}/stop`, {});
+      await api.post(`/api/sessions/${encodeURIComponent(sessionId)}/stop`, {});
     } catch {
       setError('停止失败');
     } finally {

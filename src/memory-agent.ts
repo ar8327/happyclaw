@@ -924,7 +924,7 @@ export class MemoryOrchestrator {
       sessionId: runtimeState?.provider_session_id || undefined,
       resumeAnchor: runtimeState?.resume_anchor || undefined,
       sessionRecordId: runtimeKey,
-      groupFolder: primaryFolder,
+      workspaceFolder: primaryFolder,
       chatJid: runtimeKey,
       isHome: false,
       isAdminHome: user?.role === 'admin' && primaryFolder === 'main',

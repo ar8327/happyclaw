@@ -62,12 +62,12 @@ const EMPTY_AGENTS: import('../../types').AgentInfo[] = [];
 type SidebarTab = 'search' | 'files' | 'env' | 'skills' | 'mcp';
 
 interface ChatViewProps {
-  groupJid: string;
+  sessionId: string;
   onBack?: () => void;
   headerLeft?: React.ReactNode;
 }
 
-export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
+export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
   const { mode: displayMode, toggle: toggleDisplayMode } = useDisplayMode();
   const { theme, toggle: toggleTheme } = useTheme();
   const [mobilePanel, setMobilePanel] = useState<SidebarTab | null>(null);
@@ -99,11 +99,11 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const dragStartHeightRef = useRef(0);
 
   // Individual selectors: avoid re-renders from unrelated store changes (e.g. streaming)
-  const group = useChatStore(s => s.groups[groupJid]);
-  const groupMessages = useChatStore(s => s.messages[groupJid]);
-  const groupTurns = useChatStore(s => s.turns[groupJid]);
-  const isWaiting = useChatStore(s => !!s.waiting[groupJid]);
-  const hasMoreMessages = useChatStore(s => !!s.hasMore[groupJid]);
+  const group = useChatStore(s => s.groups[sessionId]);
+  const groupMessages = useChatStore(s => s.messages[sessionId]);
+  const groupTurns = useChatStore(s => s.turns[sessionId]);
+  const isWaiting = useChatStore(s => !!s.waiting[sessionId]);
+  const hasMoreMessages = useChatStore(s => !!s.hasMore[sessionId]);
   const loading = useChatStore(s => s.loading);
   const loadMessages = useChatStore(s => s.loadMessages);
   const loadTurns = useChatStore(s => s.loadTurns);
@@ -117,8 +117,8 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const handleAgentStatus = useChatStore(s => s.handleAgentStatus);
   const clearStreaming = useChatStore(s => s.clearStreaming);
   const handleRunnerState = useChatStore(s => s.handleRunnerState);
-  const agents = useChatStore(s => s.agents[groupJid] ?? EMPTY_AGENTS);
-  const activeAgentTab = useChatStore(s => s.activeAgentTab[groupJid] ?? null);
+  const agents = useChatStore(s => s.agents[sessionId] ?? EMPTY_AGENTS);
+  const activeAgentTab = useChatStore(s => s.activeAgentTab[sessionId] ?? null);
   const setActiveAgentTab = useChatStore(s => s.setActiveAgentTab);
   const loadAgents = useChatStore(s => s.loadAgents);
   const deleteAgentAction = useChatStore(s => s.deleteAgentAction);
@@ -158,23 +158,23 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   // Load messages on group select
   const hasMessages = !!groupMessages;
   useEffect(() => {
-    if (groupJid && !hasMessages) {
-      loadMessages(groupJid);
+    if (sessionId && !hasMessages) {
+      loadMessages(sessionId);
     }
-  }, [groupJid, hasMessages, loadMessages]);
+  }, [sessionId, hasMessages, loadMessages]);
 
   const hasTurns = !!groupTurns;
   useEffect(() => {
-    if (groupJid && !hasTurns) {
-      loadTurns(groupJid);
+    if (sessionId && !hasTurns) {
+      loadTurns(sessionId);
     }
-  }, [groupJid, hasTurns, loadTurns]);
+  }, [sessionId, hasTurns, loadTurns]);
 
   useEffect(() => {
-    if (groupJid) {
-      loadActiveTurnState(groupJid);
+    if (sessionId) {
+      loadActiveTurnState(sessionId);
     }
-  }, [groupJid, loadActiveTurnState]);
+  }, [sessionId, loadActiveTurnState]);
 
   // Poll for new messages — use setTimeout recursion to avoid request piling up
   // Pauses when the page is not visible to save resources
@@ -189,8 +189,8 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     const poll = async () => {
       if (!active) return;
       try {
-        await refreshMessages(groupJid);
-        await loadActiveTurnState(groupJid);
+        await refreshMessages(sessionId);
+        await loadActiveTurnState(sessionId);
       } catch { /* handled in store */ }
       schedulePoll();
     };
@@ -212,21 +212,21 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       if (pollRef.current) clearTimeout(pollRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupJid, refreshMessages, loadActiveTurnState]);
+  }, [sessionId, refreshMessages, loadActiveTurnState]);
 
-  // WS 重连时恢复正在运行的 agent 状态（独立于 groupJid，避免切换会话时重复调用）
+  // WS 重连时恢复正在运行的 agent 状态（独立于 sessionId，避免切换会话时重复调用）
   // wsManager.connect() 已提升到 AppLayout 级别
   const restoreActiveState = useChatStore(s => s.restoreActiveState);
   useEffect(() => {
     restoreActiveState();
-    loadActiveTurnState(groupJid);
+    loadActiveTurnState(sessionId);
     const unsub = wsManager.on('connected', () => {
       restoreActiveState();
-      loadActiveTurnState(groupJid);
+      loadActiveTurnState(sessionId);
     });
     return () => { unsub(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupJid, loadActiveTurnState]);
+  }, [sessionId, loadActiveTurnState]);
 
   // Derived: active agent info and kind
   const activeAgent = activeAgentTab ? agents.find(a => a.id === activeAgentTab) : null;
@@ -235,24 +235,24 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
 
   // Load sub-agents for this group
   useEffect(() => {
-    loadAgents(groupJid);
-  }, [groupJid, loadAgents]);
+    loadAgents(sessionId);
+  }, [sessionId, loadAgents]);
 
   // Load messages for conversation agent tabs
   useEffect(() => {
     if (activeAgentTab && isConversationTab) {
       const existing = agentMessages[activeAgentTab];
       if (!existing) {
-        loadAgentMessages(groupJid, activeAgentTab);
+        loadAgentMessages(sessionId, activeAgentTab);
       }
     }
-  }, [activeAgentTab, isConversationTab, groupJid, loadAgentMessages, agentMessages]);
+  }, [activeAgentTab, isConversationTab, sessionId, loadAgentMessages, agentMessages]);
 
   // 监听 WebSocket 流式事件
   useEffect(() => {
     const unsub1 = wsManager.on('stream_event', (data: any) => {
-      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === groupJid) {
-        handleStreamEvent(groupJid, data.event, data.agentId);
+      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === sessionId) {
+        handleStreamEvent(sessionId, data.event, data.agentId);
         // Sync permission mode when agent calls ExitPlanMode/EnterPlanMode
         if (data.event?.eventType === 'mode_change' && data.event?.permissionMode) {
           const newMode = data.event.permissionMode as 'bypassPermissions' | 'plan';
@@ -262,45 +262,45 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     });
     // agent_reply 作为 fallback：如果 new_message 已处理则为 no-op
     const unsub2 = wsManager.on('agent_reply', (data: any) => {
-      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === groupJid) clearStreaming(groupJid);
+      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === sessionId) clearStreaming(sessionId);
     });
     // 通过 new_message 立即添加消息到本地状态（消除轮询延迟导致的消息"丢失"）
     const unsub3 = wsManager.on('new_message', (data: any) => {
-      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === groupJid && data.message) {
-        handleWsNewMessage(groupJid, data.message, data.agentId);
+      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === sessionId && data.message) {
+        handleWsNewMessage(sessionId, data.message, data.agentId);
       }
     });
     // 子 Agent 状态变更
     const unsub4 = wsManager.on('agent_status', (data: any) => {
-      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === groupJid) {
-        handleAgentStatus(groupJid, data.agentId, data.status, data.name, data.prompt, data.resultSummary, data.kind);
+      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === sessionId) {
+        handleAgentStatus(sessionId, data.agentId, data.status, data.name, data.prompt, data.resultSummary, data.kind);
       }
     });
     // Agent 生命周期状态（queued / capacity_wait / starting）
     const unsub5 = wsManager.on('runner_state', (data: any) => {
-      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === groupJid) {
-        handleRunnerState(groupJid, data.state, data.detail);
+      if (resolveStoreJid(useChatStore.getState().groups, data.chatJid) === sessionId) {
+        handleRunnerState(sessionId, data.state, data.detail);
       }
     });
     return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); };
-  }, [groupJid, handleStreamEvent, handleWsNewMessage, handleAgentStatus, clearStreaming, handleRunnerState]);
+  }, [sessionId, handleStreamEvent, handleWsNewMessage, handleAgentStatus, clearStreaming, handleRunnerState]);
 
   const [scrollTrigger, setScrollTrigger] = useState(0);
 
   const handleSend = async (content: string, attachments?: Array<{ data: string; mimeType: string }>) => {
-    await sendMessage(groupJid, content, attachments);
+    await sendMessage(sessionId, content, attachments);
     setScrollTrigger(n => n + 1);
   };
 
   const handleLoadMore = () => {
     if (hasMoreMessages && !loading) {
-      loadMessages(groupJid, true);
+      loadMessages(sessionId, true);
     }
   };
 
   const handleResetSession = async () => {
     setResetLoading(true);
-    await resetSession(groupJid, resetAgentId ?? undefined);
+    await resetSession(sessionId, resetAgentId ?? undefined);
     setResetLoading(false);
     setShowResetConfirm(false);
     setResetAgentId(null);
@@ -311,7 +311,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     setPermissionMode(newMode);
     try {
       const res = await api.put<{ success: boolean; mode: string; applied: boolean }>(
-        `/api/sessions/${encodeURIComponent(getRouteJid(useChatStore.getState().groups, groupJid))}/mode`, { mode: newMode },
+        `/api/sessions/${encodeURIComponent(getRouteJid(useChatStore.getState().groups, sessionId))}/mode`, { mode: newMode },
       );
       if (res.applied === false) {
         const label = newMode === 'plan' ? 'Plan' : 'Code';
@@ -395,7 +395,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     setTerminalVisible(false);
     setTerminalMounted(false);
     setMobileTerminal(false);
-  }, [groupJid]);
+  }, [sessionId]);
 
   // If the current group disappears, force-close any mounted terminal.
   useEffect(() => {
@@ -547,7 +547,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       <AgentTabBar
         agents={agents}
         activeTab={activeAgentTab}
-        onSelectTab={(id) => setActiveAgentTab(groupJid, id)}
+        onSelectTab={(id) => setActiveAgentTab(sessionId, id)}
         onDeleteAgent={(id) => {
           const agent = agents.find((a) => a.id === id);
           if (agent?.linked_im_groups && agent.linked_im_groups.length > 0) {
@@ -556,13 +556,13 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
             setBindingAgentId(id);
             return;
           }
-          deleteAgentAction(groupJid, id);
+          deleteAgentAction(sessionId, id);
         }}
         onCreateConversation={() => {
           const name = prompt('对话名称：');
           if (name?.trim()) {
-            createConversation(groupJid, name.trim()).then((agent) => {
-              if (agent) setActiveAgentTab(groupJid, agent.id);
+            createConversation(sessionId, name.trim()).then((agent) => {
+              if (agent) setActiveAgentTab(sessionId, agent.id);
             });
           }
         }}
@@ -582,19 +582,19 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                 messages={agentMessages[activeAgentTab] || []}
                 loading={false}
                 hasMore={!!agentHasMore[activeAgentTab]}
-                onLoadMore={() => loadAgentMessages(groupJid, activeAgentTab, true)}
+                onLoadMore={() => loadAgentMessages(sessionId, activeAgentTab, true)}
                 scrollTrigger={scrollTrigger}
-                groupJid={groupJid}
+                sessionId={sessionId}
                 isWaiting={!!agentWaiting[activeAgentTab] || !!agentStreaming[activeAgentTab]}
-                onInterrupt={() => interruptQuery(`${groupJid}#agent:${activeAgentTab}`)}
+                onInterrupt={() => interruptQuery(`${sessionId}#agent:${activeAgentTab}`)}
                 agentId={activeAgentTab}
               />
               <MessageInput
                 onSend={async (content) => {
-                  sendAgentMessage(groupJid, activeAgentTab, content);
+                  sendAgentMessage(sessionId, activeAgentTab, content);
                   setScrollTrigger(n => n + 1);
                 }}
-                groupJid={groupJid}
+                sessionId={sessionId}
                 onResetSession={() => { setResetAgentId(activeAgentTab); setShowResetConfirm(true); }}
               />
             </>
@@ -643,7 +643,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                       // 有流式数据 → 显示 StreamingDisplay（前台任务场景）
                       return (
                         <StreamingDisplay
-                          groupJid={groupJid}
+                          sessionId={sessionId}
                           isWaiting={taskStatus === 'running'}
                           agentId={activeAgentTab}
                         />
@@ -695,9 +695,9 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                   hasMore={false}
                   onLoadMore={() => {}}
                   scrollTrigger={scrollTrigger}
-                  groupJid={groupJid}
+                  sessionId={sessionId}
                   isWaiting={!!agentStreaming[activeAgentTab]}
-                  onInterrupt={() => interruptQuery(groupJid)}
+                  onInterrupt={() => interruptQuery(sessionId)}
                   agentId={activeAgentTab}
                 />
               )}
@@ -714,10 +714,10 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                         onSend={async (content) => {
                           const taskDesc = (activeSdkTask?.description || 'Teammate').replace(/"/g, '\\"');
                           const wrappedContent = `[发送给 Teammate "${taskDesc}"]: ${content}`;
-                          await sendMessage(groupJid, wrappedContent);
+                          await sendMessage(sessionId, wrappedContent);
                           setScrollTrigger(n => n + 1);
                         }}
-                        groupJid={groupJid}
+                        sessionId={sessionId}
                       />
                     </div>
                   );
@@ -737,22 +737,22 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
             /* Main conversation tab */
             <>
               <MessageList
-                key={`main-${groupJid}`}
+                key={`main-${sessionId}`}
                 messages={groupMessages || []}
                 loading={loading}
                 hasMore={hasMoreMessages}
                 onLoadMore={handleLoadMore}
                 scrollTrigger={scrollTrigger}
-                groupJid={groupJid}
+                sessionId={sessionId}
                 isWaiting={isWaiting}
-                onInterrupt={() => interruptQuery(groupJid)}
+                onInterrupt={() => interruptQuery(sessionId)}
                 agents={agents}
-                onAgentClick={(agentId) => setActiveAgentTab(groupJid, agentId)}
+                onAgentClick={(agentId) => setActiveAgentTab(sessionId, agentId)}
                 onSend={(content) => handleSend(content)}
               />
               <MessageInput
                 onSend={handleSend}
-                groupJid={groupJid}
+                sessionId={sessionId}
                 onResetSession={() => { setResetAgentId(null); setShowResetConfirm(true); }}
                 onToggleTerminal={canUseTerminal ? handleTerminalToggle : undefined}
                 permissionMode={permissionMode}
@@ -800,15 +800,15 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           {/* Tab content */}
           <div className="flex-1 overflow-hidden min-h-0">
             {sidebarTab === 'search' ? (
-              <SearchPanel groupJid={groupJid} />
+              <SearchPanel sessionId={sessionId} />
             ) : sidebarTab === 'files' ? (
-              <FilePanel groupJid={groupJid} />
+              <FilePanel sessionId={sessionId} />
             ) : sidebarTab === 'env' ? (
-              <RuntimeEnvPanel sessionId={groupJid} session={group} />
+              <RuntimeEnvPanel sessionId={sessionId} session={group} />
             ) : sidebarTab === 'mcp' ? (
-              <GroupMcpPanel groupJid={groupJid} />
+              <GroupMcpPanel sessionId={sessionId} />
             ) : (
-              <GroupSkillsPanel groupJid={groupJid} />
+              <GroupSkillsPanel sessionId={sessionId} />
             )}
           </div>
         </div>
@@ -835,7 +835,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
             style={{ height: terminalVisible ? terminalHeight : 0 }}
           >
             <TerminalPanel
-              groupJid={groupJid}
+              sessionId={sessionId}
               visible={terminalVisible}
               onHide={() => setTerminalVisible(false)}
               onDelete={() => {
@@ -855,7 +855,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           </SheetHeader>
           <div className="flex-1 overflow-hidden h-[calc(80dvh-56px)]">
             <FilePanel
-              groupJid={groupJid}
+              sessionId={sessionId}
               onClose={() => setMobilePanel(null)}
             />
           </div>
@@ -870,7 +870,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           </SheetHeader>
           <div className="flex-1 overflow-hidden h-[calc(80dvh-56px)]">
             <RuntimeEnvPanel
-              sessionId={groupJid}
+              sessionId={sessionId}
               session={group}
               onClose={() => setMobilePanel(null)}
             />
@@ -886,7 +886,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           </SheetHeader>
           <div className="flex-1 overflow-hidden h-[calc(80dvh-56px)]">
             <GroupSkillsPanel
-              groupJid={groupJid}
+              sessionId={sessionId}
             />
           </div>
         </SheetContent>
@@ -899,7 +899,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
             <SheetTitle>MCP 服务器</SheetTitle>
           </SheetHeader>
           <div className="flex-1 overflow-hidden h-[calc(80dvh-56px)]">
-            <GroupMcpPanel groupJid={groupJid} />
+            <GroupMcpPanel sessionId={sessionId} />
           </div>
         </SheetContent>
       </Sheet>
@@ -912,7 +912,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           </SheetHeader>
           <div className="flex-1 overflow-hidden h-[calc(85dvh-56px)]">
             <TerminalPanel
-              groupJid={groupJid}
+              sessionId={sessionId}
               visible
               onHide={() => setMobileTerminal(false)}
               onDelete={() => setMobileTerminal(false)}
@@ -986,7 +986,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       {bindingAgentId && (
         <ImBindingDialog
           open={!!bindingAgentId}
-          groupJid={groupJid}
+          sessionId={sessionId}
           targetSessionId={
             bindingAgentId === MAIN_BINDING
               ? group?.id ?? null

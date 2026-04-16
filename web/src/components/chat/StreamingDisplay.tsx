@@ -59,7 +59,7 @@ function StreamingContent({
   streaming,
   sdkTasks,
   localElapsed,
-  groupJid,
+  sessionId,
   thinkingExpanded,
   setThinkingExpanded,
   thinkingRef,
@@ -68,7 +68,7 @@ function StreamingContent({
   streaming: import('../../stores/chat').StreamingState;
   sdkTasks: Record<string, any>;
   localElapsed: Record<string, number>;
-  groupJid: string;
+  sessionId: string;
   thinkingExpanded: boolean;
   setThinkingExpanded: (v: boolean) => void;
   thinkingRef: React.RefObject<HTMLDivElement | null>;
@@ -147,7 +147,7 @@ function StreamingContent({
               toolUseId={tool.toolUseId}
               description={tool.toolInputSummary || sdkTasks[tool.toolUseId]?.description || 'Task'}
               startTime={tool.startTime}
-              groupJid={groupJid}
+              sessionId={sessionId}
             />
           ))}
           {cardTools.length > 0 && (
@@ -204,7 +204,7 @@ function StreamingContent({
             content={streaming.partialText.length > 5000
               ? '...' + streaming.partialText.slice(-4000)
               : streaming.partialText}
-            groupJid={groupJid}
+            sessionId={sessionId}
             variant="chat"
           />
         </div>
@@ -214,18 +214,18 @@ function StreamingContent({
 }
 
 interface StreamingDisplayProps {
-  groupJid: string;
+  sessionId: string;
   isWaiting: boolean;
   senderName?: string;
   agentId?: string;
 }
 
-export function StreamingDisplay({ groupJid, isWaiting, senderName: senderNameProp = 'AI', agentId }: StreamingDisplayProps) {
-  const mainStreaming = useChatStore(s => s.streaming[groupJid]);
+export function StreamingDisplay({ sessionId, isWaiting, senderName: senderNameProp = 'AI', agentId }: StreamingDisplayProps) {
+  const mainStreaming = useChatStore(s => s.streaming[sessionId]);
   const agentStreamingState = useChatStore(s => agentId ? s.agentStreaming[agentId] : undefined);
   const streaming = agentId ? agentStreamingState : mainStreaming;
   const sdkTasks = useChatStore(s => s.sdkTasks);
-  const runnerState = useChatStore(s => s.runnerState[groupJid]);
+  const runnerState = useChatStore(s => s.runnerState[sessionId]);
   const currentUser = useAuthStore(s => s.user);
   const appearance = useAuthStore(s => s.appearance);
   const senderName = currentUser?.ai_name || appearance?.aiName || senderNameProp;
@@ -250,7 +250,7 @@ export function StreamingDisplay({ groupJid, isWaiting, senderName: senderNamePr
   useEffect(() => {
     setThinkingExpanded(true);
     userScrolledRef.current = false;
-  }, [groupJid]);
+  }, [sessionId]);
 
   useEffect(() => {
     if (!streaming) {
@@ -389,7 +389,7 @@ export function StreamingDisplay({ groupJid, isWaiting, senderName: senderNamePr
             streaming={streaming}
             sdkTasks={sdkTasks}
             localElapsed={localElapsed}
-            groupJid={groupJid}
+            sessionId={sessionId}
             thinkingExpanded={thinkingExpanded}
             setThinkingExpanded={(v) => {
               setThinkingExpanded(v);
@@ -442,7 +442,7 @@ export function StreamingDisplay({ groupJid, isWaiting, senderName: senderNamePr
               streaming={streaming}
               sdkTasks={sdkTasks}
               localElapsed={localElapsed}
-              groupJid={groupJid}
+              sessionId={sessionId}
               thinkingExpanded={thinkingExpanded}
               setThinkingExpanded={(v) => {
                 setThinkingExpanded(v);
