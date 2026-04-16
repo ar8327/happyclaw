@@ -1,5 +1,4 @@
 import path from 'path';
-import type { ContextManager } from 'happyclaw-agent-runner-core';
 import { buildChannelRoutingReminder, normalizeHomeFlags } from 'happyclaw-agent-runner-core';
 
 import type {
@@ -18,7 +17,6 @@ import {
   type ClaudePermissionMode,
   type ClaudeSessionConfig,
 } from './claude-session.js';
-import { createContextManager } from '../../context-manager-factory.js';
 import { DEFAULT_ALLOWED_TOOLS, DEFAULT_CLAUDE_BUILTIN_TOOLS } from './claude-config.js';
 import type { SessionState } from '../../session-state.js';
 import type { IpcPaths } from '../../ipc-handler.js';
@@ -103,7 +101,6 @@ export class ClaudeRunner implements AgentRunner {
 
   private session!: ClaudeSession;
   private processor: StreamEventProcessor | null = null;
-  private ctxMgr!: ContextManager;
   private mcpServerPath!: string;
   private mcpServerEnv!: Record<string, string>;
   private readonly opts: ClaudeRunnerOptions;
@@ -118,23 +115,8 @@ export class ClaudeRunner implements AgentRunner {
   async initialize(): Promise<void> {
     const { containerInput, groupDir, globalDir, memoryDir } = this.opts;
     const { isHome, isAdminHome } = normalizeHomeFlags(containerInput);
-
-    const projectSkillsDir = process.env.HAPPYCLAW_PROJECT_SKILLS_DIR || '/workspace/project-skills';
-    const userSkillsDir = this.opts.skillsDir;
-    const skillsDirs = [projectSkillsDir, userSkillsDir].filter(Boolean);
-
-    this.ctxMgr = createContextManager({
-      chatJid: containerInput.chatJid,
-      groupFolder: containerInput.groupFolder,
-      isHome,
-      isAdminHome,
-      workspaceIpc: this.opts.ipcPaths.inputDir.replace('/input', ''),
-      workspaceGroup: groupDir,
-      workspaceGlobal: globalDir,
-      workspaceMemory: memoryDir,
-      userId: containerInput.userId,
-      skillsDirs,
-    }, { nativeCapabilities: ['skills'] });
+    const projectSkillsDir =
+      process.env.HAPPYCLAW_PROJECT_SKILLS_DIR || '/workspace/project-skills';
 
     this.mcpServerPath = path.resolve(
       path.dirname(new URL(import.meta.url).pathname),
@@ -182,10 +164,6 @@ export class ClaudeRunner implements AgentRunner {
     const { isHome, isAdminHome } = normalizeHomeFlags(opts.containerInput);
 
     opts.state.extractSourceChannels(prompt, opts.imChannelsFile);
-    this.ctxMgr.updateDynamicContext({
-      recentImChannels: opts.state.recentImChannels,
-      contextSummary: opts.containerInput.contextSummary,
-    });
 
     return {
       sessionId: config.sessionId,
@@ -200,7 +178,7 @@ export class ClaudeRunner implements AgentRunner {
       permissionMode: (config.permissionMode ?? opts.state.currentPermissionMode) as ClaudePermissionMode,
       builtinTools: DEFAULT_CLAUDE_BUILTIN_TOOLS,
       allowedTools: DEFAULT_ALLOWED_TOOLS,
-      systemPromptAppend: this.ctxMgr.buildAppendPrompt(),
+      systemPromptAppend: config.systemPrompt,
       isHostMode: process.env.HAPPYCLAW_HOST_MODE === '1',
       isHome,
       isAdminHome,

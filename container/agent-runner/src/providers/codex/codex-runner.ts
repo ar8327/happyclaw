@@ -13,7 +13,6 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import type { ThreadEvent, ThreadItem } from '@openai/codex-sdk';
-import type { ContextManager } from 'happyclaw-agent-runner-core';
 import {
   buildChannelRoutingReminder,
   normalizeHomeFlags,
@@ -32,7 +31,6 @@ import type {
 import type { ContainerInput, ContainerOutput } from '../../types.js';
 import type { SessionState } from '../../session-state.js';
 import type { IpcPaths } from '../../ipc-handler.js';
-import { createContextManager } from '../../context-manager-factory.js';
 import { CodexSession, type CodexSessionConfig } from './codex-session.js';
 import { convertThreadEvent } from './codex-event-adapter.js';
 import { saveImagesToTempFiles } from './codex-image-utils.js';
@@ -81,7 +79,6 @@ export class CodexRunner implements AgentRunner {
   };
 
   private session!: CodexSession;
-  private ctxMgr!: ContextManager;
   private instructionsFile!: string;
   private mcpServerPath!: string;
   private tmpDir!: string;
@@ -118,28 +115,8 @@ export class CodexRunner implements AgentRunner {
     // Create temp directory for instructions file and images
     this.tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'happyclaw-codex-'));
 
-    // Build skills directories list (project-level + user-level)
-    const projectSkillsDir = process.env.HAPPYCLAW_PROJECT_SKILLS_DIR || '/workspace/project-skills';
-    const userSkillsDir = this.opts.skillsDir;
-    const skillsDirs = [projectSkillsDir, userSkillsDir].filter(Boolean);
-
-    // Create ContextManager with all plugins (shared factory)
-    this.ctxMgr = createContextManager({
-      chatJid: containerInput.chatJid,
-      groupFolder: containerInput.groupFolder,
-      isHome,
-      isAdminHome,
-      workspaceIpc: this.opts.ipcPaths.inputDir.replace('/input', ''),
-      workspaceGroup: groupDir,
-      workspaceGlobal: globalDir,
-      workspaceMemory: memoryDir,
-      userId: containerInput.userId,
-      skillsDirs,
-    });
-
-    // Write initial instructions file
     this.instructionsFile = path.join(this.tmpDir, 'instructions.md');
-    this.ctxMgr.writeFullPromptToFile(this.instructionsFile);
+    fs.writeFileSync(this.instructionsFile, '', 'utf-8');
 
     // Resolve MCP server path (compiled JS entry point)
     this.mcpServerPath = path.resolve(
@@ -195,11 +172,7 @@ export class CodexRunner implements AgentRunner {
 
     // This depends on @openai/codex-sdk re-reading model_instructions_file on each run.
     // Keep the SDK version pinned until that behavior is re-verified during upgrades.
-    this.ctxMgr.updateDynamicContext({
-      recentImChannels: opts.state.recentImChannels,
-      contextSummary: opts.containerInput.contextSummary,
-    });
-    this.ctxMgr.writeFullPromptToFile(this.instructionsFile);
+    fs.writeFileSync(this.instructionsFile, config.systemPrompt, 'utf-8');
 
     // Prepare images (base64 → temp files)
     let imagePaths: string[] | undefined;

@@ -40,6 +40,7 @@ export interface UsageInfo {
 
 export interface QueryConfig {
   prompt: string;
+  systemPrompt: string;
   sessionId?: string;
   resumeAt?: string;
   images?: Array<{ data: string; mimeType?: string }>;

@@ -21,6 +21,7 @@ import {
   isInterruptRelatedError,
 } from './ipc-handler.js';
 import { runQueryLoop } from './query-loop.js';
+import { createSystemPromptBuilder } from './system-prompt.js';
 import { ClaudeRunner } from './providers/claude/claude-runner.js';
 import { CodexRunner } from './providers/codex/codex-runner.js';
 import type { AgentRunner } from './runner-interface.js';
@@ -277,6 +278,16 @@ async function main(): Promise<void> {
 
   await runQueryLoop({
     runner,
+    buildSystemPrompt: createSystemPromptBuilder({
+      runnerId,
+      containerInput,
+      state,
+      ipcPaths,
+      groupDir: WORKSPACE_GROUP,
+      globalDir: WORKSPACE_GLOBAL,
+      memoryDir: WORKSPACE_MEMORY,
+      skillsDir: WORKSPACE_SKILLS,
+    }),
     initialPrompt: prompt,
     initialImages: promptImages,
     sessionRecordId,
