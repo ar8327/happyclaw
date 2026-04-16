@@ -3,10 +3,9 @@ import { api } from '../api/client';
 
 export interface ScheduledTask {
   id: string;
-  session_id?: string;
-  session_folder?: string;
+  session_id: string;
+  session_folder: string;
   session_name?: string | null;
-  group_folder: string;
   chat_jid: string;
   prompt: string;
   schedule_type: 'cron' | 'interval' | 'once';

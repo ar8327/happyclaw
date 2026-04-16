@@ -85,7 +85,7 @@ export interface ScheduledTask {
   session_id?: string;
   session_folder?: string;
   session_name?: string | null;
-  group_folder: string;
+  group_folder: string; // 仅供数据库持久化与 legacy 入参兼容使用
   chat_jid: string;
   prompt: string;
   schedule_type: 'cron' | 'interval' | 'once';

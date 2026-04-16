@@ -27,6 +27,26 @@ import {
 
 const tasksRoutes = new Hono<{ Variables: Variables }>();
 
+interface TaskResponse {
+  id: string;
+  session_id: string;
+  session_folder: string;
+  session_name: string | null;
+  chat_jid: string;
+  prompt: string;
+  schedule_type: 'cron' | 'interval' | 'once';
+  schedule_value: string;
+  context_mode: 'group' | 'isolated';
+  execution_type: 'agent' | 'script';
+  script_command: string | null;
+  model?: string;
+  next_run: string | null;
+  last_run: string | null;
+  last_result: string | null;
+  status: 'active' | 'paused' | 'completed';
+  created_at: string;
+}
+
 function resolveTaskSession(id: string): SessionRecord | undefined {
   const direct = getSessionRecord(id);
   if (direct) return direct;
@@ -64,14 +84,27 @@ function resolveTaskTarget(
   return { session, group, chatJid, groupFolder: folder };
 }
 
-function buildTaskPayload(task: ScheduledTask): ScheduledTask {
+function buildTaskPayload(task: ScheduledTask): TaskResponse {
   const sessionId = task.session_id?.trim() || `main:${task.group_folder}`;
   const session = resolveTaskSession(sessionId);
   return {
-    ...task,
     session_id: session?.id || sessionId,
     session_folder: task.group_folder,
     session_name: session?.name || getRegisteredGroup(task.chat_jid)?.name || null,
+    id: task.id,
+    chat_jid: task.chat_jid,
+    prompt: task.prompt,
+    schedule_type: task.schedule_type,
+    schedule_value: task.schedule_value,
+    context_mode: task.context_mode,
+    execution_type: task.execution_type,
+    script_command: task.script_command,
+    model: task.model,
+    next_run: task.next_run,
+    last_run: task.last_run,
+    last_result: task.last_result,
+    status: task.status,
+    created_at: task.created_at,
   };
 }
 
