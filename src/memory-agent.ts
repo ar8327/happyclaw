@@ -722,7 +722,6 @@ function ensureMemorySessionProjection(
         ? (primarySession?.thinking_effort ?? null)
         : null,
     context_compression: primarySession?.context_compression ?? 'off',
-    knowledge_extraction: primarySession?.knowledge_extraction ?? false,
     is_pinned: false,
     archived: false,
     owner_key: ownerKey,

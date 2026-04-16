@@ -139,7 +139,6 @@ function serializeMemoryConfig(user: AuthUser) {
           model: session.model,
           thinking_effort: session.thinking_effort,
           context_compression: session.context_compression,
-          knowledge_extraction: session.knowledge_extraction,
           owner_key: session.owner_key,
           cwd: session.cwd,
           primary_session_folder: primaryFolder,
@@ -876,7 +875,6 @@ memoryRoutes.put('/config', authMiddleware, async (c) => {
     model,
     thinking_effort: thinkingEffort,
     context_compression: contextCompression,
-    knowledge_extraction: body?.knowledge_extraction === true,
     updated_at: new Date().toISOString(),
   });
   if (runnerId !== existing.runner_id) {

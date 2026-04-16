@@ -32,7 +32,6 @@ type RuntimeEnvSession = {
   thinking_effort?: SessionInfo['thinking_effort'] | null;
   cwd?: string | null;
   context_compression?: SessionInfo['context_compression'] | null;
-  knowledge_extraction?: boolean | null;
 };
 
 interface RunnerProfileOption {
@@ -171,9 +170,6 @@ export function RuntimeEnvPanel({
   const [contextCompression, setContextCompression] = useState<'off' | 'manual' | 'auto'>(
     session?.context_compression || 'off',
   );
-  const [knowledgeExtraction, setKnowledgeExtraction] = useState(
-    session?.knowledge_extraction ?? false,
-  );
   const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
@@ -182,11 +178,9 @@ export function RuntimeEnvPanel({
     setRunnerProfileId(session?.runner_profile_id || '__default__');
     setCwd(session?.cwd || '');
     setContextCompression(session?.context_compression || 'off');
-    setKnowledgeExtraction(session?.knowledge_extraction ?? false);
   }, [
     session?.context_compression,
     session?.cwd,
-    session?.knowledge_extraction,
     session?.model,
     session?.runner_id,
     session?.runner_profile_id,
@@ -273,20 +267,7 @@ export function RuntimeEnvPanel({
 
   const handleContextCompressionChange = useCallback(async (value: 'off' | 'manual' | 'auto') => {
     setContextCompression(value);
-    if (value === 'off' && knowledgeExtraction) {
-      setKnowledgeExtraction(false);
-      await patchSession({
-        context_compression: value,
-        knowledge_extraction: false,
-      });
-      return;
-    }
     await patchSession({ context_compression: value });
-  }, [knowledgeExtraction, patchSession]);
-
-  const handleKnowledgeExtractionChange = useCallback(async (checked: boolean) => {
-    setKnowledgeExtraction(checked);
-    await patchSession({ knowledge_extraction: checked });
   }, [patchSession]);
 
   const handleCwdBlur = useCallback(async () => {
@@ -455,22 +436,6 @@ export function RuntimeEnvPanel({
                 </SelectContent>
               </Select>
             </div>
-
-            <label className="flex items-center gap-2 rounded border border-slate-200 px-3 py-2">
-              <input
-                type="checkbox"
-                checked={knowledgeExtraction}
-                disabled={contextCompression === 'off'}
-                onChange={(e) => void handleKnowledgeExtractionChange(e.target.checked)}
-                className="h-3.5 w-3.5 rounded border-slate-300"
-              />
-              <div>
-                <div className="text-xs font-medium text-slate-700">知识萃取</div>
-                <div className="text-[11px] text-slate-400">
-                  压缩时把关键信息写入记忆系统。
-                </div>
-              </div>
-            </label>
           </div>
         )}
 

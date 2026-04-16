@@ -379,7 +379,6 @@ function buildCompatibilityGroupForSession(
     model: session.model ?? undefined,
     thinking_effort: session.thinking_effort ?? undefined,
     context_compression: session.context_compression,
-    knowledge_extraction: session.knowledge_extraction,
     customCwd:
       path.resolve(session.cwd) === path.resolve(defaultCwd)
         ? undefined
@@ -569,7 +568,6 @@ function buildSessionPayload(
     model: session.model,
     thinking_effort: session.thinking_effort,
     context_compression: session.context_compression,
-    knowledge_extraction: session.knowledge_extraction,
     binding_count: sessionBindings.length,
     binding_summary:
       sessionBindings.length > 0
@@ -1126,7 +1124,6 @@ sessionRoutes.post('/', authMiddleware, async (c) => {
     model: null,
     thinking_effort: null,
     context_compression: 'off',
-    knowledge_extraction: false,
     is_pinned: false,
     archived: false,
     owner_key: user.id,
@@ -1339,10 +1336,6 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
     body.context_compression === 'manual'
       ? body.context_compression
       : existing.context_compression;
-  const nextKnowledgeExtraction =
-    typeof body.knowledge_extraction === 'boolean'
-      ? body.knowledge_extraction
-      : existing.knowledge_extraction;
   const nextPinned =
     typeof body.is_pinned === 'boolean' ? body.is_pinned : existing.is_pinned;
   const requestedCwd =
@@ -1373,7 +1366,6 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
       model: nextModel,
       thinking_effort: nextThinkingEffort,
       context_compression: nextContextCompression,
-      knowledge_extraction: nextKnowledgeExtraction,
       is_pinned: nextPinned,
       updated_at: now,
     });
@@ -1426,7 +1418,6 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
       model: nextModel,
       thinking_effort: nextThinkingEffort,
       context_compression: nextContextCompression,
-      knowledge_extraction: nextKnowledgeExtraction,
       is_pinned: nextPinned,
       updated_at: now,
     };
@@ -1852,9 +1843,9 @@ sessionRoutes.post('/:id/compress', authMiddleware, async (c) => {
 
   const sessions = deps.getSessions();
   const sessionIdBefore = sessions[backingGroup.folder];
-  const compressOpts = deps.buildCompressOptions?.(backingGroup) ?? {};
-  compressOpts.beforeTimestamp = new Date().toISOString();
-  const result = await compressContext(backingGroup.folder, backingJid, compressOpts);
+  const result = await compressContext(backingGroup.folder, backingJid, {
+    beforeTimestamp: new Date().toISOString(),
+  });
   if (!result.success) {
     return c.json({ error: result.error }, 400);
   }
@@ -1866,7 +1857,6 @@ sessionRoutes.post('/:id/compress', authMiddleware, async (c) => {
     success: true,
     summary: result.summary,
     messageCount: result.messageCount,
-    extractedKnowledge: result.extractedKnowledge,
   });
 });
 

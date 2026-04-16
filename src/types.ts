@@ -51,7 +51,6 @@ export interface RegisteredGroup {
   model?: string; // 模型标识符覆盖（如 'opus', 'sonnet', 'haiku'），空=使用全局配置
   thinking_effort?: 'low' | 'medium' | 'high'; // Thinking effort 级别（默认 null=provider 默认）
   context_compression?: 'off' | 'auto' | 'manual'; // 上下文压缩模式（默认 'off'）
-  knowledge_extraction?: boolean; // 压缩时是否萃取知识到记忆系统（默认 false）
 }
 
 export interface NewMessage {
@@ -239,7 +238,6 @@ export interface SessionRecord {
   model: string | null;
   thinking_effort: 'low' | 'medium' | 'high' | null;
   context_compression: 'off' | 'auto' | 'manual';
-  knowledge_extraction: boolean;
   is_pinned: boolean;
   archived: boolean;
   owner_key: string | null;

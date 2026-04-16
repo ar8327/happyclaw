@@ -175,7 +175,6 @@ export function SessionDetail({ session }: SessionDetailProps) {
   );
   const [cwd, setCwd] = useState(session.cwd || session.folder);
   const [compression, setCompression] = useState<string>(session.context_compression || 'off');
-  const [knowledgeExtraction, setKnowledgeExtraction] = useState(session.knowledge_extraction ?? false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [compressing, setCompressing] = useState(false);
@@ -193,7 +192,6 @@ export function SessionDetail({ session }: SessionDetailProps) {
     setThinkingEffort(session.thinking_effort || '');
     setCwd(session.cwd || session.folder);
     setCompression(session.context_compression || 'off');
-    setKnowledgeExtraction(session.knowledge_extraction ?? false);
     setCompressResult(null);
     setSummaryInfo(null);
   }, [
@@ -205,7 +203,6 @@ export function SessionDetail({ session }: SessionDetailProps) {
     session.cwd,
     session.folder,
     session.context_compression,
-    session.knowledge_extraction,
   ]);
 
   const runnerDirty =
@@ -216,15 +213,13 @@ export function SessionDetail({ session }: SessionDetailProps) {
   const thinkingDirty = thinkingEffort !== (session.thinking_effort || '');
   const cwdDirty = cwd !== (session.cwd || session.folder);
   const compressionDirty = compression !== (session.context_compression || 'off');
-  const knowledgeDirty = knowledgeExtraction !== (session.knowledge_extraction ?? false);
   const dirty =
     runnerDirty ||
     runnerProfileDirty ||
     modelDirty ||
     thinkingDirty ||
     cwdDirty ||
-    compressionDirty ||
-    knowledgeDirty;
+    compressionDirty;
   const runnerSelectOptions = withCurrentRunnerOption(
     runnerOptions,
     runnerId || session.runner_id,
@@ -365,13 +360,6 @@ export function SessionDetail({ session }: SessionDetailProps) {
       }
       if (compressionDirty) {
         updates.context_compression = compression;
-        if (compression === 'off' && knowledgeExtraction) {
-          setKnowledgeExtraction(false);
-          updates.knowledge_extraction = false;
-        }
-      }
-      if (knowledgeDirty && !('knowledge_extraction' in updates)) {
-        updates.knowledge_extraction = knowledgeExtraction;
       }
       await updateSession(session.jid, updates);
       setSaved(true);
@@ -393,15 +381,10 @@ export function SessionDetail({ session }: SessionDetailProps) {
       const res = await api.post<{
         success: boolean;
         messageCount?: number;
-        extractedKnowledge?: number;
         error?: string;
       }>(`/api/sessions/${encodeURIComponent(backingJid)}/compress`, undefined, 60000);
       if (res.success) {
-        const knowledgeMsg =
-          res.extractedKnowledge === -1 ? '（知识萃取在后台进行中）'
-          : res.extractedKnowledge ? `，萃取了 ${res.extractedKnowledge} 条知识`
-          : '';
-        setCompressResult(`压缩完成，处理了 ${res.messageCount ?? '?'} 条消息${knowledgeMsg}`);
+        setCompressResult(`压缩完成，处理了 ${res.messageCount ?? '?'} 条消息`);
         loadSummary();
       } else {
         setCompressResult(`压缩失败：${res.error || '未知错误'}`);
@@ -597,21 +580,6 @@ export function SessionDetail({ session }: SessionDetailProps) {
               ? '每轮对话结束后自动检查，消息数超过阈值时自动压缩。也可手动触发。'
               : '使用 Sonnet 压缩历史对话，减少 token 消耗。压缩后会重置当前会话，并把摘要注入系统提示。'}
           </p>
-
-          {/* Knowledge extraction toggle */}
-          {(compression === 'manual' || compression === 'auto') && (
-            <label className="mt-2 flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={knowledgeExtraction}
-                onChange={(e) => setKnowledgeExtraction(e.target.checked)}
-                className="w-3.5 h-3.5 rounded border-slate-300"
-              />
-              <span className="text-xs text-slate-500">
-                知识萃取（压缩时提取关键知识写入记忆系统）
-              </span>
-            </label>
-          )}
 
           {/* Compress button + status */}
           {(compression === 'manual' || compression === 'auto') && (

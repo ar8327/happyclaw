@@ -17,7 +17,6 @@ export interface SessionInfo {
   model?: string;
   thinking_effort?: 'low' | 'medium' | 'high' | null;
   context_compression?: 'off' | 'auto' | 'manual';
-  knowledge_extraction?: boolean;
   cwd?: string;
   owner_key?: string | null;
   binding_count?: number;

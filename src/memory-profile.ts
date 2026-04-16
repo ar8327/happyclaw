@@ -46,7 +46,6 @@ export function buildMemoryProfile(params: {
       model: memorySession.model || undefined,
       thinking_effort: memorySession.thinking_effort || undefined,
       context_compression: memorySession.context_compression,
-      knowledge_extraction: memorySession.knowledge_extraction,
     },
   };
 }

@@ -3,9 +3,6 @@
  *
  * Uses Sonnet to summarize conversation history, then resets the SDK session
  * so the next agent invocation starts fresh with the summary injected.
- *
- * Optionally extracts factual knowledge (decisions, conventions, preferences)
- * and writes them to the Memory Agent for persistent cross-session recall.
  */
 
 import { logger } from './logger.js';
@@ -34,28 +31,16 @@ export interface CompressResult {
   success: boolean;
   summary?: string;
   messageCount?: number;
-  extractedKnowledge?: number; // number of knowledge entries extracted
   error?: string;
 }
 
 export interface CompressOptions {
-  /** Whether to extract knowledge and write to Memory Agent */
-  extractKnowledge?: boolean;
-  /** Callback to send knowledge entries to Memory Agent (type: 'remember') */
-  onKnowledgeEntry?: (content: string, importance: string) => Promise<void>;
   /**
    * Only compress messages with timestamp <= this value.
    * Prevents race condition where new messages arriving during compression
    * get included in the summary AND remain in the active session.
    */
   beforeTimestamp?: string;
-}
-
-interface KnowledgeEntry {
-  type: 'decision' | 'convention' | 'preference' | 'fact';
-  topic: string;
-  content: string;
-  confidence: 'high' | 'medium';
 }
 
 /** Check if a folder is currently being compressed */
@@ -190,85 +175,16 @@ async function callSonnet(
 }
 
 /**
- * Extract factual knowledge from a conversation transcript.
- * Returns structured knowledge entries that can be saved to the Memory Agent.
- */
-async function extractKnowledgeEntries(
-  transcript: string,
-): Promise<KnowledgeEntry[]> {
-  const systemPrompt = `You are a knowledge extractor. Extract important factual knowledge from the conversation below.
-
-Output a JSON array of knowledge entries. Each entry:
-{
-  "type": "decision" | "convention" | "preference" | "fact",
-  "topic": "short topic tag",
-  "content": "specific content",
-  "confidence": "high" | "medium"
-}
-
-Only extract:
-- Decisions the user explicitly made (e.g., "use Sonnet for compression")
-- Agreed-upon conventions (e.g., "commit messages in Chinese")
-- User-expressed preferences (e.g., "don't use Haiku")
-- Important technical facts (e.g., "sessions are stored in the sessions table")
-
-Do NOT extract: discussion process, temporary analysis, suggestions not adopted by the user.
-Output ONLY the JSON array, no other text.`;
-
-  const text = await callSonnet(
-    systemPrompt,
-    `Extract knowledge from this conversation:\n\n${transcript}`,
-  );
-
-  // Extract JSON array — handle markdown code blocks and leading/trailing prose.
-  // Use a stricter approach: try fenced code block first, then outermost [...].
-  let jsonStr: string;
-  const fencedMatch = text.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/);
-  if (fencedMatch) {
-    jsonStr = fencedMatch[1];
-  } else {
-    // Find the first '[' and last ']' for the outermost array
-    const firstBracket = text.indexOf('[');
-    const lastBracket = text.lastIndexOf(']');
-    if (firstBracket !== -1 && lastBracket > firstBracket) {
-      jsonStr = text.slice(firstBracket, lastBracket + 1);
-    } else {
-      jsonStr = text.trim();
-    }
-  }
-
-  try {
-    const entries = JSON.parse(jsonStr) as KnowledgeEntry[];
-    if (!Array.isArray(entries)) return [];
-    // Validate and filter
-    return entries.filter(
-      (e) =>
-        e &&
-        typeof e.type === 'string' &&
-        typeof e.content === 'string' &&
-        e.content.length > 0,
-    );
-  } catch {
-    logger.warn(
-      { responseLength: text.length },
-      'Failed to parse knowledge extraction response as JSON',
-    );
-    return [];
-  }
-}
-
-/**
  * Compress the conversation for a group/chat.
  *
- * 1. Acquires per-folder lock (prevents concurrent compression)
+ * 1. Acquires per-folder lock
  * 2. Fetches recent messages from DB
  * 3. Calls Sonnet to generate a summary
- * 4. Optionally extracts knowledge and writes to Memory Agent
- * 5. Stores the summary in context_summaries table
- * 6. Resets the SDK session so next invocation starts fresh
+ * 4. Stores the summary in context_summaries table
+ * 5. Resets the SDK session so next invocation starts fresh
  *
  * Note: The caller is responsible for clearing the in-memory sessions map
- * (since it lives in index.ts, not here).
+ * because it lives in index.ts, not here.
  */
 export async function compressContext(
   groupFolder: string,
@@ -316,7 +232,6 @@ export async function compressContext(
         chatJid,
         messageCount: messages.length,
         transcriptLength: transcript.length,
-        extractKnowledge: !!options?.extractKnowledge,
       },
       'Compressing context',
     );
@@ -340,9 +255,7 @@ Keep the summary under 2000 tokens. Focus on WHAT was decided and done, not the 
     );
     logger.info({ groupFolder, durationMs: Date.now() - t0, summaryLength: summary.length }, 'Summary generated');
 
-    // 4. Store summary FIRST — knowledge extraction runs in background
-    //    (Knowledge extraction + Memory Agent writes can take minutes,
-    //     which would exceed the frontend's 60s request timeout.)
+    // 4. Store summary before resetting the session.
     const contextSummary: ContextSummary = {
       group_folder: groupFolder,
       chat_jid: chatJid,
@@ -366,47 +279,10 @@ Keep the summary under 2000 tokens. Focus on WHAT was decided and done, not the 
       'Context compressed successfully',
     );
 
-    // 5. Fire-and-forget: knowledge extraction in background
-    if (options?.extractKnowledge && options.onKnowledgeEntry) {
-      const onEntry = options.onKnowledgeEntry;
-      void (async () => {
-        try {
-          logger.info({ groupFolder }, 'Background knowledge extraction starting...');
-          const t1 = Date.now();
-          const entries = await extractKnowledgeEntries(transcript);
-          logger.info({ groupFolder, durationMs: Date.now() - t1, entryCount: entries.length }, 'Knowledge entries extracted');
-          let saved = 0;
-          for (const entry of entries) {
-            const content = `[${entry.type}] ${entry.topic}: ${entry.content}`;
-            const importance = entry.confidence === 'high' ? 'high' : 'normal';
-            try {
-              await onEntry(content, importance);
-              saved++;
-            } catch (err) {
-              logger.warn(
-                { topic: entry.topic, error: err instanceof Error ? err.message : String(err) },
-                'Failed to save knowledge entry to Memory Agent',
-              );
-            }
-          }
-          logger.info(
-            { groupFolder, chatJid, extracted: saved, total: entries.length },
-            'Background knowledge extraction completed',
-          );
-        } catch (err) {
-          logger.error(
-            { groupFolder, chatJid, error: err instanceof Error ? err.message : String(err) },
-            'Background knowledge extraction failed',
-          );
-        }
-      })();
-    }
-
     return {
       success: true,
       summary,
       messageCount: messages.length,
-      extractedKnowledge: -1, // -1 indicates extraction is running in background
     };
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);

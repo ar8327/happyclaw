@@ -49,7 +49,6 @@ interface MemorySessionConfig {
   model: string | null;
   thinking_effort: 'low' | 'medium' | 'high' | null;
   context_compression: 'off' | 'auto' | 'manual';
-  knowledge_extraction: boolean;
   owner_key: string | null;
   cwd: string;
   primary_session_folder: string | null;
@@ -152,7 +151,6 @@ export function MemoryPage() {
             thinking_effort: memoryConfig.thinking_effort,
             cwd: memoryConfig.cwd,
             context_compression: memoryConfig.context_compression,
-            knowledge_extraction: memoryConfig.knowledge_extraction,
           }
         : null,
     [memoryConfig],
@@ -330,7 +328,6 @@ export function MemoryPage() {
         model: memoryConfig.model,
         thinking_effort: memoryConfig.thinking_effort,
         context_compression: memoryConfig.context_compression,
-        knowledge_extraction: memoryConfig.knowledge_extraction,
       });
       setMemoryConfig(data.session);
       setMemoryRunners(data.runners);
@@ -629,19 +626,6 @@ export function MemoryPage() {
                         </select>
                       </div>
                     </div>
-
-                    <label className="flex items-center gap-2 text-sm text-slate-600">
-                      <input
-                        type="checkbox"
-                        checked={memoryConfig.knowledge_extraction}
-                        onChange={(e) => setMemoryConfig((prev) => prev ? {
-                          ...prev,
-                          knowledge_extraction: e.target.checked,
-                        } : prev)}
-                        className="w-4 h-4 rounded border-slate-300"
-                      />
-                      开启知识萃取
-                    </label>
 
                     <div className="text-xs text-slate-500 space-y-1">
                       <div>会话 ID: {memoryConfig.id}</div>
