@@ -96,7 +96,7 @@ export function TaskCard({ task, onPause, onResume, onDelete }: TaskCardProps) {
               <div className="flex items-center gap-2">
                 <span className="text-slate-500">会话:</span>
                 <span className="text-foreground font-medium">
-                  {task.session_name || task.group_folder}
+                  {task.session_name || task.session_folder || task.session_id || task.group_folder}
                 </span>
               </div>
             </div>

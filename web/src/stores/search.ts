@@ -12,7 +12,6 @@ export interface GlobalSearchResult {
   session_id?: string;
   session_folder?: string;
   session_name?: string;
-  group_folder?: string;
   group_name?: string;
 }
 

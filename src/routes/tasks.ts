@@ -70,6 +70,7 @@ function buildTaskPayload(task: ScheduledTask): ScheduledTask {
   return {
     ...task,
     session_id: session?.id || sessionId,
+    session_folder: task.group_folder,
     session_name: session?.name || getRegisteredGroup(task.chat_jid)?.name || null,
   };
 }

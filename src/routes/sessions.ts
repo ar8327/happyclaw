@@ -1942,7 +1942,19 @@ sessionRoutes.get('/:id/summary', authMiddleware, (c) => {
   if (!backingJid) {
     return c.json({ summary: null });
   }
-  return c.json({ summary: getContextSummary(getFolderForSession(session), backingJid) ?? null });
+  const summary = getContextSummary(getFolderForSession(session), backingJid);
+  return c.json({
+    summary: summary
+      ? {
+          session_folder: summary.group_folder,
+          channel_jid: summary.chat_jid,
+          summary: summary.summary,
+          message_count: summary.message_count,
+          created_at: summary.created_at,
+          model_used: summary.model_used,
+        }
+      : null,
+  });
 });
 
 sessionRoutes.get('/:id/members', authMiddleware, (c) => {

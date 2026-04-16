@@ -72,7 +72,7 @@ export function TaskDetail({ task }: TaskDetailProps) {
         <div>
           <div className="text-xs text-slate-500 mb-1">会话</div>
           <div className="text-sm text-foreground">
-            {task.session_name || task.group_folder}
+            {task.session_name || task.session_folder || task.session_id || task.group_folder}
           </div>
         </div>
 

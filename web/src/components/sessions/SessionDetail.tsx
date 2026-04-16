@@ -55,8 +55,8 @@ const THINKING_OPTIONS = [
 ];
 
 interface ContextSummary {
-  group_folder: string;
-  chat_jid: string;
+  session_folder: string;
+  channel_jid: string;
   summary: string;
   message_count: number;
   created_at: string;

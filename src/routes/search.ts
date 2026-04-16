@@ -101,7 +101,6 @@ searchRoutes.get('/messages', authMiddleware, (c) => {
       session_id: info?.session_id,
       session_folder: info?.session_folder,
       session_name: info?.session_name,
-      group_folder: info?.folder,
       group_name: info?.name,
     };
   });

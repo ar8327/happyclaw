@@ -74,7 +74,7 @@ turnsRoutes.get('/:jid/turns', (c) => {
       completedAt: t.completed_at,
       status: t.status,
       summary: t.summary,
-      groupFolder: t.group_folder,
+      sessionFolder: t.group_folder,
       hasTrace: !!t.trace_file,
     })),
   });
@@ -161,7 +161,7 @@ turnsRoutes.get('/:jid/turns/:turnId', (c) => {
     resultMessageId: turn.result_message_id,
     summary: turn.summary,
     tokenUsage: turn.token_usage ? JSON.parse(turn.token_usage) : null,
-    groupFolder: turn.group_folder,
+    sessionFolder: turn.group_folder,
     hasTrace: !!turn.trace_file,
   });
 });

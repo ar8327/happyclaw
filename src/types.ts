@@ -83,6 +83,7 @@ export interface MessageCursor {
 export interface ScheduledTask {
   id: string;
   session_id?: string;
+  session_folder?: string;
   session_name?: string | null;
   group_folder: string;
   chat_jid: string;
