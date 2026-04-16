@@ -1185,9 +1185,20 @@ export class MemoryOrchestrator {
         ),
       );
     };
-    const failedJobs: MemorySyntheticWrapupJob[] = [];
+    const makeJobKey = (job: MemorySyntheticWrapupJob) =>
+      `${job.workspaceFolder}::${job.transcriptFile}`;
+    const remainingJobs = new Map(
+      syntheticStateRef.current.pendingWrapupJobs.map((job) => [
+        makeJobKey(job),
+        job,
+      ]),
+    );
 
     for (const job of jobs) {
+      const jobKey = makeJobKey(job);
+      if (!remainingJobs.has(jobKey)) {
+        continue;
+      }
       const result = await this.runRequest(
         context,
         crypto.randomUUID(),
@@ -1209,10 +1220,16 @@ export class MemoryOrchestrator {
           },
           'Synthetic memory wrapup flush failed',
         );
-        failedJobs.push(job);
+        continue;
       }
+      remainingJobs.delete(jobKey);
+      syntheticStateRef.current = {
+        ...syntheticStateRef.current,
+        pendingWrapupJobs: Array.from(remainingJobs.values()),
+      };
+      persistSyntheticState();
     }
-    return failedJobs;
+    return Array.from(remainingJobs.values());
   }
 
   private async flushPendingSyntheticWrapups(
