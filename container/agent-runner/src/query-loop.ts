@@ -38,7 +38,7 @@ import {
 
 export interface QueryLoopConfig {
   runner: AgentRunner;
-  buildSystemPrompt: () => string;
+  buildSystemPrompt: (prompt: string) => string;
   initialPrompt: string;
   initialImages?: Array<{ data: string; mimeType?: string }>;
   sessionRecordId: string;
@@ -381,7 +381,7 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
     // Execute query
     const queryConfig: QueryConfig = {
       prompt,
-      systemPrompt: config.buildSystemPrompt(),
+      systemPrompt: config.buildSystemPrompt(prompt),
       sessionId,
       resumeAt: resumeAnchor,
       images,

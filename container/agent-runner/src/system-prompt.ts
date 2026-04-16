@@ -3,7 +3,6 @@ import {
 } from 'happyclaw-agent-runner-core';
 
 import { createContextManager } from './context-manager-factory.js';
-import type { IpcPaths } from './ipc-handler.js';
 import type { SessionState } from './session-state.js';
 import type { ContainerInput } from './types.js';
 
@@ -13,17 +12,19 @@ export function createSystemPromptBuilder(params: {
   runnerId: SupportedRunnerId;
   containerInput: ContainerInput;
   state: SessionState;
-  ipcPaths: IpcPaths;
+  workspaceIpc: string;
+  imChannelsFile: string;
   groupDir: string;
   globalDir: string;
   memoryDir: string;
   skillsDir: string;
-}): () => string {
+}): (prompt: string) => string {
   const {
     runnerId,
     containerInput,
     state,
-    ipcPaths,
+    workspaceIpc,
+    imChannelsFile,
     groupDir,
     globalDir,
     memoryDir,
@@ -38,7 +39,7 @@ export function createSystemPromptBuilder(params: {
       groupFolder: containerInput.groupFolder,
       isHome,
       isAdminHome,
-      workspaceIpc: ipcPaths.inputDir.replace('/input', ''),
+      workspaceIpc,
       workspaceGroup: groupDir,
       workspaceGlobal: globalDir,
       workspaceMemory: memoryDir,
@@ -48,7 +49,8 @@ export function createSystemPromptBuilder(params: {
     runnerId === 'claude' ? { nativeCapabilities: ['skills'] } : undefined,
   );
 
-  return () => {
+  return (prompt: string) => {
+    state.extractSourceChannels(prompt, imChannelsFile);
     ctxMgr.updateDynamicContext({
       recentImChannels: state.recentImChannels,
       contextSummary: containerInput.contextSummary,
