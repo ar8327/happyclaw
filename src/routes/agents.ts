@@ -11,6 +11,7 @@ import {
   getAllRegisteredGroups,
   getSessionBinding,
   getSessionRecord,
+  isPrimarySessionFolder,
   listAgentsByJid,
   getAgent,
   deleteAgent,
@@ -617,7 +618,7 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
   if (!canAccessGroup(user, { ...group, jid: accessJid })) {
     return c.json({ error: 'Forbidden' }, 403);
   }
-  if (group.is_home) {
+  if (isPrimarySessionFolder(group.folder)) {
     return c.json(
       { error: 'Home workspace main conversation uses default IM routing' },
       400,

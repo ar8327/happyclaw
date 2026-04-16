@@ -28,7 +28,7 @@ export async function runLocalSessionRuntime(
   input: RuntimeInput,
   onProcess: (proc: ChildProcess, identifier: string) => void,
   onOutput?: (output: RuntimeOutput) => Promise<void>,
-  ownerHomeFolder?: string,
+  ownerPrimarySessionFolder?: string,
   launchProfile?: RuntimeLaunchProfile,
 ): Promise<RuntimeOutput> {
   return runLocalAgent(
@@ -36,7 +36,7 @@ export async function runLocalSessionRuntime(
     input,
     onProcess,
     onOutput,
-    ownerHomeFolder,
+    ownerPrimarySessionFolder,
     launchProfile,
   );
 }
@@ -46,7 +46,7 @@ export async function runSessionAgent(
   input: RuntimeInput,
   onProcess: (proc: ChildProcess, identifier: string) => void,
   onOutput?: (output: RuntimeOutput) => Promise<void>,
-  ownerHomeFolder?: string,
+  ownerPrimarySessionFolder?: string,
   launchProfile?: RuntimeLaunchProfile,
 ): Promise<RuntimeOutput> {
   return runLocalSessionRuntime(
@@ -54,7 +54,7 @@ export async function runSessionAgent(
     input,
     onProcess,
     onOutput,
-    ownerHomeFolder,
+    ownerPrimarySessionFolder,
     launchProfile,
   );
 }

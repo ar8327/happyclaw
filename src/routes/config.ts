@@ -16,6 +16,7 @@ import {
   getRegisteredGroup,
   getSessionBinding,
   getSessionRecord,
+  isPrimarySessionFolder,
   setRegisteredGroup,
   saveSessionBinding,
   getAgent,
@@ -2951,11 +2952,11 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
     return c.json({ success: true });
   }
 
-  if (target.group.is_home) {
-      return c.json(
-        { error: 'Home workspace main conversation uses default IM routing' },
-        400,
-      );
+  if (isPrimarySessionFolder(target.group.folder)) {
+    return c.json(
+      { error: 'Home workspace main conversation uses default IM routing' },
+      400,
+    );
   }
 
   const force = body.force === true;

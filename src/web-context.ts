@@ -8,6 +8,7 @@ import type { ActiveTurn } from './turn-manager.js';
 import type { TurnObservabilitySnapshot } from './turn-observability.js';
 import type { CompressOptions } from './context-compressor.js';
 import {
+  isPrimarySessionFolder,
 } from './db.js';
 import { getLocalWorkbenchAuthUser } from './local-user.js';
 
@@ -146,6 +147,6 @@ export function canDeleteGroup(
   user: { id: string; role: UserRole },
   group: RegisteredGroup & { jid: string },
 ): boolean {
-  if (group.is_home) return false;
+  if (isPrimarySessionFolder(group.folder)) return false;
   return canModifyGroup(user, group);
 }

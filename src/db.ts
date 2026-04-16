@@ -2641,6 +2641,10 @@ export function getPrimarySessionForOwner(
   return rows[0] ? parseSessionRecord(rows[0]) : undefined;
 }
 
+export function isPrimarySessionFolder(folder: string): boolean {
+  return getSessionRecord(buildMainSessionId(folder))?.kind === 'main';
+}
+
 export function saveSessionRecord(session: SessionRecord): void {
   db.prepare(
     `INSERT INTO sessions (

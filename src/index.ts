@@ -79,6 +79,7 @@ import {
   getGroupsByOwner,
   getMessagesPage,
   insertUsageRecord,
+  isPrimarySessionFolder,
   getTranscriptMessagesSince,
   markStaleTurnsAsError,
   cleanupOldTurns,
@@ -718,17 +719,25 @@ function resolveEffectiveFolder(chatJid: string): string | undefined {
  * Non-home aliases keep their own local runtime metadata and customCwd.
  * Populates registeredGroups cache as a side-effect.
  */
-function resolveEffectiveGroup(group: RegisteredGroup): {
+function resolveEffectiveGroup(
+  chatJid: string,
+  group: RegisteredGroup,
+): {
   effectiveGroup: RegisteredGroup;
   isHome: boolean;
 } {
-  if (group.is_home) return { effectiveGroup: group, isHome: true };
+  const primarySessionFolder = isPrimarySessionFolder(group.folder);
+  if (chatJid.startsWith('web:') && primarySessionFolder) {
+    return { effectiveGroup: group, isHome: true };
+  }
 
-  const siblingJids = getJidsByFolder(group.folder);
-  for (const jid of siblingJids) {
-    const sibling = registeredGroups[jid] ?? getRegisteredGroup(jid);
-    if (sibling && !registeredGroups[jid]) registeredGroups[jid] = sibling;
-    if (sibling?.is_home) {
+  const primaryJid = getJidsByFolder(group.folder).find((jid) => jid.startsWith('web:'));
+  if (primaryJid && primaryJid !== chatJid && primarySessionFolder) {
+    const sibling = registeredGroups[primaryJid] ?? getRegisteredGroup(primaryJid);
+    if (sibling && !registeredGroups[primaryJid]) {
+      registeredGroups[primaryJid] = sibling;
+    }
+    if (sibling) {
       return {
         effectiveGroup: {
           ...group,
@@ -744,7 +753,7 @@ function resolveEffectiveGroup(group: RegisteredGroup): {
 }
 
 /** Resolve the owner's primary session folder for shared runtime credentials. */
-function resolveOwnerHomeFolder(group: RegisteredGroup): string {
+function resolveOwnerPrimarySessionFolder(group: RegisteredGroup): string {
   const ownerKey = resolveSessionOwnerKey(group.folder);
   if (!ownerKey) {
     return group.folder;
@@ -1718,12 +1727,6 @@ function loadState(): void {
     logger.warn({ err }, 'Failed to ensure local operator primary Session alias');
   }
 
-  // Normalize legacy home-style aliases onto the single local-runtime compatibility shape.
-  for (const [jid, group] of Object.entries(registeredGroups)) {
-    if (!group.is_home) continue;
-    registeredGroups[jid] = group;
-  }
-
   // Initialize the local operator global CLAUDE.md from template when missing.
   const templatePath = path.resolve(
     process.cwd(),
@@ -2037,7 +2040,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return true;
   }
 
-  const resolved = resolveEffectiveGroup(group);
+  const resolved = resolveEffectiveGroup(chatJid, group);
   let effectiveGroup = resolved.effectiveGroup;
   let isHome = resolved.isHome;
 
@@ -2051,7 +2054,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // active admin sender to avoid writing global memory into another admin's
   // user-global directory.
   let ownerUserId = resolveSessionOwnerKey(effectiveGroup.folder);
-  if (chatJid === 'web:main' && effectiveGroup.is_home) {
+  if (chatJid === 'web:main' && isHome) {
     for (let i = missedMessages.length - 1; i >= 0; i--) {
       const sender = missedMessages[i]?.sender;
       if (!sender || sender === 'happyclaw-agent' || sender === '__system__')
@@ -2954,7 +2957,7 @@ async function runAgent(
   status: 'success' | 'error' | 'closed' | 'drained';
   error?: string;
 }> {
-  const isHome = !!group.is_home;
+  const isHome = isPrimarySessionFolder(group.folder);
   const isAdminHome = isHome && group.folder === MAIN_GROUP_FOLDER;
   const sessionRecordId = buildMainSessionRecordId(group.folder);
   const sessionRecord = getSessionRecord(sessionRecordId);
@@ -3016,7 +3019,7 @@ async function runAgent(
       queue.registerProcess(chatJid, proc, null, group.folder, identifier);
     };
 
-    const ownerHomeFolder = resolveOwnerHomeFolder(group);
+    const ownerPrimarySessionFolder = resolveOwnerPrimarySessionFolder(group);
     const activeTurnId = turnManager.getActiveTurn(group.folder)?.id;
 
     const output = await runSessionAgent(
@@ -3038,7 +3041,7 @@ async function runAgent(
       },
       onProcessCb,
       wrappedOnOutput,
-      ownerHomeFolder,
+      ownerPrimarySessionFolder,
     );
 
     // 仅从成功的最终输出中更新 session ID；
@@ -3154,7 +3157,6 @@ function canSendCrossGroupMessage(
   isAdminHome: boolean,
   isHome: boolean,
   sourceFolder: string,
-  sourceGroupEntry: RegisteredGroup | undefined,
   targetGroup: RegisteredGroup | undefined,
 ): boolean {
   if (isAdminHome) return true;
@@ -3194,13 +3196,8 @@ function startIpcWatcher(): void {
 
     for (const sourceGroup of groupFolders) {
       // Determine whether this IPC directory belongs to the primary Session workspace.
-      const sourceGroupEntry = Object.values(registeredGroups).find(
-        (g) => g.folder === sourceGroup,
-      );
-      const isAdminHome = !!(
-        sourceGroupEntry?.is_home && sourceGroup === MAIN_GROUP_FOLDER
-      );
-      const isHome = !!sourceGroupEntry?.is_home;
+      const isHome = isPrimarySessionFolder(sourceGroup);
+      const isAdminHome = isHome && sourceGroup === MAIN_GROUP_FOLDER;
 
       // Collect all IPC roots: main group dir + agents/*/
       const groupIpcRoot = path.join(ipcBaseDir, sourceGroup);
@@ -3241,7 +3238,6 @@ function startIpcWatcher(): void {
                       isAdminHome,
                       isHome,
                       sourceGroup,
-                      sourceGroupEntry,
                       targetGroup,
                     )
                   ) {
@@ -3339,7 +3335,6 @@ function startIpcWatcher(): void {
                       isAdminHome,
                       isHome,
                       sourceGroup,
-                      sourceGroupEntry,
                       targetGroup,
                     )
                   ) {
@@ -3490,7 +3485,6 @@ function startIpcWatcher(): void {
                   sourceGroup,
                   isAdminHome,
                   isHome,
-                  sourceGroupEntry,
                 );
                 fs.unlinkSync(filePath);
               } catch (err) {
@@ -3567,7 +3561,6 @@ async function processTaskIpc(
   sourceGroup: string, // Verified identity from IPC directory
   isAdminHome: boolean, // Compatibility flag: whether source is the primary Session runtime
   isHome: boolean, // Compatibility flag: whether source maps to a home-style alias
-  sourceGroupEntry: RegisteredGroup | undefined, // Source group's registered entry
 ): Promise<void> {
   switch (data.type) {
     case 'schedule_task':
@@ -3796,7 +3789,6 @@ async function processTaskIpc(
             isAdminHome,
             isHome,
             sourceGroup,
-            sourceGroupEntry,
             targetGroup,
           )
         ) {
@@ -3916,7 +3908,7 @@ async function processAgentConversation(
   }
   if (!group) return;
 
-  const { effectiveGroup } = resolveEffectiveGroup(group);
+  const { effectiveGroup, isHome } = resolveEffectiveGroup(chatJid, group);
 
   const virtualChatJid = buildWorkerConversationJid(chatJid, agentId);
   const workerSessionId = buildWorkerSessionRecordId(agentId);
@@ -3926,7 +3918,6 @@ async function processAgentConversation(
   const missedMessages = getMessagesSince(virtualChatJid, sinceCursor);
   if (missedMessages.length === 0) return;
 
-  const isHome = !!effectiveGroup.is_home;
   const isAdminHome = isHome && effectiveGroup.folder === MAIN_GROUP_FOLDER;
 
   // Update agent status → running
@@ -4133,14 +4124,14 @@ async function processAgentConversation(
       new Set(Object.keys(registeredGroups)),
     );
 
-    const ownerHomeFolder = resolveOwnerHomeFolder(effectiveGroup);
+    const ownerPrimarySessionFolder = resolveOwnerPrimarySessionFolder(effectiveGroup);
 
     const output = await runSessionAgent(
       effectiveGroup,
       runtimeInput,
       onProcessCb,
       wrappedOnOutput,
-      ownerHomeFolder,
+      ownerPrimarySessionFolder,
     );
 
     // Finalize session
@@ -4399,7 +4390,7 @@ async function startMessageLoop(): Promise<void> {
                 getChannelType(channel) === 'feishu' &&
                 !hasActiveProgressSession(channel)
               ) {
-                const resolved = resolveEffectiveGroup(group);
+                const resolved = resolveEffectiveGroup(chatJid, group);
                 const ownerId = resolveSessionOwnerKey(resolved.effectiveGroup.folder);
                 const fc = ownerId ? getUserFeishuConfig(ownerId) : null;
                 if (fc?.streamingCard) {
@@ -4604,7 +4595,7 @@ function buildOnNewChat(
       // Re-route the chat to the current user's home folder.
       // This handles the common case where the same Feishu app credentials
       // are moved from one user to another (e.g., admin → member for testing).
-      if (!existing.is_home) {
+      if (!isPrimarySessionFolder(existing.folder)) {
         const previousFolder = existing.folder;
         const previousOwnerKey = existingOwnerKey;
         existing.folder = homeFolder;

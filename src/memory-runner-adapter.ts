@@ -11,7 +11,7 @@ export class MemoryRunnerAdapter {
     profile: MemoryProfile,
     input: RuntimeInput,
     onOutput: (output: RuntimeOutput) => Promise<void> | void,
-    ownerHomeFolder: string,
+    ownerPrimarySessionFolder: string,
   ): Promise<RuntimeOutput> {
     const launchProfile: RuntimeLaunchProfile = {
       toolProfile: profile.toolProfile,
@@ -25,7 +25,7 @@ export class MemoryRunnerAdapter {
       async (output) => {
         await onOutput(output);
       },
-      ownerHomeFolder,
+      ownerPrimarySessionFolder,
       launchProfile,
     );
   }
