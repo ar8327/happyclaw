@@ -10,9 +10,10 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, GROUPS_DIR } from './config.js';
-import type { RuntimeOutput } from './runtime-runner.js';
+import type { RuntimeInput, RuntimeOutput } from './runtime-runner.js';
 import {
   getChatNamesByJids,
+  getJidsByFolder,
   getPrimarySessionForOwner,
   getSessionRecord,
   getSessionRuntimeState,
@@ -25,11 +26,25 @@ import {
 } from './db.js';
 import { SessionRuntimeManager } from './session-runtime-manager.js';
 import { logger } from './logger.js';
-import { resolveMemoryRunnerId } from './runner-registry.js';
+import {
+  getRunnerDescriptor,
+  resolveMemoryRunnerId,
+} from './runner-registry.js';
 import { getSystemSettings } from './runtime-config.js';
-import type { MessageCursor, SessionRecord } from './types.js';
+import type { MessageCursor, RunnerDescriptor, SessionRecord } from './types.js';
 import { MemoryRunnerAdapter } from './memory-runner-adapter.js';
 import { buildMemoryProfile } from './memory-profile.js';
+import {
+  buildMemorySyntheticRepairPrompt,
+  clearMemorySyntheticRepair,
+  consumeMemorySyntheticUsage,
+  getMemoryLifecycleStrategy,
+  queueMemorySyntheticWrapupJobs,
+  readMemorySyntheticLifecycleState,
+  resetMemorySyntheticUsage,
+  writeMemorySyntheticLifecycleState,
+  type MemorySyntheticWrapupJob,
+} from './memory-synthetic-lifecycle.js';
 
 // Limits
 const MAX_CONCURRENT_MEMORY_AGENTS = 3;
@@ -41,6 +56,33 @@ interface AgentEntry {
   lastActivity: number;
   inFlight: number;
   tail: Promise<void>;
+}
+
+interface MemoryExecutionContext {
+  ownerKey: string;
+  memDir: string;
+  primaryFolder: string;
+  runtimeKey: string;
+  memoryAgentId: string;
+  ipcInputDir: string;
+  memoryProfile: ReturnType<typeof buildMemoryProfile>;
+  runnerDescriptor: RunnerDescriptor;
+  runtimeInputBase: Omit<RuntimeInput, 'prompt'>;
+}
+
+interface MemoryTranscriptExport {
+  transcriptFile: string;
+  workspaceFolder: string;
+  chatJids: string[];
+}
+
+interface MemoryRunResult {
+  output: RuntimeOutput;
+  parsed: {
+    success: boolean;
+    response?: string;
+    error?: string;
+  };
 }
 
 export interface MemoryAgentResponse {
@@ -120,8 +162,8 @@ const INITIAL_META: Record<string, unknown> = {
  * Ensure the memory directory for a user has the full structure.
  * Safe to call multiple times (idempotent).
  */
-export function ensureMemoryDir(userId: string): string {
-  const memDir = path.join(DATA_DIR, 'memory', userId);
+export function ensureMemoryDir(ownerKey: string): string {
+  const memDir = path.join(DATA_DIR, 'memory', ownerKey);
 
   // Create subdirectories
   for (const subdir of ['knowledge', 'impressions', 'transcripts']) {
@@ -132,7 +174,7 @@ export function ensureMemoryDir(userId: string): string {
   const indexPath = path.join(memDir, 'index.md');
   if (!fs.existsSync(indexPath)) {
     fs.writeFileSync(indexPath, INDEX_MD_TEMPLATE, 'utf-8');
-    logger.info({ userId }, 'Created initial index.md for memory');
+    logger.info({ ownerKey }, 'Created initial index.md for memory');
   }
 
   // Create state.json if missing
@@ -143,7 +185,7 @@ export function ensureMemoryDir(userId: string): string {
       JSON.stringify(INITIAL_STATE, null, 2) + '\n',
       'utf-8',
     );
-    logger.info({ userId }, 'Created initial state.json for memory');
+    logger.info({ ownerKey }, 'Created initial state.json for memory');
   }
 
   // Create meta.json if missing (with migration from old state.json)
@@ -173,9 +215,9 @@ export function ensureMemoryDir(userId: string): string {
         delete existingState.totalImpressions;
         delete existingState.totalKnowledgeFiles;
         delete existingState.pendingMaintenance;
-        writeMemoryState(userId, existingState);
+        writeMemoryState(ownerKey, existingState);
         logger.info(
-          { userId },
+          { ownerKey },
           'Migrated LLM fields from state.json to meta.json',
         );
       }
@@ -188,7 +230,7 @@ export function ensureMemoryDir(userId: string): string {
       JSON.stringify(meta, null, 2) + '\n',
       'utf-8',
     );
-    logger.info({ userId }, 'Created meta.json for memory');
+    logger.info({ ownerKey }, 'Created meta.json for memory');
   }
 
   return memDir;
@@ -197,8 +239,8 @@ export function ensureMemoryDir(userId: string): string {
 /**
  * Read the memory state.json for a user.
  */
-export function readMemoryState(userId: string): Record<string, unknown> {
-  const statePath = path.join(DATA_DIR, 'memory', userId, 'state.json');
+export function readMemoryState(ownerKey: string): Record<string, unknown> {
+  const statePath = path.join(DATA_DIR, 'memory', ownerKey, 'state.json');
   try {
     if (fs.existsSync(statePath)) {
       return JSON.parse(fs.readFileSync(statePath, 'utf-8'));
@@ -213,10 +255,10 @@ export function readMemoryState(userId: string): Record<string, unknown> {
  * Write the memory state.json for a user (atomic write).
  */
 export function writeMemoryState(
-  userId: string,
+  ownerKey: string,
   state: Record<string, unknown>,
 ): void {
-  const statePath = path.join(DATA_DIR, 'memory', userId, 'state.json');
+  const statePath = path.join(DATA_DIR, 'memory', ownerKey, 'state.json');
   const tmp = `${statePath}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', 'utf-8');
   fs.renameSync(tmp, statePath);
@@ -225,8 +267,8 @@ export function writeMemoryState(
 /**
  * Read the memory meta.json for a user (LLM-managed metadata).
  */
-export function readMemoryMeta(userId: string): Record<string, unknown> {
-  const metaPath = path.join(DATA_DIR, 'memory', userId, 'meta.json');
+export function readMemoryMeta(ownerKey: string): Record<string, unknown> {
+  const metaPath = path.join(DATA_DIR, 'memory', ownerKey, 'meta.json');
   try {
     if (fs.existsSync(metaPath)) {
       return JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
@@ -241,10 +283,10 @@ export function readMemoryMeta(userId: string): Record<string, unknown> {
  * Write the memory meta.json for a user (atomic write).
  */
 export function writeMemoryMeta(
-  userId: string,
+  ownerKey: string,
   meta: Record<string, unknown>,
 ): void {
-  const metaPath = path.join(DATA_DIR, 'memory', userId, 'meta.json');
+  const metaPath = path.join(DATA_DIR, 'memory', ownerKey, 'meta.json');
   const tmp = `${metaPath}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(meta, null, 2) + '\n', 'utf-8');
   fs.renameSync(tmp, metaPath);
@@ -351,18 +393,17 @@ function formatTranscriptMarkdown(
 }
 
 /**
- * Export transcripts for the owner's primary Session folder and trigger session_wrapup.
- * Extracted from index.ts so it can be called from both container exit listener and manual trigger.
+ * Export transcripts for the owner's Session folder and persist wrapup state.
+ * The caller decides whether to run `session_wrapup` immediately or defer it.
  */
-export async function exportTranscriptsForUser(
-  userId: string,
+export function exportTranscriptSnapshotForUser(
+  ownerKey: string,
   folder: string,
   chatJids: string[],
-  memoryOrchestrator: MemoryOrchestrator,
-): Promise<MemoryAgentResponse | null> {
+): MemoryTranscriptExport | null {
   try {
-    const memDir = ensureMemoryDir(userId);
-    const state = readMemoryState(userId);
+    const memDir = ensureMemoryDir(ownerKey);
+    const state = readMemoryState(ownerKey);
     const rawWrapups = (state.lastSessionWrapups || {}) as Record<
       string,
       unknown
@@ -409,7 +450,7 @@ export async function exportTranscriptsForUser(
     }
 
     if (allMessages.length === 0) {
-      logger.debug({ userId, folder }, 'No new messages for transcript export');
+      logger.debug({ ownerKey, folder }, 'No new messages for transcript export');
       return null;
     }
 
@@ -436,7 +477,7 @@ export async function exportTranscriptsForUser(
 
     logger.info(
       {
-        userId,
+        ownerKey,
         folder,
         messageCount: allMessages.length,
         path: transcriptRelPath,
@@ -460,18 +501,15 @@ export async function exportTranscriptsForUser(
       pending.push(folder);
       state.pendingWrapups = pending;
     }
-    writeMemoryState(userId, state);
-
-    // Trigger session_wrapup and return the result
-    return await memoryOrchestrator.send(userId, {
-      type: 'session_wrapup',
+    writeMemoryState(ownerKey, state);
+    return {
       transcriptFile: transcriptRelPath,
       workspaceFolder: folder,
       chatJids: Array.from(transcriptChatJids),
-    });
+    };
   } catch (err) {
     logger.error(
-      { userId, folder, err },
+      { ownerKey, folder, err },
       'Failed to export transcript for Memory Agent',
     );
     return null;
@@ -479,10 +517,30 @@ export async function exportTranscriptsForUser(
 }
 
 /**
+ * Export transcripts for the owner's primary Session folder and trigger session_wrapup.
+ * Extracted from index.ts so it can be called from both container exit listener and manual trigger.
+ */
+export async function exportTranscriptsForUser(
+  ownerKey: string,
+  folder: string,
+  chatJids: string[],
+  memoryOrchestrator: MemoryOrchestrator,
+): Promise<MemoryAgentResponse | null> {
+  const transcript = exportTranscriptSnapshotForUser(ownerKey, folder, chatJids);
+  if (!transcript) return null;
+  return memoryOrchestrator.send(ownerKey, {
+    type: 'session_wrapup',
+    transcriptFile: transcript.transcriptFile,
+    workspaceFolder: transcript.workspaceFolder,
+    chatJids: transcript.chatJids,
+  });
+}
+
+/**
  * Write a memory agent execution log to the primary session logs directory.
  */
 function writeMemoryLog(
-  userId: string,
+  ownerKey: string,
   opts: {
     type: string;
     startTime: number;
@@ -497,9 +555,9 @@ function writeMemoryLog(
     const logsDir = path.join(
       GROUPS_DIR,
       resolvePrimarySessionFolder(
-        userId,
-        getMemorySessionConfig(userId),
-        getPrimarySessionForOwner(userId),
+        ownerKey,
+        getMemorySessionConfig(ownerKey),
+        getPrimarySessionForOwner(ownerKey),
       ),
       'logs',
     );
@@ -532,11 +590,11 @@ function writeMemoryLog(
     fs.renameSync(tmp, filePath);
 
     logger.info(
-      { userId, filename, type: opts.type, status: opts.status, duration },
+      { ownerKey, filename, type: opts.type, status: opts.status, duration },
       'Wrote memory agent log',
     );
   } catch (err) {
-    logger.error({ userId, err }, 'Failed to write memory agent log');
+    logger.error({ ownerKey, err }, 'Failed to write memory agent log');
   }
 }
 
@@ -567,12 +625,12 @@ const MEMORY_CORE_INSTRUCTIONS = `你现在以 HappyClaw memory agent 的身份�
 - response 用自然语言简短总结结果
 - touchedFiles 只放相对 memory 根目录的路径`;
 
-function buildMemorySessionId(userId: string): string {
-  return `${MEMORY_SESSION_ID_PREFIX}${userId}`;
+function buildMemorySessionId(ownerKey: string): string {
+  return `${MEMORY_SESSION_ID_PREFIX}${ownerKey}`;
 }
 
 function resolvePrimarySessionFolder(
-  userId: string,
+  ownerKey: string,
   memorySession: SessionRecord | undefined,
   primarySession?: SessionRecord,
 ): string {
@@ -582,16 +640,16 @@ function resolvePrimarySessionFolder(
   if (primarySession?.id.startsWith('main:')) {
     return primarySession.id.slice('main:'.length);
   }
-  throw new Error(`No primary session found for memory owner ${userId}`);
+  throw new Error(`No primary session found for memory owner ${ownerKey}`);
 }
 
-function listOwnedPrimaryFolders(userId: string): string[] {
+function listOwnedPrimaryFolders(ownerKey: string): string[] {
   return Array.from(
     new Set(
       listSessionRecords()
         .filter(
           (session) =>
-            session.owner_key === userId &&
+            session.owner_key === ownerKey &&
             session.id.startsWith('main:') &&
             (session.kind === 'main' || session.kind === 'workspace'),
         )
@@ -600,12 +658,12 @@ function listOwnedPrimaryFolders(userId: string): string[] {
   );
 }
 
-function getMemorySessionConfig(userId: string) {
-  return getSessionRecord(buildMemorySessionId(userId));
+function getMemorySessionConfig(ownerKey: string) {
+  return getSessionRecord(buildMemorySessionId(ownerKey));
 }
 
 function ensureMemorySessionProjection(
-  userId: string,
+  ownerKey: string,
   memDir: string,
   primarySession: SessionRecord | undefined,
   existing: SessionRecord | undefined,
@@ -613,7 +671,7 @@ function ensureMemorySessionProjection(
   if (existing) {
     const nextParentSessionId =
       existing.parent_session_id || primarySession?.id || null;
-    const nextOwnerKey = existing.owner_key || userId;
+    const nextOwnerKey = existing.owner_key || ownerKey;
     const nextSession =
       nextParentSessionId !== existing.parent_session_id
       || nextOwnerKey !== existing.owner_key
@@ -632,8 +690,8 @@ function ensureMemorySessionProjection(
   const now = new Date().toISOString();
   const runnerId = resolveMemoryRunnerId(primarySession?.runner_id || null);
   const session: SessionRecord = {
-    id: buildMemorySessionId(userId),
-    name: `memory:${userId}`,
+    id: buildMemorySessionId(ownerKey),
+    name: `memory:${ownerKey}`,
     kind: 'memory',
     parent_session_id: primarySession?.id ?? null,
     cwd: memDir,
@@ -647,7 +705,7 @@ function ensureMemorySessionProjection(
     knowledge_extraction: primarySession?.knowledge_extraction ?? false,
     is_pinned: false,
     archived: false,
-    owner_key: userId,
+    owner_key: ownerKey,
     created_at: now,
     updated_at: now,
   };
@@ -667,14 +725,16 @@ function parseJsonText<T>(raw: string | null | undefined, fallback: T): T {
 function buildMemoryPrompt(
   request: MemoryExecutionRequest,
   memDir: string,
+  repairPrompt?: string | null,
 ): string {
   const workspaceFolder = resolveRequestWorkspaceFolder(request);
-  const lines: string[] = [
-    MEMORY_CORE_INSTRUCTIONS,
-    '',
-    `memory 根目录: ${memDir}`,
-    `请求类型: ${request.type}`,
-  ];
+  const lines: string[] = [MEMORY_CORE_INSTRUCTIONS];
+
+  if (repairPrompt) {
+    lines.push('', repairPrompt);
+  }
+
+  lines.push('', `memory 根目录: ${memDir}`, `请求类型: ${request.type}`);
 
   if (request.type === 'query') {
     lines.push(
@@ -769,11 +829,11 @@ function parseMemoryAgentResponseText(
 }
 
 function persistMemoryRuntimeSnapshot(
-  userId: string,
+  ownerKey: string,
   output: RuntimeOutput,
 ): void {
   if (!output.runtimeState && !output.newSessionId) return;
-  const sessionId = buildMemorySessionId(userId);
+  const sessionId = buildMemorySessionId(ownerKey);
   const current = getSessionRuntimeState(sessionId);
   upsertSessionRuntimeState(sessionId, {
     providerSessionId:
@@ -831,8 +891,8 @@ export class MemoryOrchestrator {
     this.idleCheckTimer = null;
   }
 
-  private ensureAgent(userId: string): AgentEntry {
-    const existing = this.agents.get(userId);
+  private ensureAgent(ownerKey: string): AgentEntry {
+    const existing = this.agents.get(ownerKey);
     if (existing) {
       existing.lastActivity = Date.now();
       return existing;
@@ -847,15 +907,15 @@ export class MemoryOrchestrator {
       inFlight: 0,
       tail: Promise.resolve(),
     };
-    this.agents.set(userId, entry);
+    this.agents.set(ownerKey, entry);
     return entry;
   }
 
   private async runSerialized<T>(
-    userId: string,
+    ownerKey: string,
     task: () => Promise<T>,
   ): Promise<T> {
-    const entry = this.ensureAgent(userId);
+    const entry = this.ensureAgent(ownerKey);
     entry.inFlight += 1;
     entry.lastActivity = Date.now();
 
@@ -875,39 +935,41 @@ export class MemoryOrchestrator {
     }
   }
 
-  private async execute(
-    userId: string,
-    requestId: string,
-    request: MemoryExecutionRequest,
-    timeoutMs: number,
-  ): Promise<MemoryAgentResponse> {
-    const memorySession = getMemorySessionConfig(userId);
-    const primarySession = getPrimarySessionForOwner(userId);
+  private prepareExecutionContext(ownerKey: string): MemoryExecutionContext {
+    const memorySession = getMemorySessionConfig(ownerKey);
+    const primarySession = getPrimarySessionForOwner(ownerKey);
     if (!memorySession && !primarySession) {
-      throw new Error(`No memory session found for ${userId}`);
+      throw new Error(`No memory session found for ${ownerKey}`);
     }
 
-    const memDir = ensureMemoryDir(userId);
+    const memDir = ensureMemoryDir(ownerKey);
     const effectiveMemorySession = ensureMemorySessionProjection(
-      userId,
+      ownerKey,
       memDir,
       primarySession,
       memorySession,
     );
+    const runnerDescriptor = getRunnerDescriptor(effectiveMemorySession.runner_id);
+    if (!runnerDescriptor) {
+      throw new Error(
+        `Unknown memory runner "${effectiveMemorySession.runner_id}"`,
+      );
+    }
+
     const primaryFolder = resolvePrimarySessionFolder(
-      userId,
+      ownerKey,
       effectiveMemorySession,
       primarySession,
     );
     const groupDir = effectiveMemorySession.cwd || memDir;
     fs.mkdirSync(groupDir, { recursive: true });
-    fs.mkdirSync(path.join(GROUPS_DIR, 'user-global', userId), {
+    fs.mkdirSync(path.join(GROUPS_DIR, 'user-global', ownerKey), {
       recursive: true,
     });
-    fs.mkdirSync(path.join(DATA_DIR, 'skills', userId), { recursive: true });
+    fs.mkdirSync(path.join(DATA_DIR, 'skills', ownerKey), { recursive: true });
 
-    const runtimeKey = buildMemorySessionId(userId);
-    const memoryAgentId = `memory-${userId}`;
+    const runtimeKey = buildMemorySessionId(ownerKey);
+    const memoryAgentId = `memory-${ownerKey}`;
     const runtimeState = getSessionRuntimeState(runtimeKey);
     const ipcInputDir = path.join(
       DATA_DIR,
@@ -919,24 +981,70 @@ export class MemoryOrchestrator {
     );
     fs.mkdirSync(ipcInputDir, { recursive: true });
 
-    const user = getUserById(userId);
+    const user = getUserById(ownerKey);
     const memoryProfile = buildMemoryProfile({
-      userId,
+      ownerKey,
       runtimeKey,
       primaryFolder,
       groupDir,
       memorySession: effectiveMemorySession,
     });
-    const input = {
-      prompt: buildMemoryPrompt(request, memDir),
+
+    return {
+      ownerKey,
+      memDir,
+      primaryFolder,
+      runtimeKey,
+      memoryAgentId,
+      ipcInputDir,
+      memoryProfile,
+      runnerDescriptor,
+      runtimeInputBase: {
+        sessionId: runtimeState?.provider_session_id || undefined,
+        resumeAnchor: runtimeState?.resume_anchor || undefined,
+        sessionRecordId: runtimeKey,
+        workspaceFolder: primaryFolder,
+        chatJid: runtimeKey,
+        isHome: false,
+        isAdminHome: user?.role === 'admin' && primaryFolder === 'main',
+        agentId: memoryAgentId,
+        bootstrapState: runtimeState
+          ? {
+              providerState: parseJsonText<Record<string, unknown>>(
+                runtimeState.provider_state_json,
+                {},
+              ),
+              recentImChannels: parseJsonText<string[]>(
+                runtimeState.recent_im_channels_json,
+                [],
+              ),
+              imChannelLastSeen: parseJsonText<Record<string, number>>(
+                runtimeState.im_channel_last_seen_json,
+                {},
+              ),
+              currentPermissionMode: runtimeState.current_permission_mode,
+              lastMessageCursor: runtimeState.last_message_cursor,
+            }
+          : undefined,
+      },
+    };
+  }
+
+  private async runRequest(
+    context: MemoryExecutionContext,
+    requestId: string,
+    request: MemoryExecutionRequest,
+    timeoutMs: number,
+    opts?: {
+      repairPrompt?: string | null;
+      onOutput?: (output: RuntimeOutput) => Promise<void> | void;
+    },
+  ): Promise<MemoryRunResult> {
+    const runtimeState = getSessionRuntimeState(context.runtimeKey);
+    const input: RuntimeInput = {
+      ...context.runtimeInputBase,
       sessionId: runtimeState?.provider_session_id || undefined,
       resumeAnchor: runtimeState?.resume_anchor || undefined,
-      sessionRecordId: runtimeKey,
-      workspaceFolder: primaryFolder,
-      chatJid: runtimeKey,
-      isHome: false,
-      isAdminHome: user?.role === 'admin' && primaryFolder === 'main',
-      agentId: memoryAgentId,
       bootstrapState: runtimeState
         ? {
             providerState: parseJsonText<Record<string, unknown>>(
@@ -955,46 +1063,50 @@ export class MemoryOrchestrator {
             lastMessageCursor: runtimeState.last_message_cursor,
           }
         : undefined,
+      prompt: buildMemoryPrompt(request, context.memDir, opts?.repairPrompt),
     };
 
     const startTime = Date.now();
     let responseText = '';
     let finalOutput: RuntimeOutput | null = null;
     let closeRequested = false;
+
     try {
       const output = await this.runnerAdapter.run(
-        memoryProfile,
+        context.runnerDescriptor,
+        context.memoryProfile,
         input,
-        async (output) => {
-          persistMemoryRuntimeSnapshot(userId, output);
+        async (runtimeOutput) => {
+          persistMemoryRuntimeSnapshot(context.ownerKey, runtimeOutput);
+          await opts?.onOutput?.(runtimeOutput);
           if (
-            output.status === 'success' ||
-            output.status === 'error' ||
-            output.status === 'closed' ||
-            output.status === 'drained'
+            runtimeOutput.status === 'success' ||
+            runtimeOutput.status === 'error' ||
+            runtimeOutput.status === 'closed' ||
+            runtimeOutput.status === 'drained'
           ) {
-            finalOutput = output;
+            finalOutput = runtimeOutput;
           }
           if (
             !closeRequested &&
-            (output.status === 'success' || output.status === 'error')
+            (runtimeOutput.status === 'success' || runtimeOutput.status === 'error')
           ) {
             closeRequested = true;
-            fs.mkdirSync(ipcInputDir, { recursive: true });
-            fs.writeFileSync(path.join(ipcInputDir, '_close'), '');
+            fs.mkdirSync(context.ipcInputDir, { recursive: true });
+            fs.writeFileSync(path.join(context.ipcInputDir, '_close'), '');
           }
           if (
-            output.status === 'stream' &&
-            output.streamEvent?.eventType === 'text_delta' &&
-            output.streamEvent.text
+            runtimeOutput.status === 'stream' &&
+            runtimeOutput.streamEvent?.eventType === 'text_delta' &&
+            runtimeOutput.streamEvent.text
           ) {
-            responseText += output.streamEvent.text;
+            responseText += runtimeOutput.streamEvent.text;
           }
         },
-        primaryFolder,
+        context.primaryFolder,
       );
 
-      persistMemoryRuntimeSnapshot(userId, output);
+      persistMemoryRuntimeSnapshot(context.ownerKey, output);
       const finalResultText = (finalOutput as RuntimeOutput | null)?.result ?? null;
       const outputResultText = output.result ?? null;
       let parsed = parseMemoryAgentResponseText(
@@ -1007,7 +1119,7 @@ export class MemoryOrchestrator {
           error: parsed.error || output.error || 'Memory runner exited with error',
         };
       }
-      writeMemoryLog(userId, {
+      writeMemoryLog(context.ownerKey, {
         type: request.type,
         startTime,
         status: parsed.success ? 'success' : 'error',
@@ -1016,15 +1128,10 @@ export class MemoryOrchestrator {
         stderr: [],
         error: parsed.error,
       });
-      return {
-        requestId,
-        success: parsed.success,
-        response: parsed.response,
-        error: parsed.error,
-      };
+      return { output, parsed };
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
-      writeMemoryLog(userId, {
+      writeMemoryLog(context.ownerKey, {
         type: request.type,
         startTime,
         status: /timed out/i.test(error.message) ? 'timeout' : 'error',
@@ -1036,8 +1143,178 @@ export class MemoryOrchestrator {
     }
   }
 
+  private async flushSyntheticWrapupJobs(
+    context: MemoryExecutionContext,
+    jobs: MemorySyntheticWrapupJob[],
+    syntheticStateRef: {
+      current: ReturnType<typeof readMemorySyntheticLifecycleState>;
+    },
+  ): Promise<MemorySyntheticWrapupJob[]> {
+    if (jobs.length === 0) return [];
+    const persistSyntheticState = () => {
+      const latestState = readMemoryState(context.ownerKey);
+      writeMemoryState(
+        context.ownerKey,
+        writeMemorySyntheticLifecycleState(
+          latestState,
+          syntheticStateRef.current,
+        ),
+      );
+    };
+    const failedJobs: MemorySyntheticWrapupJob[] = [];
+
+    for (const job of jobs) {
+      const repairPrompt = syntheticStateRef.current.pendingRepair
+        ? buildMemorySyntheticRepairPrompt(syntheticStateRef.current.pendingRepair)
+        : null;
+      const result = await this.runRequest(
+        context,
+        crypto.randomUUID(),
+        {
+          type: 'session_wrapup',
+          transcriptFile: job.transcriptFile,
+          workspaceFolder: job.workspaceFolder,
+          chatJids: job.chatJids,
+        },
+        getSystemSettings().memorySendTimeout,
+        { repairPrompt },
+      );
+      if (repairPrompt && result.parsed.success) {
+        syntheticStateRef.current = clearMemorySyntheticRepair(
+          syntheticStateRef.current,
+        );
+        persistSyntheticState();
+      }
+      if (!result.parsed.success) {
+        logger.warn(
+          {
+            ownerKey: context.ownerKey,
+            workspaceFolder: job.workspaceFolder,
+            transcriptFile: job.transcriptFile,
+            error: result.parsed.error,
+          },
+          'Synthetic memory wrapup flush failed',
+        );
+        failedJobs.push(job);
+      }
+    }
+    return failedJobs;
+  }
+
+  private async execute(
+    ownerKey: string,
+    requestId: string,
+    request: MemoryExecutionRequest,
+    timeoutMs: number,
+  ): Promise<MemoryAgentResponse> {
+    const context = this.prepareExecutionContext(ownerKey);
+    const lifecycleStrategy = getMemoryLifecycleStrategy(context.runnerDescriptor);
+    const syntheticStateRef = {
+      current: readMemorySyntheticLifecycleState(readMemoryState(ownerKey)),
+    };
+    const persistSyntheticState = () => {
+      const latestState = readMemoryState(ownerKey);
+      writeMemoryState(
+        ownerKey,
+        writeMemorySyntheticLifecycleState(latestState, syntheticStateRef.current),
+      );
+    };
+
+    const repairPrompt =
+      lifecycleStrategy === 'synthetic' && syntheticStateRef.current.pendingRepair
+        ? buildMemorySyntheticRepairPrompt(syntheticStateRef.current.pendingRepair)
+        : null;
+    let archiveTriggered = false;
+
+    const result = await this.runRequest(
+      context,
+      requestId,
+      request,
+      timeoutMs,
+      {
+        repairPrompt,
+        onOutput:
+          lifecycleStrategy === 'synthetic'
+            ? async (output) => {
+                const consumed = consumeMemorySyntheticUsage(
+                  syntheticStateRef.current,
+                  output,
+                );
+                syntheticStateRef.current = consumed.synthetic;
+                if (
+                  output.status === 'stream' &&
+                  output.streamEvent?.eventType === 'usage'
+                ) {
+                  persistSyntheticState();
+                }
+                if (consumed.crossedThreshold) {
+                  archiveTriggered = true;
+                }
+              }
+            : undefined,
+      },
+    );
+
+    if (
+      lifecycleStrategy === 'synthetic' &&
+      repairPrompt &&
+      result.parsed.success
+    ) {
+      syntheticStateRef.current = clearMemorySyntheticRepair(
+        syntheticStateRef.current,
+      );
+      persistSyntheticState();
+    }
+
+    if (lifecycleStrategy === 'synthetic' && archiveTriggered) {
+      const queuedAt = new Date().toISOString();
+      const wrapupJobs: MemorySyntheticWrapupJob[] = [];
+      for (const folder of listOwnedPrimaryFolders(ownerKey)) {
+        const transcript = exportTranscriptSnapshotForUser(
+          ownerKey,
+          folder,
+          getJidsByFolder(folder),
+        );
+        if (!transcript) continue;
+        wrapupJobs.push({
+          workspaceFolder: transcript.workspaceFolder,
+          transcriptFile: transcript.transcriptFile,
+          chatJids: transcript.chatJids,
+          queuedAt,
+        });
+      }
+      syntheticStateRef.current = queueMemorySyntheticWrapupJobs(
+        syntheticStateRef.current,
+        wrapupJobs,
+      );
+      syntheticStateRef.current = resetMemorySyntheticUsage(
+        syntheticStateRef.current,
+        wrapupJobs,
+      );
+      persistSyntheticState();
+
+      const failedJobs = await this.flushSyntheticWrapupJobs(
+        context,
+        syntheticStateRef.current.pendingWrapupJobs,
+        syntheticStateRef,
+      );
+      syntheticStateRef.current = {
+        ...syntheticStateRef.current,
+        pendingWrapupJobs: failedJobs,
+      };
+      persistSyntheticState();
+    }
+
+    return {
+      requestId,
+      success: result.parsed.success,
+      response: result.parsed.response,
+      error: result.parsed.error,
+    };
+  }
+
   async query(
-    userId: string,
+    ownerKey: string,
     options: {
       query: string;
       context?: string;
@@ -1049,8 +1326,8 @@ export class MemoryOrchestrator {
     const requestId = crypto.randomUUID();
     const timeoutMs =
       getSystemSettings().memoryQueryTimeout || DEFAULT_QUERY_TIMEOUT_MS;
-    return this.runSerialized(userId, () =>
-      this.execute(userId, requestId, {
+    return this.runSerialized(ownerKey, () =>
+      this.execute(ownerKey, requestId, {
         type: 'query',
         query: options.query,
         context: options.context,
@@ -1062,7 +1339,7 @@ export class MemoryOrchestrator {
   }
 
   async send(
-    userId: string,
+    ownerKey: string,
     message: Record<string, unknown>,
   ): Promise<MemoryAgentResponse> {
     const requestId = crypto.randomUUID();
@@ -1079,9 +1356,9 @@ export class MemoryOrchestrator {
       msgType === 'global_sleep'
         ? settings.memoryGlobalSleepTimeout
         : settings.memorySendTimeout;
-    return this.runSerialized(userId, () =>
+    return this.runSerialized(ownerKey, () =>
       this.execute(
-        userId,
+        ownerKey,
         requestId,
         { ...(message as Record<string, unknown>), type: msgType } as unknown as MemoryExecutionRequest,
         timeoutMs,
@@ -1098,11 +1375,11 @@ export class MemoryOrchestrator {
   }
 
   remember(
-    userId: string,
+    ownerKey: string,
     content: string,
     source?: string,
   ): Promise<MemoryAgentResponse> {
-    return this.send(userId, {
+    return this.send(ownerKey, {
       type: 'remember',
       content,
       source,
@@ -1110,34 +1387,34 @@ export class MemoryOrchestrator {
   }
 
   sessionWrapup(
-    userId: string,
+    ownerKey: string,
     workspaceFolder: string,
   ): Promise<MemoryAgentResponse> {
-    return this.send(userId, {
+    return this.send(ownerKey, {
       type: 'session_wrapup',
       workspaceFolder,
     });
   }
 
-  globalSleep(userId: string): Promise<MemoryAgentResponse> {
-    return this.send(userId, { type: 'global_sleep' });
+  globalSleep(ownerKey: string): Promise<MemoryAgentResponse> {
+    return this.send(ownerKey, { type: 'global_sleep' });
   }
 
   exportSessionTranscripts(
-    userId: string,
+    ownerKey: string,
     workspaceFolder: string,
     chatJid: string,
   ): Promise<MemoryAgentResponse | null> {
-    return this.exportTranscripts(userId, workspaceFolder, [chatJid]);
+    return this.exportTranscripts(ownerKey, workspaceFolder, [chatJid]);
   }
 
   exportTranscripts(
-    userId: string,
+    ownerKey: string,
     workspaceFolder: string,
     chatJids: string[],
   ): Promise<MemoryAgentResponse | null> {
     return exportTranscriptsForUser(
-      userId,
+      ownerKey,
       workspaceFolder,
       chatJids,
       this,
@@ -1146,10 +1423,10 @@ export class MemoryOrchestrator {
 
   checkIdleAgents(): void {
     const now = Date.now();
-    for (const [userId, entry] of this.agents) {
+    for (const [ownerKey, entry] of this.agents) {
       if (entry.inFlight === 0 && now - entry.lastActivity > IDLE_TIMEOUT_MS) {
-        logger.info({ userId }, 'Pruning idle memory session coordinator');
-        this.agents.delete(userId);
+        logger.info({ ownerKey }, 'Pruning idle memory session coordinator');
+        this.agents.delete(ownerKey);
       }
     }
   }
@@ -1171,8 +1448,8 @@ export class MemoryOrchestrator {
       .length;
   }
 
-  hasAgent(userId: string): boolean {
-    return this.agents.has(userId);
+  hasAgent(ownerKey: string): boolean {
+    return this.agents.has(ownerKey);
   }
 }
 

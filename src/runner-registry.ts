@@ -1,4 +1,5 @@
 import type { RunnerDescriptor } from './types.js';
+import { getMemoryLifecycleStrategy } from './memory-synthetic-lifecycle.js';
 
 export const RUNNER_REGISTRY: Record<RunnerDescriptor['id'], RunnerDescriptor> = {
   claude: {
@@ -92,15 +93,7 @@ export function getDefaultRunnerId(): RunnerDescriptor['id'] {
 }
 
 export function canServeAsMemoryRunner(descriptor: RunnerDescriptor): boolean {
-  if (descriptor.compatibility.memory === 'unsupported') return false;
-  if (descriptor.capabilities.customTools === 'none') return false;
-  if (
-    descriptor.lifecycle.turnBoundary !== 'native' &&
-    descriptor.lifecycle.turnBoundary !== 'simulated'
-  ) {
-    return false;
-  }
-  return descriptor.lifecycle.archivalTrigger.length > 0;
+  return getMemoryLifecycleStrategy(descriptor) !== 'unsupported';
 }
 
 export function listMemoryRunnerDescriptors(): RunnerDescriptor[] {

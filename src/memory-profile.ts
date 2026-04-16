@@ -16,15 +16,15 @@ export interface MemoryProfile {
 }
 
 export function buildMemoryProfile(params: {
-  userId: string;
+  ownerKey: string;
   runtimeKey: string;
   primaryFolder: string;
   groupDir: string;
   memorySession: SessionRecord;
 }): MemoryProfile {
-  const { userId, runtimeKey, primaryFolder, groupDir, memorySession } = params;
-  const memoryDir = path.join(DATA_DIR, 'memory', userId);
-  const globalDir = path.join(GROUPS_DIR, 'user-global', userId);
+  const { ownerKey, runtimeKey, primaryFolder, groupDir, memorySession } = params;
+  const memoryDir = path.join(DATA_DIR, 'memory', ownerKey);
+  const globalDir = path.join(GROUPS_DIR, 'user-global', ownerKey);
   return {
     runtimeKey,
     primaryFolder,
