@@ -67,6 +67,10 @@ export interface StreamEvent {
 export interface ContainerInput {
   prompt: string;
   runnerId: string;
+  declaredIpcCapabilities?: {
+    midQueryPush: boolean;
+    runtimeModeSwitch: boolean;
+  };
   sessionId?: string;
   workspaceFolder?: string;
   groupFolder: string;

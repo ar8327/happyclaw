@@ -171,6 +171,36 @@ function buildSessionRecordId(containerInput: ContainerInput): string {
     : `main:${workspaceFolder}`;
 }
 
+function validateDeclaredIpcCapabilities(
+  runnerId: SupportedRunnerId,
+  input: ContainerInput,
+  runner: AgentRunner,
+): void {
+  const declared = input.declaredIpcCapabilities;
+  if (!declared) return;
+
+  const mismatches: string[] = [];
+  if (declared.midQueryPush !== runner.ipcCapabilities.supportsMidQueryPush) {
+    mismatches.push(
+      `midQueryPush descriptor=${declared.midQueryPush} instance=${runner.ipcCapabilities.supportsMidQueryPush}`,
+    );
+  }
+  if (
+    declared.runtimeModeSwitch
+    !== runner.ipcCapabilities.supportsRuntimeModeSwitch
+  ) {
+    mismatches.push(
+      `runtimeModeSwitch descriptor=${declared.runtimeModeSwitch} instance=${runner.ipcCapabilities.supportsRuntimeModeSwitch}`,
+    );
+  }
+
+  if (mismatches.length > 0) {
+    throw new Error(
+      `Runner "${runnerId}" ipcCapabilities mismatch: ${mismatches.join('; ')}`,
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -242,6 +272,7 @@ async function main(): Promise<void> {
     loadUserMcpServers,
     skillsDir: WORKSPACE_SKILLS,
   });
+  validateDeclaredIpcCapabilities(runnerId, containerInput, runner);
   await runner.initialize();
 
   await runQueryLoop({

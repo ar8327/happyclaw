@@ -12,7 +12,11 @@ import path from 'path';
 
 import { DATA_DIR, GROUPS_DIR } from './config.js';
 import { logger } from './logger.js';
-import { getDefaultRunnerId, inferRunnerIdFromModel } from './runner-registry.js';
+import {
+  getDefaultRunnerId,
+  getRunnerDescriptor,
+  inferRunnerIdFromModel,
+} from './runner-registry.js';
 import {
   loadMountAllowlist,
 } from './mount-security.js';
@@ -122,6 +126,10 @@ export interface RuntimeLaunchProfile {
 export interface ContainerInput extends RuntimeInput {
   runnerId: string;
   groupFolder?: string;
+  declaredIpcCapabilities?: {
+    midQueryPush: boolean;
+    runtimeModeSwitch: boolean;
+  };
 }
 
 export interface RuntimeOutput {
@@ -746,10 +754,17 @@ export async function runHostAgent(
       logger.error({ group: group.name, err }, 'Local runtime stdin write failed');
       killProcessTree(proc);
     });
+    const runnerDescriptor = getRunnerDescriptor(effectiveRunnerId);
     const containerInput: ContainerInput = {
       ...input,
       runnerId: effectiveRunnerId,
       groupFolder: input.workspaceFolder,
+      declaredIpcCapabilities: runnerDescriptor
+        ? {
+            midQueryPush: runnerDescriptor.capabilities.midQueryPush,
+            runtimeModeSwitch: runnerDescriptor.capabilities.runtimeModeSwitch,
+          }
+        : undefined,
     };
     proc.stdin.write(JSON.stringify(containerInput));
     proc.stdin.end();
