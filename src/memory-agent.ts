@@ -31,7 +31,11 @@ import {
   resolveMemoryRunnerId,
 } from './runner-registry.js';
 import { getSystemSettings } from './runtime-config.js';
-import type { MessageCursor, RunnerDescriptor, SessionRecord } from './types.js';
+import type {
+  MessageCursor,
+  RunnerDescriptor,
+  SessionRecord,
+} from './types.js';
 import { MemoryRunnerAdapter } from './memory-runner-adapter.js';
 import { buildMemoryProfile } from './memory-profile.js';
 import {
@@ -194,9 +198,7 @@ export function ensureMemoryDir(ownerKey: string): string {
     // Check if state.json contains old LLM-managed fields to migrate
     let meta: Record<string, unknown> = { ...INITIAL_META };
     try {
-      const existingState = JSON.parse(
-        fs.readFileSync(statePath, 'utf-8'),
-      );
+      const existingState = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
       const hasOldFields =
         'indexVersion' in existingState ||
         'totalImpressions' in existingState ||
@@ -225,11 +227,7 @@ export function ensureMemoryDir(ownerKey: string): string {
       /* state.json parse error — use defaults */
     }
 
-    fs.writeFileSync(
-      metaPath,
-      JSON.stringify(meta, null, 2) + '\n',
-      'utf-8',
-    );
+    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2) + '\n', 'utf-8');
     logger.info({ ownerKey }, 'Created meta.json for memory');
   }
 
@@ -411,9 +409,17 @@ export function exportTranscriptSnapshotForUser(
     // Normalize wrapup cursors: handle both old { timestamp, id } and new { rowid } format
     const wrapups: Record<string, MessageCursor> = {};
     for (const [jid, raw] of Object.entries(rawWrapups)) {
-      if (raw && typeof raw === 'object' && typeof (raw as { rowid?: unknown }).rowid === 'number') {
+      if (
+        raw &&
+        typeof raw === 'object' &&
+        typeof (raw as { rowid?: unknown }).rowid === 'number'
+      ) {
         wrapups[jid] = { rowid: (raw as { rowid: number }).rowid };
-      } else if (raw && typeof raw === 'object' && typeof (raw as { timestamp?: unknown }).timestamp === 'string') {
+      } else if (
+        raw &&
+        typeof raw === 'object' &&
+        typeof (raw as { timestamp?: unknown }).timestamp === 'string'
+      ) {
         // Old format: reset to 0 (transcript export is idempotent)
         wrapups[jid] = { rowid: 0 };
       } else {
@@ -450,7 +456,10 @@ export function exportTranscriptSnapshotForUser(
     }
 
     if (allMessages.length === 0) {
-      logger.debug({ ownerKey, folder }, 'No new messages for transcript export');
+      logger.debug(
+        { ownerKey, folder },
+        'No new messages for transcript export',
+      );
       return null;
     }
 
@@ -526,7 +535,11 @@ export async function exportTranscriptsForUser(
   chatJids: string[],
   memoryOrchestrator: MemoryOrchestrator,
 ): Promise<MemoryAgentResponse | null> {
-  const transcript = exportTranscriptSnapshotForUser(ownerKey, folder, chatJids);
+  const transcript = exportTranscriptSnapshotForUser(
+    ownerKey,
+    folder,
+    chatJids,
+  );
   if (!transcript) return null;
   return memoryOrchestrator.send(ownerKey, {
     type: 'session_wrapup',
@@ -673,8 +686,8 @@ function ensureMemorySessionProjection(
       existing.parent_session_id || primarySession?.id || null;
     const nextOwnerKey = existing.owner_key || ownerKey;
     const nextSession =
-      nextParentSessionId !== existing.parent_session_id
-      || nextOwnerKey !== existing.owner_key
+      nextParentSessionId !== existing.parent_session_id ||
+      nextOwnerKey !== existing.owner_key
         ? {
             ...existing,
             parent_session_id: nextParentSessionId,
@@ -697,10 +710,17 @@ function ensureMemorySessionProjection(
     cwd: memDir,
     runner_id: runnerId,
     runner_profile_id:
-      primarySession?.runner_id === runnerId ? primarySession.runner_profile_id ?? null : null,
-    model: primarySession?.runner_id === runnerId ? primarySession?.model ?? null : null,
+      primarySession?.runner_id === runnerId
+        ? (primarySession.runner_profile_id ?? null)
+        : null,
+    model:
+      primarySession?.runner_id === runnerId
+        ? (primarySession?.model ?? null)
+        : null,
     thinking_effort:
-      primarySession?.runner_id === runnerId ? primarySession?.thinking_effort ?? null : null,
+      primarySession?.runner_id === runnerId
+        ? (primarySession?.thinking_effort ?? null)
+        : null,
     context_compression: primarySession?.context_compression ?? 'off',
     knowledge_extraction: primarySession?.knowledge_extraction ?? false,
     is_pinned: false,
@@ -802,9 +822,11 @@ function buildMemoryPrompt(
   return lines.join('\n');
 }
 
-function parseMemoryAgentResponseText(
-  raw: string | null | undefined,
-): { success: boolean; response?: string; error?: string } {
+function parseMemoryAgentResponseText(raw: string | null | undefined): {
+  success: boolean;
+  response?: string;
+  error?: string;
+} {
   const text = raw?.trim();
   if (!text) {
     return { success: false, error: 'Memory runner returned empty response' };
@@ -845,10 +867,7 @@ function persistMemoryRuntimeSnapshot(
       output.runtimeState?.resumeAnchor || current?.resume_anchor || undefined,
     providerState:
       output.runtimeState?.providerState ||
-      parseJsonText<Record<string, unknown>>(
-        current?.provider_state_json,
-        {},
-      ),
+      parseJsonText<Record<string, unknown>>(current?.provider_state_json, {}),
     recentImChannels:
       output.runtimeState?.recentImChannels ||
       parseJsonText<string[]>(current?.recent_im_channels_json, []),
@@ -949,7 +968,9 @@ export class MemoryOrchestrator {
       primarySession,
       memorySession,
     );
-    const runnerDescriptor = getRunnerDescriptor(effectiveMemorySession.runner_id);
+    const runnerDescriptor = getRunnerDescriptor(
+      effectiveMemorySession.runner_id,
+    );
     if (!runnerDescriptor) {
       throw new Error(
         `Unknown memory runner "${effectiveMemorySession.runner_id}"`,
@@ -1089,7 +1110,8 @@ export class MemoryOrchestrator {
           }
           if (
             !closeRequested &&
-            (runtimeOutput.status === 'success' || runtimeOutput.status === 'error')
+            (runtimeOutput.status === 'success' ||
+              runtimeOutput.status === 'error')
           ) {
             closeRequested = true;
             fs.mkdirSync(context.ipcInputDir, { recursive: true });
@@ -1107,7 +1129,8 @@ export class MemoryOrchestrator {
       );
 
       persistMemoryRuntimeSnapshot(context.ownerKey, output);
-      const finalResultText = (finalOutput as RuntimeOutput | null)?.result ?? null;
+      const finalResultText =
+        (finalOutput as RuntimeOutput | null)?.result ?? null;
       const outputResultText = output.result ?? null;
       let parsed = parseMemoryAgentResponseText(
         responseText || finalResultText || outputResultText || null,
@@ -1116,7 +1139,8 @@ export class MemoryOrchestrator {
         parsed = {
           success: false,
           response: parsed.response,
-          error: parsed.error || output.error || 'Memory runner exited with error',
+          error:
+            parsed.error || output.error || 'Memory runner exited with error',
         };
       }
       writeMemoryLog(context.ownerKey, {
@@ -1164,9 +1188,6 @@ export class MemoryOrchestrator {
     const failedJobs: MemorySyntheticWrapupJob[] = [];
 
     for (const job of jobs) {
-      const repairPrompt = syntheticStateRef.current.pendingRepair
-        ? buildMemorySyntheticRepairPrompt(syntheticStateRef.current.pendingRepair)
-        : null;
       const result = await this.runRequest(
         context,
         crypto.randomUUID(),
@@ -1177,14 +1198,7 @@ export class MemoryOrchestrator {
           chatJids: job.chatJids,
         },
         getSystemSettings().memorySendTimeout,
-        { repairPrompt },
       );
-      if (repairPrompt && result.parsed.success) {
-        syntheticStateRef.current = clearMemorySyntheticRepair(
-          syntheticStateRef.current,
-        );
-        persistSyntheticState();
-      }
       if (!result.parsed.success) {
         logger.warn(
           {
@@ -1201,6 +1215,40 @@ export class MemoryOrchestrator {
     return failedJobs;
   }
 
+  private async flushPendingSyntheticWrapups(
+    ownerKey: string,
+    context?: MemoryExecutionContext,
+  ): Promise<void> {
+    const effectiveContext = context || this.prepareExecutionContext(ownerKey);
+    if (
+      getMemoryLifecycleStrategy(effectiveContext.runnerDescriptor) !==
+      'synthetic'
+    ) {
+      return;
+    }
+
+    const syntheticStateRef = {
+      current: readMemorySyntheticLifecycleState(readMemoryState(ownerKey)),
+    };
+    if (syntheticStateRef.current.pendingWrapupJobs.length === 0) {
+      return;
+    }
+
+    const failedJobs = await this.flushSyntheticWrapupJobs(
+      effectiveContext,
+      syntheticStateRef.current.pendingWrapupJobs,
+      syntheticStateRef,
+    );
+    const latestState = readMemoryState(ownerKey);
+    writeMemoryState(
+      ownerKey,
+      writeMemorySyntheticLifecycleState(latestState, {
+        ...syntheticStateRef.current,
+        pendingWrapupJobs: failedJobs,
+      }),
+    );
+  }
+
   private async execute(
     ownerKey: string,
     requestId: string,
@@ -1208,7 +1256,9 @@ export class MemoryOrchestrator {
     timeoutMs: number,
   ): Promise<MemoryAgentResponse> {
     const context = this.prepareExecutionContext(ownerKey);
-    const lifecycleStrategy = getMemoryLifecycleStrategy(context.runnerDescriptor);
+    const lifecycleStrategy = getMemoryLifecycleStrategy(
+      context.runnerDescriptor,
+    );
     const syntheticStateRef = {
       current: readMemorySyntheticLifecycleState(readMemoryState(ownerKey)),
     };
@@ -1216,13 +1266,36 @@ export class MemoryOrchestrator {
       const latestState = readMemoryState(ownerKey);
       writeMemoryState(
         ownerKey,
-        writeMemorySyntheticLifecycleState(latestState, syntheticStateRef.current),
+        writeMemorySyntheticLifecycleState(
+          latestState,
+          syntheticStateRef.current,
+        ),
       );
     };
 
+    if (
+      lifecycleStrategy === 'synthetic' &&
+      syntheticStateRef.current.pendingWrapupJobs.length > 0
+    ) {
+      const failedJobs = await this.flushSyntheticWrapupJobs(
+        context,
+        syntheticStateRef.current.pendingWrapupJobs,
+        syntheticStateRef,
+      );
+      syntheticStateRef.current = {
+        ...syntheticStateRef.current,
+        pendingWrapupJobs: failedJobs,
+      };
+      persistSyntheticState();
+    }
+
     const repairPrompt =
-      lifecycleStrategy === 'synthetic' && syntheticStateRef.current.pendingRepair
-        ? buildMemorySyntheticRepairPrompt(syntheticStateRef.current.pendingRepair)
+      lifecycleStrategy === 'synthetic' &&
+      syntheticStateRef.current.pendingWrapupJobs.length === 0 &&
+      syntheticStateRef.current.pendingRepair
+        ? buildMemorySyntheticRepairPrompt(
+            syntheticStateRef.current.pendingRepair,
+          )
         : null;
     let archiveTriggered = false;
 
@@ -1327,14 +1400,19 @@ export class MemoryOrchestrator {
     const timeoutMs =
       getSystemSettings().memoryQueryTimeout || DEFAULT_QUERY_TIMEOUT_MS;
     return this.runSerialized(ownerKey, () =>
-      this.execute(ownerKey, requestId, {
-        type: 'query',
-        query: options.query,
-        context: options.context,
-        chatJid: options.chatJid,
-        workspaceFolder: options.workspaceFolder,
-        channelLabel: options.channelLabel,
-      }, timeoutMs),
+      this.execute(
+        ownerKey,
+        requestId,
+        {
+          type: 'query',
+          query: options.query,
+          context: options.context,
+          chatJid: options.chatJid,
+          workspaceFolder: options.workspaceFolder,
+          channelLabel: options.channelLabel,
+        },
+        timeoutMs,
+      ),
     );
   }
 
@@ -1360,7 +1438,10 @@ export class MemoryOrchestrator {
       this.execute(
         ownerKey,
         requestId,
-        { ...(message as Record<string, unknown>), type: msgType } as unknown as MemoryExecutionRequest,
+        {
+          ...(message as Record<string, unknown>),
+          type: msgType,
+        } as unknown as MemoryExecutionRequest,
         timeoutMs,
       ),
     );
@@ -1413,12 +1494,7 @@ export class MemoryOrchestrator {
     workspaceFolder: string,
     chatJids: string[],
   ): Promise<MemoryAgentResponse | null> {
-    return exportTranscriptsForUser(
-      ownerKey,
-      workspaceFolder,
-      chatJids,
-      this,
-    );
+    return exportTranscriptsForUser(ownerKey, workspaceFolder, chatJids, this);
   }
 
   checkIdleAgents(): void {
@@ -1433,6 +1509,30 @@ export class MemoryOrchestrator {
 
   async shutdownAll(): Promise<void> {
     this.stopIdleChecks();
+    const ownersToFlush = new Set<string>(this.agents.keys());
+    for (const session of listSessionRecords()) {
+      if (session.kind !== 'memory' || !session.owner_key) continue;
+      const syntheticState = readMemorySyntheticLifecycleState(
+        readMemoryState(session.owner_key),
+      );
+      if (syntheticState.pendingWrapupJobs.length > 0) {
+        ownersToFlush.add(session.owner_key);
+      }
+    }
+
+    for (const ownerKey of ownersToFlush) {
+      try {
+        await this.runSerialized(ownerKey, async () => {
+          await this.flushPendingSyntheticWrapups(ownerKey);
+        });
+      } catch (err) {
+        logger.warn(
+          { ownerKey, err },
+          'Failed to flush synthetic memory wrapups during shutdown',
+        );
+      }
+    }
+
     for (const entry of this.agents.values()) {
       try {
         await entry.tail;
@@ -1444,8 +1544,9 @@ export class MemoryOrchestrator {
   }
 
   get activeCount(): number {
-    return Array.from(this.agents.values()).filter((entry) => entry.inFlight > 0)
-      .length;
+    return Array.from(this.agents.values()).filter(
+      (entry) => entry.inFlight > 0,
+    ).length;
   }
 
   hasAgent(ownerKey: string): boolean {
@@ -1493,55 +1594,52 @@ export function runMemoryGlobalSleepIfNeeded(deps: GlobalSleepDeps): void {
   const memoryOwners = new Set(
     listSessionRecords()
       .filter((session) => session.kind === 'memory' && session.owner_key)
-      .map((session) => session.owner_key!)
+      .map((session) => session.owner_key!),
   );
 
   let triggered = 0;
   for (const ownerKey of memoryOwners) {
-      const state = readMemoryState(ownerKey);
+    const state = readMemoryState(ownerKey);
 
-      // 2. lastGlobalSleep > 6 hours ago (or never run)
-      const lastSleep = state.lastGlobalSleep as string | null;
-      if (lastSleep) {
-        const hoursSince =
-          (now - new Date(lastSleep).getTime()) / (1000 * 60 * 60);
-        if (hoursSince < 6) continue;
-      }
+    // 2. lastGlobalSleep > 6 hours ago (or never run)
+    const lastSleep = state.lastGlobalSleep as string | null;
+    if (lastSleep) {
+      const hoursSince =
+        (now - new Date(lastSleep).getTime()) / (1000 * 60 * 60);
+      if (hoursSince < 6) continue;
+    }
 
-      // 3. No active sessions for this user's explicit session folders
-      const ownedFolders = new Set(listOwnedPrimaryFolders(ownerKey));
-      const hasActiveSession = Array.from(activeRuntimeFolders).some((folder) =>
-        ownedFolders.has(folder),
-      );
-      if (hasActiveSession) continue;
+    // 3. No active sessions for this user's explicit session folders
+    const ownedFolders = new Set(listOwnedPrimaryFolders(ownerKey));
+    const hasActiveSession = Array.from(activeRuntimeFolders).some((folder) =>
+      ownedFolders.has(folder),
+    );
+    if (hasActiveSession) continue;
 
-      // 4. Has pending wrapups
-      const pendingWrapups = (state.pendingWrapups || []) as string[];
-      if (pendingWrapups.length === 0) continue;
+    // 4. Has pending wrapups
+    const pendingWrapups = (state.pendingWrapups || []) as string[];
+    if (pendingWrapups.length === 0) continue;
 
-      // All conditions met — trigger global_sleep
-      logger.info({ ownerKey }, 'Triggering Memory Agent global_sleep');
-      deps.manager
-        .send(ownerKey, { type: 'global_sleep' })
-        .then(() => {
-          // Main process updates state.json after successful global_sleep
-          // (LLM no longer touches state.json — it only manages meta.json)
-          const updatedState = readMemoryState(ownerKey);
-          updatedState.lastGlobalSleep = new Date().toISOString();
-          updatedState.pendingWrapups = [];
-          writeMemoryState(ownerKey, updatedState);
-          logger.info(
-            { ownerKey },
-            'Memory Agent global_sleep completed, state updated',
-          );
-        })
-        .catch((err) => {
-          logger.warn(
-            { ownerKey, err },
-            'Memory Agent global_sleep failed',
-          );
-        });
-      triggered++;
+    // All conditions met — trigger global_sleep
+    logger.info({ ownerKey }, 'Triggering Memory Agent global_sleep');
+    deps.manager
+      .send(ownerKey, { type: 'global_sleep' })
+      .then(() => {
+        // Main process updates state.json after successful global_sleep
+        // (LLM no longer touches state.json — it only manages meta.json)
+        const updatedState = readMemoryState(ownerKey);
+        updatedState.lastGlobalSleep = new Date().toISOString();
+        updatedState.pendingWrapups = [];
+        writeMemoryState(ownerKey, updatedState);
+        logger.info(
+          { ownerKey },
+          'Memory Agent global_sleep completed, state updated',
+        );
+      })
+      .catch((err) => {
+        logger.warn({ ownerKey, err }, 'Memory Agent global_sleep failed');
+      });
+    triggered++;
   }
 
   if (triggered > 0) {
