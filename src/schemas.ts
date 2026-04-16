@@ -142,47 +142,6 @@ export const MemoryGlobalSchema = z.object({
   content: z.string(),
 });
 
-export const ClaudeConfigSchema = z.object({
-  anthropicBaseUrl: z.string(),
-  happyclawModel: z.string().max(128).optional(),
-});
-
-export const ClaudeThirdPartyProfileCreateSchema = z.object({
-  name: z.string().min(1).max(64),
-  anthropicBaseUrl: z.string().max(2000),
-  anthropicAuthToken: z.string().max(2000),
-  happyclawModel: z.string().max(128).optional(),
-  customEnv: z.record(z.string().max(256), z.string().max(4096)).optional(),
-});
-
-export const ClaudeThirdPartyProfilePatchSchema = z
-  .object({
-    name: z.string().min(1).max(64).optional(),
-    anthropicBaseUrl: z.string().max(2000).optional(),
-    happyclawModel: z.string().max(128).optional(),
-    customEnv: z.record(z.string().max(256), z.string().max(4096)).optional(),
-  })
-  .refine(
-    (data) =>
-      typeof data.name === 'string' ||
-      typeof data.anthropicBaseUrl === 'string' ||
-      typeof data.happyclawModel === 'string' ||
-      data.customEnv !== undefined,
-    { message: 'At least one profile field must be provided' },
-  );
-
-export const ClaudeThirdPartyProfileSecretsSchema = z
-  .object({
-    anthropicAuthToken: z.string().max(2000).optional(),
-    clearAnthropicAuthToken: z.boolean().optional(),
-  })
-  .refine(
-    (data) =>
-      typeof data.anthropicAuthToken === 'string' ||
-      data.clearAnthropicAuthToken === true,
-    { message: 'At least one secret field must be provided' },
-  );
-
 export const SystemSettingsSchema = z.object({
   runtimeTimeout: z.number().int().min(60000).max(86400000).optional(),
   idleTimeout: z.number().int().min(60000).max(86400000).optional(),
@@ -295,48 +254,6 @@ export const InviteCreateSchema = z.object({
   expires_in_hours: z.number().int().min(1).max(8760).optional(),
 });
 
-export const ClaudeOAuthCredentialsSchema = z.object({
-  accessToken: z.string().min(1),
-  refreshToken: z.string().min(1),
-  expiresAt: z.number(),
-  scopes: z.array(z.string()).default([]),
-});
-
-export const ClaudeSecretsSchema = z
-  .object({
-    anthropicAuthToken: z.string().optional(),
-    clearAnthropicAuthToken: z.boolean().optional(),
-    anthropicApiKey: z.string().optional(),
-    clearAnthropicApiKey: z.boolean().optional(),
-    claudeCodeOauthToken: z.string().optional(),
-    clearClaudeCodeOauthToken: z.boolean().optional(),
-    claudeOAuthCredentials: ClaudeOAuthCredentialsSchema.optional(),
-    clearClaudeOAuthCredentials: z.boolean().optional(),
-  })
-  .refine(
-    (data) => {
-      const hasAnthropicAuthToken =
-        typeof data.anthropicAuthToken === 'string' ||
-        data.clearAnthropicAuthToken === true;
-      const hasAnthropicApiKey =
-        typeof data.anthropicApiKey === 'string' ||
-        data.clearAnthropicApiKey === true;
-      const hasClaudeCodeOauthToken =
-        typeof data.claudeCodeOauthToken === 'string' ||
-        data.clearClaudeCodeOauthToken === true;
-      const hasClaudeOAuthCredentials =
-        data.claudeOAuthCredentials !== undefined ||
-        data.clearClaudeOAuthCredentials === true;
-      return (
-        hasAnthropicAuthToken ||
-        hasAnthropicApiKey ||
-        hasClaudeCodeOauthToken ||
-        hasClaudeOAuthCredentials
-      );
-    },
-    { message: 'At least one secret field must be provided' },
-  );
-
 export const FeishuConfigSchema = z
   .object({
     appId: z.string().max(2000).optional(),
@@ -397,32 +314,6 @@ export const ImGeneralConfigSchema = z.object({
   autoUnbindOnSendFailure: z.boolean(),
 });
 
-export const ClaudeCustomEnvSchema = z.object({
-  customEnv: z.record(z.string().max(256), z.string().max(4096)),
-});
-
-export const ContainerEnvSchema = z.object({
-  anthropicBaseUrl: z.string().max(2000).optional(),
-  anthropicAuthToken: z.string().max(2000).optional(),
-  anthropicApiKey: z.string().max(2000).optional(),
-  claudeCodeOauthToken: z.string().max(2000).optional(),
-  happyclawModel: z.string().max(128).optional(),
-  codexBaseUrl: z.string().max(2000).optional(),
-  codexDefaultModel: z.string().max(128).optional(),
-  customEnv: z
-    .record(z.string().max(256), z.string().max(4096))
-    .optional()
-    .refine((env) => !env || Object.keys(env).length <= 50, {
-      message: 'customEnv must have at most 50 entries',
-    }),
-  codexCustomEnv: z
-    .record(z.string().max(256), z.string().max(4096))
-    .optional()
-    .refine((env) => !env || Object.keys(env).length <= 50, {
-      message: 'codexCustomEnv must have at most 50 entries',
-    }),
-});
-
 // Terminal WebSocket message schemas
 export const TerminalStartSchema = z.object({
   chatJid: z.string().min(1),
@@ -479,40 +370,4 @@ export const UserIMPreferencesSchema = z.object({
 export const WeChatConfigSchema = z.object({
   enabled: z.boolean().optional(),
   clearBotToken: z.boolean().optional(),
-});
-
-// ─── Codex Provider ─────────────────────────────────────────────
-
-export const CodexModeSchema = z.object({
-  mode: z.enum(['cli', 'api_key']),
-});
-
-export const CodexProfileCreateSchema = z.object({
-  name: z.string().min(1).max(64),
-  openaiApiKey: z.string().min(1).max(2000),
-  baseUrl: z.string().max(2000).optional(),
-  defaultModel: z.string().max(128).optional(),
-  customEnv: z
-    .record(z.string().max(256), z.string().max(4096))
-    .optional()
-    .refine((env) => !env || Object.keys(env).length <= 50, {
-      message: 'customEnv must have at most 50 entries',
-    }),
-});
-
-export const CodexProfilePatchSchema = z.object({
-  name: z.string().min(1).max(64).optional(),
-  baseUrl: z.string().max(2000).optional(),
-  defaultModel: z.string().max(128).optional(),
-  customEnv: z
-    .record(z.string().max(256), z.string().max(4096))
-    .optional()
-    .refine((env) => !env || Object.keys(env).length <= 50, {
-      message: 'customEnv must have at most 50 entries',
-    }),
-});
-
-export const CodexProfileSecretsSchema = z.object({
-  openaiApiKey: z.string().max(2000).optional(),
-  clearOpenaiApiKey: z.boolean().optional(),
 });

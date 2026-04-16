@@ -96,8 +96,8 @@ export function SettingsPage() {
   }, [activeTab]);
 
   const sectionTitle: Record<SettingsTab, string> = {
-    claude: 'Claude 兼容桥接',
-    codex: 'Codex 兼容桥接',
+    claude: 'Claude 本机命令',
+    codex: 'Codex 本机命令',
     runners: 'Runner 注册表',
     appearance: '外观设置（全局默认）',
     system: '系统参数',

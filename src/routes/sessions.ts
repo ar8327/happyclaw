@@ -17,7 +17,7 @@ import {
   canModifyGroup,
   getWebDeps,
 } from '../web-context.js';
-import { ContainerEnvSchema, SessionCreateSchema } from '../schemas.js';
+import { SessionCreateSchema } from '../schemas.js';
 import {
   clearWorkerArtifactsForFolder,
   deleteChatHistory,
@@ -64,18 +64,11 @@ import {
   explainRunnerDegradation,
   getDefaultRunnerId,
   getRunnerDescriptor,
+  inferRunnerIdFromModel,
   listRunnerDescriptors,
 } from '../runner-registry.js';
 import { compressContext, isCompressing } from '../context-compressor.js';
 import { DATA_DIR, GROUPS_DIR } from '../config.js';
-import {
-  deleteRuntimeEnvConfig,
-  getRuntimeEnvConfig,
-  getSessionRuntimeEnvConfig,
-  saveRuntimeEnvConfig,
-  saveSessionRuntimeEnvConfig,
-  toPublicRuntimeEnvConfig,
-} from '../runtime-config.js';
 import { executeSessionReset } from '../commands.js';
 import { loadTurnTrace } from '../turn-trace.js';
 import {
@@ -255,7 +248,12 @@ function removeSessionArtifacts(folder: string): void {
     recursive: true,
     force: true,
   });
-  deleteRuntimeEnvConfig(folder);
+  fs.rmSync(path.join(DATA_DIR, 'config', 'runtime-env', `${folder}.json`), {
+    force: true,
+  });
+  fs.rmSync(path.join(DATA_DIR, 'config', 'container-env', `${folder}.json`), {
+    force: true,
+  });
 }
 
 function annotateMessagesWithTrace(
@@ -346,24 +344,6 @@ function normalizeSessionCwd(
   }
 
   return realPath;
-}
-
-function toPublicRuntimeEnvForUser(
-  config: ReturnType<typeof getRuntimeEnvConfig>,
-  user: AuthUser,
-) {
-  const base = toPublicRuntimeEnvConfig(config);
-  if (
-    user.role === 'admin' ||
-    (user.permissions && user.permissions.includes('manage_group_env'))
-  ) {
-    return base;
-  }
-  return {
-    ...base,
-    customEnv: {},
-    codexCustomEnv: {},
-  };
 }
 
 function syncRegisteredGroupCache(jid: string, group: RegisteredGroup): void {
@@ -552,7 +532,12 @@ function buildSessionPayload(
   }
 
   const backingJid = resolveBackingJid(session);
-  const descriptor = getRunnerDescriptor(session.runner_id);
+  const inferredRunnerId = inferRunnerIdFromModel(session.model);
+  const effectiveRunnerId =
+    session.model && inferredRunnerId && inferredRunnerId !== session.runner_id
+      ? inferredRunnerId
+      : session.runner_id;
+  const descriptor = getRunnerDescriptor(effectiveRunnerId);
   const summary = backingJid ? getContextSummary(getFolderForSession(session), backingJid) : null;
   const backingGroup = backingJid ? getRegisteredGroup(backingJid) : undefined;
   const uniformActivationMode =
@@ -578,8 +563,9 @@ function buildSessionPayload(
     cwd: session.cwd,
     backing_jid: backingJid,
     owner_key: session.owner_key,
-    runner_id: session.runner_id,
-    runner_profile_id: session.runner_profile_id,
+    runner_id: effectiveRunnerId,
+    runner_profile_id:
+      effectiveRunnerId === session.runner_id ? session.runner_profile_id : null,
     model: session.model,
     thinking_effort: session.thinking_effort,
     context_compression: session.context_compression,
@@ -595,7 +581,7 @@ function buildSessionPayload(
     bound_channels: sessionBindings.map((binding) => binding.channel_jid),
     lastMessage,
     lastMessageTime: latestAt,
-    runner_label: descriptor?.label || session.runner_id,
+    runner_label: descriptor?.label || effectiveRunnerId,
     compatibility: descriptor?.compatibility || null,
     degradation_reasons: descriptor ? explainRunnerDegradation(descriptor) : [],
     has_summary: !!summary,
@@ -1296,6 +1282,15 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
   let nextSelectedSkills: string[] | null | undefined;
   let nextActivationMode: 'auto' | 'always' | 'when_mentioned' | 'disabled' | undefined;
   let validatedRunnerProfileId: string | null;
+  const runnerProvided = Object.prototype.hasOwnProperty.call(body, 'runner_id');
+  const runnerProfileProvided = Object.prototype.hasOwnProperty.call(body, 'runner_profile_id');
+  const nextModel =
+    typeof body.model === 'string'
+      ? body.model.trim() || null
+      : body.model === null
+        ? null
+        : existing.model;
+  const inferredRunnerId = inferRunnerIdFromModel(nextModel);
   try {
     nextRunnerId = normalizeRunnerId(
       body.runner_id,
@@ -1309,6 +1304,17 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
           : existing.runner_profile_id;
     nextSelectedSkills = normalizeSelectedSkills(body.selected_skills);
     nextActivationMode = normalizeActivationMode(body.activation_mode);
+    if (inferredRunnerId && inferredRunnerId !== nextRunnerId) {
+      if (runnerProvided) {
+        throw new Error(
+          `模型 "${nextModel}" 与 runner "${nextRunnerId}" 不匹配，应该使用 "${inferredRunnerId}"`,
+        );
+      }
+      nextRunnerId = inferredRunnerId;
+      if (!runnerProfileProvided) {
+        nextRunnerProfileId = null;
+      }
+    }
     validatedRunnerProfileId = validateRunnerProfile(
       nextRunnerProfileId,
       nextRunnerId,
@@ -1319,12 +1325,6 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
       400,
     );
   }
-  const nextModel =
-    typeof body.model === 'string'
-      ? body.model.trim() || null
-      : body.model === null
-        ? null
-        : existing.model;
   const nextThinkingEffort =
     body.thinking_effort === 'low' ||
     body.thinking_effort === 'medium' ||
@@ -1495,21 +1495,13 @@ sessionRoutes.get('/:id/env', authMiddleware, (c) => {
   ) {
     return c.json({ error: 'Insufficient permissions' }, 403);
   }
-
-  let config: ReturnType<typeof getRuntimeEnvConfig>;
-  if (session.kind === 'memory') {
-    config = getSessionRuntimeEnvConfig(session.id);
-  } else {
-    const resolvedBacking = resolveBackingGroupForSession(session);
-    if (!resolvedBacking) {
-      return c.json(
-        { error: 'Only main/workspace and memory sessions support runtime env' },
-        400,
-      );
-    }
-    config = getRuntimeEnvConfig(resolvedBacking.backingGroup.folder);
-  }
-  return c.json(toPublicRuntimeEnvForUser(config, user));
+  return c.json(
+    {
+      error:
+        '会话级 Claude/Codex 连接配置已移除。请在宿主机自行配置本机可用的 claude 或 codex 命令。',
+    },
+    410,
+  );
 });
 
 sessionRoutes.put('/:id/env', authMiddleware, async (c) => {
@@ -1523,64 +1515,13 @@ sessionRoutes.put('/:id/env', authMiddleware, async (c) => {
   ) {
     return c.json({ error: 'Insufficient permissions' }, 403);
   }
-
-  const body = await c.req.json().catch(() => ({}));
-  const validation = ContainerEnvSchema.safeParse(body);
-  if (!validation.success) {
-    return c.json({ error: 'Invalid request body' }, 400);
-  }
-
-  let resolvedBacking: ReturnType<typeof resolveBackingGroupForSession> = null;
-  let current: ReturnType<typeof getRuntimeEnvConfig>;
-  if (session.kind === 'memory') {
-    current = getSessionRuntimeEnvConfig(session.id);
-  } else {
-    resolvedBacking = resolveBackingGroupForSession(session);
-    if (!resolvedBacking) {
-      return c.json(
-        { error: 'Only main/workspace and memory sessions support runtime env' },
-        400,
-      );
-    }
-    if (
-      !canAccessGroup(user, {
-        ...resolvedBacking.backingGroup,
-        jid: resolvedBacking.backingJid,
-      })
-    ) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-    current = getRuntimeEnvConfig(resolvedBacking.backingGroup.folder);
-  }
-  const data = validation.data;
-  const next = { ...current };
-  if (data.anthropicBaseUrl !== undefined) next.anthropicBaseUrl = data.anthropicBaseUrl;
-  if (data.anthropicAuthToken !== undefined) next.anthropicAuthToken = data.anthropicAuthToken;
-  if (data.anthropicApiKey !== undefined) next.anthropicApiKey = data.anthropicApiKey;
-  if (data.claudeCodeOauthToken !== undefined) next.claudeCodeOauthToken = data.claudeCodeOauthToken;
-  if (data.happyclawModel !== undefined) next.happyclawModel = data.happyclawModel;
-  if (data.customEnv !== undefined) next.customEnv = data.customEnv;
-  if (data.codexBaseUrl !== undefined) next.codexBaseUrl = data.codexBaseUrl;
-  if (data.codexDefaultModel !== undefined) next.codexDefaultModel = data.codexDefaultModel;
-  if (data.codexCustomEnv !== undefined) next.codexCustomEnv = data.codexCustomEnv;
-
-  try {
-    if (session.kind === 'memory') {
-      saveSessionRuntimeEnvConfig(session.id, next);
-    } else {
-      saveRuntimeEnvConfig(resolvedBacking!.backingGroup.folder, next);
-      const deps = getWebDeps();
-      if (deps) {
-        await deps.queue.restartSession(resolvedBacking!.backingJid);
-      }
-    }
-    return c.json(toPublicRuntimeEnvForUser(next, user));
-  } catch (err) {
-    return c.json(
-      { error: err instanceof Error ? err.message : 'Failed to save config' },
-      500,
-    );
-  }
+  return c.json(
+    {
+      error:
+        '会话级 Claude/Codex 连接配置已移除。请在宿主机自行配置本机可用的 claude 或 codex 命令。',
+    },
+    410,
+  );
 });
 
 sessionRoutes.post('/:id/stop', authMiddleware, async (c) => {

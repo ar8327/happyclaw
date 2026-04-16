@@ -1,6 +1,8 @@
 import type { RunnerDescriptor } from './types.js';
 import { getMemoryLifecycleStrategy } from './memory-synthetic-lifecycle.js';
 
+const CLAUDE_MODEL_ALIASES = new Set(['opus', 'sonnet', 'haiku']);
+
 export const RUNNER_REGISTRY: Record<RunnerDescriptor['id'], RunnerDescriptor> = {
   claude: {
     id: 'claude',
@@ -90,6 +92,35 @@ export function getDefaultRunnerDescriptor(): RunnerDescriptor | undefined {
 
 export function getDefaultRunnerId(): RunnerDescriptor['id'] {
   return getDefaultRunnerDescriptor()?.id || 'claude';
+}
+
+export function inferRunnerIdFromModel(
+  model: string | null | undefined,
+): RunnerDescriptor['id'] | null {
+  const normalized = model?.trim().toLowerCase();
+  if (!normalized) return null;
+
+  if (CLAUDE_MODEL_ALIASES.has(normalized) || normalized.startsWith('claude-')) {
+    return 'claude';
+  }
+
+  if (/^gpt-[a-z0-9._-]+$/i.test(normalized)) {
+    return 'codex';
+  }
+
+  if (/^o[1-9](?:$|[-._])/.test(normalized)) {
+    return 'codex';
+  }
+
+  return null;
+}
+
+export function isModelCompatibleWithRunner(
+  runnerId: RunnerDescriptor['id'],
+  model: string | null | undefined,
+): boolean {
+  const inferredRunnerId = inferRunnerIdFromModel(model);
+  return !inferredRunnerId || inferredRunnerId === runnerId;
 }
 
 export function canServeAsMemoryRunner(descriptor: RunnerDescriptor): boolean {

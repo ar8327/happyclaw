@@ -12,8 +12,8 @@ import {
 } from '../local-user.js';
 import {
   getAppearanceConfig,
-  getClaudeProviderConfig,
-  getCodexProviderConfig,
+  detectLocalClaudeCode,
+  detectLocalCodexCli,
   getImFeishuConfig,
 } from '../runtime-config.js';
 import {
@@ -26,20 +26,13 @@ const authRoutes = new Hono<{ Variables: Variables }>();
 const AVATAR_DIR = path.join(DATA_DIR, 'avatars');
 
 function buildSetupStatus() {
-  const claudeConfig = getClaudeProviderConfig();
-  const officialConfigured =
-    !!claudeConfig.claudeCodeOauthToken?.trim() ||
-    !!claudeConfig.claudeOAuthCredentials;
-  const thirdPartyConfigured = !!(
-    claudeConfig.anthropicBaseUrl?.trim() &&
-    claudeConfig.anthropicAuthToken?.trim()
-  );
-  const claudeConfigured = officialConfigured || thirdPartyConfigured;
-  const codexConfig = getCodexProviderConfig();
-  const codexConfigured =
-    codexConfig.hasCliAuth ||
-    codexConfig.hasEnvApiKey ||
-    !!codexConfig.activeProfile?.openaiApiKey;
+  const claudeLocal = detectLocalClaudeCode();
+  const claudeConfigured =
+    claudeLocal.hasCredentials ||
+    !!process.env.ANTHROPIC_API_KEY ||
+    !!process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  const codexLocal = detectLocalCodexCli();
+  const codexConfigured = codexLocal.hasAuth || !!process.env.OPENAI_API_KEY;
   const feishuConfig = getImFeishuConfig();
   const feishuConfigured = !!(
     feishuConfig?.appId?.trim() && feishuConfig?.appSecret?.trim()

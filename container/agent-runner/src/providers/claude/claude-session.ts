@@ -391,6 +391,7 @@ export class ClaudeSession {
     config: ClaudeSessionConfig,
     mcpServers: Record<string, unknown>,
   ): string {
+    const resumeTarget = this.resolveResumeTarget(config);
     return JSON.stringify({
       cwd: config.cwd,
       additionalDirectories: config.additionalDirectories || [],
@@ -403,8 +404,25 @@ export class ClaudeSession {
       mcpServers,
       agents: PREDEFINED_AGENTS,
       disableSlashCommands: config.disableSlashCommands !== false,
-      resumeTarget: this.currentSessionId || config.sessionId || null,
+      resumeTarget: resumeTarget || null,
     });
+  }
+
+  private resolveResumeTarget(config: ClaudeSessionConfig): string | undefined {
+    if (config.sessionId) {
+      return config.sessionId;
+    }
+    if (config.resumeAt && this.currentSessionId) {
+      return this.currentSessionId;
+    }
+    return undefined;
+  }
+
+  private canWriteToChild(child: ChildProcessWithoutNullStreams | null = this.child): child is ChildProcessWithoutNullStreams {
+    return !!child
+      && !child.killed
+      && !child.stdin.destroyed
+      && !child.stdin.writableEnded;
   }
 
   private async stopProcess(): Promise<void> {
@@ -507,7 +525,7 @@ export class ClaudeSession {
     fs.writeFileSync(this.mcpConfigPath, JSON.stringify(mergedMcpConfig, null, 2));
     fs.writeFileSync(this.settingsPath, JSON.stringify(settingsConfig, null, 2));
 
-    let resumeSessionId = this.currentSessionId || config.sessionId;
+    let resumeSessionId = this.resolveResumeTarget(config);
     if (this.forceForkResume && config.sessionId && config.resumeAt) {
       const forkedSessionId = forkTranscriptAtAnchor(config.sessionId, config.resumeAt, this.log);
       if (forkedSessionId) {
@@ -635,9 +653,13 @@ export class ClaudeSession {
   }
 
   private flushPendingInputPayloads(): void {
-    if (!this.child) return;
+    if (!this.canWriteToChild()) {
+      if (this.pendingInputPayloads.length === 0) return;
+      throw new Error('Claude CLI stdin is not writable after startup');
+    }
+    const child = this.child!;
     while (this.pendingInputPayloads.length > 0) {
-      this.child.stdin.write(this.pendingInputPayloads.shift()!);
+      child.stdin.write(this.pendingInputPayloads.shift()!);
     }
   }
 
@@ -681,10 +703,13 @@ export class ClaudeSession {
         content: prepared.prompt,
       },
     })}\n`;
-    if (this.child) {
-      this.child.stdin.write(payload);
-    } else if (this.startupPromise) {
+    if (this.startupPromise) {
       this.pendingInputPayloads.push(payload);
+    } else if (this.canWriteToChild()) {
+      const child = this.child!;
+      child.stdin.write(payload);
+    } else if (this.child) {
+      throw new Error('Claude CLI stdin is not writable');
     } else {
       throw new Error('ClaudeSession.run() not called');
     }

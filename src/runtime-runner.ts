@@ -12,22 +12,18 @@ import path from 'path';
 
 import { DATA_DIR, GROUPS_DIR } from './config.js';
 import { logger } from './logger.js';
-import { getDefaultRunnerId } from './runner-registry.js';
+import { getDefaultRunnerId, inferRunnerIdFromModel } from './runner-registry.js';
 import {
   loadMountAllowlist,
 } from './mount-security.js';
 import {
-  buildRuntimeEnvLines,
-  getClaudeProviderConfig,
-  getRuntimeEnvConfig,
-  getSessionRuntimeEnvConfig,
-  getCodexProviderConfig,
   getSystemSettings,
-  mergeRuntimeEnvConfig,
-  mergeClaudeEnvConfig,
-  parseRunnerProfileRuntimeOverride,
+  detectLocalClaudeCode,
+  detectLocalCodexCli,
+  importLocalClaudeCredentials,
   writeCredentialsFile,
 } from './runtime-config.js';
+import type { ClaudeProviderConfig } from './runtime-config.js';
 import { resolveGroupMcpServers } from './mcp-utils.js';
 import { getInternalToken } from './routes/memory-agent.js';
 import { RegisteredGroup, StreamEvent } from './types.js';
@@ -42,7 +38,7 @@ import {
   writeRunLog,
   type CloseHandlerContext,
 } from './agent-output-parser.js';
-import { getPrimarySessionForOwner, getRunnerProfile, getSessionRecord } from './db.js';
+import { getPrimarySessionForOwner, getSessionRecord } from './db.js';
 
 /**
  * Required env flags for settings.json — 每次 Runtime 启动时强制写入，不可被用户覆盖。
@@ -484,92 +480,58 @@ export async function runHostAgent(
   };
   const settings = getSystemSettings();
 
-  const effectiveRunnerId = sessionRecord?.runner_id || getDefaultRunnerId();
+  const storedRunnerId = sessionRecord?.runner_id || getDefaultRunnerId();
   const effectiveModel = sessionRecord?.model ?? group.model;
   const effectiveThinkingEffort =
     sessionRecord?.thinking_effort ?? group.thinking_effort;
-  const runnerProfile =
-    sessionRecord?.runner_profile_id
-      ? getRunnerProfile(sessionRecord.runner_profile_id)
-      : undefined;
-  const profileOverride =
-    runnerProfile && runnerProfile.runner_id === effectiveRunnerId
-      ? parseRunnerProfileRuntimeOverride(runnerProfile.runner_id, runnerProfile.config_json)
-      : {};
-
-  // 配置层环境变量
-  const runtimeEnvConfig =
-    sessionRecord?.kind === 'memory'
-      ? getSessionRuntimeEnvConfig(stableSessionId)
-      : getRuntimeEnvConfig(group.folder);
-  const globalConfig = getClaudeProviderConfig();
-  const containerOverride = mergeRuntimeEnvConfig(
-    runtimeEnvConfig,
-    profileOverride.claudeEnv || {},
-  );
-  const envLines = buildRuntimeEnvLines(globalConfig, containerOverride);
-  for (const line of envLines) {
-    const eqIdx = line.indexOf('=');
-    if (eqIdx > 0) {
-      hostEnv[line.slice(0, eqIdx)] = line.slice(eqIdx + 1);
-    }
+  const inferredModelRunner = inferRunnerIdFromModel(effectiveModel);
+  const effectiveRunnerId =
+    effectiveModel && inferredModelRunner && inferredModelRunner !== storedRunnerId
+      ? inferredModelRunner
+      : storedRunnerId;
+  if (effectiveRunnerId !== storedRunnerId) {
+    logger.warn(
+      {
+        group: group.name,
+        storedRunnerId,
+        effectiveRunnerId,
+        model: effectiveModel,
+      },
+      'Auto-corrected runner from model override for local runtime',
+    );
   }
-
   // Per-workspace model override takes priority over global and runtime-env config
-  if (effectiveModel) {
+  if (
+    effectiveRunnerId === 'claude' &&
+    effectiveModel &&
+    (!inferredModelRunner || inferredModelRunner === 'claude')
+  ) {
     hostEnv['HAPPYCLAW_MODEL'] = effectiveModel;
+  } else if (effectiveRunnerId === 'claude' && effectiveModel && inferredModelRunner) {
+    logger.warn(
+      { group: group.name, runnerId: effectiveRunnerId, model: effectiveModel },
+      'Ignoring incompatible model override for local runtime',
+    );
   }
-
-  // Codex provider config for local runtime
-  const hostCodexConfig = getCodexProviderConfig();
-  const hostCodexProfile = hostCodexConfig.mode === 'api_key' ? hostCodexConfig.activeProfile : null;
-  const workspaceRuntimeConfig = runtimeEnvConfig;
-  const hostCodexBaseUrl =
-    workspaceRuntimeConfig.codexBaseUrl ||
-    profileOverride.codex?.baseUrl ||
-    hostCodexProfile?.baseUrl ||
-    '';
-  const hostCodexDefaultModel =
-    workspaceRuntimeConfig.codexDefaultModel ||
-    profileOverride.codex?.defaultModel ||
-    hostCodexProfile?.defaultModel ||
-    '';
-  const hostCodexCustomEnv = {
-    ...(hostCodexProfile?.customEnv || {}),
-    ...(profileOverride.codex?.customEnv || {}),
-    ...(workspaceRuntimeConfig.codexCustomEnv || {}),
-  };
-  const hostOpenaiKey = hostCodexProfile?.openaiApiKey || process.env.OPENAI_API_KEY || '';
-  if (hostOpenaiKey) hostEnv['OPENAI_API_KEY'] = hostOpenaiKey;
-  if (hostCodexBaseUrl) hostEnv['OPENAI_BASE_URL'] = hostCodexBaseUrl;
 
   if (effectiveRunnerId === 'codex') {
-    // Pass workspace model as Codex model (separate from HAPPYCLAW_MODEL used by Claude)
-    if (effectiveModel) {
+    if (effectiveModel && (!inferredModelRunner || inferredModelRunner === 'codex')) {
       hostEnv['HAPPYCLAW_CODEX_MODEL'] = effectiveModel;
-    } else if (hostCodexDefaultModel) {
-      hostEnv['HAPPYCLAW_CODEX_MODEL'] = hostCodexDefaultModel;
-    }
-    // Local runtime: SDK reads ~/.codex/auth.json directly, no sync needed
-  }
-
-  // Inject Codex profile customEnv (already sanitized at save time)
-  if (Object.keys(hostCodexCustomEnv).length > 0) {
-    for (const [k, v] of Object.entries(hostCodexCustomEnv)) {
-      hostEnv[k] = v;
     }
   }
 
-  // Cross-provider invoke_agent: mark Claude as available so Codex can call it
-  const hostClaudeConfig = getClaudeProviderConfig();
-  const hostClaudeConfigured = !!(hostClaudeConfig.anthropicApiKey || hostClaudeConfig.claudeCodeOauthToken || hostClaudeConfig.claudeOAuthCredentials);
-  if (hostClaudeConfigured) {
+  const localClaude = detectLocalClaudeCode();
+  const localCodex = detectLocalCodexCli();
+
+  if (
+    localClaude.hasCredentials ||
+    !!process.env.ANTHROPIC_API_KEY ||
+    !!process.env.CLAUDE_CODE_OAUTH_TOKEN
+  ) {
     hostEnv['HAPPYCLAW_CLAUDE_AVAILABLE'] = '1';
   }
 
-  // Cross-provider invoke_agent: mark Codex as available so Claude can call it
-  const hostCodexAvailable = !!(hostCodexConfig.hasCliAuth || hostCodexProfile?.openaiApiKey || process.env.OPENAI_API_KEY);
-  if (hostCodexAvailable) {
+  if (localCodex.hasAuth || !!process.env.OPENAI_API_KEY) {
     hostEnv['HAPPYCLAW_CODEX_AVAILABLE'] = '1';
   }
 
@@ -578,18 +540,25 @@ export async function runHostAgent(
     hostEnv['HAPPYCLAW_THINKING_EFFORT'] = effectiveThinkingEffort;
   }
 
-  // Write .credentials.json for OAuth credentials
-  const mergedConfig = mergeClaudeEnvConfig(globalConfig, containerOverride);
-  if (mergedConfig.claudeOAuthCredentials) {
+  const localClaudeCredentials = importLocalClaudeCredentials();
+  if (localClaudeCredentials) {
+    const localClaudeConfig: ClaudeProviderConfig = {
+      anthropicBaseUrl: '',
+      anthropicAuthToken: '',
+      anthropicApiKey: '',
+      happyclawModel: '',
+      claudeCodeOauthToken: '',
+      claudeOAuthCredentials: localClaudeCredentials,
+      updatedAt: null,
+    };
     try {
-      writeCredentialsFile(groupSessionsDir, mergedConfig);
+      writeCredentialsFile(groupSessionsDir, localClaudeConfig);
     } catch (err) {
       logger.warn(
         { folder: group.folder, err },
-        'Failed to write .credentials.json for local runtime agent',
+        'Failed to sync local Claude credentials into session runtime dir',
       );
     }
-    // Also write to home session dir for cross-provider invoke_agent
     if (sharedPrimarySessionFolder !== group.folder) {
       const homeClaudeDir = path.join(
         DATA_DIR,
@@ -598,7 +567,7 @@ export async function runHostAgent(
         '.claude',
       );
       try {
-        writeCredentialsFile(homeClaudeDir, mergedConfig);
+        writeCredentialsFile(homeClaudeDir, localClaudeConfig);
       } catch { /* non-critical */ }
     }
   }

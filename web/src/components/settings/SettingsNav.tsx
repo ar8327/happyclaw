@@ -25,8 +25,8 @@ interface NavItem {
 }
 
 const systemItems: NavItem[] = [
-  { key: 'claude', label: 'Claude 兼容桥接', icon: <ShieldCheck className="w-4 h-4" />, group: 'system' },
-  { key: 'codex', label: 'Codex 兼容桥接', icon: <Cpu className="w-4 h-4" />, group: 'system' },
+  { key: 'claude', label: 'Claude 本机命令', icon: <ShieldCheck className="w-4 h-4" />, group: 'system' },
+  { key: 'codex', label: 'Codex 本机命令', icon: <Cpu className="w-4 h-4" />, group: 'system' },
   { key: 'runners', label: 'Runner 注册表', icon: <Orbit className="w-4 h-4" />, group: 'system' },
   { key: 'appearance', label: '外观（全局）', icon: <Palette className="w-4 h-4" />, group: 'system' },
   { key: 'system', label: '系统参数', icon: <SlidersHorizontal className="w-4 h-4" />, group: 'system' },

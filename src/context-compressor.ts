@@ -17,7 +17,7 @@ import {
   countMessagesSince,
   type ContextSummary,
 } from './db.js';
-import { getClaudeProviderConfig } from './runtime-config.js';
+import { importLocalClaudeCredentials } from './runtime-config.js';
 import type { NewMessage } from './types.js';
 
 // OAuth tokens (from Claude Code subscription) only allow Haiku for direct Messages API.
@@ -65,41 +65,31 @@ export function isCompressing(groupFolder: string): boolean {
 
 /**
  * Get authentication credentials for the Anthropic API.
- * Tries: API key → OAuth credentials → OAuth token → env var.
+ * Tries local machine environment first, then local Claude Code OAuth credentials.
  * Returns { type, token } where type determines the HTTP header to use.
  */
 function getAuthCredentials(): { type: 'api-key' | 'bearer'; token: string } | null {
-  const config = getClaudeProviderConfig();
-
-  // 1. Direct API key (highest priority)
-  if (config.anthropicApiKey) {
-    return { type: 'api-key', token: config.anthropicApiKey };
-  }
-
-  // 2. OAuth credentials (official profile — most common in HappyClaw)
-  if (config.claudeOAuthCredentials?.accessToken) {
-    return { type: 'bearer', token: config.claudeOAuthCredentials.accessToken };
-  }
-
-  // 3. Legacy OAuth token
-  if (config.claudeCodeOauthToken) {
-    return { type: 'bearer', token: config.claudeCodeOauthToken };
-  }
-
-  // 4. Environment variable fallback
   if (process.env.ANTHROPIC_API_KEY) {
     return { type: 'api-key', token: process.env.ANTHROPIC_API_KEY };
+  }
+
+  const oauth = importLocalClaudeCredentials();
+  if (oauth?.accessToken) {
+    return { type: 'bearer', token: oauth.accessToken };
+  }
+
+  if (process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+    return { type: 'bearer', token: process.env.CLAUDE_CODE_OAUTH_TOKEN };
   }
 
   return null;
 }
 
 /**
- * Get the Anthropic base URL from the provider config.
+ * Get the Anthropic base URL from the local environment.
  */
 function getBaseUrl(): string {
-  const config = getClaudeProviderConfig();
-  return config.anthropicBaseUrl || 'https://api.anthropic.com';
+  return process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com';
 }
 
 /**
@@ -132,7 +122,7 @@ async function callSonnet(
   const auth = getAuthCredentials();
   if (!auth) {
     throw new Error(
-      'No Anthropic credentials configured. Set API key, OAuth credentials, or ANTHROPIC_API_KEY env var.',
+      'No local Anthropic credentials found. Configure Claude Code locally or export ANTHROPIC_API_KEY.',
     );
   }
 

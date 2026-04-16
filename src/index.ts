@@ -129,7 +129,6 @@ import {
   getSystemSettings,
   saveImFeishuConfig,
   saveImTelegramConfig,
-  updateAllSessionCredentials,
   getImPreferences,
   getImGeneralConfig,
   migrateLegacyUserImConfigToGlobal,

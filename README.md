@@ -61,7 +61,7 @@
 
 > 当前主线已经切换到单用户多 Session workbench。
 > 运行时以本地统一 runtime 和 Session 语义为主，旧 `group`、多用户、Docker 双执行模式只保留少量兼容痕迹。
-> 如果 README 下面某些章节和当前行为不一致，以 `docs/single-user-session-runner-migration-plan.md` 与实际代码为准。
+> 如果 README 下面某些章节和当前行为不一致，以实际代码为准。
 
 ### 关键特性
 
