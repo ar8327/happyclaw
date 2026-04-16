@@ -40,6 +40,12 @@ export interface UsageInfo {
 
 export interface QueryConfig {
   prompt: string;
+  /**
+   * Fresh system prompt for the current turn.
+   * query-loop rebuilds this before every runQuery() call.
+   * Runner implementations must consume this exact value and must not
+   * silently rebuild or cache provider-specific prompt content internally.
+   */
   systemPrompt: string;
   sessionId?: string;
   resumeAt?: string;
@@ -51,7 +57,10 @@ export interface QueryConfig {
 
 export interface QueryResult {
   newSessionId?: string;
-  /** Provider-specific 的 resume 锚点（Claude: uuid，Codex: threadId） */
+  /**
+   * Provider-specific 的 resume 锚点。
+   * Claude 通常在一个 turn 内更新多次，Codex 通常在 turn 末尾更新一次 threadId。
+   */
   resumeAnchor?: string;
   closedDuringQuery: boolean;
   interruptedDuringQuery: boolean;
@@ -72,7 +81,10 @@ export interface ActivityReport {
   hasActiveToolCall: boolean;
   /** 当前工具调用已持续时间 (ms)，无活跃调用时为 0 */
   activeToolDurationMs: number;
-  /** 是否有后台任务仍在运行 */
+  /**
+   * 是否有 provider 自己仍在推进、且 query-loop 应继续延长活性超时的后台工作。
+   * 只有仍可能产生后续流事件或需要保活当前 turn 时才应返回 true。
+   */
   hasPendingBackgroundTasks: boolean;
 }
 
@@ -97,8 +109,9 @@ export interface AgentRunner {
   readonly ipcCapabilities: IpcCapabilities;
 
   /**
-   * 初始化 runner（创建 SDK 实例、MCP 配置等）。
-   * 在 query loop 开始前调用一次。
+   * 初始化 runner。
+   * 调用时机：整个进程生命周期内只调用一次，发生在第一次 runQuery() 之前。
+   * 这里适合创建 SDK 客户端、恢复 provider state、准备 MCP 进程配置等。
    */
   initialize(): Promise<void>;
 
@@ -106,11 +119,16 @@ export interface AgentRunner {
    * 执行一次查询。
    *
    * 实现须：
-   * 1. 将 prompt 发给 LLM
+   * 1. 使用 QueryConfig 里当前 turn 的 prompt / systemPrompt / resumeAt
+   * 2. 将 prompt 发给 LLM
    * 2. 将 SDK 事件转为 NormalizedMessage yield 出去
    * 3. 在内部处理 provider-specific 逻辑（如 Claude 的 compact_boundary routing reminder）
    * 4. yield { kind: 'resume_anchor', anchor } 每当 resume 点更新
    * 5. 最终通过 generator return 返回 QueryResult
+   *
+   * recoverable=true 只应用于 query-loop 有明确恢复分支的错误。
+   * 例如 context overflow 或可重建的 resume 失败。
+   * 普通 provider 错误不要标成 recoverable。
    *
    * query-loop 负责：重试、overflow 恢复、drain/close 退出、活性看门狗。
    */
@@ -133,7 +151,7 @@ export interface AgentRunner {
    * 报告当前活动状态，供 query-loop 的活性看门狗决策。
    * 每次看门狗超时检查时调用。
    *
-   * 默认实现（不覆盖时）：返回 { hasActiveToolCall: false, activeToolDurationMs: 0, hasPendingBackgroundTasks: false }
+   * 默认实现：返回没有活跃工具、没有待处理后台任务。
    */
   getActivityReport?(): ActivityReport;
 
@@ -144,11 +162,15 @@ export interface AgentRunner {
   getRuntimePersistenceSnapshot?(): RuntimePersistenceSnapshot;
 
   /**
-   * 两次查询之间的清理 / 重建（如 Claude 的 MCP server rebuild）。
-   * 每轮 query 结束后、下一轮开始前调用。
+   * 两次查询之间的清理 / 重建。
+   * 调用时机：每轮 runQuery() 完成并且 runtime state 已写回后调用，
+   * 下一轮 runQuery() 之前最多调用一次。
    */
   betweenQueries?(): Promise<void>;
 
-  /** runner 退出前的资源清理（如 Codex 的 forceArchive）。 */
+  /**
+   * runner 退出前的最终清理。
+   * 调用时机：idle drain、显式 drain、最终退出时都会调用。
+   */
   cleanup?(): Promise<void>;
 }
