@@ -116,7 +116,7 @@
 
 当前主链路只有**本地 unified runtime**。`src/session-launcher.ts` 提供启动门面，`src/runtime-runner.ts` 负责准备环境、目录边界、子进程与日志处理，然后启动 `container/agent-runner/` 中的 Claude 或 Codex provider。
 
-- **输入协议**：stdin 接收初始 JSON，包含 `prompt`、`sessionId`、`resumeAnchor`、`groupFolder`、`chatJid`、bootstrap state 等，后续消息通过 IPC 文件注入
+- **输入协议**：stdin 接收初始 JSON，主字段包含 `prompt`、`runnerId`、`sessionId`、`resumeAnchor`、`workspaceFolder`、`chatJid`、bootstrap state 等；`groupFolder` 仅作为过渡期兼容别名继续接受，后续消息通过 IPC 文件注入
 - **输出协议**：stdout 输出 `OUTPUT_START_MARKER...OUTPUT_END_MARKER` 包裹的 JSON，主进程解析为 `RuntimeOutput`
 - **流式事件**：`text_delta`、`thinking_delta`、`tool_use_start/end`、`tool_progress`、`hook_started/progress/response`、`task_start`、`task_notification`、`status`、`init` 统一通过 WebSocket `stream_event` 广播到 Web 端
 - **文本缓冲**：`text_delta` 累积到 200 字符后刷新，避免高频小包
