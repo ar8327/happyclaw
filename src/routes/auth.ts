@@ -14,7 +14,7 @@ import {
   getAppearanceConfig,
   getClaudeProviderConfig,
   getCodexProviderConfig,
-  getFeishuProviderConfigWithSource,
+  getImFeishuConfig,
 } from '../runtime-config.js';
 import {
   ChangePasswordSchema,
@@ -40,8 +40,10 @@ function buildSetupStatus() {
     codexConfig.hasCliAuth ||
     codexConfig.hasEnvApiKey ||
     !!codexConfig.activeProfile?.openaiApiKey;
-  const { source: feishuSource } = getFeishuProviderConfigWithSource();
-  const feishuConfigured = feishuSource !== 'none';
+  const feishuConfig = getImFeishuConfig();
+  const feishuConfigured = !!(
+    feishuConfig?.appId?.trim() && feishuConfig?.appSecret?.trim()
+  );
 
   return {
     needsSetup: !claudeConfigured && !codexConfigured,
