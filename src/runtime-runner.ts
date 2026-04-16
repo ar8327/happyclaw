@@ -125,6 +125,7 @@ export interface RuntimeLaunchProfile {
 
 export interface ContainerInput extends RuntimeInput {
   runnerId: string;
+  groupFolder?: string;
 }
 
 export interface RuntimeOutput {
@@ -779,6 +780,7 @@ export async function runHostAgent(
     const containerInput: ContainerInput = {
       ...input,
       runnerId: effectiveRunnerId,
+      groupFolder: input.workspaceFolder,
     };
     proc.stdin.write(JSON.stringify(containerInput));
     proc.stdin.end();

@@ -24,6 +24,10 @@ import { runQueryLoop } from './query-loop.js';
 import { ClaudeRunner } from './providers/claude/claude-runner.js';
 import { CodexRunner } from './providers/codex/codex-runner.js';
 
+type ContainerInputWire = Omit<ContainerInput, 'groupFolder'> & {
+  groupFolder?: string;
+};
+
 // ---------------------------------------------------------------------------
 // Environment
 // ---------------------------------------------------------------------------
@@ -107,10 +111,22 @@ function selectProvider(input: ContainerInput): 'claude' | 'codex' {
   return 'claude';
 }
 
+function resolveWorkspaceFolder(input: {
+  workspaceFolder?: string;
+  groupFolder?: string;
+}): string {
+  const workspaceFolder = input.workspaceFolder?.trim() || input.groupFolder?.trim();
+  if (!workspaceFolder) {
+    throw new Error('Missing workspaceFolder in ContainerInput');
+  }
+  return workspaceFolder;
+}
+
 function buildSessionRecordId(containerInput: ContainerInput): string {
+  const workspaceFolder = resolveWorkspaceFolder(containerInput);
   return containerInput.agentId
     ? `worker:${containerInput.agentId}`
-    : `main:${containerInput.groupFolder}`;
+    : `main:${workspaceFolder}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -122,8 +138,14 @@ async function main(): Promise<void> {
 
   try {
     const stdinData = await readStdin();
-    containerInput = JSON.parse(stdinData);
-    log(`Received input for group: ${containerInput.groupFolder}`);
+    const parsed = JSON.parse(stdinData) as ContainerInputWire;
+    const workspaceFolder = resolveWorkspaceFolder(parsed);
+    containerInput = {
+      ...parsed,
+      workspaceFolder,
+      groupFolder: parsed.groupFolder || workspaceFolder,
+    };
+    log(`Received input for workspace: ${workspaceFolder}`);
   } catch (err) {
     writeOutput({
       status: 'error',

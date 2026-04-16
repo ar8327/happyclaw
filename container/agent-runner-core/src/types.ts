@@ -68,6 +68,7 @@ export interface ContainerInput {
   prompt: string;
   runnerId: string;
   sessionId?: string;
+  workspaceFolder?: string;
   groupFolder: string;
   chatJid: string;
   isHome?: boolean;

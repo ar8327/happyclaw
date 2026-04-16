@@ -13,6 +13,7 @@ export interface ContainerInput {
   runnerId: string;
   sessionId?: string;
   resumeAnchor?: string;
+  workspaceFolder?: string;
   groupFolder: string;
   chatJid: string;
   /** Whether this is the user's home container (admin or member). */
