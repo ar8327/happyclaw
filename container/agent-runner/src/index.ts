@@ -1,8 +1,8 @@
 /**
  * HappyClaw Agent Runner — Entry Point
  *
- * Thin entry: reads ContainerInput from stdin, selects the provider
- * (Claude or Codex), initializes the runner, and starts the query loop.
+ * Thin entry: reads ContainerInput from stdin, resolves the runner,
+ * initializes it, and starts the query loop.
  *
  * All provider logic lives in providers/claude/ (and future providers/codex/).
  * The generic query loop lives in query-loop.ts.
@@ -23,6 +23,7 @@ import {
 import { runQueryLoop } from './query-loop.js';
 import { ClaudeRunner } from './providers/claude/claude-runner.js';
 import { CodexRunner } from './providers/codex/codex-runner.js';
+import type { AgentRunner } from './runner-interface.js';
 
 type ContainerInputWire = Omit<ContainerInput, 'groupFolder'> & {
   groupFolder?: string;
@@ -102,13 +103,54 @@ function loadUserMcpServers(): Record<string, unknown> {
 }
 
 // ---------------------------------------------------------------------------
-// Provider selection
+// Runner selection
 // ---------------------------------------------------------------------------
 
-function selectProvider(input: ContainerInput): 'claude' | 'codex' {
-  const provider = input.runnerId?.toLowerCase();
-  if (provider === 'codex') return 'codex';
-  return 'claude';
+type SupportedRunnerId = 'claude' | 'codex';
+
+type RunnerFactoryContext = {
+  containerInput: ContainerInput;
+  state: SessionState;
+  ipcPaths: typeof ipcPaths;
+  log: typeof log;
+  writeOutput: typeof writeOutput;
+  imChannelsFile: string;
+  groupDir: string;
+  globalDir: string;
+  memoryDir: string;
+  thinkingEffort?: string;
+  loadUserMcpServers: typeof loadUserMcpServers;
+  skillsDir: string;
+};
+
+const RUNNER_FACTORIES: Record<
+  SupportedRunnerId,
+  (ctx: RunnerFactoryContext) => AgentRunner
+> = {
+  claude: (ctx) =>
+    new ClaudeRunner({
+      ...ctx,
+      model: CLAUDE_MODEL,
+    }),
+  codex: (ctx) =>
+    new CodexRunner({
+      ...ctx,
+      model:
+        process.env.HAPPYCLAW_CODEX_MODEL || process.env.OPENAI_MODEL || 'gpt-5.4',
+    }),
+};
+
+function resolveRunnerId(input: ContainerInput): SupportedRunnerId {
+  const runnerId = input.runnerId?.trim().toLowerCase();
+  if (!runnerId) {
+    throw new Error('Missing runnerId in ContainerInput');
+  }
+  if (runnerId in RUNNER_FACTORIES) {
+    return runnerId as SupportedRunnerId;
+  }
+  throw new Error(
+    `Unsupported runnerId "${input.runnerId}". Supported runners: ${Object.keys(RUNNER_FACTORIES).join(', ')}`,
+  );
 }
 
 function resolveWorkspaceFolder(input: {
@@ -155,9 +197,9 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const provider = selectProvider(containerInput);
+  const runnerId = resolveRunnerId(containerInput);
   const sessionRecordId = buildSessionRecordId(containerInput);
-  log(`Provider: ${provider}`);
+  log(`Runner: ${runnerId}`);
 
   // Initialize session state
   state.loadImChannels(IM_CHANNELS_FILE);
@@ -186,72 +228,35 @@ async function main(): Promise<void> {
     }
   }
 
-  // Create and initialize the runner
-  if (provider === 'claude') {
-    const runner = new ClaudeRunner({
-      containerInput,
-      state,
-      ipcPaths,
-      log,
-      writeOutput,
-      imChannelsFile: IM_CHANNELS_FILE,
-      groupDir: WORKSPACE_GROUP,
-      globalDir: WORKSPACE_GLOBAL,
-      memoryDir: WORKSPACE_MEMORY,
-      model: CLAUDE_MODEL,
-      thinkingEffort: THINKING_EFFORT,
-      loadUserMcpServers,
-      skillsDir: WORKSPACE_SKILLS,
-    });
-    await runner.initialize();
+  const runner = RUNNER_FACTORIES[runnerId]({
+    containerInput,
+    state,
+    ipcPaths,
+    log,
+    writeOutput,
+    imChannelsFile: IM_CHANNELS_FILE,
+    groupDir: WORKSPACE_GROUP,
+    globalDir: WORKSPACE_GLOBAL,
+    memoryDir: WORKSPACE_MEMORY,
+    thinkingEffort: THINKING_EFFORT,
+    loadUserMcpServers,
+    skillsDir: WORKSPACE_SKILLS,
+  });
+  await runner.initialize();
 
-    // Run the query loop
-    await runQueryLoop({
-      runner,
-      initialPrompt: prompt,
-      initialImages: promptImages,
-      sessionRecordId,
-      sessionId: containerInput.sessionId,
-      initialResumeAnchor: containerInput.resumeAnchor,
-      state,
-      ipcPaths,
-      imChannelsFile: IM_CHANNELS_FILE,
-      log,
-      writeOutput,
-    });
-  } else if (provider === 'codex') {
-    const codexModel = process.env.HAPPYCLAW_CODEX_MODEL || process.env.OPENAI_MODEL || 'gpt-5.4';
-    const runner = new CodexRunner({
-      containerInput,
-      state,
-      ipcPaths,
-      log,
-      writeOutput,
-      imChannelsFile: IM_CHANNELS_FILE,
-      groupDir: WORKSPACE_GROUP,
-      globalDir: WORKSPACE_GLOBAL,
-      memoryDir: WORKSPACE_MEMORY,
-      model: codexModel,
-      thinkingEffort: THINKING_EFFORT,
-      loadUserMcpServers,
-      skillsDir: WORKSPACE_SKILLS,
-    });
-    await runner.initialize();
-
-    await runQueryLoop({
-      runner,
-      initialPrompt: prompt,
-      initialImages: promptImages,
-      sessionRecordId,
-      sessionId: containerInput.sessionId,
-      initialResumeAnchor: containerInput.resumeAnchor,
-      state,
-      ipcPaths,
-      imChannelsFile: IM_CHANNELS_FILE,
-      log,
-      writeOutput,
-    });
-  }
+  await runQueryLoop({
+    runner,
+    initialPrompt: prompt,
+    initialImages: promptImages,
+    sessionRecordId,
+    sessionId: containerInput.sessionId,
+    initialResumeAnchor: containerInput.resumeAnchor,
+    state,
+    ipcPaths,
+    imChannelsFile: IM_CHANNELS_FILE,
+    log,
+    writeOutput,
+  });
 }
 
 // ---------------------------------------------------------------------------
