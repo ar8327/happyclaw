@@ -442,8 +442,24 @@ function commitTranscriptExportSuccess(
   writeMemoryState(ownerKey, state);
 }
 
+function isTranscriptCommitObsolete(
+  ownerKey: string,
+  wrapupCursors: Record<string, MessageCursor>,
+): boolean {
+  const currentWrapups = normalizeWrapupCursors(
+    (readMemoryState(ownerKey).lastSessionWrapups || {}) as Record<
+      string,
+      unknown
+    >,
+  );
+  return Object.entries(wrapupCursors).every(([jid, cursor]) => {
+    const current = currentWrapups[jid];
+    return !!current && current.rowid >= cursor.rowid;
+  });
+}
+
 /**
- * Export transcripts for the owner's Session folder and persist wrapup state.
+ * Export transcripts for the owner's Session folder.
  * The caller decides whether to run `session_wrapup` immediately or defer it.
  */
 export function exportTranscriptSnapshotForUser(
@@ -1228,6 +1244,18 @@ export class MemoryOrchestrator {
     for (const job of jobs) {
       const jobKey = makeJobKey(job);
       if (!remainingJobs.has(jobKey)) {
+        continue;
+      }
+      if (
+        Object.keys(job.wrapupCursors).length > 0 &&
+        isTranscriptCommitObsolete(context.ownerKey, job.wrapupCursors)
+      ) {
+        remainingJobs.delete(jobKey);
+        syntheticStateRef.current = {
+          ...syntheticStateRef.current,
+          pendingWrapupJobs: Array.from(remainingJobs.values()),
+        };
+        persistSyntheticState();
         continue;
       }
       const result = await this.runRequest(

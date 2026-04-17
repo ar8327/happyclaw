@@ -7,6 +7,7 @@ const WORKSPACE_IPC = process.env.HAPPYCLAW_WORKSPACE_IPC || '/workspace/ipc';
 const TASKS_DIR = path.join(WORKSPACE_IPC, 'tasks');
 const RESPONSES_DIR = path.join(WORKSPACE_IPC, 'responses');
 const RESPONSE_POLL_MS = 200;
+const STALE_RESPONSE_TTL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_WRAPUP_TIMEOUT_MS = parseInt(
   process.env.HAPPYCLAW_MEMORY_SEND_TIMEOUT || '120000',
   10,
@@ -76,6 +77,16 @@ function parseWrapupResponse(filePath: string): SessionWrapupResponse | null {
   }
 }
 
+function maybeDeleteStaleResponse(filePath: string, now: number): void {
+  try {
+    const stat = fs.statSync(filePath);
+    if (now - stat.mtimeMs < STALE_RESPONSE_TTL_MS) return;
+    fs.unlinkSync(filePath);
+  } catch {
+    /* ignore */
+  }
+}
+
 export function enqueueSessionWrapupTask(
   task: SessionWrapupTask & { requestId?: string },
 ): string {
@@ -98,6 +109,7 @@ export async function waitForSessionWrapupResponse(
   while (Date.now() <= deadline) {
     try {
       if (fs.existsSync(RESPONSES_DIR)) {
+        const now = Date.now();
         const files = fs
           .readdirSync(RESPONSES_DIR)
           .filter((file) => file.endsWith('.json'))
@@ -106,6 +118,7 @@ export async function waitForSessionWrapupResponse(
           const filePath = path.join(RESPONSES_DIR, file);
           const response = parseWrapupResponse(filePath);
           if (!response || response.requestId !== requestId) {
+            maybeDeleteStaleResponse(filePath, now);
             continue;
           }
           try {
