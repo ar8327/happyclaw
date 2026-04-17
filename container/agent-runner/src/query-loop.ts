@@ -164,6 +164,9 @@ async function consumeQueryStream(
 
   const gen = runner.runQuery(config);
   let activityTimer: ReturnType<typeof setTimeout> | null = null;
+  // Codex already emits usage as a stream_event on turn completion. Keep the
+  // result-level fallback only for providers that do not stream usage.
+  let sawUsageStreamEvent = false;
 
   const resetActivityTimer = () => {
     if (activityTimer) clearTimeout(activityTimer);
@@ -210,11 +213,16 @@ async function consumeQueryStream(
 
     switch (msg.kind) {
       case 'stream_event':
+        if (msg.event.eventType === 'usage') {
+          sawUsageStreamEvent = true;
+        }
         if (
           msg.event.eventType === 'lifecycle' &&
           msg.event.phase === 'compact_completed'
         ) {
-          state.setPendingRoutingRecentImChannels(msg.event.repairHints?.recentImChannels ?? []);
+          state.setPendingRoutingRecentImChannels(
+            msg.event.repairHints?.recentImChannels ?? [],
+          );
         }
         if (msg.event.eventType === 'mode_change') {
           emitRuntimeState(writeOutput, runner, state, {
@@ -248,7 +256,7 @@ async function consumeQueryStream(
           resumeAnchor,
         });
         writeOutput({ status: 'success', result: msg.text, newSessionId });
-        if (msg.usage) {
+        if (msg.usage && !sawUsageStreamEvent) {
           writeOutput({
             status: 'stream', result: null,
             streamEvent: { eventType: 'usage', usage: msg.usage },

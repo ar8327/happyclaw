@@ -122,7 +122,7 @@ export interface AgentRunner {
    * 1. 使用 QueryConfig 里当前 turn 的 prompt / systemPrompt / resumeAt
    * 2. 将 prompt 发给 LLM
    * 2. 将 SDK 事件转为 NormalizedMessage yield 出去
-   * 3. 在内部处理 provider-specific 逻辑（如 Claude 的 compact_boundary routing reminder）
+   * 3. 在内部处理 provider-specific 逻辑，并把 provider 事件映射成统一的 StreamEvent
    * 4. yield { kind: 'resume_anchor', anchor } 每当 resume 点更新
    * 5. 最终通过 generator return 返回 QueryResult
    *
