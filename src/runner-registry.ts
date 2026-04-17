@@ -1,5 +1,4 @@
 import type { RunnerDescriptor } from './types.js';
-import { getMemoryLifecycleStrategy } from './memory-synthetic-lifecycle.js';
 
 const CLAUDE_MODEL_ALIASES = new Set(['opus', 'sonnet', 'haiku']);
 
@@ -122,7 +121,11 @@ export function isModelCompatibleWithRunner(
 }
 
 export function canServeAsMemoryRunner(descriptor: RunnerDescriptor): boolean {
-  return getMemoryLifecycleStrategy(descriptor) !== 'unsupported';
+  if (descriptor.capabilities.customTools === 'none') return false;
+  return (
+    descriptor.lifecycle.turnBoundary === 'native' ||
+    descriptor.lifecycle.turnBoundary === 'simulated'
+  );
 }
 
 export function listMemoryRunnerDescriptors(): RunnerDescriptor[] {
@@ -167,9 +170,6 @@ export function explainRunnerDegradation(
   descriptor: RunnerDescriptor,
 ): string[] {
   const reasons: string[] = [];
-  if (getMemoryLifecycleStrategy(descriptor) === 'synthetic') {
-    reasons.push('memory 依赖 synthetic lifecycle，而不是 runner 原生 compact hook');
-  }
   if (descriptor.capabilities.toolStreaming === 'coarse') {
     reasons.push('工具流式事件只有粗粒度观测');
   }
@@ -178,6 +178,19 @@ export function explainRunnerDegradation(
   }
   if (descriptor.capabilities.sessionResume !== 'strong') {
     reasons.push('会话恢复强度不是 strong，恢复后的连续性较弱');
+  }
+  return reasons;
+}
+
+export function explainMemoryRunnerDegradation(
+  descriptor: RunnerDescriptor,
+): string[] {
+  const reasons: string[] = [];
+  if (descriptor.capabilities.toolStreaming === 'coarse') {
+    reasons.push('工具流式事件只有粗粒度观测');
+  }
+  if (descriptor.lifecycle.hookStreaming === 'none') {
+    reasons.push('前端无法看到 hook 生命周期事件');
   }
   return reasons;
 }

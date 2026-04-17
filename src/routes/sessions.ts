@@ -69,6 +69,7 @@ import {
 } from '../runner-registry.js';
 import { compressContext, isCompressing } from '../context-compressor.js';
 import { DATA_DIR, GROUPS_DIR } from '../config.js';
+import { getSystemSettings } from '../runtime-config.js';
 import { executeSessionReset } from '../commands.js';
 import { loadTurnTrace } from '../turn-trace.js';
 import {
@@ -584,6 +585,10 @@ function buildSessionPayload(
     degradation_reasons: descriptor ? explainRunnerDegradation(descriptor) : [],
     has_summary: !!summary,
     summary_created_at: summary?.created_at ?? null,
+    codex_compact:
+      effectiveRunnerId === 'codex' && session.kind !== 'memory'
+        ? buildCodexCompactPayload(session, summary?.created_at ?? null)
+        : null,
     pinned_at: session.is_pinned ? session.updated_at : undefined,
     selected_skills: backingGroup?.selected_skills ?? null,
     activation_mode:
@@ -656,6 +661,55 @@ function parseSessionStateJson<T>(value: string | null | undefined, fallback: T)
   } catch {
     return fallback;
   }
+}
+
+function parseFiniteNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function parseOptionalIsoString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value : null;
+}
+
+function buildCodexCompactPayload(
+  session: SessionRecord,
+  summaryCreatedAt: string | null,
+): Record<string, unknown> | null {
+  const runtimeState = getSessionRuntimeState(session.id);
+  const providerState = parseSessionStateJson<Record<string, unknown> | undefined>(
+    runtimeState?.provider_state_json,
+    undefined,
+  );
+  const archiveState =
+    providerState?.archiveState
+    && typeof providerState.archiveState === 'object'
+    && !Array.isArray(providerState.archiveState)
+      ? providerState.archiveState as Record<string, unknown>
+      : undefined;
+  const cumulativeInputTokens = parseFiniteNumber(
+    archiveState?.cumulativeInputTokens,
+  );
+  const cumulativeOutputTokens = parseFiniteNumber(
+    archiveState?.cumulativeOutputTokens,
+  );
+  const thresholdTokens = Math.max(1, getSystemSettings().codexArchiveThreshold);
+  const currentTokens = cumulativeInputTokens + cumulativeOutputTokens;
+
+  return {
+    current_tokens: currentTokens,
+    current_input_tokens: cumulativeInputTokens,
+    current_output_tokens: cumulativeOutputTokens,
+    threshold_tokens: thresholdTokens,
+    remaining_tokens: Math.max(0, thresholdTokens - currentTokens),
+    progress: Math.min(1, currentTokens / thresholdTokens),
+    turn_count: parseFiniteNumber(archiveState?.turnCount),
+    start_fresh_on_next_turn: providerState?.startFreshOnNextTurn === true,
+    last_compacted_at:
+      parseOptionalIsoString(providerState?.lastCompactedAt)
+      || summaryCreatedAt
+      || null,
+    state_updated_at: runtimeState?.updated_at || null,
+  };
 }
 
 function persistPermissionModeSnapshot(

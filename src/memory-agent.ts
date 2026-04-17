@@ -41,22 +41,8 @@ import {
 } from './runtime-request-executor.js';
 import { getSystemSettings } from './runtime-config.js';
 import { runSessionAgent } from './session-launcher.js';
-import type {
-  MessageCursor,
-  RunnerDescriptor,
-  SessionRecord,
-} from './types.js';
+import type { MessageCursor, SessionRecord } from './types.js';
 import { buildMemoryProfile } from './memory-profile.js';
-import {
-  getMemoryLifecycleStrategy,
-  queueMemorySyntheticWrapupJobs,
-  readMemorySyntheticLifecycleState,
-  SyntheticArchiveLifecycleHook,
-  writeMemorySyntheticLifecycleState,
-  type MemorySyntheticLifecycleFollowUp,
-  type MemorySyntheticLifecycleHookContext,
-  type MemorySyntheticWrapupJob,
-} from './memory-synthetic-lifecycle.js';
 
 // Limits
 const MAX_CONCURRENT_MEMORY_AGENTS = 3;
@@ -78,7 +64,6 @@ interface MemoryExecutionContext {
   memoryAgentId: string;
   ipcInputDir: string;
   memoryProfile: ReturnType<typeof buildMemoryProfile>;
-  runnerDescriptor: RunnerDescriptor;
   runtimeInputBase: Omit<RuntimeInput, 'prompt'>;
 }
 
@@ -96,11 +81,9 @@ interface MemoryRunResult {
     response?: string;
     error?: string;
   };
-  followUps: MemorySyntheticLifecycleFollowUp[];
 }
 
-interface MemoryRuntimeRunContext
-extends MemorySyntheticLifecycleHookContext {
+interface MemoryRuntimeRunContext {
   requestId: string;
   request: MemoryExecutionRequest;
   executionContext: MemoryExecutionContext;
@@ -187,6 +170,16 @@ const INITIAL_META: Record<string, unknown> = {
   pendingMaintenance: [],
 };
 
+function sanitizeMemoryState(
+  state: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!Object.prototype.hasOwnProperty.call(state, 'syntheticLifecycle')) {
+    return state;
+  }
+  const { syntheticLifecycle: _syntheticLifecycle, ...sanitized } = state;
+  return sanitized;
+}
+
 /**
  * Ensure the memory directory for a user has the full structure.
  * Safe to call multiple times (idempotent).
@@ -266,7 +259,15 @@ export function readMemoryState(ownerKey: string): Record<string, unknown> {
   const statePath = path.join(DATA_DIR, 'memory', ownerKey, 'state.json');
   try {
     if (fs.existsSync(statePath)) {
-      return JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+      const parsed = JSON.parse(fs.readFileSync(statePath, 'utf-8')) as Record<
+        string,
+        unknown
+      >;
+      const sanitized = sanitizeMemoryState(parsed);
+      if (sanitized !== parsed) {
+        writeMemoryState(ownerKey, sanitized);
+      }
+      return sanitized;
     }
   } catch {
     /* ignore parse errors */
@@ -935,16 +936,9 @@ function persistMemoryRuntimeSnapshot(
   const sessionId = buildMemorySessionId(ownerKey);
   const current = getSessionRuntimeState(sessionId);
   upsertSessionRuntimeState(sessionId, {
-    providerSessionId:
-      output.runtimeState?.providerSessionId ||
-      output.newSessionId ||
-      current?.provider_session_id ||
-      undefined,
-    resumeAnchor:
-      output.runtimeState?.resumeAnchor || current?.resume_anchor || undefined,
-    providerState:
-      output.runtimeState?.providerState ||
-      parseJsonText<Record<string, unknown>>(current?.provider_state_json, {}),
+    providerSessionId: undefined,
+    resumeAnchor: undefined,
+    providerState: undefined,
     recentImChannels:
       output.runtimeState?.recentImChannels ||
       parseJsonText<string[]>(current?.recent_im_channels_json, []),
@@ -958,17 +952,13 @@ function persistMemoryRuntimeSnapshot(
       output.runtimeState?.currentPermissionMode ||
       current?.current_permission_mode ||
       'default',
-    lastMessageCursor:
-      output.runtimeState?.lastMessageCursor ??
-      current?.last_message_cursor ??
-      null,
+    lastMessageCursor: null,
   });
 }
 
 class MemoryPromptBuilderHook
 implements RuntimeExecutionHook<
-  MemoryRuntimeRunContext,
-  MemorySyntheticLifecycleFollowUp
+  MemoryRuntimeRunContext
 > {
   readonly name = 'MemoryPromptBuilderHook';
 
@@ -984,8 +974,7 @@ implements RuntimeExecutionHook<
 
 class RuntimeStatePersistenceHook
 implements RuntimeExecutionHook<
-  MemoryRuntimeRunContext,
-  MemorySyntheticLifecycleFollowUp
+  MemoryRuntimeRunContext
 > {
   readonly name = 'RuntimeStatePersistenceHook';
 
@@ -1005,8 +994,7 @@ implements RuntimeExecutionHook<
 
 class StreamingTextCollectorHook
 implements RuntimeExecutionHook<
-  MemoryRuntimeRunContext,
-  MemorySyntheticLifecycleFollowUp
+  MemoryRuntimeRunContext
 > {
   readonly name = 'StreamingTextCollectorHook';
 
@@ -1023,8 +1011,7 @@ implements RuntimeExecutionHook<
 
 class OneShotCloseHook
 implements RuntimeExecutionHook<
-  MemoryRuntimeRunContext,
-  MemorySyntheticLifecycleFollowUp
+  MemoryRuntimeRunContext
 > {
   readonly name = 'OneShotCloseHook';
 
@@ -1046,8 +1033,7 @@ implements RuntimeExecutionHook<
 
 class ResponseParserHook
 implements RuntimeExecutionHook<
-  MemoryRuntimeRunContext,
-  MemorySyntheticLifecycleFollowUp
+  MemoryRuntimeRunContext
 > {
   readonly name = 'ResponseParserHook';
 
@@ -1079,8 +1065,7 @@ implements RuntimeExecutionHook<
 
 class RunLogHook
 implements RuntimeExecutionHook<
-  MemoryRuntimeRunContext,
-  MemorySyntheticLifecycleFollowUp
+  MemoryRuntimeRunContext
 > {
   readonly name = 'RunLogHook';
 
@@ -1113,11 +1098,9 @@ implements RuntimeExecutionHook<
 }
 
 const MEMORY_RUNTIME_HOOKS: RuntimeExecutionHook<
-  MemoryRuntimeRunContext,
-  MemorySyntheticLifecycleFollowUp
+  MemoryRuntimeRunContext
 >[] = [
   new MemoryPromptBuilderHook(),
-  new SyntheticArchiveLifecycleHook(),
   new RuntimeStatePersistenceHook(),
   new StreamingTextCollectorHook(),
   new OneShotCloseHook(),
@@ -1131,8 +1114,7 @@ export class MemoryOrchestrator {
 
   constructor(
     private readonly requestExecutor: RuntimeRequestExecutor<
-      MemoryRuntimeRunContext,
-      MemorySyntheticLifecycleFollowUp
+      MemoryRuntimeRunContext
     > =
       new RuntimeRequestExecutor(MEMORY_RUNTIME_HOOKS),
   ) {}
@@ -1260,10 +1242,7 @@ export class MemoryOrchestrator {
       memoryAgentId,
       ipcInputDir,
       memoryProfile,
-      runnerDescriptor,
       runtimeInputBase: {
-        sessionId: runtimeState?.provider_session_id || undefined,
-        resumeAnchor: runtimeState?.resume_anchor || undefined,
         sessionRecordId: runtimeKey,
         workspaceFolder: primaryFolder,
         chatJid: runtimeKey,
@@ -1272,10 +1251,6 @@ export class MemoryOrchestrator {
         agentId: memoryAgentId,
         bootstrapState: runtimeState
           ? {
-              providerState: parseJsonText<Record<string, unknown>>(
-                runtimeState.provider_state_json,
-                {},
-              ),
               recentImChannels: parseJsonText<string[]>(
                 runtimeState.recent_im_channels_json,
                 [],
@@ -1285,40 +1260,10 @@ export class MemoryOrchestrator {
                 {},
               ),
               currentPermissionMode: runtimeState.current_permission_mode,
-              lastMessageCursor: runtimeState.last_message_cursor,
             }
           : undefined,
       },
     };
-  }
-
-  private persistSyntheticState(runContext: MemoryRuntimeRunContext): void {
-    const latestState = readMemoryState(runContext.executionContext.ownerKey);
-    writeMemoryState(
-      runContext.executionContext.ownerKey,
-      writeMemorySyntheticLifecycleState(latestState, runContext.syntheticState),
-    );
-  }
-
-  private buildSyntheticWrapupJobs(ownerKey: string): MemorySyntheticWrapupJob[] {
-    const queuedAt = new Date().toISOString();
-    const wrapupJobs: MemorySyntheticWrapupJob[] = [];
-    for (const folder of listOwnedPrimaryFolders(ownerKey)) {
-      const transcript = exportTranscriptSnapshotForUser(
-        ownerKey,
-        folder,
-        getJidsByFolder(folder),
-      );
-      if (!transcript) continue;
-      wrapupJobs.push({
-        workspaceFolder: transcript.workspaceFolder,
-        transcriptFile: transcript.transcriptFile,
-        chatJids: transcript.chatJids,
-        queuedAt,
-        wrapupCursors: transcript.wrapupCursors,
-      });
-    }
-    return wrapupJobs;
   }
 
   private createRunContext(
@@ -1326,53 +1271,16 @@ export class MemoryOrchestrator {
     requestId: string,
     request: MemoryExecutionRequest,
   ): MemoryRuntimeRunContext {
-    let runContext!: MemoryRuntimeRunContext;
-    runContext = {
+    return {
       requestId,
       request,
-      requestType: request.type,
       executionContext: context,
       startTime: Date.now(),
       responseText: '',
       closeRequested: false,
       parsed: null,
       executionProfile: buildMemoryExecutionProfile(context.memoryProfile),
-      syntheticLifecycleStrategy: getMemoryLifecycleStrategy(
-        context.runnerDescriptor,
-      ),
-      syntheticState: readMemorySyntheticLifecycleState(
-        readMemoryState(context.ownerKey),
-      ),
-      syntheticRepairPromptApplied: false,
-      syntheticArchiveCompletion: null,
-      persistSyntheticState: () => {
-        this.persistSyntheticState(runContext);
-      },
-      flushSyntheticWrapupJobs: (jobs) =>
-        this.flushSyntheticWrapupJobs(runContext, jobs),
-      buildSyntheticWrapupJobs: () =>
-        this.buildSyntheticWrapupJobs(context.ownerKey),
     };
-    return runContext;
-  }
-
-  private async processRunFollowUps(
-    runContext: MemoryRuntimeRunContext,
-    followUps: MemorySyntheticLifecycleFollowUp[],
-  ): Promise<void> {
-    for (const followUp of followUps) {
-      if (followUp.type !== 'flush_synthetic_wrapups') {
-        continue;
-      }
-      const remaining = await runContext.flushSyntheticWrapupJobs(
-        followUp.jobs,
-      );
-      runContext.syntheticState = {
-        ...runContext.syntheticState,
-        pendingWrapupJobs: remaining,
-      };
-      runContext.persistSyntheticState();
-    }
   }
 
   private async runRequest(
@@ -1384,29 +1292,8 @@ export class MemoryOrchestrator {
       onOutput?: (output: RuntimeOutput) => Promise<void> | void;
     },
   ): Promise<MemoryRunResult> {
-    const runtimeState = getSessionRuntimeState(context.runtimeKey);
     const input: RuntimeInput = {
       ...context.runtimeInputBase,
-      sessionId: runtimeState?.provider_session_id || undefined,
-      resumeAnchor: runtimeState?.resume_anchor || undefined,
-      bootstrapState: runtimeState
-        ? {
-            providerState: parseJsonText<Record<string, unknown>>(
-              runtimeState.provider_state_json,
-              {},
-            ),
-            recentImChannels: parseJsonText<string[]>(
-              runtimeState.recent_im_channels_json,
-              [],
-            ),
-            imChannelLastSeen: parseJsonText<Record<string, number>>(
-              runtimeState.im_channel_last_seen_json,
-              {},
-            ),
-            currentPermissionMode: runtimeState.current_permission_mode,
-            lastMessageCursor: runtimeState.last_message_cursor,
-          }
-        : undefined,
       prompt: '',
     };
 
@@ -1430,7 +1317,6 @@ export class MemoryOrchestrator {
             executionProfile,
           ),
       });
-      await this.processRunFollowUps(runContext, result.followUps);
       if (!result.output) {
         throw new Error('Memory runner completed without final output');
       }
@@ -1444,7 +1330,6 @@ export class MemoryOrchestrator {
               result.output.result ||
               null,
           ),
-        followUps: result.followUps,
       };
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
@@ -1456,77 +1341,6 @@ export class MemoryOrchestrator {
       }
       throw error;
     }
-  }
-
-  private async flushSyntheticWrapupJobs(
-    runContext: MemoryRuntimeRunContext,
-    jobs: MemorySyntheticWrapupJob[],
-  ): Promise<MemorySyntheticWrapupJob[]> {
-    if (jobs.length === 0) return [];
-    const makeJobKey = (job: MemorySyntheticWrapupJob) =>
-      `${job.workspaceFolder}::${job.transcriptFile}`;
-    const remainingJobs = new Map(
-      runContext.syntheticState.pendingWrapupJobs.map((job) => [
-        makeJobKey(job),
-        job,
-      ]),
-    );
-
-    for (const job of jobs) {
-      const jobKey = makeJobKey(job);
-      if (!remainingJobs.has(jobKey)) {
-        continue;
-      }
-      if (
-        Object.keys(job.wrapupCursors).length > 0 &&
-        isTranscriptCommitObsolete(
-          runContext.executionContext.ownerKey,
-          job.wrapupCursors,
-        )
-      ) {
-        remainingJobs.delete(jobKey);
-        runContext.syntheticState = {
-          ...runContext.syntheticState,
-          pendingWrapupJobs: Array.from(remainingJobs.values()),
-        };
-        runContext.persistSyntheticState();
-        continue;
-      }
-      const result = await this.runRequest(
-        runContext.executionContext,
-        crypto.randomUUID(),
-        {
-          type: 'session_wrapup',
-          transcriptFile: job.transcriptFile,
-          workspaceFolder: job.workspaceFolder,
-          chatJids: job.chatJids,
-        },
-        getSystemSettings().memorySendTimeout,
-      );
-      if (!result.parsed.success) {
-        logger.warn(
-          {
-            ownerKey: runContext.executionContext.ownerKey,
-            workspaceFolder: job.workspaceFolder,
-            transcriptFile: job.transcriptFile,
-            error: result.parsed.error,
-          },
-          'Synthetic memory wrapup flush failed',
-        );
-        continue;
-      }
-      commitTranscriptExportSuccess(runContext.executionContext.ownerKey, {
-        workspaceFolder: job.workspaceFolder,
-        wrapupCursors: job.wrapupCursors,
-      });
-      remainingJobs.delete(jobKey);
-      runContext.syntheticState = {
-        ...runContext.syntheticState,
-        pendingWrapupJobs: Array.from(remainingJobs.values()),
-      };
-      runContext.persistSyntheticState();
-    }
-    return Array.from(remainingJobs.values());
   }
 
   private async execute(
@@ -1675,35 +1489,6 @@ export class MemoryOrchestrator {
 
   async shutdownAll(): Promise<void> {
     this.stopIdleChecks();
-    const ownersToFlush = new Set<string>(this.agents.keys());
-    for (const session of listSessionRecords()) {
-      if (session.kind !== 'memory' || !session.owner_key) continue;
-      const syntheticState = readMemorySyntheticLifecycleState(
-        readMemoryState(session.owner_key),
-      );
-      if (syntheticState.pendingWrapupJobs.length > 0) {
-        ownersToFlush.add(session.owner_key);
-      }
-    }
-
-    for (const ownerKey of ownersToFlush) {
-      try {
-        await this.runSerialized(ownerKey, async () => {
-          const context = this.prepareExecutionContext(ownerKey);
-          await this.requestExecutor.shutdown(
-            this.createRunContext(context, crypto.randomUUID(), {
-              type: 'global_sleep',
-            }),
-          );
-        });
-      } catch (err) {
-        logger.warn(
-          { ownerKey, err },
-          'Failed to flush synthetic memory wrapups during shutdown',
-        );
-      }
-    }
-
     for (const entry of this.agents.values()) {
       try {
         await entry.tail;

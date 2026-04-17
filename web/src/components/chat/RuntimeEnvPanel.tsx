@@ -21,17 +21,21 @@ interface RuntimeEnvPanelProps {
   onClose?: () => void;
   title?: string;
   hideSessionFields?: boolean;
+  hideCodexCompact?: boolean;
 }
 
 type RuntimeEnvSession = {
   id?: string;
   name: string;
+  folder?: string;
+  created_at?: string;
   runner_id?: SessionInfo['runner_id'] | null;
   runner_profile_id?: string | null;
   model?: string | null;
   thinking_effort?: SessionInfo['thinking_effort'] | null;
   cwd?: string | null;
   context_compression?: SessionInfo['context_compression'] | null;
+  codex_compact?: SessionInfo['codex_compact'];
 };
 
 interface RunnerProfileOption {
@@ -70,6 +74,17 @@ interface RunnerOption {
   capabilities: RunnerCapabilities;
   lifecycle: RunnerLifecycle;
   degradation_reasons: string[];
+}
+
+function formatNumber(value: number | undefined | null): string {
+  return new Intl.NumberFormat('en-US').format(Math.round(value || 0));
+}
+
+function formatDateTime(value: string | null | undefined): string {
+  if (!value) return '暂无记录';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '暂无记录';
+  return date.toLocaleString('zh-CN');
 }
 
 function RunnerCapabilityCard({ runner }: { runner: RunnerOption | null }) {
@@ -148,10 +163,12 @@ export function RuntimeEnvPanel({
   onClose,
   title = '会话运行环境',
   hideSessionFields = false,
+  hideCodexCompact = false,
 }: RuntimeEnvPanelProps) {
   const sessionFromChat = useChatStore((s) => s.groups[sessionId]);
   const reloadChatSessions = useChatStore((s) => s.loadGroups);
-  const session = sessionProp ?? sessionFromChat;
+  const [liveSession, setLiveSession] = useState<RuntimeEnvSession | null>(null);
+  const session = liveSession ?? sessionProp ?? sessionFromChat ?? null;
   const [runnerOptions, setRunnerOptions] = useState<RunnerOption[]>([]);
 
   const currentRunnerId = session?.runner_id || runnerOptions[0]?.id || '';
@@ -170,6 +187,18 @@ export function RuntimeEnvPanel({
   );
   const [refreshing, setRefreshing] = useState(false);
 
+  const fetchSession = useCallback(async () => {
+    try {
+      const res = await api.get<{ session: RuntimeEnvSession }>(
+        `/api/sessions/${encodeURIComponent(sessionId)}`,
+      );
+      setLiveSession(res.session);
+      return res.session;
+    } catch {
+      return null;
+    }
+  }, [sessionId]);
+
   useEffect(() => {
     setModel(session?.model || '__default__');
     setThinkingEffort(session?.thinking_effort || '__default__');
@@ -184,6 +213,23 @@ export function RuntimeEnvPanel({
     session?.runner_profile_id,
     session?.thinking_effort,
   ]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchSession().then((nextSession) => {
+      if (cancelled || !nextSession) return;
+      setLiveSession(nextSession);
+    });
+
+    const timer = window.setInterval(() => {
+      void fetchSession();
+    }, 5000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [fetchSession]);
 
   useEffect(() => {
     let cancelled = false;
@@ -220,23 +266,28 @@ export function RuntimeEnvPanel({
   const patchSession = useCallback(async (updates: Record<string, unknown>) => {
     try {
       await api.patch(`/api/sessions/${encodeURIComponent(sessionId)}`, updates);
-      await Promise.allSettled([
+      const [, sessionReload] = await Promise.allSettled([
         reloadChatSessions(),
         Promise.resolve(onSessionReload?.()),
+        fetchSession(),
       ]);
+      if (sessionReload.status === 'rejected') {
+        throw sessionReload.reason;
+      }
     } catch {
       // ignore
     }
-  }, [onSessionReload, reloadChatSessions, sessionId]);
+  }, [fetchSession, onSessionReload, reloadChatSessions, sessionId]);
 
   const reloadSessionState = useCallback(async () => {
     setRefreshing(true);
     await Promise.allSettled([
       reloadChatSessions(),
       Promise.resolve(onSessionReload?.()),
+      fetchSession(),
     ]);
     setRefreshing(false);
-  }, [onSessionReload, reloadChatSessions]);
+  }, [fetchSession, onSessionReload, reloadChatSessions]);
 
   const handleProviderChange = useCallback(async (value: string) => {
     if (value === currentRunnerId) return;
@@ -276,6 +327,8 @@ export function RuntimeEnvPanel({
   }, [cwd, patchSession, session?.cwd]);
 
   const modelOptions = isCodex ? codexModelOptions : CLAUDE_MODEL_OPTIONS;
+  const codexCompact = session?.codex_compact;
+  const compactProgressWidth = `${Math.max(0, Math.min(100, Math.round((codexCompact?.progress || 0) * 100)))}%`;
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -438,6 +491,59 @@ export function RuntimeEnvPanel({
         )}
 
         {!hideSessionFields && <div className="border-t border-slate-100" />}
+
+        {!hideCodexCompact && isCodex && codexCompact && (
+          <>
+            <div className="space-y-3">
+              <div className="text-xs font-medium text-slate-500 uppercase tracking-wide">Codex Compact</div>
+
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 space-y-3">
+                <div className="flex items-center justify-between gap-3 text-xs">
+                  <div className="font-medium text-slate-700">当前累计 token</div>
+                  <div className="font-mono text-slate-600">
+                    {formatNumber(codexCompact.current_tokens)} / {formatNumber(codexCompact.threshold_tokens)}
+                  </div>
+                </div>
+
+                <div className="h-2 rounded-full bg-slate-200 overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-sky-500 transition-[width] duration-300"
+                    style={{ width: compactProgressWidth }}
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 text-[11px]">
+                  <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
+                    距下次 compact: <span className="font-medium text-slate-700">{formatNumber(codexCompact.remaining_tokens)}</span>
+                  </div>
+                  <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
+                    累计轮次: <span className="font-medium text-slate-700">{formatNumber(codexCompact.turn_count)}</span>
+                  </div>
+                  <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
+                    输入 tokens: <span className="font-medium text-slate-700">{formatNumber(codexCompact.current_input_tokens)}</span>
+                  </div>
+                  <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
+                    输出 tokens: <span className="font-medium text-slate-700">{formatNumber(codexCompact.current_output_tokens)}</span>
+                  </div>
+                  <div className="rounded border border-slate-200 bg-white px-2 py-1.5 col-span-2">
+                    上次 synthetic compact: <span className="font-medium text-slate-700">{formatDateTime(codexCompact.last_compacted_at)}</span>
+                  </div>
+                  <div className="rounded border border-slate-200 bg-white px-2 py-1.5 col-span-2">
+                    状态更新时间: <span className="font-medium text-slate-700">{formatDateTime(codexCompact.state_updated_at)}</span>
+                  </div>
+                </div>
+
+                {codexCompact.start_fresh_on_next_turn && (
+                  <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
+                    当前会话已经完成 synthetic compact，下一轮会重新开启线程。
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="border-t border-slate-100" />
+          </>
+        )}
 
         <div className="space-y-3">
           <div className="text-xs font-medium text-slate-500 uppercase tracking-wide">本机命令模式</div>

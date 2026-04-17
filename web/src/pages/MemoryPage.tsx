@@ -667,8 +667,9 @@ export function MemoryPage() {
                     sessionId={memoryConfig.id}
                     session={memoryRuntimeSession}
                     onSessionReload={loadMemoryConfig}
-                    title="Memory 会话运行环境"
+                    title="Memory 执行配置"
                     hideSessionFields
+                    hideCodexCompact
                   />
                 </div>
               )}

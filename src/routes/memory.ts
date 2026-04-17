@@ -29,7 +29,7 @@ import { readMemoryState, writeMemoryState } from '../memory-agent.js';
 import type { MemoryOrchestrator } from '../memory-orchestrator.js';
 import {
   canServeAsMemoryRunner,
-  explainRunnerDegradation,
+  explainMemoryRunnerDegradation,
   getRunnerDescriptor,
   listRunnerDescriptors,
 } from '../runner-registry.js';
@@ -150,7 +150,7 @@ function serializeMemoryConfig(user: AuthUser) {
       id: descriptor.id,
       label: descriptor.label,
       can_serve_memory: canServeAsMemoryRunner(descriptor),
-      degradation_reasons: explainRunnerDegradation(descriptor),
+      degradation_reasons: explainMemoryRunnerDegradation(descriptor),
     })),
   };
 }
