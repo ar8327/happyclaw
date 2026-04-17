@@ -10,7 +10,11 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, GROUPS_DIR } from './config.js';
-import type { RuntimeInput, RuntimeOutput } from './runtime-runner.js';
+import type {
+  RuntimeExecutionProfile,
+  RuntimeInput,
+  RuntimeOutput,
+} from './runtime-runner.js';
 import {
   getChatNamesByJids,
   getJidsByFolder,
@@ -36,22 +40,21 @@ import {
   type RunResult,
 } from './runtime-request-executor.js';
 import { getSystemSettings } from './runtime-config.js';
+import { runSessionAgent } from './session-launcher.js';
 import type {
   MessageCursor,
   RunnerDescriptor,
   SessionRecord,
 } from './types.js';
-import { MemoryRunnerAdapter } from './memory-runner-adapter.js';
 import { buildMemoryProfile } from './memory-profile.js';
 import {
-  buildMemorySyntheticRepairPrompt,
-  clearMemorySyntheticRepair,
-  consumeMemorySyntheticUsage,
   getMemoryLifecycleStrategy,
   queueMemorySyntheticWrapupJobs,
   readMemorySyntheticLifecycleState,
-  resetMemorySyntheticUsage,
+  SyntheticArchiveLifecycleHook,
   writeMemorySyntheticLifecycleState,
+  type MemorySyntheticLifecycleFollowUp,
+  type MemorySyntheticLifecycleHookContext,
   type MemorySyntheticWrapupJob,
 } from './memory-synthetic-lifecycle.js';
 
@@ -93,9 +96,11 @@ interface MemoryRunResult {
     response?: string;
     error?: string;
   };
+  followUps: MemorySyntheticLifecycleFollowUp[];
 }
 
-interface MemoryRuntimeRunContext {
+interface MemoryRuntimeRunContext
+extends MemorySyntheticLifecycleHookContext {
   requestId: string;
   request: MemoryExecutionRequest;
   executionContext: MemoryExecutionContext;
@@ -103,6 +108,7 @@ interface MemoryRuntimeRunContext {
   responseText: string;
   closeRequested: boolean;
   parsed: MemoryRunResult['parsed'] | null;
+  executionProfile: RuntimeExecutionProfile;
 }
 
 export interface MemoryAgentResponse {
@@ -804,17 +810,24 @@ function parseJsonText<T>(raw: string | null | undefined, fallback: T): T {
   }
 }
 
-function buildMemoryPrompt(
+function buildMemoryExecutionProfile(
+  profile: ReturnType<typeof buildMemoryProfile>,
+): RuntimeExecutionProfile {
+  return {
+    profileId: profile.profileId,
+    additionalDirectories: profile.allowedDirectories,
+    disableUserMcpServers: profile.disableUserMcpServers,
+    disabledPlugins: profile.disabledPlugins,
+    toolScope: profile.toolScope,
+  };
+}
+
+function buildMemoryPromptPreamble(
   request: MemoryExecutionRequest,
   memDir: string,
-  repairPrompt?: string | null,
 ): string {
   const workspaceFolder = resolveRequestWorkspaceFolder(request);
   const lines: string[] = [MEMORY_CORE_INSTRUCTIONS];
-
-  if (repairPrompt) {
-    lines.push('', repairPrompt);
-  }
 
   lines.push('', `memory 根目录: ${memDir}`, `请求类型: ${request.type}`);
 
@@ -950,8 +963,28 @@ function persistMemoryRuntimeSnapshot(
   });
 }
 
+class MemoryPromptBuilderHook
+implements RuntimeExecutionHook<
+  MemoryRuntimeRunContext,
+  MemorySyntheticLifecycleFollowUp
+> {
+  readonly name = 'MemoryPromptBuilderHook';
+
+  beforeRun(ctx: MemoryRuntimeRunContext): { promptPreamble: string } {
+    return {
+      promptPreamble: buildMemoryPromptPreamble(
+        ctx.request,
+        ctx.executionContext.memDir,
+      ),
+    };
+  }
+}
+
 class RuntimeStatePersistenceHook
-implements RuntimeExecutionHook<MemoryRuntimeRunContext> {
+implements RuntimeExecutionHook<
+  MemoryRuntimeRunContext,
+  MemorySyntheticLifecycleFollowUp
+> {
   readonly name = 'RuntimeStatePersistenceHook';
 
   async onOutput(
@@ -969,7 +1002,10 @@ implements RuntimeExecutionHook<MemoryRuntimeRunContext> {
 }
 
 class StreamingTextCollectorHook
-implements RuntimeExecutionHook<MemoryRuntimeRunContext> {
+implements RuntimeExecutionHook<
+  MemoryRuntimeRunContext,
+  MemorySyntheticLifecycleFollowUp
+> {
   readonly name = 'StreamingTextCollectorHook';
 
   onOutput(ctx: MemoryRuntimeRunContext, output: RuntimeOutput): void {
@@ -984,7 +1020,10 @@ implements RuntimeExecutionHook<MemoryRuntimeRunContext> {
 }
 
 class OneShotCloseHook
-implements RuntimeExecutionHook<MemoryRuntimeRunContext> {
+implements RuntimeExecutionHook<
+  MemoryRuntimeRunContext,
+  MemorySyntheticLifecycleFollowUp
+> {
   readonly name = 'OneShotCloseHook';
 
   onOutput(ctx: MemoryRuntimeRunContext, output: RuntimeOutput): void {
@@ -1004,7 +1043,10 @@ implements RuntimeExecutionHook<MemoryRuntimeRunContext> {
 }
 
 class ResponseParserHook
-implements RuntimeExecutionHook<MemoryRuntimeRunContext> {
+implements RuntimeExecutionHook<
+  MemoryRuntimeRunContext,
+  MemorySyntheticLifecycleFollowUp
+> {
   readonly name = 'ResponseParserHook';
 
   afterRun(
@@ -1034,7 +1076,10 @@ implements RuntimeExecutionHook<MemoryRuntimeRunContext> {
 }
 
 class RunLogHook
-implements RuntimeExecutionHook<MemoryRuntimeRunContext> {
+implements RuntimeExecutionHook<
+  MemoryRuntimeRunContext,
+  MemorySyntheticLifecycleFollowUp
+> {
   readonly name = 'RunLogHook';
 
   afterRun(
@@ -1065,7 +1110,12 @@ implements RuntimeExecutionHook<MemoryRuntimeRunContext> {
   }
 }
 
-const MEMORY_RUNTIME_HOOKS: RuntimeExecutionHook<MemoryRuntimeRunContext>[] = [
+const MEMORY_RUNTIME_HOOKS: RuntimeExecutionHook<
+  MemoryRuntimeRunContext,
+  MemorySyntheticLifecycleFollowUp
+>[] = [
+  new MemoryPromptBuilderHook(),
+  new SyntheticArchiveLifecycleHook(),
   new RuntimeStatePersistenceHook(),
   new StreamingTextCollectorHook(),
   new OneShotCloseHook(),
@@ -1078,8 +1128,10 @@ export class MemoryOrchestrator {
   private idleCheckTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
-    private readonly runnerAdapter: MemoryRunnerAdapter = new MemoryRunnerAdapter(),
-    private readonly requestExecutor: RuntimeRequestExecutor<MemoryRuntimeRunContext> =
+    private readonly requestExecutor: RuntimeRequestExecutor<
+      MemoryRuntimeRunContext,
+      MemorySyntheticLifecycleFollowUp
+    > =
       new RuntimeRequestExecutor(MEMORY_RUNTIME_HOOKS),
   ) {}
 
@@ -1238,13 +1290,95 @@ export class MemoryOrchestrator {
     };
   }
 
+  private persistSyntheticState(runContext: MemoryRuntimeRunContext): void {
+    const latestState = readMemoryState(runContext.executionContext.ownerKey);
+    writeMemoryState(
+      runContext.executionContext.ownerKey,
+      writeMemorySyntheticLifecycleState(latestState, runContext.syntheticState),
+    );
+  }
+
+  private buildSyntheticWrapupJobs(ownerKey: string): MemorySyntheticWrapupJob[] {
+    const queuedAt = new Date().toISOString();
+    const wrapupJobs: MemorySyntheticWrapupJob[] = [];
+    for (const folder of listOwnedPrimaryFolders(ownerKey)) {
+      const transcript = exportTranscriptSnapshotForUser(
+        ownerKey,
+        folder,
+        getJidsByFolder(folder),
+      );
+      if (!transcript) continue;
+      wrapupJobs.push({
+        workspaceFolder: transcript.workspaceFolder,
+        transcriptFile: transcript.transcriptFile,
+        chatJids: transcript.chatJids,
+        queuedAt,
+        wrapupCursors: transcript.wrapupCursors,
+      });
+    }
+    return wrapupJobs;
+  }
+
+  private createRunContext(
+    context: MemoryExecutionContext,
+    requestId: string,
+    request: MemoryExecutionRequest,
+  ): MemoryRuntimeRunContext {
+    let runContext!: MemoryRuntimeRunContext;
+    runContext = {
+      requestId,
+      request,
+      requestType: request.type,
+      executionContext: context,
+      startTime: Date.now(),
+      responseText: '',
+      closeRequested: false,
+      parsed: null,
+      executionProfile: buildMemoryExecutionProfile(context.memoryProfile),
+      syntheticLifecycleStrategy: getMemoryLifecycleStrategy(
+        context.runnerDescriptor,
+      ),
+      syntheticState: readMemorySyntheticLifecycleState(
+        readMemoryState(context.ownerKey),
+      ),
+      syntheticRepairPromptApplied: false,
+      syntheticArchiveCompletion: null,
+      persistSyntheticState: () => {
+        this.persistSyntheticState(runContext);
+      },
+      flushSyntheticWrapupJobs: (jobs) =>
+        this.flushSyntheticWrapupJobs(runContext, jobs),
+      buildSyntheticWrapupJobs: () =>
+        this.buildSyntheticWrapupJobs(context.ownerKey),
+    };
+    return runContext;
+  }
+
+  private async processRunFollowUps(
+    runContext: MemoryRuntimeRunContext,
+    followUps: MemorySyntheticLifecycleFollowUp[],
+  ): Promise<void> {
+    for (const followUp of followUps) {
+      if (followUp.type !== 'flush_synthetic_wrapups') {
+        continue;
+      }
+      const remaining = await runContext.flushSyntheticWrapupJobs(
+        followUp.jobs,
+      );
+      runContext.syntheticState = {
+        ...runContext.syntheticState,
+        pendingWrapupJobs: remaining,
+      };
+      runContext.persistSyntheticState();
+    }
+  }
+
   private async runRequest(
     context: MemoryExecutionContext,
     requestId: string,
     request: MemoryExecutionRequest,
     timeoutMs: number,
     opts?: {
-      repairPrompt?: string | null;
       onOutput?: (output: RuntimeOutput) => Promise<void> | void;
     },
   ): Promise<MemoryRunResult> {
@@ -1271,35 +1405,30 @@ export class MemoryOrchestrator {
             lastMessageCursor: runtimeState.last_message_cursor,
           }
         : undefined,
-      prompt: buildMemoryPrompt(request, context.memDir, opts?.repairPrompt),
+      prompt: '',
     };
 
-    const runContext: MemoryRuntimeRunContext = {
-      requestId,
-      request,
-      executionContext: context,
-      startTime: Date.now(),
-      responseText: '',
-      closeRequested: false,
-      parsed: null,
-    };
+    const runContext = this.createRunContext(context, requestId, request);
 
     try {
       const result = await this.requestExecutor.run({
         input,
         ctx: runContext,
-        execute: async (effectiveInput, onOutput) =>
-          this.runnerAdapter.run(
-            context.runnerDescriptor,
-            context.memoryProfile,
+        executionProfile: runContext.executionProfile,
+        execute: async (effectiveInput, onOutput, executionProfile) =>
+          runSessionAgent(
+            context.memoryProfile.registeredGroup,
             effectiveInput,
+            () => {},
             async (runtimeOutput) => {
               await onOutput(runtimeOutput);
               await opts?.onOutput?.(runtimeOutput);
             },
             context.primaryFolder,
+            executionProfile,
           ),
       });
+      await this.processRunFollowUps(runContext, result.followUps);
       if (!result.output) {
         throw new Error('Memory runner completed without final output');
       }
@@ -1313,6 +1442,7 @@ export class MemoryOrchestrator {
               result.output.result ||
               null,
           ),
+        followUps: result.followUps,
       };
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
@@ -1327,27 +1457,14 @@ export class MemoryOrchestrator {
   }
 
   private async flushSyntheticWrapupJobs(
-    context: MemoryExecutionContext,
+    runContext: MemoryRuntimeRunContext,
     jobs: MemorySyntheticWrapupJob[],
-    syntheticStateRef: {
-      current: ReturnType<typeof readMemorySyntheticLifecycleState>;
-    },
   ): Promise<MemorySyntheticWrapupJob[]> {
     if (jobs.length === 0) return [];
-    const persistSyntheticState = () => {
-      const latestState = readMemoryState(context.ownerKey);
-      writeMemoryState(
-        context.ownerKey,
-        writeMemorySyntheticLifecycleState(
-          latestState,
-          syntheticStateRef.current,
-        ),
-      );
-    };
     const makeJobKey = (job: MemorySyntheticWrapupJob) =>
       `${job.workspaceFolder}::${job.transcriptFile}`;
     const remainingJobs = new Map(
-      syntheticStateRef.current.pendingWrapupJobs.map((job) => [
+      runContext.syntheticState.pendingWrapupJobs.map((job) => [
         makeJobKey(job),
         job,
       ]),
@@ -1360,18 +1477,21 @@ export class MemoryOrchestrator {
       }
       if (
         Object.keys(job.wrapupCursors).length > 0 &&
-        isTranscriptCommitObsolete(context.ownerKey, job.wrapupCursors)
+        isTranscriptCommitObsolete(
+          runContext.executionContext.ownerKey,
+          job.wrapupCursors,
+        )
       ) {
         remainingJobs.delete(jobKey);
-        syntheticStateRef.current = {
-          ...syntheticStateRef.current,
+        runContext.syntheticState = {
+          ...runContext.syntheticState,
           pendingWrapupJobs: Array.from(remainingJobs.values()),
         };
-        persistSyntheticState();
+        runContext.persistSyntheticState();
         continue;
       }
       const result = await this.runRequest(
-        context,
+        runContext.executionContext,
         crypto.randomUUID(),
         {
           type: 'session_wrapup',
@@ -1384,7 +1504,7 @@ export class MemoryOrchestrator {
       if (!result.parsed.success) {
         logger.warn(
           {
-            ownerKey: context.ownerKey,
+            ownerKey: runContext.executionContext.ownerKey,
             workspaceFolder: job.workspaceFolder,
             transcriptFile: job.transcriptFile,
             error: result.parsed.error,
@@ -1393,52 +1513,18 @@ export class MemoryOrchestrator {
         );
         continue;
       }
-      commitTranscriptExportSuccess(context.ownerKey, {
+      commitTranscriptExportSuccess(runContext.executionContext.ownerKey, {
         workspaceFolder: job.workspaceFolder,
         wrapupCursors: job.wrapupCursors,
       });
       remainingJobs.delete(jobKey);
-      syntheticStateRef.current = {
-        ...syntheticStateRef.current,
+      runContext.syntheticState = {
+        ...runContext.syntheticState,
         pendingWrapupJobs: Array.from(remainingJobs.values()),
       };
-      persistSyntheticState();
+      runContext.persistSyntheticState();
     }
     return Array.from(remainingJobs.values());
-  }
-
-  private async flushPendingSyntheticWrapups(
-    ownerKey: string,
-    context?: MemoryExecutionContext,
-  ): Promise<void> {
-    const effectiveContext = context || this.prepareExecutionContext(ownerKey);
-    if (
-      getMemoryLifecycleStrategy(effectiveContext.runnerDescriptor) !==
-      'synthetic'
-    ) {
-      return;
-    }
-
-    const syntheticStateRef = {
-      current: readMemorySyntheticLifecycleState(readMemoryState(ownerKey)),
-    };
-    if (syntheticStateRef.current.pendingWrapupJobs.length === 0) {
-      return;
-    }
-
-    const failedJobs = await this.flushSyntheticWrapupJobs(
-      effectiveContext,
-      syntheticStateRef.current.pendingWrapupJobs,
-      syntheticStateRef,
-    );
-    const latestState = readMemoryState(ownerKey);
-    writeMemoryState(
-      ownerKey,
-      writeMemorySyntheticLifecycleState(latestState, {
-        ...syntheticStateRef.current,
-        pendingWrapupJobs: failedJobs,
-      }),
-    );
   }
 
   private async execute(
@@ -1448,128 +1534,13 @@ export class MemoryOrchestrator {
     timeoutMs: number,
   ): Promise<MemoryAgentResponse> {
     const context = this.prepareExecutionContext(ownerKey);
-    const lifecycleStrategy = getMemoryLifecycleStrategy(
-      context.runnerDescriptor,
-    );
-    const syntheticStateRef = {
-      current: readMemorySyntheticLifecycleState(readMemoryState(ownerKey)),
-    };
-    const persistSyntheticState = () => {
-      const latestState = readMemoryState(ownerKey);
-      writeMemoryState(
-        ownerKey,
-        writeMemorySyntheticLifecycleState(
-          latestState,
-          syntheticStateRef.current,
-        ),
-      );
-    };
-
-    if (
-      lifecycleStrategy === 'synthetic' &&
-      syntheticStateRef.current.pendingWrapupJobs.length > 0
-    ) {
-      const failedJobs = await this.flushSyntheticWrapupJobs(
-        context,
-        syntheticStateRef.current.pendingWrapupJobs,
-        syntheticStateRef,
-      );
-      syntheticStateRef.current = {
-        ...syntheticStateRef.current,
-        pendingWrapupJobs: failedJobs,
-      };
-      persistSyntheticState();
-    }
-
-    const repairPrompt =
-      lifecycleStrategy === 'synthetic' &&
-      syntheticStateRef.current.pendingWrapupJobs.length === 0 &&
-      syntheticStateRef.current.pendingRepair
-        ? buildMemorySyntheticRepairPrompt(
-            syntheticStateRef.current.pendingRepair,
-          )
-        : null;
-    let archiveTriggered = false;
-
     const result = await this.runRequest(
       context,
       requestId,
       request,
       timeoutMs,
-      {
-        repairPrompt,
-        onOutput:
-          lifecycleStrategy === 'synthetic'
-            ? async (output) => {
-                const consumed = consumeMemorySyntheticUsage(
-                  syntheticStateRef.current,
-                  output,
-                );
-                syntheticStateRef.current = consumed.synthetic;
-                if (
-                  output.status === 'stream' &&
-                  output.streamEvent?.eventType === 'usage'
-                ) {
-                  persistSyntheticState();
-                }
-                if (consumed.crossedThreshold) {
-                  archiveTriggered = true;
-                }
-              }
-            : undefined,
-      },
+      undefined,
     );
-
-    if (
-      lifecycleStrategy === 'synthetic' &&
-      repairPrompt &&
-      result.parsed.success
-    ) {
-      syntheticStateRef.current = clearMemorySyntheticRepair(
-        syntheticStateRef.current,
-      );
-      persistSyntheticState();
-    }
-
-    if (lifecycleStrategy === 'synthetic' && archiveTriggered) {
-      const queuedAt = new Date().toISOString();
-      const wrapupJobs: MemorySyntheticWrapupJob[] = [];
-      for (const folder of listOwnedPrimaryFolders(ownerKey)) {
-        const transcript = exportTranscriptSnapshotForUser(
-          ownerKey,
-          folder,
-          getJidsByFolder(folder),
-        );
-        if (!transcript) continue;
-        wrapupJobs.push({
-          workspaceFolder: transcript.workspaceFolder,
-          transcriptFile: transcript.transcriptFile,
-          chatJids: transcript.chatJids,
-          queuedAt,
-          wrapupCursors: transcript.wrapupCursors,
-        });
-      }
-      syntheticStateRef.current = queueMemorySyntheticWrapupJobs(
-        syntheticStateRef.current,
-        wrapupJobs,
-      );
-      syntheticStateRef.current = resetMemorySyntheticUsage(
-        syntheticStateRef.current,
-        wrapupJobs,
-      );
-      persistSyntheticState();
-
-      const failedJobs = await this.flushSyntheticWrapupJobs(
-        context,
-        syntheticStateRef.current.pendingWrapupJobs,
-        syntheticStateRef,
-      );
-      syntheticStateRef.current = {
-        ...syntheticStateRef.current,
-        pendingWrapupJobs: failedJobs,
-      };
-      persistSyntheticState();
-    }
 
     return {
       requestId,
@@ -1716,7 +1687,12 @@ export class MemoryOrchestrator {
     for (const ownerKey of ownersToFlush) {
       try {
         await this.runSerialized(ownerKey, async () => {
-          await this.flushPendingSyntheticWrapups(ownerKey);
+          const context = this.prepareExecutionContext(ownerKey);
+          await this.requestExecutor.shutdown(
+            this.createRunContext(context, crypto.randomUUID(), {
+              type: 'global_sleep',
+            }),
+          );
         });
       } catch (err) {
         logger.warn(
