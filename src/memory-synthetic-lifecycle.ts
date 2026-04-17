@@ -1,6 +1,6 @@
 import { getSystemSettings } from './runtime-config.js';
 import type { RuntimeOutput } from './runtime-runner.js';
-import type { RunnerDescriptor } from './types.js';
+import type { MessageCursor, RunnerDescriptor } from './types.js';
 
 export type MemoryLifecycleStrategy = 'native' | 'synthetic' | 'unsupported';
 
@@ -19,6 +19,7 @@ export interface MemorySyntheticWrapupJob {
   transcriptFile: string;
   chatJids: string[];
   queuedAt: string;
+  wrapupCursors: Record<string, MessageCursor>;
 }
 
 export interface MemorySyntheticRepairState {
@@ -89,6 +90,27 @@ function parseWrapupJob(value: unknown): MemorySyntheticWrapupJob | null {
       typeof raw.queuedAt === 'string' && raw.queuedAt.trim()
         ? raw.queuedAt
         : new Date().toISOString(),
+    wrapupCursors:
+      raw.wrapupCursors && typeof raw.wrapupCursors === 'object'
+        ? Object.fromEntries(
+            Object.entries(raw.wrapupCursors as Record<string, unknown>)
+              .filter(
+                (entry): entry is [string, { rowid: number }] => {
+                  const cursor =
+                    entry[1] && typeof entry[1] === 'object'
+                      ? (entry[1] as { rowid?: unknown })
+                      : null;
+                  return (
+                    !!entry[0] &&
+                    !!cursor &&
+                    typeof cursor.rowid === 'number' &&
+                    Number.isFinite(cursor.rowid)
+                  );
+                },
+              )
+              .map(([jid, cursor]) => [jid, { rowid: cursor.rowid }]),
+          )
+        : {},
   };
 }
 
@@ -189,7 +211,7 @@ function totalTokens(usage: UsageTotals): number {
 }
 
 export function getMemorySyntheticArchiveThreshold(): number {
-  return Math.max(getSystemSettings().codexArchiveThreshold, 120000);
+  return Math.max(getSystemSettings().codexArchiveThreshold, 200000);
 }
 
 export function consumeMemorySyntheticUsage(

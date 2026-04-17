@@ -181,7 +181,6 @@ export class CodexRunner implements AgentRunner {
     }
 
     // Start or resume thread
-    this.archiveMgr.recordUserMessage(config.prompt);
     this.session.startOrResume(
       this.startFreshOnNextTurn
         ? undefined
@@ -259,7 +258,7 @@ export class CodexRunner implements AgentRunner {
     // Emit result
     yield { kind: 'result', text: finalText, usage };
 
-    this.archiveMgr.recordTurn(usage, finalText);
+    this.archiveMgr.recordTurn(usage);
 
     if (this.archiveMgr.shouldArchive()) {
       yield {

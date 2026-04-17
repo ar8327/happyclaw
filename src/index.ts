@@ -3451,6 +3451,7 @@ function startIpcWatcher(): void {
                 // Pass source group identity to processTaskIpc for authorization
                 await processTaskIpc(
                   data,
+                  ipcRoot,
                   sourceGroup,
                   isAdminHome,
                   isHome,
@@ -3498,12 +3499,39 @@ function startIpcWatcher(): void {
   logger.info('IPC watcher started (per-group namespaces)');
 }
 
+function writeIpcResponseFile(ipcRoot: string, data: object): void {
+  const responsesDir = path.join(ipcRoot, 'responses');
+  fs.mkdirSync(responsesDir, { recursive: true });
+  const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
+  const filePath = path.join(responsesDir, filename);
+  const tmpPath = `${filePath}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  fs.renameSync(tmpPath, filePath);
+}
+
+function writeConversationArchiveFromTranscript(
+  ownerKey: string,
+  workspaceFolder: string,
+  transcriptFile: string,
+): string {
+  const transcriptPath = path.join(DATA_DIR, 'memory', ownerKey, transcriptFile);
+  const conversationsDir = path.join(GROUPS_DIR, workspaceFolder, 'conversations');
+  fs.mkdirSync(conversationsDir, { recursive: true });
+  const archiveFileName = path.basename(transcriptFile);
+  const archivePath = path.join(conversationsDir, archiveFileName);
+  const tmpPath = `${archivePath}.tmp`;
+  fs.writeFileSync(tmpPath, fs.readFileSync(transcriptPath, 'utf-8'), 'utf-8');
+  fs.renameSync(tmpPath, archivePath);
+  return path.join('conversations', archiveFileName);
+}
+
 // Module-level reference set after MemoryOrchestrator creation, used by processTaskIpc.
 let memoryOrchestratorRef: MemoryOrchestrator | null = null;
 
 async function processTaskIpc(
   data: {
     type: string;
+    requestId?: string;
     taskId?: string;
     prompt?: string;
     schedule_type?: string;
@@ -3527,7 +3555,9 @@ async function processTaskIpc(
     fileName?: string;
     // For targetChannel routing (send_file via model-controlled channel)
     targetChannel?: string;
+    archiveConversation?: boolean;
   },
+  ipcRoot: string,
   sourceGroup: string, // Verified identity from IPC directory
   isAdminHome: boolean, // Compatibility flag: whether source is the primary Session runtime
   isHome: boolean, // Compatibility flag: whether source maps to a home-style alias
@@ -3830,22 +3860,85 @@ async function processTaskIpc(
     case 'session_wrapup':
       {
         const workspaceFolder = data.workspaceFolder || data.groupFolder;
-        if (
-          data.userId &&
-          workspaceFolder &&
-          memoryOrchestratorRef &&
-          resolveSessionOwnerKey(workspaceFolder) === data.userId
-        ) {
+        const requestId =
+          typeof data.requestId === 'string' && data.requestId.trim().length > 0
+            ? data.requestId
+            : null;
+        const reply = (payload: {
+          success: boolean;
+          error?: string;
+          transcriptFile?: string;
+          chatJids?: string[];
+          conversationArchiveFile?: string;
+          noNewMessages?: boolean;
+        }): void => {
+          if (!requestId) return;
+          writeIpcResponseFile(ipcRoot, {
+            type: 'session_wrapup_result',
+            requestId,
+            workspaceFolder,
+            ...payload,
+          });
+        };
+
+        if (!data.userId || !workspaceFolder || !memoryOrchestratorRef) {
+          reply({
+            success: false,
+            error: 'Invalid session_wrapup request',
+          });
+          break;
+        }
+
+        if (resolveSessionOwnerKey(workspaceFolder) !== data.userId) {
+          reply({
+            success: false,
+            error: 'session_wrapup owner mismatch',
+          });
+          break;
+        }
+
+        try {
           const allJids = getJidsByFolder(workspaceFolder);
-          memoryOrchestratorRef.exportTranscripts(
+          const result = await memoryOrchestratorRef.exportTranscripts(
             data.userId,
             workspaceFolder,
             allJids,
-          ).catch((err) => {
-            logger.warn(
-              { workspaceFolder, err },
-              'session_wrapup via PreCompact IPC failed',
-            );
+          );
+          let conversationArchiveFile: string | undefined;
+          if (
+            data.archiveConversation &&
+            result?.transcriptFile &&
+            result.success
+          ) {
+            try {
+              conversationArchiveFile = writeConversationArchiveFromTranscript(
+                data.userId,
+                workspaceFolder,
+                result.transcriptFile,
+              );
+            } catch (err) {
+              logger.warn(
+                { workspaceFolder, err, transcriptFile: result.transcriptFile },
+                'Failed to mirror transcript into conversations archive',
+              );
+            }
+          }
+          reply({
+            success: result?.success ?? true,
+            error: result?.success === false ? result.error : undefined,
+            transcriptFile: result?.transcriptFile,
+            chatJids: result?.chatJids,
+            conversationArchiveFile,
+            noNewMessages: result === null,
+          });
+        } catch (err) {
+          logger.warn(
+            { workspaceFolder, err },
+            'session_wrapup via IPC failed',
+          );
+          reply({
+            success: false,
+            error: err instanceof Error ? err.message : String(err),
           });
         }
       }

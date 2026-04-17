@@ -78,6 +78,7 @@ interface MemoryTranscriptExport {
   transcriptFile: string;
   workspaceFolder: string;
   chatJids: string[];
+  wrapupCursors: Record<string, MessageCursor>;
 }
 
 interface MemoryRunResult {
@@ -94,6 +95,9 @@ export interface MemoryAgentResponse {
   success: boolean;
   response?: string;
   error?: string;
+  transcriptFile?: string;
+  workspaceFolder?: string;
+  chatJids?: string[];
 }
 
 interface MemoryExecutionRequest {
@@ -390,6 +394,54 @@ function formatTranscriptMarkdown(
   return lines.join('\n');
 }
 
+function normalizeWrapupCursors(
+  rawWrapups: Record<string, unknown>,
+): Record<string, MessageCursor> {
+  const wrapups: Record<string, MessageCursor> = {};
+  for (const [jid, raw] of Object.entries(rawWrapups)) {
+    if (
+      raw &&
+      typeof raw === 'object' &&
+      typeof (raw as { rowid?: unknown }).rowid === 'number'
+    ) {
+      wrapups[jid] = { rowid: (raw as { rowid: number }).rowid };
+    } else if (
+      raw &&
+      typeof raw === 'object' &&
+      typeof (raw as { timestamp?: unknown }).timestamp === 'string'
+    ) {
+      wrapups[jid] = { rowid: 0 };
+    } else {
+      wrapups[jid] = { rowid: 0 };
+    }
+  }
+  return wrapups;
+}
+
+function commitTranscriptExportSuccess(
+  ownerKey: string,
+  transcript: Pick<MemoryTranscriptExport, 'workspaceFolder' | 'wrapupCursors'>,
+): void {
+  const state = readMemoryState(ownerKey);
+  const currentWrapups = normalizeWrapupCursors(
+    (state.lastSessionWrapups || {}) as Record<string, unknown>,
+  );
+  for (const [jid, cursor] of Object.entries(transcript.wrapupCursors)) {
+    const current = currentWrapups[jid];
+    if (!current || cursor.rowid > current.rowid) {
+      currentWrapups[jid] = { rowid: cursor.rowid };
+    }
+  }
+  state.lastSessionWrapups = currentWrapups;
+  state.lastSessionWrapupAt = new Date().toISOString();
+  const pending = (state.pendingWrapups || []) as string[];
+  if (!pending.includes(transcript.workspaceFolder)) {
+    pending.push(transcript.workspaceFolder);
+    state.pendingWrapups = pending;
+  }
+  writeMemoryState(ownerKey, state);
+}
+
 /**
  * Export transcripts for the owner's Session folder and persist wrapup state.
  * The caller decides whether to run `session_wrapup` immediately or defer it.
@@ -402,30 +454,9 @@ export function exportTranscriptSnapshotForUser(
   try {
     const memDir = ensureMemoryDir(ownerKey);
     const state = readMemoryState(ownerKey);
-    const rawWrapups = (state.lastSessionWrapups || {}) as Record<
-      string,
-      unknown
-    >;
-    // Normalize wrapup cursors: handle both old { timestamp, id } and new { rowid } format
-    const wrapups: Record<string, MessageCursor> = {};
-    for (const [jid, raw] of Object.entries(rawWrapups)) {
-      if (
-        raw &&
-        typeof raw === 'object' &&
-        typeof (raw as { rowid?: unknown }).rowid === 'number'
-      ) {
-        wrapups[jid] = { rowid: (raw as { rowid: number }).rowid };
-      } else if (
-        raw &&
-        typeof raw === 'object' &&
-        typeof (raw as { timestamp?: unknown }).timestamp === 'string'
-      ) {
-        // Old format: reset to 0 (transcript export is idempotent)
-        wrapups[jid] = { rowid: 0 };
-      } else {
-        wrapups[jid] = { rowid: 0 };
-      }
-    }
+    const wrapups = normalizeWrapupCursors(
+      (state.lastSessionWrapups || {}) as Record<string, unknown>,
+    );
     const defaultCursor: MessageCursor = { rowid: 0 };
 
     const transcriptChatJids = new Set(chatJids);
@@ -494,27 +525,19 @@ export function exportTranscriptSnapshotForUser(
       'Exported transcript for Memory Agent',
     );
 
-    // Update cursors per-jid: only update jids that had messages
+    const nextWrapupCursors: Record<string, MessageCursor> = {};
     for (const jid of transcriptChatJids) {
       const jidMsgs = allMessages.filter((m) => m.chat_jid === jid);
       if (jidMsgs.length > 0) {
         const last = jidMsgs[jidMsgs.length - 1];
-        wrapups[jid] = { rowid: last.rowid };
+        nextWrapupCursors[jid] = { rowid: last.rowid };
       }
     }
-    state.lastSessionWrapups = wrapups;
-    state.lastSessionWrapupAt = new Date().toISOString();
-    // Track pending wrapups for global_sleep scheduling
-    const pending = (state.pendingWrapups || []) as string[];
-    if (!pending.includes(folder)) {
-      pending.push(folder);
-      state.pendingWrapups = pending;
-    }
-    writeMemoryState(ownerKey, state);
     return {
       transcriptFile: transcriptRelPath,
       workspaceFolder: folder,
       chatJids: Array.from(transcriptChatJids),
+      wrapupCursors: nextWrapupCursors,
     };
   } catch (err) {
     logger.error(
@@ -541,12 +564,21 @@ export async function exportTranscriptsForUser(
     chatJids,
   );
   if (!transcript) return null;
-  return memoryOrchestrator.send(ownerKey, {
+  const response = await memoryOrchestrator.send(ownerKey, {
     type: 'session_wrapup',
     transcriptFile: transcript.transcriptFile,
     workspaceFolder: transcript.workspaceFolder,
     chatJids: transcript.chatJids,
   });
+  if (response.success) {
+    commitTranscriptExportSuccess(ownerKey, transcript);
+  }
+  return {
+    ...response,
+    transcriptFile: transcript.transcriptFile,
+    workspaceFolder: transcript.workspaceFolder,
+    chatJids: transcript.chatJids,
+  };
 }
 
 /**
@@ -1221,6 +1253,10 @@ export class MemoryOrchestrator {
         );
         continue;
       }
+      commitTranscriptExportSuccess(context.ownerKey, {
+        workspaceFolder: job.workspaceFolder,
+        wrapupCursors: job.wrapupCursors,
+      });
       remainingJobs.delete(jobKey);
       syntheticStateRef.current = {
         ...syntheticStateRef.current,
@@ -1370,6 +1406,7 @@ export class MemoryOrchestrator {
           transcriptFile: transcript.transcriptFile,
           chatJids: transcript.chatJids,
           queuedAt,
+          wrapupCursors: transcript.wrapupCursors,
         });
       }
       syntheticStateRef.current = queueMemorySyntheticWrapupJobs(
