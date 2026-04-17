@@ -30,6 +30,11 @@ import {
   getRunnerDescriptor,
   resolveMemoryRunnerId,
 } from './runner-registry.js';
+import {
+  RuntimeRequestExecutor,
+  type RuntimeExecutionHook,
+  type RunResult,
+} from './runtime-request-executor.js';
 import { getSystemSettings } from './runtime-config.js';
 import type {
   MessageCursor,
@@ -88,6 +93,16 @@ interface MemoryRunResult {
     response?: string;
     error?: string;
   };
+}
+
+interface MemoryRuntimeRunContext {
+  requestId: string;
+  request: MemoryExecutionRequest;
+  executionContext: MemoryExecutionContext;
+  startTime: number;
+  responseText: string;
+  closeRequested: boolean;
+  parsed: MemoryRunResult['parsed'] | null;
 }
 
 export interface MemoryAgentResponse {
@@ -935,12 +950,137 @@ function persistMemoryRuntimeSnapshot(
   });
 }
 
+class RuntimeStatePersistenceHook
+implements RuntimeExecutionHook<MemoryRuntimeRunContext> {
+  readonly name = 'RuntimeStatePersistenceHook';
+
+  async onOutput(
+    ctx: MemoryRuntimeRunContext,
+    output: RuntimeOutput,
+  ): Promise<void> {
+    persistMemoryRuntimeSnapshot(ctx.executionContext.ownerKey, output);
+  }
+
+  afterRun(ctx: MemoryRuntimeRunContext, result: RunResult): void {
+    if (result.output) {
+      persistMemoryRuntimeSnapshot(ctx.executionContext.ownerKey, result.output);
+    }
+  }
+}
+
+class StreamingTextCollectorHook
+implements RuntimeExecutionHook<MemoryRuntimeRunContext> {
+  readonly name = 'StreamingTextCollectorHook';
+
+  onOutput(ctx: MemoryRuntimeRunContext, output: RuntimeOutput): void {
+    if (
+      output.status === 'stream' &&
+      output.streamEvent?.eventType === 'text_delta' &&
+      output.streamEvent.text
+    ) {
+      ctx.responseText += output.streamEvent.text;
+    }
+  }
+}
+
+class OneShotCloseHook
+implements RuntimeExecutionHook<MemoryRuntimeRunContext> {
+  readonly name = 'OneShotCloseHook';
+
+  onOutput(ctx: MemoryRuntimeRunContext, output: RuntimeOutput): void {
+    if (
+      ctx.closeRequested ||
+      (output.status !== 'success' && output.status !== 'error')
+    ) {
+      return;
+    }
+    ctx.closeRequested = true;
+    fs.mkdirSync(ctx.executionContext.ipcInputDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(ctx.executionContext.ipcInputDir, '_close'),
+      '',
+    );
+  }
+}
+
+class ResponseParserHook
+implements RuntimeExecutionHook<MemoryRuntimeRunContext> {
+  readonly name = 'ResponseParserHook';
+
+  afterRun(
+    ctx: MemoryRuntimeRunContext,
+    result: RunResult,
+  ): void {
+    const parsedBase = parseMemoryAgentResponseText(
+      ctx.responseText ||
+        result.terminalOutput?.result ||
+        result.output?.result ||
+        null,
+    );
+    if (result.output?.status === 'error' || result.error) {
+      ctx.parsed = {
+        success: false,
+        response: parsedBase.response,
+        error:
+          parsedBase.error ||
+          result.output?.error ||
+          result.error?.message ||
+          'Memory runner exited with error',
+      };
+      return;
+    }
+    ctx.parsed = parsedBase;
+  }
+}
+
+class RunLogHook
+implements RuntimeExecutionHook<MemoryRuntimeRunContext> {
+  readonly name = 'RunLogHook';
+
+  afterRun(
+    ctx: MemoryRuntimeRunContext,
+    result: RunResult,
+  ): void {
+    const parsed = ctx.parsed || {
+      success: false,
+      error:
+        result.error?.message ||
+        result.output?.error ||
+        'Memory runner exited with error',
+    };
+    writeMemoryLog(ctx.executionContext.ownerKey, {
+      type: ctx.request.type,
+      startTime: ctx.startTime,
+      status:
+        result.error && /timed out/i.test(result.error.message)
+          ? 'timeout'
+          : parsed.success
+            ? 'success'
+            : 'error',
+      exitCode: parsed.success ? 0 : 1,
+      response: parsed.response,
+      stderr: [],
+      error: parsed.error,
+    });
+  }
+}
+
+const MEMORY_RUNTIME_HOOKS: RuntimeExecutionHook<MemoryRuntimeRunContext>[] = [
+  new RuntimeStatePersistenceHook(),
+  new StreamingTextCollectorHook(),
+  new OneShotCloseHook(),
+  new ResponseParserHook(),
+  new RunLogHook(),
+];
+
 export class MemoryOrchestrator {
   private agents: Map<string, AgentEntry> = new Map();
   private idleCheckTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private readonly runnerAdapter: MemoryRunnerAdapter = new MemoryRunnerAdapter(),
+    private readonly requestExecutor: RuntimeRequestExecutor<MemoryRuntimeRunContext> =
+      new RuntimeRequestExecutor(MEMORY_RUNTIME_HOOKS),
   ) {}
 
   startIdleChecks(): void {
@@ -1134,82 +1274,54 @@ export class MemoryOrchestrator {
       prompt: buildMemoryPrompt(request, context.memDir, opts?.repairPrompt),
     };
 
-    const startTime = Date.now();
-    let responseText = '';
-    let finalOutput: RuntimeOutput | null = null;
-    let closeRequested = false;
+    const runContext: MemoryRuntimeRunContext = {
+      requestId,
+      request,
+      executionContext: context,
+      startTime: Date.now(),
+      responseText: '',
+      closeRequested: false,
+      parsed: null,
+    };
 
     try {
-      const output = await this.runnerAdapter.run(
-        context.runnerDescriptor,
-        context.memoryProfile,
+      const result = await this.requestExecutor.run({
         input,
-        async (runtimeOutput) => {
-          persistMemoryRuntimeSnapshot(context.ownerKey, runtimeOutput);
-          await opts?.onOutput?.(runtimeOutput);
-          if (
-            runtimeOutput.status === 'success' ||
-            runtimeOutput.status === 'error' ||
-            runtimeOutput.status === 'closed' ||
-            runtimeOutput.status === 'drained'
-          ) {
-            finalOutput = runtimeOutput;
-          }
-          if (
-            !closeRequested &&
-            (runtimeOutput.status === 'success' ||
-              runtimeOutput.status === 'error')
-          ) {
-            closeRequested = true;
-            fs.mkdirSync(context.ipcInputDir, { recursive: true });
-            fs.writeFileSync(path.join(context.ipcInputDir, '_close'), '');
-          }
-          if (
-            runtimeOutput.status === 'stream' &&
-            runtimeOutput.streamEvent?.eventType === 'text_delta' &&
-            runtimeOutput.streamEvent.text
-          ) {
-            responseText += runtimeOutput.streamEvent.text;
-          }
-        },
-        context.primaryFolder,
-      );
-
-      persistMemoryRuntimeSnapshot(context.ownerKey, output);
-      const finalResultText =
-        (finalOutput as RuntimeOutput | null)?.result ?? null;
-      const outputResultText = output.result ?? null;
-      let parsed = parseMemoryAgentResponseText(
-        responseText || finalResultText || outputResultText || null,
-      );
-      if (output.status === 'error') {
-        parsed = {
-          success: false,
-          response: parsed.response,
-          error:
-            parsed.error || output.error || 'Memory runner exited with error',
-        };
-      }
-      writeMemoryLog(context.ownerKey, {
-        type: request.type,
-        startTime,
-        status: parsed.success ? 'success' : 'error',
-        exitCode: parsed.success ? 0 : 1,
-        response: parsed.response,
-        stderr: [],
-        error: parsed.error,
+        ctx: runContext,
+        execute: async (effectiveInput, onOutput) =>
+          this.runnerAdapter.run(
+            context.runnerDescriptor,
+            context.memoryProfile,
+            effectiveInput,
+            async (runtimeOutput) => {
+              await onOutput(runtimeOutput);
+              await opts?.onOutput?.(runtimeOutput);
+            },
+            context.primaryFolder,
+          ),
       });
-      return { output, parsed };
+      if (!result.output) {
+        throw new Error('Memory runner completed without final output');
+      }
+      return {
+        output: result.output,
+        parsed:
+          runContext.parsed ||
+          parseMemoryAgentResponseText(
+            runContext.responseText ||
+              result.terminalOutput?.result ||
+              result.output.result ||
+              null,
+          ),
+      };
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
-      writeMemoryLog(context.ownerKey, {
-        type: request.type,
-        startTime,
-        status: /timed out/i.test(error.message) ? 'timeout' : 'error',
-        exitCode: 1,
-        stderr: [],
-        error: error.message,
-      });
+      if (!runContext.parsed) {
+        runContext.parsed = {
+          success: false,
+          error: error.message,
+        };
+      }
       throw error;
     }
   }
