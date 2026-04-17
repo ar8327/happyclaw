@@ -6,7 +6,7 @@
 
 本项目是 [HappyClaw](https://github.com/riba2534/happyclaw) 的实验性 fork，当前主线已经迁移到**单用户多 Session 本地 workbench**。与上游的核心差异：
 
-- **Memory Agent 系统**：独立的记忆 Session 与记忆子进程，替代上游的 inline MCP 记忆工具，实现自动会话归档、索引自修复和深度整理
+- **Memory Agent 系统**：独立的记忆 Session 与 one-shot memory 执行链路，替代上游的 inline MCP 记忆工具，实现自动会话归档、索引自修复和深度整理
 - **显式消息路由**：Agent 的 stdout 仅显示在 Web 端，IM 消息必须通过 `send_message` MCP 工具显式发送，Agent 自主控制消息路由
 - **Skills 自主创建**：移除上游的注册表安装机制，Agent 通过 `skill-creator` 直接在文件系统中创建和管理 Skills
 
@@ -41,7 +41,7 @@
 | `src/routes/monitor.ts` | 系统状态：Session runtime 列表、队列状态、健康检查（`GET /api/health` 无需认证） |
 | `src/routes/memory.ts` | 记忆文件读写、全文检索、Memory Agent 状态/手动触发（`/api/memory/status`、`trigger-wrapup`、`trigger-global-sleep`） |
 | `src/routes/memory-agent.ts` | Memory Agent 内部 HTTP 端点（`/api/internal/memory/query`、`remember`、`session-wrapup`），agent-runner 通过 Bearer token 调用 |
-| `src/memory-agent.ts` | `MemoryOrchestrator`：记忆子进程生命周期、stdin/stdout JSON-line 通信、idle 超时清理、global_sleep 调度 |
+| `src/memory-agent.ts` | `MemoryOrchestrator`：复用共享 session-launcher 发起 one-shot memory request、串行化同一用户请求、落盘轻量 runtime state、idle 清理与 global_sleep 调度 |
 | `src/routes/tasks.ts` | 定时任务 CRUD + 执行日志查询 |
 | `src/routes/skills.ts` | Skills 文件系统发现、启用/禁用、主机同步 |
 | `src/routes/browse.ts` | 目录浏览 API（`GET/POST /api/browse/directories`，受挂载白名单约束） |
@@ -122,7 +122,7 @@
 - **输出协议**：stdout 输出 `OUTPUT_START_MARKER...OUTPUT_END_MARKER` 包裹的 JSON，主进程解析为 `RuntimeOutput`
 - **流式事件**：`text_delta`、`thinking_delta`、`tool_use_start/end`、`tool_progress`、`hook_started/progress/response`、`task_start`、`task_notification`、`status`、`init` 统一通过 WebSocket `stream_event` 广播到 Web 端
 - **文本缓冲**：`text_delta` 累积到 200 字符后刷新，避免高频小包
-- **会话循环**：provider 会维护持久 query 会话，结合 `provider_session_id` 和 `resume_anchor` 做 resume
+- **会话循环**：普通 chat session 默认会维护持久 query 会话，结合 `provider_session_id` 和 `resume_anchor` 做 resume；memory profile 会显式打开 `ephemeralSession`，每次请求都强制 fresh turn
 - **MCP Server**：工具通过独立 stdio MCP server 暴露，Memory runtime 会额外应用 `MemoryProfile` 白名单与目录边界
 - **消息路由**：stdout 仅输出到 Web 端；IM 消息必须通过 `send_message(channel=...)` 显式发送
 - **敏感数据过滤**：StreamEvent 中的 `toolInputSummary` 会过滤 `ANTHROPIC_API_KEY` 等环境变量名
@@ -160,15 +160,15 @@
 
 ### 2.6 Memory Agent（Fork 特有）
 
-记忆能力现在由 `MemoryOrchestrator`、`RuntimeRequestExecutor`、memory hooks 和 `MemoryProfile` 共同承接。Memory 不再是独立于 Session 模型之外的特殊系统，而是一个带特殊 orchestration 语义的 `memory:{ownerKey}` Session。
+记忆能力现在由 `MemoryOrchestrator`、`RuntimeRequestExecutor`、memory hooks 和 `MemoryProfile` 共同承接。Memory 不再是独立于 Session 模型之外的特殊系统，而是一个带特殊 orchestration 语义的 `memory:{ownerKey}` Session 配置投影。
 
 **架构**：
-- `MemoryOrchestrator` 管理记忆子进程生命周期
-- `RuntimeRequestExecutor` 负责统一执行管线，memory 通过 `MemoryPromptBuilderHook`、`SyntheticArchiveLifecycleHook` 等 hook 拼装 prompt、消费 lifecycle、落盘日志与 runtime state
+- `MemoryOrchestrator` 只负责串行化同一用户的 memory 请求，并在空闲 10 分钟后清理内存里的协调器条目
+- `RuntimeRequestExecutor` 负责统一执行管线，memory 通过 `MemoryPromptBuilderHook`、`RuntimeStatePersistenceHook`、`OneShotCloseHook` 等 hook 拼装 prompt、收集响应、落盘轻量 runtime state
 - `MemoryProfile` 在 runtime 侧下沉工具白名单、额外目录和禁用 user MCP 的约束
-- 子进程使用持久 query 会话，避免反复启动 CLI 进程
-- stdin/stdout JSON-line 协议通信，Promise 路由匹配请求/响应
-- 空闲 10 分钟自动关闭，下次请求时重新启动
+- 每个 memory 请求都会复用共享 `session-launcher` 启动一次性 runtime turn，不复用上一次的 `providerSessionId`、`resumeAnchor`、`providerState`
+- memory 的真实状态只保存在 `data/memory/{ownerKey}/` 的文件系统里，不参与 HappyClaw 的 synthetic compact
+- 仓库里仍保留 `container/memory-agent/` 旧实验实现，但当前主链路已经不再依赖它
 
 **四种操作**：
 
@@ -582,18 +582,19 @@ scripts/                      # 构建辅助脚本
 
 ```
 Session runtime 启动 → Agent 对话中调用 memory_query/memory_remember
-         → HTTP → MemoryOrchestrator.ensureAgent() 延迟启动子进程
-         → 子进程持久运行，处理后续请求
+         → HTTP → MemoryOrchestrator.runSerialized()
+         → prepareExecutionContext() + runSessionAgent() 发起 one-shot runtime turn
+         → 当前请求结束后立刻关闭 provider 会话，不保留 resume 入口
 
 Session runtime 收尾 → export transcripts
-         → orchestrator.send(session_wrapup) → 子进程生成印象/更新索引
+         → orchestrator.send(session_wrapup) → one-shot runtime 生成印象/更新索引
          → folder 加入 pendingWrapups
 
 每 30 分钟 → runMemoryGlobalSleepIfNeeded() 检查当前 operator
           → 满足条件（6h+未 sleep、无活跃会话、有 pending）
-          → orchestrator.send(global_sleep) → 子进程压缩/归档旧印象/knowledge 拆分/备份
+          → orchestrator.send(global_sleep) → one-shot runtime 压缩/归档旧印象/knowledge 拆分/备份
 
-子进程空闲 10 分钟 → 自动关闭，下次请求重新启动
+协调器空闲 10 分钟 → 从内存 map 中移除，下次请求重新创建
 ```
 
 ### 8.11 IM 通道热管理
@@ -685,14 +686,14 @@ make help          # 列出所有可用的 make 命令
 - 后端：3000（Hono + WebSocket）
 - 前端开发服务器：5173（Vite，代理 `/api` 和 `/ws` 到后端）
 
-### 四个独立的 Node 项目
+### 三个主链路项目和一个历史实验项目
 
 | 项目 | 目录 | 用途 |
 |------|------|------|
 | 主服务 | `/`（根目录） | 后端服务 |
 | Web 前端 | `web/` | React SPA |
 | Agent Runner | `container/agent-runner/` | 本地 runtime 执行引擎 |
-| Memory Agent | `container/memory-agent/` | 记忆子进程（Fork 特有） |
+| Legacy Memory Agent | `container/memory-agent/` | 历史实验实现，当前 Memory 主链路不依赖 |
 
 每个项目有独立的 `package.json`、`tsconfig.json`、`node_modules/`。此外，`shared/` 目录存放跨项目的共享类型定义（如 `stream-event.ts`），构建时通过 `make sync-types` 同步到各项目。
 

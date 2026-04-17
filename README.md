@@ -53,7 +53,7 @@
 
 本项目是 [HappyClaw](https://github.com/riba2534/happyclaw) 的实验性 fork，源自上游的自托管 AI Agent 系统，重点探索三个方向：
 
-1. **Memory Agent 系统** — 独立的记忆会话与记忆子进程，自动归档对话、构建索引、深度整理，替代上游的 inline MCP 记忆工具
+1. **Memory Agent 系统** — 独立的记忆 Session 与 one-shot memory 执行链路，自动归档对话、构建索引、深度整理，替代上游的 inline MCP 记忆工具
 2. **显式消息路由** — Agent 的 stdout 仅显示在 Web 端，IM 消息必须通过 `send_message` MCP 工具显式发送，Agent 自主控制消息路由
 3. **Skills 自主创建** — 移除注册表安装机制，Agent 通过 `skill-creator` 直接在文件系统中创建和管理 Skills
 
@@ -141,11 +141,13 @@ Agent 在运行时可通过内置 MCP Server 与主进程通信：
 
 ### 记忆系统（Fork 特有：Memory Agent）
 
-独立的 Memory Agent 子进程管理持久记忆，替代上游的 inline MCP 工具：
+当前 Memory 模型是“持久文件系统 + 一次性推理请求”，替代上游的 inline MCP 工具：
 
-- **Memory Session** — 记忆能力以 `memory:{ownerKey}` Session 暴露，可单独选择 runner，目前本地已验证 Claude 与 Codex 都能承接
-- **Memory Agent** — 记忆子进程负责归档对话、生成印象、维护知识索引
-- **随身索引** — `data/memory/{ownerKey}/index.md`，主 Agent 每次对话自动加载，Memory Agent 查询后自修复索引
+- **Memory Session** — 记忆能力以 `memory:{ownerKey}` Session 配置投影暴露，可单独选择 runner，目前本地已验证 Claude 与 Codex 都能承接
+- **One-shot 执行** — `query`、`remember`、`session_wrapup`、`global_sleep` 每次都会启动全新的 provider session，不复用 `providerSessionId`、`resumeAnchor`、`providerState`，也不参与 synthetic compact
+- **真实状态只在磁盘** — Memory 是否可继续工作，只依赖 `data/memory/{ownerKey}/` 下的 `index.md`、`knowledge/`、`impressions/`、`transcripts/` 等文件
+- **MemoryOrchestrator** — 主进程里的记忆编排器负责串行化同一用户请求，复用共享 `session-launcher` 发起 one-shot runtime；空闲 10 分钟只会清理内存里的协调器，不会保留 provider 对话
+- **随身索引** — `data/memory/{ownerKey}/index.md`，主 Agent 每次对话自动加载，Memory query 后会顺手做轻量索引修复
 - **自动会话归档** — Session runtime 收尾时自动导出对话转录到 `transcripts/`，触发 `session_wrapup` 生成印象和知识
 - **深度整理** — `global_sleep` 定期压缩索引、清理旧印象、更新用户画像（需距上次 >6h、无活跃会话、有待处理 wrapup）
 - **会话记忆** — `data/groups/{folder}/CLAUDE.md`，会话私有（与上游相同）
@@ -298,7 +300,7 @@ make start
 | Runner | 说明 | 当前状态 |
 |------|------|---------|
 | **Claude** | 原生支持更完整的 session resume、hook 与 observability | 聊天、记忆、IM、观测均为 full |
-| **Codex** | 聊天主链路可用，但记忆和观测存在降级 | 聊天可用，memory 与 observability 为 degraded 或 synthetic |
+| **Codex** | 聊天与 memory 主链路可用，但 IM 与观测存在降级 | 聊天、记忆可用，IM 与 observability 为 degraded |
 
 当前所有 Session 都通过本地 runtime 启动。`runtime_mode`、`execution_mode` 与 `llm_provider` 已不再作为 Session 接口字段返回；如果请求体继续携带这些旧字段，`/api/sessions` 会直接拒绝。它们只在历史数据库迁移和启动期兼容清理中被识别并移除。
 
@@ -324,13 +326,13 @@ flowchart TD
         Auth["认证<br/>(本地 operator 上下文 + 兼容 auth API)"]
         Config["配置管理<br/>(AES-256-GCM 加密)"]
         Bindings["IM Bindings<br/>(渠道绑定到 Session)"]
-        MemMgr["Memory Agent Manager<br/>(单用户记忆子进程)"]
+        MemMgr["Memory Orchestrator<br/>(单用户串行调度)"]
     end
 
     subgraph 执行层
         Runtime["本地 Runtime<br/>(runtime-runner)"]
         AgentRunner["agent-runner<br/>(Claude / Codex provider)"]
-        MemAgent["Memory Agent<br/>(持久 query 会话)"]
+        MemAgent["Memory Runtime<br/>(one-shot 请求)"]
     end
 
     subgraph Agent["Agent 运行时"]
@@ -381,7 +383,7 @@ flowchart TD
     class Memory cfg
 ```
 
-**数据流**：消息从接入层进入主进程，经去重和 Session 路由后分发到并发队列。队列统一启动本地 runtime，由 `runtime-runner` 调度 `container/agent-runner` 中的 Claude 或 Codex provider。流式事件通过 stdout 标记协议传回主进程，经 WebSocket 广播到 Web 客户端。IM 消息由 Agent 通过 `send_message` MCP 工具显式发送，经 IPC 文件通道路由到对应 IM 渠道。Memory Agent 作为独立子进程运行，Agent 通过 `memory_query` 和 `memory_remember` MCP 工具与之通信。
+**数据流**：消息从接入层进入主进程，经去重和 Session 路由后分发到并发队列。队列统一启动本地 runtime，由 `runtime-runner` 调度 `container/agent-runner` 中的 Claude 或 Codex provider。流式事件通过 stdout 标记协议传回主进程，经 WebSocket 广播到 Web 客户端。IM 消息由 Agent 通过 `send_message` MCP 工具显式发送，经 IPC 文件通道路由到对应 IM 渠道。Memory 请求则由主进程内的 `MemoryOrchestrator` 串行接收，再通过共享 `session-launcher` 发起一次性的 memory runtime turn。
 
 ### 技术栈
 
@@ -390,7 +392,7 @@ flowchart TD
 | **后端** | Node.js 22 · TypeScript 5.7 · Hono · better-sqlite3 (WAL) · ws · node-pty · Pino · Zod |
 | **前端** | React 19 · Vite 6 · Zustand 5 · Tailwind CSS 4 · shadcn/ui · Radix UI · Lucide Icons · react-markdown · mermaid · xterm.js · @tanstack/react-virtual · PWA |
 | **Runtime** | `src/runtime-runner.ts` · `container/agent-runner` · Claude Code CLI · Codex SDK · MCP SDK · IPC 文件通道 |
-| **记忆** | `container/memory-agent` · transcript wrapup · `CLAUDE.md` · Memory 索引 |
+| **记忆** | `src/memory-agent.ts` · `src/routes/memory.ts` · transcript wrapup · `CLAUDE.md` · Memory 索引 |
 | **安全** | 本地 operator 上下文 · AES-256-GCM · 路径遍历防护 · 挂载白名单 |
 | **IM 集成** | @larksuiteoapi/node-sdk (飞书) · grammY (Telegram) · QQ Bot API v2 (WebSocket + REST) |
 
@@ -433,8 +435,8 @@ happyclaw/
 │   │       ├── system-prompt.ts  #     共享 system prompt 构造
 │   │       ├── happyclaw-mcp-server.ts # 共用 MCP server 入口
 │   │       └── providers/        #     Claude / Codex provider 实现
-│   ├── memory-agent/             #   Memory Agent 子进程（Fork 特有）
-│   │   └── src/index.ts          #     持久 query 会话 + JSON-line 通信
+│   ├── memory-agent/             #   历史实验实现，当前 Memory 主链路不再依赖
+│   │   └── src/index.ts          #     旧的持久 query 会话原型
 │   └── skills/                   #   项目级 Skills
 │
 ├── shared/                       # 跨项目共享类型定义
@@ -566,14 +568,14 @@ Commit message 使用简体中文，格式：`类型: 描述`
 
 ### 项目结构
 
-项目包含四个独立的 Node.js 项目，各有独立的 `package.json` 和 `tsconfig.json`：
+项目目前有三个主链路 Node.js 项目，外加一个保留中的历史实验项目，各自维护独立的 `package.json` 和 `tsconfig.json`：
 
 | 项目 | 目录 | 用途 |
 |------|------|------|
 | 主服务 | `/`（根目录） | 后端服务 |
 | Web 前端 | `web/` | React SPA |
 | Agent Runner | `container/agent-runner/` | 本地 runtime 使用的执行引擎 |
-| Memory Agent | `container/memory-agent/` | 记忆子进程 |
+| Legacy Memory Agent | `container/memory-agent/` | 历史实验实现，当前 Memory 主链路不依赖 |
 
 ## 许可证
 
