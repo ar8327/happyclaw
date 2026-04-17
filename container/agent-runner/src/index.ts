@@ -43,6 +43,17 @@ const WORKSPACE_SKILLS = process.env.HAPPYCLAW_SKILLS_DIR || '/workspace/user-sk
 const CLAUDE_MODEL = process.env.HAPPYCLAW_MODEL || process.env.ANTHROPIC_MODEL || 'opus';
 const THINKING_EFFORT = process.env.HAPPYCLAW_THINKING_EFFORT || undefined;
 
+function isEnabledEnv(value: string | undefined): boolean {
+  return value === '1' || value === 'true';
+}
+
+const EPHEMERAL_SESSION = isEnabledEnv(
+  process.env.HAPPYCLAW_EPHEMERAL_SESSION,
+);
+const DISABLE_SYNTHETIC_ARCHIVE = isEnabledEnv(
+  process.env.HAPPYCLAW_DISABLE_SYNTHETIC_ARCHIVE,
+);
+
 const ipcPaths = buildIpcPaths(WORKSPACE_IPC);
 const IM_CHANNELS_FILE = path.join(WORKSPACE_IPC, '.recent-im-channels.json');
 
@@ -122,6 +133,7 @@ type RunnerFactoryContext = {
   thinkingEffort?: string;
   loadUserMcpServers: typeof loadUserMcpServers;
   skillsDir: string;
+  disableSyntheticArchive: boolean;
 };
 
 const RUNNER_FACTORIES: Record<
@@ -170,6 +182,21 @@ function buildSessionRecordId(containerInput: ContainerInput): string {
   return containerInput.agentId
     ? `worker:${containerInput.agentId}`
     : `main:${workspaceFolder}`;
+}
+
+function buildInitialSessionSnapshot(
+  containerInput: ContainerInput,
+): ContainerInput['bootstrapState'] {
+  if (!EPHEMERAL_SESSION) {
+    return containerInput.bootstrapState;
+  }
+  const bootstrapState = containerInput.bootstrapState;
+  if (!bootstrapState) return undefined;
+  return {
+    recentImChannels: bootstrapState.recentImChannels,
+    imChannelLastSeen: bootstrapState.imChannelLastSeen,
+    currentPermissionMode: bootstrapState.currentPermissionMode,
+  };
 }
 
 function validateDeclaredIpcCapabilities(
@@ -234,7 +261,7 @@ async function main(): Promise<void> {
 
   // Initialize session state
   state.loadImChannels(IM_CHANNELS_FILE);
-  state.hydrate(containerInput.bootstrapState);
+  state.hydrate(buildInitialSessionSnapshot(containerInput));
 
   // Clean up stale sentinels
   fs.mkdirSync(ipcPaths.inputDir, { recursive: true });
@@ -272,6 +299,7 @@ async function main(): Promise<void> {
     thinkingEffort: THINKING_EFFORT,
     loadUserMcpServers,
     skillsDir: WORKSPACE_SKILLS,
+    disableSyntheticArchive: DISABLE_SYNTHETIC_ARCHIVE,
   });
   validateDeclaredIpcCapabilities(runnerId, containerInput, runner);
   await runner.initialize();
@@ -294,6 +322,7 @@ async function main(): Promise<void> {
     sessionRecordId,
     sessionId: containerInput.sessionId,
     initialResumeAnchor: containerInput.resumeAnchor,
+    ephemeralSession: EPHEMERAL_SESSION,
     state,
     ipcPaths,
     imChannelsFile: IM_CHANNELS_FILE,

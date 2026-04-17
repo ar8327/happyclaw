@@ -819,6 +819,8 @@ function buildMemoryExecutionProfile(
     disableUserMcpServers: profile.disableUserMcpServers,
     disabledPlugins: profile.disabledPlugins,
     toolScope: profile.toolScope,
+    ephemeralSession: true,
+    disableSyntheticArchive: true,
   };
 }
 

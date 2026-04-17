@@ -53,6 +53,7 @@ export interface CodexRunnerOptions {
   thinkingEffort?: string;
   loadUserMcpServers: () => Record<string, unknown>;
   skillsDir: string;
+  disableSyntheticArchive?: boolean;
 }
 
 function resolveAdditionalDirectories(defaultDirs: string[]): string[] {
@@ -102,8 +103,10 @@ export class CodexRunner implements AgentRunner {
         conversationLines?: unknown;
       };
     }>();
-    this.startFreshOnNextTurn = persistedState?.startFreshOnNextTurn === true;
-    this.archiveMgr.hydrate(persistedState?.archiveState);
+    if (!this.opts.disableSyntheticArchive) {
+      this.startFreshOnNextTurn = persistedState?.startFreshOnNextTurn === true;
+      this.archiveMgr.hydrate(persistedState?.archiveState);
+    }
 
     // Create temp directory for instructions file and images
     this.tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'happyclaw-codex-'));
@@ -271,9 +274,11 @@ export class CodexRunner implements AgentRunner {
     // Emit result
     yield { kind: 'result', text: finalText, usage };
 
-    this.archiveMgr.recordTurn(usage);
+    if (!this.opts.disableSyntheticArchive) {
+      this.archiveMgr.recordTurn(usage);
+    }
 
-    if (this.archiveMgr.shouldArchive()) {
+    if (!this.opts.disableSyntheticArchive && this.archiveMgr.shouldArchive()) {
       yield* this.buildCompactLifecycleMessages();
       yield {
         kind: 'stream_event',
@@ -346,21 +351,26 @@ export class CodexRunner implements AgentRunner {
 
   getRuntimePersistenceSnapshot(): RuntimePersistenceSnapshot {
     const currentThreadId = this.session?.getThreadId?.() || null;
+    const providerState: Record<string, unknown> = {
+      activeThreadId: currentThreadId,
+    };
+    if (!this.opts.disableSyntheticArchive) {
+      providerState.startFreshOnNextTurn = this.startFreshOnNextTurn;
+      providerState.archiveState = this.archiveMgr.snapshot();
+    }
     return {
-      providerState: {
-        startFreshOnNextTurn: this.startFreshOnNextTurn,
-        archiveState: this.archiveMgr.snapshot(),
-        activeThreadId: currentThreadId,
-      },
+      providerState,
       lastMessageCursor: currentThreadId,
     };
   }
 
   async cleanup(): Promise<void> {
-    await this.archiveMgr.forceArchive(
-      this.opts.containerInput.groupFolder,
-      this.opts.containerInput.userId || undefined,
-    );
+    if (!this.opts.disableSyntheticArchive) {
+      await this.archiveMgr.forceArchive(
+        this.opts.containerInput.groupFolder,
+        this.opts.containerInput.userId || undefined,
+      );
+    }
     if (this.startFreshOnNextTurn) {
       this.session.resetThread();
     }

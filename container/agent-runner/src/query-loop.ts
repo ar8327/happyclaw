@@ -45,6 +45,7 @@ export interface QueryLoopConfig {
   sessionRecordId: string;
   sessionId?: string;
   initialResumeAnchor?: string;
+  ephemeralSession?: boolean;
   state: SessionState;
   ipcPaths: IpcPaths;
   imChannelsFile: string;
@@ -353,8 +354,10 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
 
   let prompt = config.initialPrompt;
   let images = config.initialImages;
-  let sessionId = config.sessionId;
-  let resumeAnchor: string | undefined = config.initialResumeAnchor;
+  let sessionId = config.ephemeralSession ? undefined : config.sessionId;
+  let resumeAnchor: string | undefined = config.ephemeralSession
+    ? undefined
+    : config.initialResumeAnchor;
   let overflowRetryCount = 0;
   let pendingMessages: IpcMessage[] = [];
   const handleIdleDrain = async (): Promise<void> => {
@@ -403,8 +406,8 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
     const queryConfig: QueryConfig = {
       prompt: effectivePrompt,
       systemPrompt: config.buildSystemPrompt(prompt),
-      sessionId,
-      resumeAt: resumeAnchor,
+      sessionId: config.ephemeralSession ? undefined : sessionId,
+      resumeAt: config.ephemeralSession ? undefined : resumeAnchor,
       images,
       permissionMode: state.currentPermissionMode,
     };
@@ -431,8 +434,13 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
     if (poller.drainDetectedDuringQuery) result.drainDetectedDuringQuery = true;
 
     // Update session state
-    if (result.newSessionId) sessionId = result.newSessionId;
-    if (result.resumeAnchor) resumeAnchor = result.resumeAnchor;
+    if (config.ephemeralSession) {
+      sessionId = undefined;
+      resumeAnchor = undefined;
+    } else {
+      if (result.newSessionId) sessionId = result.newSessionId;
+      if (result.resumeAnchor) resumeAnchor = result.resumeAnchor;
+    }
     emitRuntimeState(writeOutput, runner, state, {
       providerSessionId: sessionId,
       resumeAnchor,

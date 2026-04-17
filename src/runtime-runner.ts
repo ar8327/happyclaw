@@ -123,6 +123,8 @@ export interface RuntimeExecutionProfile {
   disableUserMcpServers?: boolean;
   disabledPlugins?: string[];
   toolScope?: 'default' | 'isolated';
+  ephemeralSession?: boolean;
+  disableSyntheticArchive?: boolean;
 }
 
 export interface ContainerInput extends RuntimeInput {
@@ -615,6 +617,12 @@ export async function runHostAgent(
   }
   if (executionProfile?.toolScope) {
     hostEnv['HAPPYCLAW_TOOL_SCOPE'] = executionProfile.toolScope;
+  }
+  if (executionProfile?.ephemeralSession) {
+    hostEnv['HAPPYCLAW_EPHEMERAL_SESSION'] = '1';
+  }
+  if (executionProfile?.disableSyntheticArchive) {
+    hostEnv['HAPPYCLAW_DISABLE_SYNTHETIC_ARCHIVE'] = '1';
   }
   hostEnv['HAPPYCLAW_PROJECT_SKILLS_DIR'] = path.join(process.cwd(), 'container', 'skills');
   hostEnv['CLAUDE_CONFIG_DIR'] = groupSessionsDir;
