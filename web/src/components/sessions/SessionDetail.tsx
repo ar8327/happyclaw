@@ -408,14 +408,16 @@ export function SessionDetail({ session }: SessionDetailProps) {
       </div>
 
       {/* Folder / cwd */}
-      <div>
-        <div className="text-xs text-slate-500 mb-1">
-          {isSessionView ? '工作目录' : '文件夹'}
+      {(!isMemorySession || session.cwd) && (
+        <div>
+          <div className="text-xs text-slate-500 mb-1">
+            {isSessionView ? '工作目录' : '文件夹'}
+          </div>
+          <div className="text-sm text-foreground font-medium">
+            {session.cwd || session.folder}
+          </div>
         </div>
-        <div className="text-sm text-foreground font-medium">
-          {session.cwd || session.folder}
-        </div>
-      </div>
+      )}
 
       {/* Added At */}
       <div>

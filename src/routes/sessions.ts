@@ -515,6 +515,7 @@ function buildSessionPayload(
   latestMessages: Map<string, { content: string; timestamp: string }>,
   chatsByJid: Map<string, { jid: string; name?: string | null; last_message_time?: string | null }>,
 ) {
+  const isMemorySession = session.kind === 'memory';
   const sessionBindings = bindings.filter(
     (binding) => binding.session_id === session.id,
   );
@@ -561,7 +562,7 @@ function buildSessionPayload(
       !!backingJid &&
       !!backingGroup &&
       canDeleteGroup(user, { ...backingGroup, jid: backingJid }),
-    cwd: session.cwd,
+    cwd: isMemorySession ? undefined : session.cwd,
     backing_jid: backingJid,
     owner_key: session.owner_key,
     runner_id: effectiveRunnerId,
@@ -569,16 +570,21 @@ function buildSessionPayload(
       effectiveRunnerId === session.runner_id ? session.runner_profile_id : null,
     model: session.model,
     thinking_effort: session.thinking_effort,
-    context_compression: session.context_compression,
-    binding_count: sessionBindings.length,
+    context_compression: isMemorySession ? undefined : session.context_compression,
+    binding_count: isMemorySession ? undefined : sessionBindings.length,
     binding_summary:
-      sessionBindings.length > 0
-        ? sessionBindings
-            .map((binding) => binding.display_name || binding.channel_jid)
-            .slice(0, 3)
-            .join('、')
-        : '无渠道绑定',
-    bound_channels: sessionBindings.map((binding) => binding.channel_jid),
+      isMemorySession
+        ? undefined
+        : sessionBindings.length > 0
+          ? sessionBindings
+              .map((binding) => binding.display_name || binding.channel_jid)
+              .slice(0, 3)
+              .join('、')
+          : '无渠道绑定',
+    bound_channels:
+      isMemorySession
+        ? undefined
+        : sessionBindings.map((binding) => binding.channel_jid),
     lastMessage,
     lastMessageTime: latestAt,
     runner_label: descriptor?.label || effectiveRunnerId,
@@ -596,9 +602,11 @@ function buildSessionPayload(
         ? buildCodexCompactPayload(session, summary?.created_at ?? null)
         : null,
     pinned_at: session.is_pinned ? session.updated_at : undefined,
-    selected_skills: backingGroup?.selected_skills ?? null,
+    selected_skills: isMemorySession ? undefined : (backingGroup?.selected_skills ?? null),
     activation_mode:
-      uniformActivationMode || backingGroup?.activation_mode || 'auto',
+      isMemorySession
+        ? undefined
+        : (uniformActivationMode || backingGroup?.activation_mode || 'auto'),
   };
 }
 
