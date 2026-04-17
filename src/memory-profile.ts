@@ -56,7 +56,7 @@ export function buildMemoryProfile(params: {
       selected_mcps: [],
       model: memorySession.model || undefined,
       thinking_effort: memorySession.thinking_effort || undefined,
-      context_compression: memorySession.context_compression,
+      context_compression: 'off',
     },
   };
 }

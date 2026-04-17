@@ -47,7 +47,6 @@ interface MemorySessionConfig {
   runner_profile_id: string | null;
   model: string | null;
   thinking_effort: 'low' | 'medium' | 'high' | null;
-  context_compression: 'off' | 'auto' | 'manual';
   owner_key: string | null;
   cwd: string;
   primary_session_folder: string | null;
@@ -149,7 +148,6 @@ export function MemoryPage() {
             model: memoryConfig.model,
             thinking_effort: memoryConfig.thinking_effort,
             cwd: memoryConfig.cwd,
-            context_compression: memoryConfig.context_compression,
           }
         : null,
     [memoryConfig],
@@ -326,7 +324,6 @@ export function MemoryPage() {
         runner_profile_id: memoryConfig.runner_profile_id,
         model: memoryConfig.model,
         thinking_effort: memoryConfig.thinking_effort,
-        context_compression: memoryConfig.context_compression,
       });
       setMemoryConfig(data.session);
       setMemoryRunners(data.runners);
@@ -593,7 +590,7 @@ export function MemoryPage() {
                       </select>
                     </div>
 
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 gap-3">
                       <div>
                         <label className="block text-xs font-medium text-slate-600 mb-1">
                           模型
@@ -606,23 +603,6 @@ export function MemoryPage() {
                           } : prev)}
                           placeholder="留空表示使用 runner 默认模型"
                         />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-medium text-slate-600 mb-1">
-                          上下文压缩
-                        </label>
-                        <select
-                          value={memoryConfig.context_compression}
-                          onChange={(e) => setMemoryConfig((prev) => prev ? {
-                            ...prev,
-                            context_compression: e.target.value as 'off' | 'auto' | 'manual',
-                          } : prev)}
-                          className="w-full h-9 rounded-md border border-border bg-background px-3 text-sm"
-                        >
-                          <option value="off">off</option>
-                          <option value="manual">manual</option>
-                          <option value="auto">auto</option>
-                        </select>
                       </div>
                     </div>
 

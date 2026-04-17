@@ -1402,6 +1402,12 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
     if (requestedCwd !== undefined) {
       return c.json({ error: 'Memory session does not support cwd override' }, 400);
     }
+    if (body.context_compression !== undefined) {
+      return c.json(
+        { error: 'Memory session does not support context_compression' },
+        400,
+      );
+    }
     if (nextSelectedSkills !== undefined || nextActivationMode !== undefined) {
       return c.json({ error: 'Memory session does not support binding policy fields' }, 400);
     }
@@ -1419,7 +1425,7 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
       runner_profile_id: validatedRunnerProfileId,
       model: nextModel,
       thinking_effort: nextThinkingEffort,
-      context_compression: nextContextCompression,
+      context_compression: 'off',
       is_pinned: nextPinned,
       updated_at: now,
     });

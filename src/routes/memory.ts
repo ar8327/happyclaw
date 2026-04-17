@@ -138,7 +138,6 @@ function serializeMemoryConfig(user: AuthUser) {
           runner_profile_id: session.runner_profile_id,
           model: session.model,
           thinking_effort: session.thinking_effort,
-          context_compression: session.context_compression,
           owner_key: session.owner_key,
           cwd: session.cwd,
           primary_session_folder: primaryFolder,
@@ -838,10 +837,6 @@ memoryRoutes.put('/config', authMiddleware, async (c) => {
     body?.thinking_effort === 'high'
       ? body.thinking_effort
       : null;
-  const contextCompression =
-    body?.context_compression === 'auto' || body?.context_compression === 'manual'
-      ? body.context_compression
-      : 'off';
   const model =
     typeof body?.model === 'string' && body.model.trim()
       ? body.model.trim()
@@ -873,7 +868,7 @@ memoryRoutes.put('/config', authMiddleware, async (c) => {
     runner_profile_id: runnerProfileId,
     model,
     thinking_effort: thinkingEffort,
-    context_compression: contextCompression,
+    context_compression: 'off',
     updated_at: new Date().toISOString(),
   });
   if (runnerId !== existing.runner_id) {

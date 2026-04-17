@@ -755,13 +755,16 @@ function ensureMemorySessionProjection(
     const nextParentSessionId =
       existing.parent_session_id || primarySession?.id || null;
     const nextOwnerKey = existing.owner_key || ownerKey;
+    const nextContextCompression: SessionRecord['context_compression'] = 'off';
     const nextSession =
       nextParentSessionId !== existing.parent_session_id ||
-      nextOwnerKey !== existing.owner_key
+      nextOwnerKey !== existing.owner_key ||
+      existing.context_compression !== nextContextCompression
         ? {
             ...existing,
             parent_session_id: nextParentSessionId,
             owner_key: nextOwnerKey,
+            context_compression: nextContextCompression,
             updated_at: new Date().toISOString(),
           }
         : existing;
@@ -791,7 +794,7 @@ function ensureMemorySessionProjection(
       primarySession?.runner_id === runnerId
         ? (primarySession?.thinking_effort ?? null)
         : null,
-    context_compression: primarySession?.context_compression ?? 'off',
+    context_compression: 'off',
     is_pinned: false,
     archived: false,
     owner_key: ownerKey,
