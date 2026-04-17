@@ -282,9 +282,10 @@ export function writeMemoryState(
   ownerKey: string,
   state: Record<string, unknown>,
 ): void {
+  const sanitized = sanitizeMemoryState(state);
   const statePath = path.join(DATA_DIR, 'memory', ownerKey, 'state.json');
   const tmp = `${statePath}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', 'utf-8');
+  fs.writeFileSync(tmp, JSON.stringify(sanitized, null, 2) + '\n', 'utf-8');
   fs.renameSync(tmp, statePath);
 }
 
@@ -931,6 +932,43 @@ function parseMemoryAgentResponseText(raw: string | null | undefined): {
   return { success: true, response: text };
 }
 
+function getSanitizedMemoryRuntimeState(ownerKey: string) {
+  const sessionId = buildMemorySessionId(ownerKey);
+  const current = getSessionRuntimeState(sessionId);
+  if (!current) return null;
+
+  const hasLegacyResumeState =
+    !!current.provider_session_id ||
+    !!current.resume_anchor ||
+    !!current.provider_state_json ||
+    !!current.last_message_cursor;
+  if (!hasLegacyResumeState) return current;
+
+  upsertSessionRuntimeState(sessionId, {
+    providerSessionId: undefined,
+    resumeAnchor: undefined,
+    providerState: undefined,
+    recentImChannels: parseJsonText<string[]>(
+      current.recent_im_channels_json,
+      [],
+    ),
+    imChannelLastSeen: parseJsonText<Record<string, number>>(
+      current.im_channel_last_seen_json,
+      {},
+    ),
+    currentPermissionMode: current.current_permission_mode || 'default',
+    lastMessageCursor: null,
+  });
+
+  return {
+    ...current,
+    provider_session_id: null,
+    resume_anchor: null,
+    provider_state_json: null,
+    last_message_cursor: null,
+  };
+}
+
 function persistMemoryRuntimeSnapshot(
   ownerKey: string,
   output: RuntimeOutput,
@@ -1217,7 +1255,7 @@ export class MemoryOrchestrator {
 
     const runtimeKey = buildMemorySessionId(ownerKey);
     const memoryAgentId = `memory-${ownerKey}`;
-    const runtimeState = getSessionRuntimeState(runtimeKey);
+    const runtimeState = getSanitizedMemoryRuntimeState(ownerKey);
     const ipcInputDir = path.join(
       DATA_DIR,
       'ipc',
