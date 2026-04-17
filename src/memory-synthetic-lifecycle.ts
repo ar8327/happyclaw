@@ -175,7 +175,6 @@ function parseRepairState(value: unknown): MemorySyntheticRepairState | null {
 export function getMemoryLifecycleStrategy(
   descriptor: RunnerDescriptor,
 ): MemoryLifecycleStrategy {
-  if (descriptor.compatibility.memory === 'unsupported') return 'unsupported';
   if (descriptor.capabilities.customTools === 'none') return 'unsupported';
   if (
     descriptor.lifecycle.turnBoundary !== 'native' &&
@@ -183,7 +182,9 @@ export function getMemoryLifecycleStrategy(
   ) {
     return 'unsupported';
   }
-  if (descriptor.lifecycle.archivalTrigger.length === 0) return 'unsupported';
+  if (descriptor.lifecycle.contextShrinkTrigger === 'none') {
+    return 'unsupported';
+  }
   if (
     descriptor.lifecycle.postCompactRepair === 'native' &&
     descriptor.lifecycle.archivalTrigger.includes('pre_compact')
@@ -191,8 +192,13 @@ export function getMemoryLifecycleStrategy(
     return 'native';
   }
   if (
-    descriptor.lifecycle.postCompactRepair === 'synthetic' ||
-    !descriptor.lifecycle.archivalTrigger.includes('pre_compact')
+    descriptor.lifecycle.contextShrinkTrigger === 'synthetic' &&
+    descriptor.lifecycle.archivalTrigger.includes('turn_threshold')
+  ) {
+    return 'synthetic';
+  }
+  if (
+    descriptor.lifecycle.postCompactRepair === 'synthetic'
   ) {
     return 'synthetic';
   }

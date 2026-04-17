@@ -333,7 +333,6 @@ export interface RunnerPromptContract {
 
 export interface RunnerCompatibility {
   chat: 'full' | 'degraded' | 'unsupported';
-  memory: 'full' | 'synthetic' | 'unsupported';
   im: 'full' | 'degraded' | 'unsupported';
   observability: 'full' | 'degraded' | 'unsupported';
 }

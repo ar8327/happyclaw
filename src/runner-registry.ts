@@ -35,7 +35,6 @@ export const RUNNER_REGISTRY: Record<RunnerDescriptor['id'], RunnerDescriptor> =
     },
     compatibility: {
       chat: 'full',
-      memory: 'full',
       im: 'full',
       observability: 'full',
     },
@@ -71,7 +70,6 @@ export const RUNNER_REGISTRY: Record<RunnerDescriptor['id'], RunnerDescriptor> =
     },
     compatibility: {
       chat: 'full',
-      memory: 'synthetic',
       im: 'degraded',
       observability: 'degraded',
     },
@@ -169,7 +167,7 @@ export function explainRunnerDegradation(
   descriptor: RunnerDescriptor,
 ): string[] {
   const reasons: string[] = [];
-  if (descriptor.compatibility.memory === 'synthetic') {
+  if (getMemoryLifecycleStrategy(descriptor) === 'synthetic') {
     reasons.push('memory 依赖 synthetic lifecycle，而不是 runner 原生 compact hook');
   }
   if (descriptor.capabilities.toolStreaming === 'coarse') {

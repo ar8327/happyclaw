@@ -160,11 +160,11 @@
 
 ### 2.6 Memory Agent（Fork 特有）
 
-记忆能力现在由 `MemoryOrchestrator`、`MemoryRunnerAdapter` 和 `MemoryProfile` 共同承接。Memory 不再是独立于 Session 模型之外的特殊系统，而是一个带特殊 orchestration 语义的 `memory:{ownerKey}` Session。
+记忆能力现在由 `MemoryOrchestrator`、`RuntimeRequestExecutor`、memory hooks 和 `MemoryProfile` 共同承接。Memory 不再是独立于 Session 模型之外的特殊系统，而是一个带特殊 orchestration 语义的 `memory:{ownerKey}` Session。
 
 **架构**：
 - `MemoryOrchestrator` 管理记忆子进程生命周期
-- `MemoryRunnerAdapter` 负责把记忆查询与 wrapup 请求映射到统一 runtime
+- `RuntimeRequestExecutor` 负责统一执行管线，memory 通过 `MemoryPromptBuilderHook`、`SyntheticArchiveLifecycleHook` 等 hook 拼装 prompt、消费 lifecycle、落盘日志与 runtime state
 - `MemoryProfile` 在 runtime 侧下沉工具白名单、额外目录和禁用 user MCP 的约束
 - 子进程使用持久 query 会话，避免反复启动 CLI 进程
 - stdin/stdout JSON-line 协议通信，Promise 路由匹配请求/响应

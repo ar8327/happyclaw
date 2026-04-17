@@ -76,7 +76,6 @@ interface RunnerOption {
   canServeMemory?: boolean;
   compatibility?: {
     chat: string;
-    memory: string;
     im: string;
     observability: string;
   };
@@ -109,7 +108,6 @@ function RunnerCapabilitySummary({ runner }: { runner: RunnerOption | null }) {
         </div>
         <div className="text-[11px] text-slate-500 text-right">
           <div>chat: {runner.compatibility.chat}</div>
-          <div>memory: {runner.compatibility.memory}</div>
           <div>IM: {runner.compatibility.im}</div>
         </div>
       </div>

@@ -245,7 +245,6 @@ export function RunnersPage() {
                     </div>
                     <div className="text-right text-xs text-slate-500 space-y-1">
                       <div>chat: {runner.compatibility.chat}</div>
-                      <div>memory: {runner.compatibility.memory}</div>
                       <div>IM: {runner.compatibility.im}</div>
                     </div>
                   </div>

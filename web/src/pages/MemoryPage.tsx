@@ -36,7 +36,6 @@ interface MemorySearchHit {
 interface MemoryRunnerOption {
   id: string;
   label: string;
-  memory_compatibility: 'full' | 'synthetic' | 'unsupported';
   can_serve_memory: boolean;
   degradation_reasons: string[];
 }
@@ -542,7 +541,7 @@ export function MemoryPage() {
                               value={runner.id}
                               disabled={!runner.can_serve_memory}
                             >
-                              {runner.label} · memory={runner.memory_compatibility}
+                              {runner.label}
                             </option>
                           ))}
                         </select>
