@@ -10,6 +10,7 @@
  */
 
 import fs from 'fs';
+import { buildChannelRoutingReminder } from 'happyclaw-agent-runner-core';
 import type {
   AgentRunner,
   QueryConfig,
@@ -209,6 +210,12 @@ async function consumeQueryStream(
 
     switch (msg.kind) {
       case 'stream_event':
+        if (
+          msg.event.eventType === 'lifecycle' &&
+          msg.event.phase === 'compact_completed'
+        ) {
+          state.setPendingRoutingRecentImChannels(msg.event.repairHints?.recentImChannels ?? []);
+        }
         if (msg.event.eventType === 'mode_change') {
           emitRuntimeState(writeOutput, runner, state, {
             providerSessionId: newSessionId,
@@ -379,8 +386,14 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
     });
 
     // Execute query
+    const pendingRoutingRecentImChannels =
+      state.takePendingRoutingRecentImChannels();
+    const effectivePrompt =
+      pendingRoutingRecentImChannels !== null
+        ? `${buildChannelRoutingReminder(pendingRoutingRecentImChannels)}\n\n${prompt}`
+        : prompt;
     const queryConfig: QueryConfig = {
-      prompt,
+      prompt: effectivePrompt,
       systemPrompt: config.buildSystemPrompt(prompt),
       sessionId,
       resumeAt: resumeAnchor,

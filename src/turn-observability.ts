@@ -3,6 +3,23 @@ import crypto from 'crypto';
 import type { StreamEvent } from './stream-event.types.js';
 import type { ActiveTurn } from './turn-manager.js';
 
+function describeLifecycleEvent(event: StreamEvent): string | null {
+  switch (event.phase) {
+    case 'compact_started':
+      return event.trigger === 'synthetic_threshold'
+        ? '开始 synthetic compact'
+        : '开始 compact';
+    case 'compact_completed':
+      return 'compact 完成';
+    case 'archive_started':
+      return '开始 archive';
+    case 'archive_completed':
+      return 'archive 完成';
+    default:
+      return null;
+  }
+}
+
 export interface TurnObservabilityTimelineEvent {
   id: string;
   timestamp: number;
@@ -396,6 +413,18 @@ class TurnObservabilityManager {
               updatedAt: nowIso,
             };
           }
+        }
+        break;
+      }
+      case 'lifecycle': {
+        const lifecycleText = describeLifecycleEvent(event);
+        next.systemStatus = lifecycleText;
+        if (lifecycleText) {
+          next.recentEvents = pushEvent(
+            prev.recentEvents,
+            'status',
+            `状态 · ${lifecycleText}`,
+          );
         }
         break;
       }

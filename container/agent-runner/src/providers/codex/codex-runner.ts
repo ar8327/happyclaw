@@ -14,7 +14,6 @@ import path from 'path';
 import os from 'os';
 import type { ThreadEvent, ThreadItem } from '@openai/codex-sdk';
 import {
-  buildChannelRoutingReminder,
   normalizeHomeFlags,
 } from 'happyclaw-agent-runner-core';
 
@@ -84,7 +83,6 @@ export class CodexRunner implements AgentRunner {
   private tmpDir!: string;
   private archiveMgr = new CodexArchiveManager();
   private startFreshOnNextTurn = false;
-  private pendingRoutingReminder: string | null = null;
   private activeToolCalls = new Map<string, number>();
   private readonly opts: CodexRunnerOptions;
 
@@ -96,7 +94,6 @@ export class CodexRunner implements AgentRunner {
     const { containerInput, groupDir, globalDir, memoryDir } = this.opts;
     const { isHome, isAdminHome } = normalizeHomeFlags(containerInput);
     const persistedState = this.opts.state.getProviderState<{
-      pendingRoutingReminder?: unknown;
       startFreshOnNextTurn?: unknown;
       archiveState?: {
         cumulativeInputTokens?: unknown;
@@ -105,10 +102,6 @@ export class CodexRunner implements AgentRunner {
         conversationLines?: unknown;
       };
     }>();
-    this.pendingRoutingReminder =
-      typeof persistedState?.pendingRoutingReminder === 'string'
-        ? persistedState.pendingRoutingReminder
-        : null;
     this.startFreshOnNextTurn = persistedState?.startFreshOnNextTurn === true;
     this.archiveMgr.hydrate(persistedState?.archiveState);
 
@@ -161,14 +154,34 @@ export class CodexRunner implements AgentRunner {
     });
   }
 
+  private buildCompactLifecycleMessages(): NormalizedMessage[] {
+    return [
+      {
+        kind: 'stream_event',
+        event: {
+          eventType: 'lifecycle',
+          phase: 'compact_started',
+          trigger: 'synthetic_threshold',
+        },
+      },
+      {
+        kind: 'stream_event',
+        event: {
+          eventType: 'lifecycle',
+          phase: 'compact_completed',
+          repairHints: {
+            recentImChannels: this.opts.state.getActiveImChannels(),
+          },
+        },
+      },
+    ];
+  }
+
   async *runQuery(config: QueryConfig): AsyncGenerator<NormalizedMessage, QueryResult> {
     const { opts } = this;
     const { log } = opts;
 
-    const composedPrompt = this.pendingRoutingReminder
-      ? `${this.pendingRoutingReminder}\n\n${config.prompt}`
-      : config.prompt;
-    this.pendingRoutingReminder = null;
+    const composedPrompt = config.prompt;
 
     // This depends on @openai/codex-sdk re-reading model_instructions_file on each run.
     // Keep the SDK version pinned until that behavior is re-verified during upgrades.
@@ -261,27 +274,33 @@ export class CodexRunner implements AgentRunner {
     this.archiveMgr.recordTurn(usage);
 
     if (this.archiveMgr.shouldArchive()) {
+      yield* this.buildCompactLifecycleMessages();
       yield {
         kind: 'stream_event',
         event: {
-          eventType: 'status',
-          statusText: 'synthetic_archive:start',
+          eventType: 'lifecycle',
+          phase: 'archive_started',
         },
       };
-      await this.archiveMgr.archive(
+      const archiveResult = await this.archiveMgr.archive(
         this.opts.containerInput.groupFolder,
         this.opts.containerInput.userId || undefined,
       );
       this.session.resetThread();
       this.startFreshOnNextTurn = true;
-      const channels = [...this.opts.state.recentImChannels];
-      this.pendingRoutingReminder =
-        channels.length > 0 ? buildChannelRoutingReminder(channels) : null;
       yield {
         kind: 'stream_event',
         event: {
-          eventType: 'status',
-          statusText: 'synthetic_archive:completed',
+          eventType: 'lifecycle',
+          phase: 'archive_completed',
+          archivedFolders: [this.opts.containerInput.groupFolder],
+          transcriptFiles: [
+            archiveResult?.conversationArchiveFile,
+            archiveResult?.transcriptFile,
+          ].filter(
+            (file): file is string =>
+              typeof file === 'string' && file.trim().length > 0,
+          ),
         },
       };
     }
@@ -329,7 +348,6 @@ export class CodexRunner implements AgentRunner {
     const currentThreadId = this.session?.getThreadId?.() || null;
     return {
       providerState: {
-        pendingRoutingReminder: this.pendingRoutingReminder,
         startFreshOnNextTurn: this.startFreshOnNextTurn,
         archiveState: this.archiveMgr.snapshot(),
         activeThreadId: currentThreadId,

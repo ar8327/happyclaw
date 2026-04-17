@@ -11,6 +11,7 @@ export type StreamEventType =
   | 'text_delta' | 'thinking_delta'
   | 'tool_use_start' | 'tool_use_end' | 'tool_progress'
   | 'hook_started' | 'hook_progress' | 'hook_response'
+  | 'lifecycle'
   | 'task_start' | 'task_notification'
   | 'todo_update'
   | 'mode_change'
@@ -33,6 +34,13 @@ export interface StreamEvent {
   hookName?: string;
   hookEvent?: string;
   hookOutcome?: string;
+  phase?: 'compact_started' | 'compact_completed' | 'archive_started' | 'archive_completed';
+  trigger?: 'native' | 'synthetic_threshold';
+  repairHints?: {
+    recentImChannels?: string[];
+  };
+  archivedFolders?: string[];
+  transcriptFiles?: string[];
   statusText?: string;
   taskDescription?: string;
   taskId?: string;

@@ -1,5 +1,5 @@
 import path from 'path';
-import { buildChannelRoutingReminder, normalizeHomeFlags } from 'happyclaw-agent-runner-core';
+import { normalizeHomeFlags } from 'happyclaw-agent-runner-core';
 
 import type {
   AgentRunner,
@@ -105,7 +105,6 @@ export class ClaudeRunner implements AgentRunner {
   private mcpServerEnv!: Record<string, string>;
   private readonly opts: ClaudeRunnerOptions;
   private toolCallStartedAt: number | null = null;
-  private pendingRoutingReminder: string | null = null;
   private lastMessageCursor: string | null = null;
 
   constructor(opts: ClaudeRunnerOptions) {
@@ -138,13 +137,6 @@ export class ClaudeRunner implements AgentRunner {
     };
 
     this.session = new ClaudeSession(this.opts.log);
-    const persistedState = this.opts.state.getProviderState<{
-      pendingRoutingReminder?: unknown;
-    }>();
-    this.pendingRoutingReminder =
-      typeof persistedState?.pendingRoutingReminder === 'string'
-        ? persistedState.pendingRoutingReminder
-        : null;
     this.lastMessageCursor = this.opts.state.getLastMessageCursor();
   }
 
@@ -157,6 +149,66 @@ export class ClaudeRunner implements AgentRunner {
     }, this.opts.log, (newMode) => {
       state.currentPermissionMode = newMode;
     });
+  }
+
+  private buildCompactLifecycleMessages(
+    state: SessionState,
+  ): NormalizedMessage[] {
+    return [
+      {
+        kind: 'stream_event',
+        event: {
+          eventType: 'lifecycle',
+          phase: 'compact_started',
+          trigger: 'native',
+        },
+      },
+      {
+        kind: 'stream_event',
+        event: {
+          eventType: 'lifecycle',
+          phase: 'compact_completed',
+          repairHints: {
+            recentImChannels: state.getActiveImChannels(),
+          },
+        },
+      },
+    ];
+  }
+
+  private buildArchiveLifecycleMessages(
+    message: { subtype?: string; hook_event?: string },
+  ): NormalizedMessage[] {
+    if (
+      message.subtype === 'hook_started' &&
+      message.hook_event === 'PreCompact'
+    ) {
+      return [
+        {
+          kind: 'stream_event',
+          event: {
+            eventType: 'lifecycle',
+            phase: 'archive_started',
+          },
+        },
+      ];
+    }
+    if (
+      message.subtype === 'hook_response' &&
+      message.hook_event === 'PreCompact'
+    ) {
+      return [
+        {
+          kind: 'stream_event',
+          event: {
+            eventType: 'lifecycle',
+            phase: 'archive_completed',
+            archivedFolders: [this.opts.containerInput.groupFolder],
+          },
+        },
+      ];
+    }
+    return [];
   }
 
   private buildSessionConfig(config: QueryConfig, prompt: string): ClaudeSessionConfig {
@@ -205,10 +257,15 @@ export class ClaudeRunner implements AgentRunner {
         processor.processToolUseSummary(event as any);
       } else if (event.type === 'system') {
         if ((event as any).subtype === 'compact_boundary') {
-          const channels = [...state.recentImChannels];
-          this.pendingRoutingReminder = buildChannelRoutingReminder(channels);
+          streamEventQueue.push(...this.buildCompactLifecycleMessages(state));
         } else {
           processor.processSystemMessage(event as any);
+          streamEventQueue.push(
+            ...this.buildArchiveLifecycleMessages(event as {
+              subtype?: string;
+              hook_event?: string;
+            }),
+          );
         }
       } else if (event.type === 'assistant') {
         processor.processAssistantMessage(event as any);
@@ -228,10 +285,7 @@ export class ClaudeRunner implements AgentRunner {
     const streamEventQueue: NormalizedMessage[] = [];
     this.processor = this.createProcessor(streamEventQueue);
 
-    const composedPrompt = this.pendingRoutingReminder
-      ? `${this.pendingRoutingReminder}\n\n${config.prompt}`
-      : config.prompt;
-    this.pendingRoutingReminder = null;
+    const composedPrompt = config.prompt;
 
     const sessionConfig = this.buildSessionConfig(config, composedPrompt);
     const mcpServers = opts.loadUserMcpServers();
@@ -288,11 +342,11 @@ export class ClaudeRunner implements AgentRunner {
               continue;
             }
             if (subtype === 'compact_boundary') {
-              const channels = [...state.recentImChannels];
+              const channels = state.getActiveImChannels();
               log(channels.length > 0
-                ? `Context compacted, staging routing reminder for channels: ${channels.join(', ')}`
-                : 'Context compacted, no IM channels tracked');
-              this.pendingRoutingReminder = buildChannelRoutingReminder(channels);
+                ? `Context compacted, emitting lifecycle event for channels: ${channels.join(', ')}`
+                : 'Context compacted, emitting lifecycle event without IM channels');
+              yield* this.buildCompactLifecycleMessages(state);
               continue;
             }
             if (subtype === 'task_notification') {
@@ -311,6 +365,10 @@ export class ClaudeRunner implements AgentRunner {
             }
             if (this.processor.processSystemMessage(message as any)) {
               while (streamEventQueue.length > 0) yield streamEventQueue.shift()!;
+              yield* this.buildArchiveLifecycleMessages(message as {
+                subtype?: string;
+                hook_event?: string;
+              });
               continue;
             }
           }
@@ -597,7 +655,6 @@ export class ClaudeRunner implements AgentRunner {
   getRuntimePersistenceSnapshot(): RuntimePersistenceSnapshot {
     return {
       providerState: {
-        pendingRoutingReminder: this.pendingRoutingReminder,
         currentSessionId: this.session.getCurrentSessionId() || null,
         currentTranscriptPath: this.session.getCurrentTranscriptPath(),
       },

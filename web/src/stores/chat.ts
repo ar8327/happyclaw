@@ -488,6 +488,23 @@ function pushEvent(
   return [...events, item].slice(-MAX_EVENT_LOG);
 }
 
+function describeLifecycleEvent(event: StreamEvent): string | null {
+  switch (event.phase) {
+    case 'compact_started':
+      return event.trigger === 'synthetic_threshold'
+        ? '开始 synthetic compact'
+        : '开始 compact';
+    case 'compact_completed':
+      return 'compact 完成';
+    case 'archive_started':
+      return '开始 archive';
+    case 'archive_completed':
+      return 'archive 完成';
+    default:
+      return null;
+  }
+}
+
 /**
  * Apply a single StreamEvent to a StreamingState object.
  * Shared by main conversation and SDK subagent streaming.
@@ -619,6 +636,14 @@ function applyStreamEvent(
       next.systemStatus = event.statusText || null;
       if (event.statusText) {
         next.recentEvents = pushEvent(prev.recentEvents, 'status', `状态: ${event.statusText}`);
+      }
+      break;
+    }
+    case 'lifecycle': {
+      const lifecycleText = describeLifecycleEvent(event);
+      next.systemStatus = lifecycleText;
+      if (lifecycleText) {
+        next.recentEvents = pushEvent(prev.recentEvents, 'status', `状态: ${lifecycleText}`);
       }
       break;
     }
