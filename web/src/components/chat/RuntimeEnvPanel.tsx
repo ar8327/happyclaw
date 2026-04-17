@@ -22,6 +22,7 @@ interface RuntimeEnvPanelProps {
   title?: string;
   hideSessionFields?: boolean;
   hideCodexCompact?: boolean;
+  hostCommandDescription?: string;
 }
 
 type RuntimeEnvSession = {
@@ -164,6 +165,7 @@ export function RuntimeEnvPanel({
   title = '会话运行环境',
   hideSessionFields = false,
   hideCodexCompact = false,
+  hostCommandDescription,
 }: RuntimeEnvPanelProps) {
   const sessionFromChat = useChatStore((s) => s.groups[sessionId]);
   const reloadChatSessions = useChatStore((s) => s.loadGroups);
@@ -329,6 +331,9 @@ export function RuntimeEnvPanel({
   const modelOptions = isCodex ? codexModelOptions : CLAUDE_MODEL_OPTIONS;
   const codexCompact = session?.codex_compact;
   const compactProgressWidth = `${Math.max(0, Math.min(100, Math.round((codexCompact?.progress || 0) * 100)))}%`;
+  const resolvedHostCommandDescription =
+    hostCommandDescription ||
+    'HappyClaw 不再管理 Claude 或 Codex 的连接配置。认证、Base URL、API Key、自定义环境变量都需要由宿主机自己提供。当前面板只保留 Session 级的 Runner、模型和工作目录设置。';
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -548,8 +553,7 @@ export function RuntimeEnvPanel({
         <div className="space-y-3">
           <div className="text-xs font-medium text-slate-500 uppercase tracking-wide">本机命令模式</div>
           <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600 leading-6">
-            HappyClaw 不再管理 Claude 或 Codex 的连接配置。认证、Base URL、API Key、自定义环境变量都需要由宿主机自己提供。
-            当前面板只保留 Session 级的 Runner、模型和工作目录设置。
+            {resolvedHostCommandDescription}
           </div>
           <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 leading-6">
             如果本机 <code className="rounded bg-white px-1.5 py-0.5 text-xs">claude</code> 或

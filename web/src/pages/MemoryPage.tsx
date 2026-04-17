@@ -650,6 +650,7 @@ export function MemoryPage() {
                     title="Memory 执行配置"
                     hideSessionFields
                     hideCodexCompact
+                    hostCommandDescription="Memory 运行仍然直接依赖宿主机上的 Claude 或 Codex 命令配置。认证、Base URL、API Key 和自定义环境变量都需要由宿主机自己提供。上面的表单是在配置 memory runner，本身不会把 Memory 变成一个可恢复会话。"
                   />
                 </div>
               )}
