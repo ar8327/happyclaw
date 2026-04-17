@@ -47,21 +47,40 @@ export function createContextManager(
     ?? parseInt(process.env.HAPPYCLAW_MEMORY_QUERY_TIMEOUT || '60000', 10);
   const memorySendTimeoutMs = options?.memorySendTimeoutMs
     ?? parseInt(process.env.HAPPYCLAW_MEMORY_SEND_TIMEOUT || '120000', 10);
-  const toolProfile = process.env.HAPPYCLAW_TOOL_PROFILE || 'default';
-  const isMemoryToolProfile = toolProfile === 'memory';
+  const disabledPlugins = (() => {
+    const raw = process.env.HAPPYCLAW_DISABLED_PLUGINS;
+    if (!raw) return new Set<string>();
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return new Set<string>();
+      return new Set(
+        parsed.filter(
+          (plugin): plugin is string =>
+            typeof plugin === 'string' && plugin.trim().length > 0,
+        ),
+      );
+    } catch {
+      return new Set<string>();
+    }
+  })();
+  const isPluginEnabled = (name: string) => !disabledPlugins.has(name);
 
   const ctxMgr = new ContextManager(ctx, options?.nativeCapabilities);
 
-  if (!isMemoryToolProfile) {
+  if (isPluginEnabled('messaging')) {
     ctxMgr.register(new MessagingPlugin());
+  }
+  if (isPluginEnabled('tasks')) {
     ctxMgr.register(new TasksPlugin());
+  }
+  if (isPluginEnabled('groups')) {
     ctxMgr.register(new GroupsPlugin());
+  }
+  if (isPluginEnabled('skills')) {
     ctxMgr.register(new SkillsPlugin());
   }
 
-  // Memory orchestration runs as an isolated file worker and must not
-  // recursively call HappyClaw message, task, memory, or sub-agent tools.
-  if (!isMemoryToolProfile && ctx.userId) {
+  if (isPluginEnabled('memory') && ctx.userId) {
     ctxMgr.register(new MemoryPlugin({
       apiUrl,
       apiToken,
@@ -70,7 +89,7 @@ export function createContextManager(
     }));
   }
 
-  if (!isMemoryToolProfile) {
+  if (isPluginEnabled('invoke-agent')) {
     ctxMgr.register(new InvokeAgentPlugin());
   }
 

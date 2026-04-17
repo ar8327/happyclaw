@@ -10,8 +10,10 @@ export interface MemoryProfile {
   globalDir: string;
   memoryDir: string;
   allowedDirectories: string[];
-  toolProfile: 'memory';
+  profileId: 'memory';
   disableUserMcpServers: boolean;
+  disabledPlugins: string[];
+  toolScope: 'isolated';
   registeredGroup: RegisteredGroup;
 }
 
@@ -32,8 +34,17 @@ export function buildMemoryProfile(params: {
     globalDir,
     memoryDir,
     allowedDirectories: [globalDir, memoryDir],
-    toolProfile: 'memory',
+    profileId: 'memory',
     disableUserMcpServers: true,
+    disabledPlugins: [
+      'messaging',
+      'tasks',
+      'groups',
+      'skills',
+      'memory',
+      'invoke-agent',
+    ],
+    toolScope: 'isolated',
     registeredGroup: {
       name: memorySession.name,
       folder: primaryFolder,

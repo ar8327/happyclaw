@@ -1,5 +1,5 @@
 import type {
-  RuntimeLaunchProfile,
+  RuntimeExecutionProfile,
   RuntimeOutput,
   RuntimeInput,
 } from './runtime-runner.js';
@@ -18,10 +18,12 @@ export class MemoryRunnerAdapter {
     onOutput: (output: RuntimeOutput) => Promise<void> | void,
     ownerPrimarySessionFolder: string,
   ): Promise<RuntimeOutput> {
-    const launchProfile: RuntimeLaunchProfile = {
-      toolProfile: profile.toolProfile,
+    const executionProfile: RuntimeExecutionProfile = {
+      profileId: profile.profileId,
       additionalDirectories: profile.allowedDirectories,
       disableUserMcpServers: profile.disableUserMcpServers,
+      disabledPlugins: profile.disabledPlugins,
+      toolScope: profile.toolScope,
     };
     const lifecycleStrategy = getMemoryLifecycleStrategy(runnerDescriptor);
     if (lifecycleStrategy === 'unsupported') {
@@ -40,7 +42,7 @@ export class MemoryRunnerAdapter {
           () => {},
           forwardOutput,
           ownerPrimarySessionFolder,
-          launchProfile,
+          executionProfile,
         );
       case 'synthetic':
         return runSessionAgent(
@@ -49,7 +51,7 @@ export class MemoryRunnerAdapter {
           () => {},
           forwardOutput,
           ownerPrimarySessionFolder,
-          launchProfile,
+          executionProfile,
         );
       default:
         throw new Error(

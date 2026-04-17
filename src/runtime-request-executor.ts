@@ -1,12 +1,12 @@
 import type {
   RuntimeInput,
-  RuntimeLaunchProfile,
+  RuntimeExecutionProfile,
   RuntimeOutput,
 } from './runtime-runner.js';
 
 export interface RunMutation {
   promptPreamble?: string;
-  profileOverride?: Partial<RuntimeLaunchProfile>;
+  profileOverride?: Partial<RuntimeExecutionProfile>;
 }
 
 export interface RunDirective<FollowUp = never> {
@@ -18,7 +18,7 @@ export interface RunResult<FollowUp = never> {
   terminalOutput: RuntimeOutput | null;
   error: Error | null;
   effectiveInput: RuntimeInput;
-  effectiveProfile?: RuntimeLaunchProfile;
+  effectiveProfile?: RuntimeExecutionProfile;
   followUps: FollowUp[];
 }
 
@@ -36,11 +36,11 @@ export interface RuntimeExecutionHook<Context, FollowUp = never> {
 interface RuntimeExecutorRunArgs<Context> {
   input: RuntimeInput;
   ctx: Context;
-  launchProfile?: RuntimeLaunchProfile;
+  executionProfile?: RuntimeExecutionProfile;
   execute: (
     input: RuntimeInput,
     onOutput: (output: RuntimeOutput) => Promise<void>,
-    launchProfile?: RuntimeLaunchProfile,
+    executionProfile?: RuntimeExecutionProfile,
   ) => Promise<RuntimeOutput>;
 }
 
@@ -49,12 +49,13 @@ function toError(error: unknown): Error {
 }
 
 function mergeLaunchProfiles(
-  baseProfile: RuntimeLaunchProfile | undefined,
-  override: Partial<RuntimeLaunchProfile>,
-): RuntimeLaunchProfile {
+  baseProfile: RuntimeExecutionProfile | undefined,
+  override: Partial<RuntimeExecutionProfile>,
+): RuntimeExecutionProfile {
   return {
     ...(baseProfile || {}),
     ...override,
+    profileId: override.profileId || baseProfile?.profileId || 'default',
   };
 }
 
@@ -65,7 +66,7 @@ export class RuntimeRequestExecutor<Context, FollowUp = never> {
 
   async run(args: RuntimeExecutorRunArgs<Context>): Promise<RunResult<FollowUp>> {
     const promptPreambles: string[] = [];
-    let effectiveProfile = args.launchProfile;
+    let effectiveProfile = args.executionProfile;
 
     for (const hook of this.hooks) {
       const mutation = await hook.beforeRun?.(args.ctx);

@@ -117,10 +117,12 @@ export interface RuntimeInput {
   };
 }
 
-export interface RuntimeLaunchProfile {
-  toolProfile?: 'memory';
+export interface RuntimeExecutionProfile {
+  profileId: string;
   additionalDirectories?: string[];
   disableUserMcpServers?: boolean;
+  disabledPlugins?: string[];
+  toolScope?: 'default' | 'isolated';
 }
 
 export interface ContainerInput extends RuntimeInput {
@@ -270,7 +272,7 @@ export async function runHostAgent(
   onProcess: (proc: ChildProcess, identifier: string) => void,
   onOutput?: (output: RuntimeOutput) => Promise<void>,
   ownerPrimarySessionFolder?: string,
-  launchProfile?: RuntimeLaunchProfile,
+  executionProfile?: RuntimeExecutionProfile,
 ): Promise<RuntimeOutput> {
   const startTime = Date.now();
   const localRuntimeSetupError = (message: string): RuntimeOutput => ({
@@ -423,7 +425,7 @@ export async function runHostAgent(
   // 3. 写入 settings.json（合并模式，不覆盖已有用户配置）
   // Resolve MCP servers based on group's mcp_mode for the unified local runtime.
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  const hostMcpServers = launchProfile?.disableUserMcpServers
+  const hostMcpServers = executionProfile?.disableUserMcpServers
     ? {}
     : resolveGroupMcpServers(group, sessionOwnerKey);
   ensureSettingsJson(settingsFile, hostMcpServers);
@@ -592,16 +594,27 @@ export async function runHostAgent(
   if (ownerId) {
     hostEnv['HAPPYCLAW_SKILLS_DIR'] = path.join(DATA_DIR, 'skills', ownerId);
   }
-  if (launchProfile?.toolProfile) {
-    hostEnv['HAPPYCLAW_TOOL_PROFILE'] = launchProfile.toolProfile;
+  if (executionProfile?.profileId) {
+    hostEnv['HAPPYCLAW_RUNTIME_PROFILE_ID'] = executionProfile.profileId;
   }
   if (
-    launchProfile?.additionalDirectories &&
-    launchProfile.additionalDirectories.length > 0
+    executionProfile?.additionalDirectories &&
+    executionProfile.additionalDirectories.length > 0
   ) {
     hostEnv['HAPPYCLAW_ADDITIONAL_DIRECTORIES'] = JSON.stringify(
-      launchProfile.additionalDirectories,
+      executionProfile.additionalDirectories,
     );
+  }
+  if (
+    executionProfile?.disabledPlugins &&
+    executionProfile.disabledPlugins.length > 0
+  ) {
+    hostEnv['HAPPYCLAW_DISABLED_PLUGINS'] = JSON.stringify(
+      executionProfile.disabledPlugins,
+    );
+  }
+  if (executionProfile?.toolScope) {
+    hostEnv['HAPPYCLAW_TOOL_SCOPE'] = executionProfile.toolScope;
   }
   hostEnv['HAPPYCLAW_PROJECT_SKILLS_DIR'] = path.join(process.cwd(), 'container', 'skills');
   hostEnv['CLAUDE_CONFIG_DIR'] = groupSessionsDir;
