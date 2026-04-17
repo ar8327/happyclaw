@@ -9,11 +9,12 @@ interface SessionCardProps {
 
 export function SessionCard({ session }: SessionCardProps) {
   const [expanded, setExpanded] = useState(false);
+  const isMemorySession = session.kind === 'memory';
   const isSessionView =
     session.kind === 'main' ||
     session.kind === 'workspace' ||
     session.kind === 'worker' ||
-    session.kind === 'memory';
+    isMemorySession;
 
   const truncateId = (value: string) => {
     if (value.length <= 30) return value;
@@ -50,10 +51,14 @@ export function SessionCard({ session }: SessionCardProps) {
             <div className="space-y-1 text-sm">
               <div className="flex items-center gap-2">
                 <span className="text-slate-500">
-                  {isSessionView ? '会话类型:' : '会话目录:'}
+                  {isSessionView ? (isMemorySession ? '条目类型:' : '会话类型:') : '会话目录:'}
                 </span>
                 <span className="text-foreground font-medium">
-                  {isSessionView ? (session.kind || 'unknown') : session.folder}
+                  {isSessionView
+                    ? isMemorySession
+                      ? 'memory runner 配置'
+                      : (session.kind || 'unknown')
+                    : session.folder}
                 </span>
               </div>
               {isSessionView && (
@@ -64,7 +69,7 @@ export function SessionCard({ session }: SessionCardProps) {
                   </span>
                 </div>
               )}
-              {isSessionView && (
+              {isSessionView && !isMemorySession && (
                 <div className="flex items-center gap-2">
                   <span className="text-slate-500">渠道绑定:</span>
                   <span className="text-foreground font-medium truncate">

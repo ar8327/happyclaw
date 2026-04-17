@@ -61,6 +61,7 @@ import {
 } from '../db.js';
 import {
   canServeAsMemoryRunner,
+  explainMemoryRunnerDegradation,
   explainRunnerDegradation,
   getDefaultRunnerId,
   getRunnerDescriptor,
@@ -582,7 +583,12 @@ function buildSessionPayload(
     lastMessageTime: latestAt,
     runner_label: descriptor?.label || effectiveRunnerId,
     compatibility: descriptor?.compatibility || null,
-    degradation_reasons: descriptor ? explainRunnerDegradation(descriptor) : [],
+    degradation_reasons:
+      descriptor
+        ? session.kind === 'memory'
+          ? explainMemoryRunnerDegradation(descriptor)
+          : explainRunnerDegradation(descriptor)
+        : [],
     has_summary: !!summary,
     summary_created_at: summary?.created_at ?? null,
     codex_compact:

@@ -211,13 +211,14 @@ export function SessionDetail({ session }: SessionDetailProps) {
   const thinkingDirty = thinkingEffort !== (session.thinking_effort || '');
   const cwdDirty = cwd !== (session.cwd || session.folder);
   const compressionDirty = compression !== (session.context_compression || 'off');
+  const isMemorySession = session.kind === 'memory';
   const dirty =
     runnerDirty ||
     runnerProfileDirty ||
     modelDirty ||
     thinkingDirty ||
-    cwdDirty ||
-    compressionDirty;
+    (!isMemorySession && cwdDirty) ||
+    (!isMemorySession && compressionDirty);
   const runnerSelectOptions = withCurrentRunnerOption(
     runnerOptions,
     runnerId || session.runner_id,
@@ -226,7 +227,6 @@ export function SessionDetail({ session }: SessionDetailProps) {
   const selectedRunner =
     runnerSelectOptions.find((option) => option.value === (runnerId || session.runner_id || ''))
     || null;
-  const isMemorySession = session.kind === 'memory';
 
   const formatDate = (timestamp: string | number) => {
     return new Date(timestamp).toLocaleString('zh-CN', {
@@ -353,10 +353,10 @@ export function SessionDetail({ session }: SessionDetailProps) {
       if (thinkingDirty) {
         updates.thinking_effort = thinkingEffort || null;
       }
-      if (cwdDirty) {
+      if (!isMemorySession && cwdDirty) {
         updates.cwd = cwd.trim();
       }
-      if (compressionDirty) {
+      if (!isMemorySession && compressionDirty) {
         updates.context_compression = compression;
       }
       await updateSession(session.jid, updates);
@@ -432,9 +432,14 @@ export function SessionDetail({ session }: SessionDetailProps) {
           {session.runner_label || runnerId}
           {session.model && <span className="text-slate-400"> / {session.model}</span>}
         </div>
-        {session.binding_summary && (
+        {!isMemorySession && session.binding_summary && (
           <div className="text-xs text-slate-400 mt-1">
             绑定: {session.binding_summary}
+          </div>
+        )}
+        {isMemorySession && (
+          <div className="text-xs text-slate-400 mt-1">
+            这是 memory runner 的配置投影，只决定单次记忆请求用哪个 runner，不保存可恢复对话状态。
           </div>
         )}
         {session.degradation_reasons && session.degradation_reasons.length > 0 && (
@@ -542,21 +547,22 @@ export function SessionDetail({ session }: SessionDetailProps) {
               </SelectContent>
             </Select>
           </div>
-
-          <div>
-            <div className="text-xs text-slate-500 mb-1">工作目录</div>
-            <Input
-              value={cwd}
-              onChange={(e) => setCwd(e.target.value)}
-              placeholder="默认使用当前会话目录"
-              className="h-8 text-sm font-mono"
-            />
-          </div>
+          {!isMemorySession && (
+            <div>
+              <div className="text-xs text-slate-500 mb-1">工作目录</div>
+              <Input
+                value={cwd}
+                onChange={(e) => setCwd(e.target.value)}
+                placeholder="默认使用当前会话目录"
+                className="h-8 text-sm font-mono"
+              />
+            </div>
+          )}
         </div>
       )}
 
       {/* Context Compression */}
-      {session.editable && (
+      {session.editable && !isMemorySession && (
         <div>
           <div className="text-xs text-slate-500 mb-1">上下文压缩</div>
           <div className="flex items-center gap-2">
