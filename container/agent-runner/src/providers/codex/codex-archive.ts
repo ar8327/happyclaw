@@ -27,11 +27,13 @@ export class CodexArchiveManager {
   private cumulativeInputTokens = 0;
   private cumulativeOutputTokens = 0;
   private turnCount = 0;
+  private lastCompactedAt: string | null = null;
 
   hydrate(snapshot?: {
     cumulativeInputTokens?: unknown;
     cumulativeOutputTokens?: unknown;
     turnCount?: unknown;
+    lastCompactedAt?: unknown;
   }): void {
     if (!snapshot || typeof snapshot !== 'object') return;
     this.cumulativeInputTokens =
@@ -49,17 +51,24 @@ export class CodexArchiveManager {
       && Number.isFinite(snapshot.turnCount)
         ? snapshot.turnCount
         : 0;
+    this.lastCompactedAt =
+      typeof snapshot.lastCompactedAt === 'string'
+      && snapshot.lastCompactedAt.trim().length > 0
+        ? snapshot.lastCompactedAt
+        : null;
   }
 
   snapshot(): {
     cumulativeInputTokens: number;
     cumulativeOutputTokens: number;
     turnCount: number;
+    lastCompactedAt: string | null;
   } {
     return {
       cumulativeInputTokens: this.cumulativeInputTokens,
       cumulativeOutputTokens: this.cumulativeOutputTokens,
       turnCount: this.turnCount,
+      lastCompactedAt: this.lastCompactedAt,
     };
   }
 
@@ -82,7 +91,22 @@ export class CodexArchiveManager {
     userId?: string,
   ): Promise<SessionWrapupResponse | null> {
     if (this.turnCount === 0) return null;
+    return this.executeArchive(groupFolder, userId, true);
+  }
 
+  async forceArchive(
+    groupFolder: string,
+    userId?: string,
+  ): Promise<SessionWrapupResponse | null> {
+    if (this.turnCount === 0) return null;
+    return this.executeArchive(groupFolder, userId, false);
+  }
+
+  private async executeArchive(
+    groupFolder: string,
+    userId: string | undefined,
+    markAsCompact: boolean,
+  ): Promise<SessionWrapupResponse | null> {
     let response: SessionWrapupResponse | null = null;
     try {
       if (userId) {
@@ -112,16 +136,11 @@ export class CodexArchiveManager {
       log(`Archive failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
+    if (markAsCompact) {
+      this.lastCompactedAt = new Date().toISOString();
+    }
     this.reset();
     return response;
-  }
-
-  async forceArchive(
-    groupFolder: string,
-    userId?: string,
-  ): Promise<SessionWrapupResponse | null> {
-    if (this.turnCount === 0) return null;
-    return this.archive(groupFolder, userId);
   }
 
   private reset(): void {

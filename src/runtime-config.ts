@@ -1375,7 +1375,7 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   memoryQueryTimeout: 60000,
   memoryGlobalSleepTimeout: 300000,
   memorySendTimeout: 120000,
-  codexArchiveThreshold: 100000,
+  codexArchiveThreshold: 200000,
   turnBatchWindowMs: 5000,
   turnMaxBatchMs: 30000,
   traceRetentionDays: 7,

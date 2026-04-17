@@ -705,7 +705,7 @@ function buildCodexCompactPayload(
     turn_count: parseFiniteNumber(archiveState?.turnCount),
     start_fresh_on_next_turn: providerState?.startFreshOnNextTurn === true,
     last_compacted_at:
-      parseOptionalIsoString(providerState?.lastCompactedAt)
+      parseOptionalIsoString(archiveState?.lastCompactedAt)
       || summaryCreatedAt
       || null,
     state_updated_at: runtimeState?.updated_at || null,
