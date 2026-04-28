@@ -6,6 +6,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import { useMediaQuery } from '@/hooks/useMediaQuery';
 import { RuntimeEnvPanel } from '../components/chat/RuntimeEnvPanel';
+import { useCodexModels, type CodexModelOption } from '@/hooks/useCodexModels';
 
 interface MemorySource {
   path: string;
@@ -60,6 +61,13 @@ interface RunnerProfileOption {
   name: string;
   is_default: boolean;
 }
+
+const CLAUDE_MODEL_OPTIONS: CodexModelOption[] = [
+  { value: '__default__', label: '默认' },
+  { value: 'opus', label: 'Opus' },
+  { value: 'sonnet', label: 'Sonnet' },
+  { value: 'haiku', label: 'Haiku' },
+];
 
 function getErrorMessage(err: unknown, fallback: string): string {
   if (typeof err === 'object' && err !== null && 'message' in err) {
@@ -135,6 +143,9 @@ export function MemoryPage() {
 
   const isMobile = useMediaQuery('(max-width: 1023px)');
   const [showContent, setShowContent] = useState(false);
+  const memoryRunnerId = memoryConfig?.runner_id || '';
+  const memoryUsesCodex = memoryRunnerId === 'codex';
+  const { models: codexModelOptions, loading: codexModelsLoading } = useCodexModels(memoryUsesCodex);
 
   const dirty = useMemo(() => content !== initialContent, [content, initialContent]);
   const memoryRuntimeSession = useMemo(
@@ -486,6 +497,20 @@ export function MemoryPage() {
     ? new Date(fileMeta.updatedAt).toLocaleString('zh-CN')
     : '未记录';
   const selectedRunner = memoryRunners.find((runner) => runner.id === memoryConfig?.runner_id) || null;
+  const memoryModelOptions = useMemo(() => {
+    const baseOptions = memoryUsesCodex ? codexModelOptions : CLAUDE_MODEL_OPTIONS;
+    const currentModel = memoryConfig?.model || null;
+    if (
+      currentModel &&
+      !baseOptions.some((option) => option.value === currentModel)
+    ) {
+      return [
+        ...baseOptions,
+        { value: currentModel, label: `当前配置 ${currentModel}` },
+      ];
+    }
+    return baseOptions;
+  }, [codexModelOptions, memoryConfig?.model, memoryUsesCodex]);
 
   return (
     <div className="min-h-full bg-background p-4 lg:p-8">
@@ -529,6 +554,8 @@ export function MemoryPage() {
                           onChange={(e) => setMemoryConfig((prev) => prev ? {
                             ...prev,
                             runner_id: e.target.value,
+                            runner_profile_id: null,
+                            model: null,
                           } : prev)}
                           className="w-full h-9 rounded-md border border-border bg-background px-3 text-sm"
                         >
@@ -595,14 +622,24 @@ export function MemoryPage() {
                         <label className="block text-xs font-medium text-slate-600 mb-1">
                           模型
                         </label>
-                        <Input
-                          value={memoryConfig.model || ''}
+                        <select
+                          value={memoryConfig.model || '__default__'}
                           onChange={(e) => setMemoryConfig((prev) => prev ? {
                             ...prev,
-                            model: e.target.value.trim() || null,
+                            model: e.target.value === '__default__' ? null : e.target.value,
                           } : prev)}
-                          placeholder="留空表示使用 runner 默认模型"
-                        />
+                          disabled={memoryUsesCodex && codexModelsLoading}
+                          className="w-full h-9 rounded-md border border-border bg-background px-3 text-sm"
+                        >
+                          {memoryModelOptions.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                        {memoryUsesCodex && codexModelsLoading && (
+                          <div className="mt-1 text-xs text-slate-500">正在加载 Codex 模型列表...</div>
+                        )}
                       </div>
                     </div>
 

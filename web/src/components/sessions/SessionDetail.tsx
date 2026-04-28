@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { Check, Loader2, Archive } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Check, Loader2 } from 'lucide-react';
 import type { SessionInfo } from '../../types';
 import { useSessionsStore } from '../../stores/sessions';
 import {
@@ -9,14 +9,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { api, type ApiError } from '@/api/client';
+import { api } from '@/api/client';
 import { Input } from '@/components/ui/input';
-
-const COMPRESSION_OPTIONS = [
-  { value: 'off', label: '关闭' },
-  { value: 'manual', label: '手动压缩' },
-  { value: 'auto', label: '自动压缩' },
-];
 
 function resolveRunnerValue(
   runnerId: string | null | undefined,
@@ -53,15 +47,6 @@ const THINKING_OPTIONS = [
   { value: 'medium', label: '中' },
   { value: 'high', label: '高' },
 ];
-
-interface ContextSummary {
-  session_folder: string;
-  channel_jid: string;
-  summary: string;
-  message_count: number;
-  created_at: string;
-  model_used: string | null;
-}
 
 interface RunnerProfileOption {
   id: string;
@@ -157,7 +142,6 @@ export function SessionDetail({ session }: SessionDetailProps) {
     session.kind === 'workspace' ||
     session.kind === 'worker' ||
     session.kind === 'memory';
-  const backingJid = session.backing_jid || session.jid;
   const runnerTouchedRef = useRef(false);
   const [runnerId, setRunnerId] = useState<string>(
     resolveRunnerValue(session.runner_id),
@@ -172,12 +156,8 @@ export function SessionDetail({ session }: SessionDetailProps) {
     session.thinking_effort || '',
   );
   const [cwd, setCwd] = useState(session.cwd || session.folder);
-  const [compression, setCompression] = useState<string>(session.context_compression || 'off');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [compressing, setCompressing] = useState(false);
-  const [compressResult, setCompressResult] = useState<string | null>(null);
-  const [summaryInfo, setSummaryInfo] = useState<ContextSummary | null>(null);
 
   // Sync local state when session prop changes
   useEffect(() => {
@@ -189,9 +169,6 @@ export function SessionDetail({ session }: SessionDetailProps) {
     setModel(session.model || '');
     setThinkingEffort(session.thinking_effort || '');
     setCwd(session.cwd || session.folder);
-    setCompression(session.context_compression || 'off');
-    setCompressResult(null);
-    setSummaryInfo(null);
   }, [
     session.jid,
     session.runner_id,
@@ -200,7 +177,6 @@ export function SessionDetail({ session }: SessionDetailProps) {
     session.thinking_effort,
     session.cwd,
     session.folder,
-    session.context_compression,
   ]);
 
   const runnerDirty =
@@ -210,15 +186,13 @@ export function SessionDetail({ session }: SessionDetailProps) {
   const modelDirty = model !== (session.model || '');
   const thinkingDirty = thinkingEffort !== (session.thinking_effort || '');
   const cwdDirty = cwd !== (session.cwd || session.folder);
-  const compressionDirty = compression !== (session.context_compression || 'off');
   const isMemorySession = session.kind === 'memory';
   const dirty =
     runnerDirty ||
     runnerProfileDirty ||
     modelDirty ||
     thinkingDirty ||
-    (!isMemorySession && cwdDirty) ||
-    (!isMemorySession && compressionDirty);
+    (!isMemorySession && cwdDirty);
   const runnerSelectOptions = withCurrentRunnerOption(
     runnerOptions,
     runnerId || session.runner_id,
@@ -237,23 +211,6 @@ export function SessionDetail({ session }: SessionDetailProps) {
       minute: '2-digit',
     });
   };
-
-  const loadSummary = useCallback(async () => {
-    try {
-      const res = await api.get<{ summary: ContextSummary | null }>(
-        `/api/sessions/${encodeURIComponent(backingJid)}/summary`,
-      );
-      setSummaryInfo(res.summary);
-    } catch {
-      setSummaryInfo(null);
-    }
-  }, [backingJid]);
-
-  useEffect(() => {
-    if (session.context_compression && session.context_compression !== 'off') {
-      loadSummary();
-    }
-  }, [session.context_compression, loadSummary]);
 
   useEffect(() => {
     let cancelled = false;
@@ -356,42 +313,13 @@ export function SessionDetail({ session }: SessionDetailProps) {
       if (!isMemorySession && cwdDirty) {
         updates.cwd = cwd.trim();
       }
-      if (!isMemorySession && compressionDirty) {
-        updates.context_compression = compression;
-      }
       await updateSession(session.jid, updates);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
-      if (compressionDirty && compression !== 'off') {
-        loadSummary();
-      }
     } catch (err) {
       console.error('Failed to update session:', err);
     } finally {
       setSaving(false);
-    }
-  };
-
-  const handleCompress = async () => {
-    setCompressing(true);
-    setCompressResult(null);
-    try {
-      const res = await api.post<{
-        success: boolean;
-        messageCount?: number;
-        error?: string;
-      }>(`/api/sessions/${encodeURIComponent(backingJid)}/compress`, undefined, 60000);
-      if (res.success) {
-        setCompressResult(`压缩完成，处理了 ${res.messageCount ?? '?'} 条消息`);
-        loadSummary();
-      } else {
-        setCompressResult(`压缩失败：${res.error || '未知错误'}`);
-      }
-    } catch (err) {
-      const msg = (err as ApiError)?.message || String(err);
-      setCompressResult(`压缩失败：${msg}`);
-    } finally {
-      setCompressing(false);
     }
   };
 
@@ -558,62 +486,6 @@ export function SessionDetail({ session }: SessionDetailProps) {
                 placeholder="默认使用当前会话目录"
                 className="h-8 text-sm font-mono"
               />
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Context Compression */}
-      {session.editable && !isMemorySession && (
-        <div>
-          <div className="text-xs text-slate-500 mb-1">上下文压缩</div>
-          <div className="flex items-center gap-2">
-            <Select value={compression} onValueChange={setCompression}>
-              <SelectTrigger className="flex-1 h-8 text-sm">
-                <SelectValue placeholder="关闭" />
-              </SelectTrigger>
-              <SelectContent>
-                {COMPRESSION_OPTIONS.map((opt) => (
-                  <SelectItem key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <p className="mt-1 text-xs text-slate-400">
-            {compression === 'auto'
-              ? '每轮对话结束后自动检查，消息数超过阈值时自动压缩。也可手动触发。'
-              : '使用 Sonnet 压缩历史对话，减少 token 消耗。压缩后会重置当前会话，并把摘要注入系统提示。'}
-          </p>
-
-          {/* Compress button + status */}
-          {(compression === 'manual' || compression === 'auto') && (
-            <div className="mt-2 space-y-2">
-              <button
-                onClick={handleCompress}
-                disabled={compressing}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded transition-colors disabled:opacity-50"
-              >
-                {compressing ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <Archive className="w-3.5 h-3.5" />
-                )}
-                {compressing ? '压缩中...' : '立即压缩'}
-              </button>
-              {compressResult && (
-                <p className={`text-xs ${compressResult.includes('失败') ? 'text-red-500' : 'text-green-600'}`}>
-                  {compressResult}
-                </p>
-              )}
-              {summaryInfo && (
-                <div className="text-xs text-slate-400 bg-card px-3 py-2 rounded border border-border">
-                  <div>已有摘要（{summaryInfo.message_count} 条消息）</div>
-                  <div>创建于 {formatDate(summaryInfo.created_at)}</div>
-                  {summaryInfo.model_used && <div>模型：{summaryInfo.model_used}</div>}
-                </div>
-              )}
             </div>
           )}
         </div>

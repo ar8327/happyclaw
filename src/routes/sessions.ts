@@ -700,19 +700,21 @@ function buildCodexCompactPayload(
     && !Array.isArray(providerState.archiveState)
       ? providerState.archiveState as Record<string, unknown>
       : undefined;
-  const cumulativeInputTokens = parseFiniteNumber(
-    archiveState?.cumulativeInputTokens,
-  );
-  const cumulativeOutputTokens = parseFiniteNumber(
-    archiveState?.cumulativeOutputTokens,
-  );
+  const inputTokens =
+    parseFiniteNumber(archiveState?.lastInputTokens) ||
+    parseFiniteNumber(archiveState?.cumulativeInputTokens);
+  const outputTokens =
+    parseFiniteNumber(archiveState?.lastOutputTokens) ||
+    parseFiniteNumber(archiveState?.cumulativeOutputTokens);
   const thresholdTokens = Math.max(1, getSystemSettings().codexArchiveThreshold);
-  const currentTokens = cumulativeInputTokens + cumulativeOutputTokens;
+  const currentTokens =
+    parseFiniteNumber(archiveState?.lastContextWindowTokens) ||
+    inputTokens + outputTokens;
 
   return {
     current_tokens: currentTokens,
-    current_input_tokens: cumulativeInputTokens,
-    current_output_tokens: cumulativeOutputTokens,
+    current_input_tokens: inputTokens,
+    current_output_tokens: outputTokens,
     threshold_tokens: thresholdTokens,
     remaining_tokens: Math.max(0, thresholdTokens - currentTokens),
     progress: Math.min(1, currentTokens / thresholdTokens),

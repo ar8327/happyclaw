@@ -35,7 +35,6 @@ type RuntimeEnvSession = {
   model?: string | null;
   thinking_effort?: SessionInfo['thinking_effort'] | null;
   cwd?: string | null;
-  context_compression?: SessionInfo['context_compression'] | null;
   codex_compact?: SessionInfo['codex_compact'];
 };
 
@@ -151,12 +150,6 @@ const THINKING_EFFORT_OPTIONS = [
   { value: 'high', label: '高' },
 ];
 
-const CONTEXT_COMPRESSION_OPTIONS = [
-  { value: 'off', label: '关闭' },
-  { value: 'manual', label: '手动压缩' },
-  { value: 'auto', label: '自动压缩' },
-];
-
 export function RuntimeEnvPanel({
   sessionId,
   session: sessionProp,
@@ -184,9 +177,6 @@ export function RuntimeEnvPanel({
   const [runnerProfileId, setRunnerProfileId] = useState(session?.runner_profile_id || '__default__');
   const [runnerProfiles, setRunnerProfiles] = useState<RunnerProfileOption[]>([]);
   const [cwd, setCwd] = useState(session?.cwd || '');
-  const [contextCompression, setContextCompression] = useState<'off' | 'manual' | 'auto'>(
-    session?.context_compression || 'off',
-  );
   const [refreshing, setRefreshing] = useState(false);
 
   const fetchSession = useCallback(async () => {
@@ -206,9 +196,7 @@ export function RuntimeEnvPanel({
     setThinkingEffort(session?.thinking_effort || '__default__');
     setRunnerProfileId(session?.runner_profile_id || '__default__');
     setCwd(session?.cwd || '');
-    setContextCompression(session?.context_compression || 'off');
   }, [
-    session?.context_compression,
     session?.cwd,
     session?.model,
     session?.runner_id,
@@ -314,11 +302,6 @@ export function RuntimeEnvPanel({
     await patchSession({
       runner_profile_id: value === '__default__' ? null : value,
     });
-  }, [patchSession]);
-
-  const handleContextCompressionChange = useCallback(async (value: 'off' | 'manual' | 'auto') => {
-    setContextCompression(value);
-    await patchSession({ context_compression: value });
   }, [patchSession]);
 
   const handleCwdBlur = useCallback(async () => {
@@ -475,23 +458,6 @@ export function RuntimeEnvPanel({
               />
             </div>
 
-            <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">
-                上下文压缩
-              </label>
-              <Select value={contextCompression} onValueChange={handleContextCompressionChange}>
-                <SelectTrigger className="text-xs h-8">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {CONTEXT_COMPRESSION_OPTIONS.map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
           </div>
         )}
 
@@ -504,7 +470,7 @@ export function RuntimeEnvPanel({
 
               <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 space-y-3">
                 <div className="flex items-center justify-between gap-3 text-xs">
-                  <div className="font-medium text-slate-700">当前累计 token</div>
+                  <div className="font-medium text-slate-700">当前 context window</div>
                   <div className="font-mono text-slate-600">
                     {formatNumber(codexCompact.current_tokens)} / {formatNumber(codexCompact.threshold_tokens)}
                   </div>
@@ -522,7 +488,7 @@ export function RuntimeEnvPanel({
                     距下次 compact: <span className="font-medium text-slate-700">{formatNumber(codexCompact.remaining_tokens)}</span>
                   </div>
                   <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
-                    累计轮次: <span className="font-medium text-slate-700">{formatNumber(codexCompact.turn_count)}</span>
+                    统计轮次: <span className="font-medium text-slate-700">{formatNumber(codexCompact.turn_count)}</span>
                   </div>
                   <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
                     输入 tokens: <span className="font-medium text-slate-700">{formatNumber(codexCompact.current_input_tokens)}</span>

@@ -348,6 +348,14 @@ function emitRuntimeState(
   });
 }
 
+function shouldClearProviderSession(runner: AgentRunner): boolean {
+  const providerState = runner.getRuntimePersistenceSnapshot?.().providerState;
+  if (!providerState || typeof providerState !== 'object') return false;
+  if (providerState.startFreshOnNextTurn !== true) return false;
+  return Object.prototype.hasOwnProperty.call(providerState, 'activeThreadId')
+    && providerState.activeThreadId == null;
+}
+
 export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
   const { runner, state, ipcPaths, log, writeOutput } = config;
   const MAX_RETRIES = config.maxOverflowRetries ?? 3;
@@ -434,7 +442,7 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
     if (poller.drainDetectedDuringQuery) result.drainDetectedDuringQuery = true;
 
     // Update session state
-    if (config.ephemeralSession) {
+    if (config.ephemeralSession || shouldClearProviderSession(runner)) {
       sessionId = undefined;
       resumeAnchor = undefined;
     } else {
@@ -516,6 +524,16 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
       });
       writeOutput({ status: 'drained', result: null, newSessionId: sessionId });
       process.exit(0);
+    }
+
+    if (config.ephemeralSession) {
+      await runner.cleanup?.();
+      emitRuntimeState(writeOutput, runner, state, {
+        providerSessionId: sessionId,
+        resumeAnchor,
+      });
+      writeOutput({ status: 'success', result: null, newSessionId: sessionId });
+      return;
     }
 
     // Runners without mid-query push may have already drained follow-up IPC

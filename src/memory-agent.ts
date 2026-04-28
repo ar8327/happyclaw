@@ -21,6 +21,7 @@ import {
   getPrimarySessionForOwner,
   getSessionRecord,
   getSessionRuntimeState,
+  getMaxMessageRowid,
   listAgentsByFolder,
   listSessionRecords,
   getTranscriptMessagesSince,
@@ -67,7 +68,7 @@ interface MemoryExecutionContext {
   runtimeInputBase: Omit<RuntimeInput, 'prompt'>;
 }
 
-interface MemoryTranscriptExport {
+export interface MemoryTranscriptExport {
   transcriptFile: string;
   workspaceFolder: string;
   chatJids: string[];
@@ -105,10 +106,17 @@ export interface MemoryAgentResponse {
 }
 
 interface MemoryExecutionRequest {
-  type: 'query' | 'remember' | 'session_wrapup' | 'global_sleep';
+  type:
+    | 'query'
+    | 'remember'
+    | 'session_wrapup'
+    | 'global_sleep'
+    | 'continuation_summary';
   query?: string;
   context?: string;
   content?: string;
+  systemPrompt?: string;
+  userMessage?: string;
   importance?: 'high' | 'normal';
   transcriptFile?: string;
   workspaceFolder?: string;
@@ -441,7 +449,7 @@ function normalizeWrapupCursors(
   return wrapups;
 }
 
-function commitTranscriptExportSuccess(
+export function commitTranscriptExportSuccess(
   ownerKey: string,
   transcript: Pick<MemoryTranscriptExport, 'workspaceFolder' | 'wrapupCursors'>,
 ): void {
@@ -509,7 +517,22 @@ export function exportTranscriptSnapshotForUser(
     // conversation-agent channels that are not persisted in session_channels.
     const allMessages: TranscriptMessage[] = [];
     for (const jid of transcriptChatJids) {
-      const cursor = wrapups[jid] || defaultCursor;
+      const storedCursor = wrapups[jid] || defaultCursor;
+      const maxRowid = getMaxMessageRowid(jid);
+      const cursor =
+        storedCursor.rowid > maxRowid ? defaultCursor : storedCursor;
+      if (storedCursor.rowid > maxRowid) {
+        logger.warn(
+          {
+            ownerKey,
+            folder,
+            chatJid: jid,
+            storedCursor: storedCursor.rowid,
+            maxRowid,
+          },
+          'Memory wrapup cursor is ahead of message history; replaying chat transcript from start',
+        );
+      }
       const msgs = getTranscriptMessagesSince(jid, cursor);
       allMessages.push(
         ...msgs.map((m) => ({
@@ -899,6 +922,21 @@ function buildMemoryPromptPreamble(
       '- 更新 meta.json 的 indexVersion、计数和 pendingMaintenance',
       '- 不要修改 state.json',
     );
+  } else if (request.type === 'continuation_summary') {
+    lines.push(
+      '',
+      '处理要求：',
+      '- 只生成 continuation summary',
+      '- 不要修改 memory 目录里的任何文件',
+      '- 不要调用工具，除非需要确认 transcriptFile 是否可读',
+      '- 最终仍按核心输出要求返回 JSON',
+      '- response 字段必须只包含摘要正文，不要加解释性前言',
+      '- touchedFiles 必须为空数组',
+      '',
+      request.systemPrompt || '',
+      '',
+      request.userMessage || '',
+    );
   }
 
   return lines.join('\n');
@@ -997,10 +1035,7 @@ function persistMemoryRuntimeSnapshot(
   });
 }
 
-class MemoryPromptBuilderHook
-implements RuntimeExecutionHook<
-  MemoryRuntimeRunContext
-> {
+class MemoryPromptBuilderHook implements RuntimeExecutionHook<MemoryRuntimeRunContext> {
   readonly name = 'MemoryPromptBuilderHook';
 
   beforeRun(ctx: MemoryRuntimeRunContext): { promptPreamble: string } {
@@ -1013,10 +1048,7 @@ implements RuntimeExecutionHook<
   }
 }
 
-class RuntimeStatePersistenceHook
-implements RuntimeExecutionHook<
-  MemoryRuntimeRunContext
-> {
+class RuntimeStatePersistenceHook implements RuntimeExecutionHook<MemoryRuntimeRunContext> {
   readonly name = 'RuntimeStatePersistenceHook';
 
   async onOutput(
@@ -1028,15 +1060,15 @@ implements RuntimeExecutionHook<
 
   afterRun(ctx: MemoryRuntimeRunContext, result: RunResult): void {
     if (result.output) {
-      persistMemoryRuntimeSnapshot(ctx.executionContext.ownerKey, result.output);
+      persistMemoryRuntimeSnapshot(
+        ctx.executionContext.ownerKey,
+        result.output,
+      );
     }
   }
 }
 
-class StreamingTextCollectorHook
-implements RuntimeExecutionHook<
-  MemoryRuntimeRunContext
-> {
+class StreamingTextCollectorHook implements RuntimeExecutionHook<MemoryRuntimeRunContext> {
   readonly name = 'StreamingTextCollectorHook';
 
   onOutput(ctx: MemoryRuntimeRunContext, output: RuntimeOutput): void {
@@ -1050,10 +1082,7 @@ implements RuntimeExecutionHook<
   }
 }
 
-class OneShotCloseHook
-implements RuntimeExecutionHook<
-  MemoryRuntimeRunContext
-> {
+class OneShotCloseHook implements RuntimeExecutionHook<MemoryRuntimeRunContext> {
   readonly name = 'OneShotCloseHook';
 
   onOutput(ctx: MemoryRuntimeRunContext, output: RuntimeOutput): void {
@@ -1065,23 +1094,14 @@ implements RuntimeExecutionHook<
     }
     ctx.closeRequested = true;
     fs.mkdirSync(ctx.executionContext.ipcInputDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(ctx.executionContext.ipcInputDir, '_close'),
-      '',
-    );
+    fs.writeFileSync(path.join(ctx.executionContext.ipcInputDir, '_close'), '');
   }
 }
 
-class ResponseParserHook
-implements RuntimeExecutionHook<
-  MemoryRuntimeRunContext
-> {
+class ResponseParserHook implements RuntimeExecutionHook<MemoryRuntimeRunContext> {
   readonly name = 'ResponseParserHook';
 
-  afterRun(
-    ctx: MemoryRuntimeRunContext,
-    result: RunResult,
-  ): void {
+  afterRun(ctx: MemoryRuntimeRunContext, result: RunResult): void {
     const parsedBase = parseMemoryAgentResponseText(
       ctx.responseText ||
         result.terminalOutput?.result ||
@@ -1104,16 +1124,10 @@ implements RuntimeExecutionHook<
   }
 }
 
-class RunLogHook
-implements RuntimeExecutionHook<
-  MemoryRuntimeRunContext
-> {
+class RunLogHook implements RuntimeExecutionHook<MemoryRuntimeRunContext> {
   readonly name = 'RunLogHook';
 
-  afterRun(
-    ctx: MemoryRuntimeRunContext,
-    result: RunResult,
-  ): void {
+  afterRun(ctx: MemoryRuntimeRunContext, result: RunResult): void {
     const parsed = ctx.parsed || {
       success: false,
       error:
@@ -1138,9 +1152,7 @@ implements RuntimeExecutionHook<
   }
 }
 
-const MEMORY_RUNTIME_HOOKS: RuntimeExecutionHook<
-  MemoryRuntimeRunContext
->[] = [
+const MEMORY_RUNTIME_HOOKS: RuntimeExecutionHook<MemoryRuntimeRunContext>[] = [
   new MemoryPromptBuilderHook(),
   new RuntimeStatePersistenceHook(),
   new StreamingTextCollectorHook(),
@@ -1154,10 +1166,9 @@ export class MemoryOrchestrator {
   private idleCheckTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
-    private readonly requestExecutor: RuntimeRequestExecutor<
-      MemoryRuntimeRunContext
-    > =
-      new RuntimeRequestExecutor(MEMORY_RUNTIME_HOOKS),
+    private readonly requestExecutor: RuntimeRequestExecutor<MemoryRuntimeRunContext> = new RuntimeRequestExecutor(
+      MEMORY_RUNTIME_HOOKS,
+    ),
   ) {}
 
   startIdleChecks(): void {
@@ -1463,6 +1474,32 @@ export class MemoryOrchestrator {
           ...(message as Record<string, unknown>),
           type: msgType,
         } as unknown as MemoryExecutionRequest,
+        timeoutMs,
+      ),
+    );
+  }
+
+  async continuationSummary(
+    ownerKey: string,
+    options: {
+      workspaceFolder: string;
+      systemPrompt: string;
+      userMessage: string;
+    },
+  ): Promise<MemoryAgentResponse> {
+    const requestId = crypto.randomUUID();
+    const timeoutMs =
+      getSystemSettings().memorySendTimeout || DEFAULT_QUERY_TIMEOUT_MS;
+    return this.runSerialized(ownerKey, () =>
+      this.execute(
+        ownerKey,
+        requestId,
+        {
+          type: 'continuation_summary',
+          workspaceFolder: options.workspaceFolder,
+          systemPrompt: options.systemPrompt,
+          userMessage: options.userMessage,
+        },
         timeoutMs,
       ),
     );

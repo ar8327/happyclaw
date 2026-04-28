@@ -66,7 +66,7 @@ export class MemoryPlugin implements ContextPlugin {
       // --- memory_remember ---
       {
         name: 'memory_remember',
-        description: '告诉记忆系统记住某条信息。用户说「记住」或发现重要信息时使用。',
+        description: '告诉记忆系统在后台记住某条信息。用户说「记住」或发现重要信息时使用。此工具只确认已提交后台写入，不等待记忆整理完成。',
         parameters: {
           type: 'object' as const,
           properties: {
@@ -93,7 +93,7 @@ export class MemoryPlugin implements ContextPlugin {
           if (!result.ok) {
             return { content: result.errorMsg, isError: true };
           }
-          return { content: '已通知记忆系统。' };
+          return { content: '已提交后台记忆写入。' };
         },
       },
     ];
@@ -170,6 +170,8 @@ export class MemoryPlugin implements ContextPlugin {
       '避免用户以为你卡死了。如果是 IM 渠道，用 send_message 发送提示后再调用 memory_query。',
       '',
       '**memory_remember — 主动记忆**',
+      '',
+      'memory_remember 是后台写入工具：调用成功只表示任务已提交，不代表记忆文件已经整理完成。',
       '',
       '每次对话结束后，系统会自动整理对话内容存入记忆，所以不需要频繁手动记录。',
       '只在以下情况使用：',

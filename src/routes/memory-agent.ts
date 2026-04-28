@@ -144,13 +144,15 @@ memoryAgentRoutes.post('/remember', async (c) => {
       channelLabel = resolveChannelLabel(chatJid, names.get(chatJid));
     }
 
-    await orchestrator.send(body.userId, {
+    void orchestrator.send(body.userId, {
       type: 'remember',
       content: body.content,
       importance: body.importance || 'normal',
       chatJid,
       workspaceFolder,
       channelLabel,
+    }).catch((err) => {
+      logger.error({ err, userId: body.userId }, 'Memory remember background task failed');
     });
     return c.json({ accepted: true });
   } catch (err) {

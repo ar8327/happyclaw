@@ -157,27 +157,42 @@ export class CodexRunner implements AgentRunner {
     });
   }
 
-  private buildCompactLifecycleMessages(): NormalizedMessage[] {
+  private buildCompactStartedMessage(): NormalizedMessage {
+    return {
+      kind: 'stream_event',
+      event: {
+        eventType: 'lifecycle',
+        phase: 'compact_started',
+        trigger: 'synthetic_threshold',
+      },
+    };
+  }
+
+  private buildCompactCompletedMessage(): NormalizedMessage {
+    return {
+      kind: 'stream_event',
+      event: {
+        eventType: 'lifecycle',
+        phase: 'compact_completed',
+        repairHints: {
+          recentImChannels: this.opts.state.getActiveImChannels(),
+        },
+      },
+    };
+  }
+
+  private buildResumeInstructions(): string {
+    const activeChannels = this.opts.state.getActiveImChannels();
     return [
-      {
-        kind: 'stream_event',
-        event: {
-          eventType: 'lifecycle',
-          phase: 'compact_started',
-          trigger: 'synthetic_threshold',
-        },
-      },
-      {
-        kind: 'stream_event',
-        event: {
-          eventType: 'lifecycle',
-          phase: 'compact_completed',
-          repairHints: {
-            recentImChannels: this.opts.state.getActiveImChannels(),
-          },
-        },
-      },
-    ];
+      'Continue the existing HappyClaw conversation thread.',
+      'Follow the system, workspace, memory, and routing instructions already established earlier in this thread.',
+      'Focus on the latest user message. Do not repeat old replies.',
+      'Your stdout is only visible in the Web UI. For IM channels, use send_message with the channel from the latest message source attribute.',
+      activeChannels.length > 0
+        ? `Recently active IM channels: ${activeChannels.join(', ')}.`
+        : '',
+      'If exact long-term memory is needed, call memory_query instead of guessing.',
+    ].filter(Boolean).join('\n');
   }
 
   async *runQuery(config: QueryConfig): AsyncGenerator<NormalizedMessage, QueryResult> {
@@ -185,10 +200,17 @@ export class CodexRunner implements AgentRunner {
     const { log } = opts;
 
     const composedPrompt = config.prompt;
+    const resumeTarget = this.startFreshOnNextTurn
+      ? undefined
+      : (config.resumeAt || config.sessionId || undefined);
+    const systemPrompt = resumeTarget
+      ? this.buildResumeInstructions()
+      : config.systemPrompt;
 
-    // This depends on @openai/codex-sdk re-reading model_instructions_file on each run.
-    // Keep the SDK version pinned until that behavior is re-verified during upgrades.
-    fs.writeFileSync(this.instructionsFile, config.systemPrompt, 'utf-8');
+    fs.writeFileSync(this.instructionsFile, systemPrompt, 'utf-8');
+    log(
+      `Codex instructions prepared: mode=${resumeTarget ? 'resume-minimal' : 'fresh-full'}, chars=${systemPrompt.length}, promptChars=${composedPrompt.length}`,
+    );
 
     // Prepare images (base64 → temp files)
     let imagePaths: string[] | undefined;
@@ -197,11 +219,7 @@ export class CodexRunner implements AgentRunner {
     }
 
     // Start or resume thread
-    this.session.startOrResume(
-      this.startFreshOnNextTurn
-        ? undefined
-        : (config.resumeAt || config.sessionId || undefined),
-    );
+    this.session.startOrResume(resumeTarget);
     this.startFreshOnNextTurn = false;
 
     // Run turn and convert events
@@ -279,7 +297,7 @@ export class CodexRunner implements AgentRunner {
     }
 
     if (!this.opts.disableSyntheticArchive && this.archiveMgr.shouldArchive()) {
-      yield* this.buildCompactLifecycleMessages();
+      yield this.buildCompactStartedMessage();
       yield {
         kind: 'stream_event',
         event: {
@@ -291,13 +309,23 @@ export class CodexRunner implements AgentRunner {
         this.opts.containerInput.groupFolder,
         this.opts.containerInput.userId || undefined,
       );
-      this.session.resetThread();
-      this.startFreshOnNextTurn = true;
+      if (archiveResult?.success) {
+        this.session.resetThread();
+        this.startFreshOnNextTurn = true;
+        yield this.buildCompactCompletedMessage();
+      } else {
+        log(
+          `Skipping synthetic compact reset for ${this.opts.containerInput.groupFolder}: session_wrapup did not complete`,
+        );
+      }
       yield {
         kind: 'stream_event',
         event: {
           eventType: 'lifecycle',
           phase: 'archive_completed',
+          statusText: archiveResult?.success
+            ? 'session_wrapup_completed'
+            : 'session_wrapup_failed',
           archivedFolders: [this.opts.containerInput.groupFolder],
           transcriptFiles: [
             archiveResult?.conversationArchiveFile,
@@ -311,7 +339,9 @@ export class CodexRunner implements AgentRunner {
     }
 
     // Emit resume anchor (thread ID)
-    const currentThreadId = threadId || this.session.getThreadId();
+    const currentThreadId = this.startFreshOnNextTurn
+      ? null
+      : (threadId || this.session.getThreadId());
     if (currentThreadId) {
       yield { kind: 'resume_anchor', anchor: currentThreadId };
     }

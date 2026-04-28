@@ -1985,6 +1985,13 @@ export function getTranscriptMessagesSince(
   >;
 }
 
+export function getMaxMessageRowid(chatJid: string): number {
+  const row = db
+    .prepare('SELECT MAX(rowid) AS rowid FROM messages WHERE chat_jid = ?')
+    .get(chatJid) as { rowid: number | null } | undefined;
+  return row?.rowid ?? 0;
+}
+
 /**
  * Migration helper: look up the rowid of a message by its old-format
  * (timestamp, id) cursor. Falls back to MAX(rowid) at or before that

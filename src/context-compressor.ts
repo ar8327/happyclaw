@@ -1,9 +1,11 @@
 /**
- * Context Compressor — generates conversation summaries using the Anthropic Messages API.
+ * Context Compressor — generates conversation summaries.
  *
- * Uses Sonnet to summarize conversation history, then resets the SDK session
- * so the next agent invocation starts fresh with the summary injected.
+ * Stores summaries used when the next agent invocation starts fresh with
+ * prior context injected.
  */
+
+import fs from 'fs';
 
 import { logger } from './logger.js';
 import {
@@ -43,6 +45,23 @@ export interface CompressOptions {
   beforeTimestamp?: string;
 }
 
+export interface ContinuationSummaryOptions {
+  groupFolder: string;
+  chatJids: string[];
+  transcriptFilePath: string;
+  generateSummary: (input: {
+    systemPrompt: string;
+    userMessage: string;
+  }) => Promise<{ summary: string; modelUsed?: string }>;
+}
+
+export interface ContinuationSummaryResult {
+  success: boolean;
+  summary?: string;
+  chatJids?: string[];
+  error?: string;
+}
+
 /** Check if a folder is currently being compressed */
 export function isCompressing(groupFolder: string): boolean {
   return compressingFolders.has(groupFolder);
@@ -53,7 +72,10 @@ export function isCompressing(groupFolder: string): boolean {
  * Tries local machine environment first, then local Claude Code OAuth credentials.
  * Returns { type, token } where type determines the HTTP header to use.
  */
-function getAuthCredentials(): { type: 'api-key' | 'bearer'; token: string } | null {
+function getAuthCredentials(): {
+  type: 'api-key' | 'bearer';
+  token: string;
+} | null {
   if (process.env.ANTHROPIC_API_KEY) {
     return { type: 'api-key', token: process.env.ANTHROPIC_API_KEY };
   }
@@ -95,6 +117,11 @@ function buildTranscript(
     lines.push(`[${role}]: ${content}`);
   }
   return lines.join('\n\n');
+}
+
+function truncateForSummary(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  return `${text.slice(0, maxLen)}\n\n[...内容截断...]`;
 }
 
 /**
@@ -172,6 +199,104 @@ async function callSonnet(
   }
 
   return textBlock.text;
+}
+
+export async function updateContinuationSummaryFromTranscript(
+  options: ContinuationSummaryOptions,
+): Promise<ContinuationSummaryResult> {
+  const chatJids = Array.from(
+    new Set(options.chatJids.filter((jid) => jid.trim().length > 0)),
+  );
+  if (chatJids.length === 0) {
+    return { success: false, error: 'No chatJids provided' };
+  }
+
+  let transcript: string;
+  try {
+    transcript = truncateForSummary(
+      await fs.promises.readFile(options.transcriptFilePath, 'utf-8'),
+      80_000,
+    );
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  const previousSummaries = new Map<string, string>();
+  for (const jid of chatJids) {
+    const existing = getContextSummary(options.groupFolder, jid);
+    if (existing?.summary) {
+      previousSummaries.set(existing.summary, jid);
+    }
+  }
+  const previousSummaryText =
+    previousSummaries.size > 0
+      ? Array.from(previousSummaries.keys()).join('\n\n---\n\n')
+      : '无';
+
+  const summaryPrompt = `你是 HappyClaw 的 continuation summary 生成器。你的输出会被注入到新的模型 thread 中，用于延续刚刚 compact 的对话。
+
+目标：
+1. 保留下一轮继续对话必须知道的上下文，而不是写长期记忆索引
+2. 保留当前任务状态、刚完成的动作、未完成事项、用户最近表达的意图和情绪
+3. 保留短句指代所需的最近上下文，例如“确实”“有道理”“就这样”指向什么
+4. 保留 IM 发送状态，例如已经通过 Telegram 或飞书发给用户的内容
+5. 合并旧摘要和新 transcript，不要丢掉仍然相关的早期上下文
+
+要求：
+- 使用中文
+- 控制在 2000 tokens 以内
+- 直接输出摘要正文，不要输出 JSON，不要加解释性前言
+- 不要编造 transcript 中没有的信息`;
+
+  try {
+    const generated = await options.generateSummary({
+      systemPrompt: summaryPrompt,
+      userMessage: [
+        '旧 continuation summary：',
+        previousSummaryText,
+        '',
+        '新 compact transcript：',
+        transcript,
+      ].join('\n'),
+    });
+    const summary = generated.summary.trim();
+    if (!summary) {
+      return {
+        success: false,
+        error: 'Continuation summary runner returned empty response',
+      };
+    }
+
+    for (const jid of chatJids) {
+      setContextSummary({
+        group_folder: options.groupFolder,
+        chat_jid: jid,
+        summary,
+        message_count: (transcript.match(/^\*\*/gm) || []).length,
+        created_at: new Date().toISOString(),
+        model_used: generated.modelUsed || 'memory-runner',
+      });
+    }
+
+    logger.info(
+      {
+        groupFolder: options.groupFolder,
+        chatJids,
+        summaryLength: summary.length,
+      },
+      'Continuation summary updated from transcript',
+    );
+
+    return { success: true, summary, chatJids };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 /**
@@ -253,7 +378,14 @@ Keep the summary under 2000 tokens. Focus on WHAT was decided and done, not the 
       summaryPrompt,
       `Please summarize this conversation:\n\n${transcript}`,
     );
-    logger.info({ groupFolder, durationMs: Date.now() - t0, summaryLength: summary.length }, 'Summary generated');
+    logger.info(
+      {
+        groupFolder,
+        durationMs: Date.now() - t0,
+        summaryLength: summary.length,
+      },
+      'Summary generated',
+    );
 
     // 4. Store summary before resetting the session.
     const contextSummary: ContextSummary = {

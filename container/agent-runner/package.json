@@ -11,7 +11,7 @@
   "// codex-sdk upgrade note": "Do not bump @openai/codex-sdk without verifying model_instructions_file is re-read per turn.",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.28.0",
-    "@openai/codex-sdk": "0.116.0",
+    "@openai/codex-sdk": "0.125.0",
     "cron-parser": "^5.0.0",
     "happyclaw-agent-runner-core": "file:../agent-runner-core",
     "zod": "^4.0.0"

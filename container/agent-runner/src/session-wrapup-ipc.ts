@@ -29,6 +29,8 @@ export interface SessionWrapupResponse {
   workspaceFolder?: string;
   chatJids?: string[];
   conversationArchiveFile?: string;
+  continuationSummary?: string;
+  continuationSummaryChatJids?: string[];
   noNewMessages?: boolean;
 }
 
@@ -70,6 +72,16 @@ function parseWrapupResponse(filePath: string): SessionWrapupResponse | null {
         typeof raw.conversationArchiveFile === 'string'
           ? raw.conversationArchiveFile
           : undefined,
+      continuationSummary:
+        typeof raw.continuationSummary === 'string'
+          ? raw.continuationSummary
+          : undefined,
+      continuationSummaryChatJids: Array.isArray(raw.continuationSummaryChatJids)
+        ? raw.continuationSummaryChatJids.filter(
+            (jid): jid is string =>
+              typeof jid === 'string' && jid.trim().length > 0,
+          )
+        : undefined,
       noNewMessages: raw.noNewMessages === true,
     };
   } catch {

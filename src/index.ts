@@ -91,7 +91,11 @@ import {
 } from './db.js';
 // feishu.js deprecated exports are no longer needed; imManager handles all connections
 import { imManager } from './im-manager.js';
-import { getChannelType, extractChatId, type IMSendOptions } from './im-channel.js';
+import {
+  getChannelType,
+  extractChatId,
+  type IMSendOptions,
+} from './im-channel.js';
 import { abortAllStreamingSessions } from './feishu-streaming-card.js';
 import {
   type ProgressCardController,
@@ -166,16 +170,22 @@ import {
 } from './web.js';
 import { streamingBlocksManager } from './streaming-blocks.js';
 import {
-  compressContext,
-  shouldAutoCompress,
+  updateContinuationSummaryFromTranscript,
 } from './context-compressor.js';
 import { turnObservabilityManager } from './turn-observability.js';
 import { verifyPairingCode } from './telegram-pairing.js';
 import { MemoryOrchestrator } from './memory-orchestrator.js';
+import {
+  commitTranscriptExportSuccess,
+  exportTranscriptSnapshotForUser,
+} from './memory-agent.js';
 import { injectMemoryOrchestratorDeps } from './routes/memory-agent.js';
 import { injectFeishuApiDeps } from './routes/feishu-api.js';
 import { injectMemoryDeps } from './routes/memory.js';
-import { sendToolCommentary, resetTurnCommentaryTimer } from './im-commentary.js';
+import {
+  sendToolCommentary,
+  resetTurnCommentaryTimer,
+} from './im-commentary.js';
 import { getLocalWorkbenchUserPublic } from './local-user.js';
 import { getDefaultRunnerId } from './runner-registry.js';
 
@@ -356,20 +366,38 @@ function getRuntimeBootstrapState(
     ? buildWorkerSessionId(agentId)
     : `main:${groupFolder}`;
   const runtimeState = getSessionRuntimeState(sessionKey);
-  const providerSessionId =
-    runtimeState?.provider_session_id || getSession(groupFolder, agentId) || undefined;
+  const providerState = parseRuntimeStateJson<Record<string, unknown>>(
+    runtimeState?.provider_state_json,
+    {},
+  );
+  const hasCodexActiveThreadState = Object.prototype.hasOwnProperty.call(
+    providerState,
+    'activeThreadId',
+  );
+  const activeThreadId =
+    typeof providerState.activeThreadId === 'string'
+      ? providerState.activeThreadId
+      : undefined;
+  const shouldStartFresh =
+    providerState.startFreshOnNextTurn === true ||
+    (hasCodexActiveThreadState && providerState.activeThreadId == null);
+  const providerSessionId = shouldStartFresh
+    ? undefined
+    : activeThreadId ||
+      runtimeState?.provider_session_id ||
+      getSession(groupFolder, agentId) ||
+      undefined;
   if (!runtimeState) {
     return { providerSessionId };
   }
 
   return {
     providerSessionId,
-    resumeAnchor: runtimeState.resume_anchor || undefined,
+    resumeAnchor: shouldStartFresh
+      ? undefined
+      : activeThreadId || runtimeState.resume_anchor || undefined,
     bootstrapState: {
-      providerState: parseRuntimeStateJson<Record<string, unknown>>(
-        runtimeState.provider_state_json,
-        {},
-      ),
+      providerState,
       recentImChannels: parseRuntimeStateJson<string[]>(
         runtimeState.recent_im_channels_json,
         [],
@@ -401,8 +429,10 @@ function resolveStableSessionOwnerKey(
   agentId?: string,
 ): string | undefined {
   if (agentId) {
-    return getSessionRecord(buildWorkerSessionRecordId(agentId))?.owner_key
-      || resolveSessionOwnerKey(groupFolder);
+    return (
+      getSessionRecord(buildWorkerSessionRecordId(agentId))?.owner_key ||
+      resolveSessionOwnerKey(groupFolder)
+    );
   }
   return resolveSessionOwnerKey(groupFolder);
 }
@@ -414,11 +444,13 @@ function isImplicitDefaultSessionBinding(
 ): boolean {
   if (!group || !binding) return false;
   if (chatJid.startsWith('web:')) return false;
-  return binding.session_id === `main:${group.folder}`
-    && binding.binding_mode === 'source_only'
-    && binding.reply_policy === 'source_only'
-    && binding.activation_mode === 'auto'
-    && binding.require_mention !== true;
+  return (
+    binding.session_id === `main:${group.folder}` &&
+    binding.binding_mode === 'source_only' &&
+    binding.reply_policy === 'source_only' &&
+    binding.activation_mode === 'auto' &&
+    binding.require_mention !== true
+  );
 }
 
 function getExplicitSessionBinding(
@@ -572,7 +604,8 @@ function resolveChatOwnerKey(
     if (workerSession?.owner_key) return workerSession.owner_key;
   }
 
-  const group = fallbackGroup ?? registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  const group =
+    fallbackGroup ?? registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   if (!group) return undefined;
   return resolveSessionOwnerKey(group.folder);
 }
@@ -595,12 +628,14 @@ function applyExplicitChatBinding(
   const now = new Date().toISOString();
   const nextActivationMode = group.activation_mode ?? 'auto';
   const nextRequireMention = group.require_mention === true;
-  const defaultSessionId = chatJid.startsWith('web:') ? null : `main:${group.folder}`;
+  const defaultSessionId = chatJid.startsWith('web:')
+    ? null
+    : `main:${group.folder}`;
   const isDefaultBinding = !!defaultSessionId && sessionId === defaultSessionId;
   const isDefaultPolicy =
-    nextActivationMode === 'auto'
-    && !nextRequireMention
-    && replyPolicy === 'source_only';
+    nextActivationMode === 'auto' &&
+    !nextRequireMention &&
+    replyPolicy === 'source_only';
   if (!sessionId || (isDefaultBinding && isDefaultPolicy)) {
     deleteSessionBinding(chatJid);
     return;
@@ -668,7 +703,11 @@ function unbindImGroup(jid: string, reason: string): void {
         activation_mode: 'disabled' as const,
       };
       setRegisteredGroup(jid, disabledGroup);
-      applyExplicitChatBinding(jid, disabledGroup, `main:${disabledGroup.folder}`);
+      applyExplicitChatBinding(
+        jid,
+        disabledGroup,
+        `main:${disabledGroup.folder}`,
+      );
       registeredGroups[jid] = disabledGroup;
     }
     return;
@@ -676,7 +715,10 @@ function unbindImGroup(jid: string, reason: string): void {
   if (!group) {
     deleteSessionBinding(jid);
     logger.info(
-      { jid, sessionId: binding?.session_id || storedBinding?.session_id || null },
+      {
+        jid,
+        sessionId: binding?.session_id || storedBinding?.session_id || null,
+      },
       `${reason} but backing IM group is already gone`,
     );
     return;
@@ -730,9 +772,12 @@ function resolveEffectiveGroup(
     return { effectiveGroup: group, isHome: true };
   }
 
-  const primaryJid = getJidsByFolder(group.folder).find((jid) => jid.startsWith('web:'));
+  const primaryJid = getJidsByFolder(group.folder).find((jid) =>
+    jid.startsWith('web:'),
+  );
   if (primaryJid && primaryJid !== chatJid && primarySessionFolder) {
-    const sibling = registeredGroups[primaryJid] ?? getRegisteredGroup(primaryJid);
+    const sibling =
+      registeredGroups[primaryJid] ?? getRegisteredGroup(primaryJid);
     if (sibling && !registeredGroups[primaryJid]) {
       registeredGroups[primaryJid] = sibling;
     }
@@ -875,18 +920,16 @@ function extractLocalImImagePaths(
     pushCandidate(match[1] || '');
   }
 
-  const tryResolveInRoot = (
-    root: string,
-    candidate: string,
-  ): string | null => {
+  const tryResolveInRoot = (root: string, candidate: string): string | null => {
     const resolved = path.resolve(root, candidate);
     const ext = path.extname(resolved).toLowerCase();
     if (!RELATIVE_IMAGE_EXTENSIONS.has(ext)) return null;
-    if (resolved !== root && !resolved.startsWith(root + path.sep))
-      return null;
+    if (resolved !== root && !resolved.startsWith(root + path.sep)) return null;
     try {
       if (fs.statSync(resolved).isFile()) return resolved;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     return null;
   };
 
@@ -1109,7 +1152,12 @@ function resolveBindingTarget(
   );
   if (!workspace) return null;
 
-  if (!agentSpec || agentSpec === 'main' || agentSpec === '主会话' || agentSpec === '主对话') {
+  if (
+    !agentSpec ||
+    agentSpec === 'main' ||
+    agentSpec === '主会话' ||
+    agentSpec === '主对话'
+  ) {
     if (!findWebJidForFolder(workspace.folder)) return null;
     return {
       sessionId: `main:${workspace.folder}`,
@@ -1191,11 +1239,7 @@ function handleListCommand(chatJid: string): string {
   const location = getLocationForGroup(chatJid, group);
 
   return (
-    formatWorkspaceList(
-      workspaces,
-      location.folder,
-      location.boundAgentId,
-    ) +
+    formatWorkspaceList(workspaces, location.folder, location.boundAgentId) +
     '\n💡 使用 /bind <workspace> 或 /bind <workspace>/<agent短ID>'
   );
 }
@@ -1214,8 +1258,8 @@ function handleStatusCommand(chatJid: string): string {
   const lookupGroup = (jid: string) =>
     registeredGroups[jid] ?? getRegisteredGroup(jid);
   const groupState =
-    queueStatus.groups.find((g) => g.jid === effectiveQueueJid)
-    || queueStatus.groups.find((g) => {
+    queueStatus.groups.find((g) => g.jid === effectiveQueueJid) ||
+    queueStatus.groups.find((g) => {
       const rg = lookupGroup(g.jid);
       return rg?.folder === location.folder;
     });
@@ -1224,9 +1268,8 @@ function handleStatusCommand(chatJid: string): string {
   const queueIndex = waitingTargets
     .map((jid) => queueStatus.waitingGroupJids.indexOf(jid))
     .find((index) => index >= 0);
-  const queuePosition = !isActive && queueIndex !== undefined
-    ? queueIndex + 1
-    : null;
+  const queuePosition =
+    !isActive && queueIndex !== undefined ? queueIndex + 1 : null;
 
   return formatSystemStatus(
     location,
@@ -1295,11 +1338,7 @@ function handleBindCommand(chatJid: string, rawSpec: string): string {
     if (workspaces.length > 0) {
       lines.push('');
       lines.push(
-        formatWorkspaceList(
-          workspaces,
-          location.folder,
-          location.boundAgentId,
-        ),
+        formatWorkspaceList(workspaces, location.folder, location.boundAgentId),
       );
     }
     lines.push('');
@@ -1308,7 +1347,10 @@ function handleBindCommand(chatJid: string, rawSpec: string): string {
   };
 
   if (!rawSpec) {
-    return buildBindHelpLines([]) + '\n/new <名称> — 创建新工作区并绑定\n/unbind — 解绑回默认';
+    return (
+      buildBindHelpLines([]) +
+      '\n/new <名称> — 创建新工作区并绑定\n/unbind — 解绑回默认'
+    );
   }
 
   const resolved = resolveBindingTarget(userId, rawSpec);
@@ -1719,7 +1761,10 @@ function loadState(): void {
       registeredGroups = getAllRegisteredGroups();
     }
   } catch (err) {
-    logger.warn({ err }, 'Failed to ensure local operator primary Session alias');
+    logger.warn(
+      { err },
+      'Failed to ensure local operator primary Session alias',
+    );
   }
 
   // Initialize the local operator global CLAUDE.md from template when missing.
@@ -1837,7 +1882,11 @@ function escapeXml(s: string): string {
     .replace(/"/g, '&quot;');
 }
 
-function formatMessages(messages: NewMessage[], isShared = false, feishuAgentReply = false): string {
+function formatMessages(
+  messages: NewMessage[],
+  isShared = false,
+  feishuAgentReply = false,
+): string {
   const lines = messages.map((m) => {
     const content = isShared ? `[${m.sender_name}] ${m.content}` : m.content;
     const sourceJid = m.source_jid || m.chat_jid;
@@ -1850,7 +1899,8 @@ function formatMessages(messages: NewMessage[], isShared = false, feishuAgentRep
     // In agent-driven reply threading mode, expose message IDs for Feishu messages only,
     // so the agent can specify which message to reply to via send_message(reply_to_message_id=...)
     const isFeishuMsg = channelType === 'feishu';
-    const idAttr = feishuAgentReply && isFeishuMsg ? ` id="${escapeXml(m.id)}"` : '';
+    const idAttr =
+      feishuAgentReply && isFeishuMsg ? ` id="${escapeXml(m.id)}"` : '';
 
     // Build reply-to attributes if the message is replying to another message.
     // Uses lightweight attribute references instead of embedding full content —
@@ -1859,9 +1909,10 @@ function formatMessages(messages: NewMessage[], isShared = false, feishuAgentRep
     if (m.reply_to_id) {
       const original = getMessageById(m.reply_to_id, m.chat_jid);
       if (original) {
-        const preview = original.content.length > 30
-          ? original.content.slice(0, 30) + '...'
-          : original.content;
+        const preview =
+          original.content.length > 30
+            ? original.content.slice(0, 30) + '...'
+            : original.content;
         replyAttrs = ` reply-to="${escapeXml(m.reply_to_id)}" reply-to-sender="${escapeXml(original.sender_name)}" reply-to-preview="${escapeXml(preview)}"`;
       }
     }
@@ -1869,6 +1920,64 @@ function formatMessages(messages: NewMessage[], isShared = false, feishuAgentRep
     return `<message sender="${escapeXml(m.sender_name)}"${sourceAttr}${idAttr}${replyAttrs} time="${m.timestamp}">${escapeXml(content)}</message>`;
   });
   return `<messages>\n${lines.join('\n')}\n</messages>`;
+}
+
+const RECENT_CONTEXT_MESSAGE_LIMIT = 8;
+const RECENT_CONTEXT_MAX_CONTENT = 1200;
+
+function truncatePromptText(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  return `${text.slice(0, maxLen)}...`;
+}
+
+function formatRecentConversationContext(
+  messages: Array<NewMessage & { is_from_me: boolean }>,
+): string {
+  if (messages.length === 0) return '';
+
+  const lines = messages.map((m) => {
+    const sourceJid = m.source_jid || m.chat_jid;
+    const channelType = getChannelType(sourceJid);
+    const role =
+      m.sender === '__system__'
+        ? 'system'
+        : m.is_from_me
+          ? 'assistant'
+          : 'user';
+    const sourceAttr = channelType
+      ? ` source="${escapeXml(channelType)}:${escapeXml(extractChatId(sourceJid))}"`
+      : '';
+    const content = truncatePromptText(m.content, RECENT_CONTEXT_MAX_CONTENT);
+
+    return `<context-message role="${role}" sender="${escapeXml(m.sender_name)}"${sourceAttr} time="${m.timestamp}">${escapeXml(content)}</context-message>`;
+  });
+
+  return [
+    '<recent_context>',
+    '以下是同一聊天中当前输入之前的最近上下文，已经处理过。只用来理解当前消息的指代，不要重复回复这些旧消息。',
+    ...lines,
+    '</recent_context>',
+  ].join('\n');
+}
+
+function prependRecentContextForFreshThread(
+  chatJid: string,
+  currentMessages: NewMessage[],
+  prompt: string,
+  shouldInclude: boolean,
+): string {
+  if (!shouldInclude || currentMessages.length === 0) return prompt;
+
+  const firstCurrentMessage = currentMessages[0];
+  const recentMessages = getMessagesPage(
+    chatJid,
+    firstCurrentMessage.timestamp,
+    RECENT_CONTEXT_MESSAGE_LIMIT,
+  ).reverse();
+  const recentContext = formatRecentConversationContext(recentMessages);
+  if (!recentContext) return prompt;
+
+  return `${recentContext}\n\n${prompt}`;
 }
 
 function collectMessageImages(
@@ -1946,14 +2055,16 @@ function resolveRuntimeOwnerContext(chatJid: string): {
     const parentSession = workerSession?.parent_session_id
       ? getSessionRecord(workerSession.parent_session_id)
       : null;
-    const folder = group?.folder
-      || (parentSession?.id.startsWith('main:')
+    const folder =
+      group?.folder ||
+      (parentSession?.id.startsWith('main:')
         ? parentSession.id.slice('main:'.length)
         : '');
     if (!folder) return null;
-    const userId = workerSession?.owner_key
-      || parentSession?.owner_key
-      || resolveSessionOwnerKey(folder);
+    const userId =
+      workerSession?.owner_key ||
+      parentSession?.owner_key ||
+      resolveSessionOwnerKey(folder);
     return userId ? { folder, userId } : null;
   }
   if (!group?.folder) return null;
@@ -2047,7 +2158,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const feishuAgentReply = ownerUserId
     ? getImFeishuConfig()?.replyThreadingMode === 'agent'
     : false;
-  const prompt = formatMessages(missedMessages, shared, feishuAgentReply);
+  const runtimeBootstrapForPrompt = getRuntimeBootstrapState(
+    effectiveGroup.folder,
+  );
+  const prompt = prependRecentContextForFreshThread(
+    chatJid,
+    missedMessages,
+    formatMessages(missedMessages, shared, feishuAgentReply),
+    !runtimeBootstrapForPrompt.providerSessionId,
+  );
 
   const images = collectMessageImages(chatJid, missedMessages);
   const imagesForAgent = images.length > 0 ? images : undefined;
@@ -2120,51 +2239,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     cursorCommitted = true;
   };
 
-  // Auto-compression: fire-and-forget after successful completion.
-  // Called from both 'drained' and normal-exit paths.
-  // For IM groups with explicit session binding, inherit compression from the bound target.
-  const tryAutoCompress = (): void => {
-    const ownCompression = group.context_compression;
-    const boundTarget = resolveBoundSessionTarget(chatJid, group);
-    const effectiveCompression =
-      (ownCompression && ownCompression !== 'off')
-        ? ownCompression
-        : boundTarget?.contextCompression ?? ownCompression ?? 'off';
-    if (
-      effectiveCompression !== 'auto' ||
-      !shouldAutoCompress(effectiveGroup.folder, chatJid)
-    ) {
-      return;
-    }
-    const folder = effectiveGroup.folder;
-    const sessionIdBeforeCompress = sessions[folder];
-    const compressBoundary = new Date().toISOString();
-    compressContext(folder, chatJid, { beforeTimestamp: compressBoundary })
-      .then((result) => {
-        if (result.success) {
-          if (sessions[folder] === sessionIdBeforeCompress) {
-            delete sessions[folder];
-          } else {
-            logger.info(
-              { folder, chatJid },
-              'Session changed during auto-compression, skipping session clear (new agent run likely started)',
-            );
-          }
-          logger.info(
-            { folder, chatJid, messageCount: result.messageCount },
-            'Auto-compressed context after successful agent run',
-          );
-          sendSystemMessage(
-            chatJid,
-            'context_compressed',
-            `历史对话已自动压缩为摘要（${result.messageCount} 条消息），后续对话基于摘要继续。`,
-          );
-        }
-      })
-      .catch((err) => {
-        logger.error({ folder, chatJid, err }, 'Auto-compression failed');
-      });
-  };
+  // Legacy message-count based context compression is retired.
+  // Codex now uses the synthetic compact/session_wrapup path.
+  const tryAutoCompress = (): void => {};
 
   const finalizeCurrentTurn = (
     status: 'completed' | 'error' | 'interrupted' | 'drained',
@@ -2276,7 +2353,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
           // IM Commentary: update the progress card with human-readable explanation (fire-and-forget)
           const _se = result.streamEvent;
-          if (_se.eventType === 'tool_use_start' && feishuConfig?.imCommentary && progressCard) {
+          if (
+            _se.eventType === 'tool_use_start' &&
+            feishuConfig?.imCommentary &&
+            progressCard
+          ) {
             sendToolCommentary({
               folder: group.folder,
               toolName: _se.toolName ?? '',
@@ -2475,7 +2556,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 },
                 'Token usage persisted',
               );
-
             } catch (err) {
               logger.warn({ err, chatJid }, 'Failed to persist token usage');
             }
@@ -2523,8 +2603,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           await completeAndResetProgressSessionsForFolder(group.folder);
         }
 
-          // Query 返回无文本结果（仅工具调用、send_message 等）：通知前端清除
-          // 流式状态，避免 agent idle 期间持续显示"正在思考..."。
+        // Query 返回无文本结果（仅工具调用、send_message 等）：通知前端清除
+        // 流式状态，避免 agent idle 期间持续显示"正在思考..."。
         if (result.status === 'success' && !result.result) {
           const pendingCounts = turnManager.getPendingCounts(group.folder);
           if (pendingCounts.size > 0) {
@@ -2600,8 +2680,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           : handoffAfterCompletedTurn
             ? 'completed'
             : isDrained
-            ? 'drained'
-            : 'completed',
+              ? 'drained'
+              : 'completed',
       { errorDetail: output.error || lastError },
     );
 
@@ -2791,7 +2871,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
     sendSystemMessage(chatJid, 'agent_error', errorDetail);
     // Forward agent errors to IM so users aren't left waiting in silence
-    const isRateLimit = /overloaded|limit|rate.?limit|quota|resets/i.test(errorDetail);
+    const isRateLimit = /overloaded|limit|rate.?limit|quota|resets/i.test(
+      errorDetail,
+    );
     if (errorImChannel) {
       const sendOpts: IMSendOptions = {};
       sendImWithFailTracking(
@@ -3003,7 +3085,9 @@ async function runAgent(
         isHome,
         isAdminHome,
         images,
-        userId: sessionRecord?.owner_key || resolveStableSessionOwnerKey(group.folder),
+        userId:
+          sessionRecord?.owner_key ||
+          resolveStableSessionOwnerKey(group.folder),
         turnId: activeTurnId,
         contextSummary,
         bootstrapState: runtimeBootstrap.bootstrapState,
@@ -3220,17 +3304,22 @@ function startIpcWatcher(): void {
                       // Resolve reply target: in 'agent' mode, prefer agent-supplied replyToMsgId;
                       // in 'auto' mode (or fallback), use trigger map → DB lookup.
                       // Agent reply mode only applies to Feishu channels.
-                      const isFeishuTarget = data.targetChannel.startsWith('feishu:');
+                      const isFeishuTarget =
+                        data.targetChannel.startsWith('feishu:');
                       const ownerUserId = resolveSessionOwnerKey(sourceGroup);
-                      const agentReplyMode = isFeishuTarget && ownerUserId
-                        ? getImFeishuConfig()?.replyThreadingMode === 'agent'
-                        : false;
-                      const triggerMap = triggerMessagesByFolder.get(sourceGroup);
+                      const agentReplyMode =
+                        isFeishuTarget && ownerUserId
+                          ? getImFeishuConfig()?.replyThreadingMode === 'agent'
+                          : false;
+                      const triggerMap =
+                        triggerMessagesByFolder.get(sourceGroup);
                       const triggerMsg = triggerMap?.get(data.targetChannel);
-                      const lastInbound = triggerMsg || getLastInboundMessage(
-                        data.chatJid,
-                        data.targetChannel, // source_jid = the IM channel
-                      );
+                      const lastInbound =
+                        triggerMsg ||
+                        getLastInboundMessage(
+                          data.chatJid,
+                          data.targetChannel, // source_jid = the IM channel
+                        );
                       const sendOptions: IMSendOptions = {};
                       // Agent-driven reply: use agent-specified ID if available and mode is 'agent'
                       if (agentReplyMode && data.replyToMsgId) {
@@ -3256,14 +3345,27 @@ function startIpcWatcher(): void {
                         );
                         imSendFailCounts.delete(data.targetChannel);
                       } catch (err) {
-                        logger.warn({ imJid: data.targetChannel, err }, 'Failed to relay message to IM');
-                        const count = (imSendFailCounts.get(data.targetChannel) ?? 0) + 1;
+                        logger.warn(
+                          { imJid: data.targetChannel, err },
+                          'Failed to relay message to IM',
+                        );
+                        const count =
+                          (imSendFailCounts.get(data.targetChannel) ?? 0) + 1;
                         imSendFailCounts.set(data.targetChannel, count);
-                        if (count >= IM_SEND_FAIL_THRESHOLD && shouldAutoUnbindOnFailure(data.targetChannel)) {
+                        if (
+                          count >= IM_SEND_FAIL_THRESHOLD &&
+                          shouldAutoUnbindOnFailure(data.targetChannel)
+                        ) {
                           try {
-                            unbindImGroup(data.targetChannel, 'Auto-unbound IM group after consecutive send failures');
+                            unbindImGroup(
+                              data.targetChannel,
+                              'Auto-unbound IM group after consecutive send failures',
+                            );
                           } catch (unbindErr) {
-                            logger.error({ imJid: data.targetChannel, unbindErr }, 'Failed to auto-unbind IM group');
+                            logger.error(
+                              { imJid: data.targetChannel, unbindErr },
+                              'Failed to auto-unbind IM group',
+                            );
                           }
                         }
                       }
@@ -3320,21 +3422,29 @@ function startIpcWatcher(): void {
                       if (data.targetChannel) {
                         // Resolve reply target for Feishu images (same logic as send_message)
                         let imageReplyToMsgId: string | undefined;
-                        const isFeishuTarget = data.targetChannel.startsWith('feishu:');
+                        const isFeishuTarget =
+                          data.targetChannel.startsWith('feishu:');
                         if (isFeishuTarget) {
-                          const ownerUserId = resolveSessionOwnerKey(sourceGroup);
+                          const ownerUserId =
+                            resolveSessionOwnerKey(sourceGroup);
                           const agentReplyMode = ownerUserId
-                            ? getImFeishuConfig()?.replyThreadingMode === 'agent'
+                            ? getImFeishuConfig()?.replyThreadingMode ===
+                              'agent'
                             : false;
                           if (agentReplyMode && data.replyToMsgId) {
                             imageReplyToMsgId = data.replyToMsgId;
                           } else {
-                            const triggerMap = triggerMessagesByFolder.get(sourceGroup);
-                            const triggerMsg = triggerMap?.get(data.targetChannel);
-                            const lastInbound = triggerMsg || getLastInboundMessage(
-                              data.chatJid,
+                            const triggerMap =
+                              triggerMessagesByFolder.get(sourceGroup);
+                            const triggerMsg = triggerMap?.get(
                               data.targetChannel,
                             );
+                            const lastInbound =
+                              triggerMsg ||
+                              getLastInboundMessage(
+                                data.chatJid,
+                                data.targetChannel,
+                              );
                             if (lastInbound?.id) {
                               imageReplyToMsgId = lastInbound.id;
                             }
@@ -3514,8 +3624,17 @@ function writeConversationArchiveFromTranscript(
   workspaceFolder: string,
   transcriptFile: string,
 ): string {
-  const transcriptPath = path.join(DATA_DIR, 'memory', ownerKey, transcriptFile);
-  const conversationsDir = path.join(GROUPS_DIR, workspaceFolder, 'conversations');
+  const transcriptPath = path.join(
+    DATA_DIR,
+    'memory',
+    ownerKey,
+    transcriptFile,
+  );
+  const conversationsDir = path.join(
+    GROUPS_DIR,
+    workspaceFolder,
+    'conversations',
+  );
   fs.mkdirSync(conversationsDir, { recursive: true });
   const archiveFileName = path.basename(transcriptFile);
   const archivePath = path.join(conversationsDir, archiveFileName);
@@ -3870,6 +3989,8 @@ async function processTaskIpc(
           transcriptFile?: string;
           chatJids?: string[];
           conversationArchiveFile?: string;
+          continuationSummary?: string;
+          continuationSummaryChatJids?: string[];
           noNewMessages?: boolean;
         }): void => {
           if (!requestId) return;
@@ -3881,7 +4002,13 @@ async function processTaskIpc(
           });
         };
 
-        if (!data.userId || !workspaceFolder || !memoryOrchestratorRef) {
+        const ownerKey =
+          typeof data.userId === 'string' && data.userId.trim().length > 0
+            ? data.userId
+            : null;
+        const wrapupOrchestrator = memoryOrchestratorRef;
+
+        if (!ownerKey || !workspaceFolder || !wrapupOrchestrator) {
           reply({
             success: false,
             error: 'Invalid session_wrapup request',
@@ -3889,7 +4016,7 @@ async function processTaskIpc(
           break;
         }
 
-        if (resolveSessionOwnerKey(workspaceFolder) !== data.userId) {
+        if (resolveSessionOwnerKey(workspaceFolder) !== ownerKey) {
           reply({
             success: false,
             error: 'session_wrapup owner mismatch',
@@ -3899,37 +4026,131 @@ async function processTaskIpc(
 
         try {
           const allJids = getJidsByFolder(workspaceFolder);
-          const result = await memoryOrchestratorRef.exportTranscripts(
-            data.userId,
+          const transcript = exportTranscriptSnapshotForUser(
+            ownerKey,
             workspaceFolder,
             allJids,
           );
+          if (!transcript) {
+            const existingSummaryJids = allJids.filter(
+              (jid) => !!getContextSummary(workspaceFolder, jid),
+            );
+            const hasContinuationSummary = existingSummaryJids.length > 0;
+            reply({
+              success: !data.archiveConversation || hasContinuationSummary,
+              error:
+                data.archiveConversation && !hasContinuationSummary
+                  ? 'No new transcript messages available for continuation summary'
+                  : undefined,
+              continuationSummaryChatJids: hasContinuationSummary
+                ? existingSummaryJids
+                : undefined,
+              noNewMessages: true,
+            });
+            break;
+          }
+
+          const result = await wrapupOrchestrator.send(ownerKey, {
+            type: 'session_wrapup',
+            transcriptFile: transcript.transcriptFile,
+            workspaceFolder: transcript.workspaceFolder,
+            chatJids: transcript.chatJids,
+          });
+          if (!result.success) {
+            reply({
+              success: false,
+              error: result.error || 'Memory session_wrapup failed',
+              transcriptFile: transcript.transcriptFile,
+              chatJids: transcript.chatJids,
+            });
+            break;
+          }
+
           let conversationArchiveFile: string | undefined;
-          if (
-            data.archiveConversation &&
-            result?.transcriptFile &&
-            result.success
-          ) {
+          if (data.archiveConversation) {
             try {
               conversationArchiveFile = writeConversationArchiveFromTranscript(
-                data.userId,
+                ownerKey,
                 workspaceFolder,
-                result.transcriptFile,
+                transcript.transcriptFile,
               );
             } catch (err) {
               logger.warn(
-                { workspaceFolder, err, transcriptFile: result.transcriptFile },
+                {
+                  workspaceFolder,
+                  err,
+                  transcriptFile: transcript.transcriptFile,
+                },
                 'Failed to mirror transcript into conversations archive',
               );
+              reply({
+                success: false,
+                error: err instanceof Error ? err.message : String(err),
+                transcriptFile: transcript.transcriptFile,
+                chatJids: transcript.chatJids,
+              });
+              break;
             }
           }
+
+          const transcriptFilePath = path.join(
+            DATA_DIR,
+            'memory',
+            ownerKey,
+            transcript.transcriptFile,
+          );
+          const continuation = await updateContinuationSummaryFromTranscript({
+            groupFolder: workspaceFolder,
+            chatJids: transcript.chatJids,
+            transcriptFilePath,
+            generateSummary: async ({ systemPrompt, userMessage }) => {
+              const generated = await wrapupOrchestrator.continuationSummary(
+                ownerKey,
+                {
+                  workspaceFolder,
+                  systemPrompt,
+                  userMessage,
+                },
+              );
+              if (!generated.success || !generated.response?.trim()) {
+                throw new Error(
+                  generated.error ||
+                    'Continuation summary runner returned empty response',
+                );
+              }
+              return {
+                summary: generated.response,
+                modelUsed: 'memory-runner',
+              };
+            },
+          });
+          if (!continuation.success) {
+            logger.warn(
+              {
+                workspaceFolder,
+                transcriptFile: transcript.transcriptFile,
+                error: continuation.error,
+              },
+              'Failed to update continuation summary',
+            );
+            reply({
+              success: false,
+              error: continuation.error || 'Continuation summary failed',
+              transcriptFile: transcript.transcriptFile,
+              chatJids: transcript.chatJids,
+              conversationArchiveFile,
+            });
+            break;
+          }
+
+          commitTranscriptExportSuccess(ownerKey, transcript);
           reply({
-            success: result?.success ?? true,
-            error: result?.success === false ? result.error : undefined,
-            transcriptFile: result?.transcriptFile,
-            chatJids: result?.chatJids,
+            success: true,
+            transcriptFile: transcript.transcriptFile,
+            chatJids: transcript.chatJids,
             conversationArchiveFile,
-            noNewMessages: result === null,
+            continuationSummary: continuation.summary,
+            continuationSummaryChatJids: continuation.chatJids,
           });
         } catch (err) {
           logger.warn(
@@ -3990,7 +4211,6 @@ async function processAgentConversation(
   updateAgentStatus(agentId, 'running');
   broadcastAgentStatus(chatJid, agentId, 'running', agent.name, agent.prompt);
 
-  const prompt = formatMessages(missedMessages, false);
   const images = collectMessageImages(virtualChatJid, missedMessages);
   const imagesForAgent = images.length > 0 ? images : undefined;
   // Track idle timer
@@ -4024,6 +4244,12 @@ async function processAgentConversation(
     agentId,
   );
   const sessionId = runtimeBootstrap.providerSessionId;
+  const prompt = prependRecentContextForFreshThread(
+    virtualChatJid,
+    missedMessages,
+    formatMessages(missedMessages, false),
+    !sessionId,
+  );
   const sessionRecordId = workerSessionId;
   const sessionRecord = getSessionRecord(sessionRecordId);
 
@@ -4038,7 +4264,11 @@ async function processAgentConversation(
 
   const wrappedOnOutput = async (output: RuntimeOutput) => {
     if (output.runtimeState) {
-      persistRuntimeStateForSession(effectiveGroup.folder, output.runtimeState, agentId);
+      persistRuntimeStateForSession(
+        effectiveGroup.folder,
+        output.runtimeState,
+        agentId,
+      );
     }
     // Track session
     if (output.newSessionId && output.status !== 'error') {
@@ -4161,8 +4391,8 @@ async function processAgentConversation(
       agentName: agent.name,
       images: imagesForAgent,
       userId:
-        sessionRecord?.owner_key
-        || resolveStableSessionOwnerKey(effectiveGroup.folder, agentId),
+        sessionRecord?.owner_key ||
+        resolveStableSessionOwnerKey(effectiveGroup.folder, agentId),
       contextSummary,
       bootstrapState: runtimeBootstrap.bootstrapState,
     };
@@ -4191,7 +4421,8 @@ async function processAgentConversation(
       new Set(Object.keys(registeredGroups)),
     );
 
-    const ownerPrimarySessionFolder = resolveOwnerPrimarySessionFolder(effectiveGroup);
+    const ownerPrimarySessionFolder =
+      resolveOwnerPrimarySessionFolder(effectiveGroup);
 
     const output = await runSessionAgent(
       effectiveGroup,
@@ -4303,7 +4534,8 @@ async function startMessageLoop(): Promise<void> {
 
           // Skip groups already bound to worker sessions — their messages are
           // routed to conversation agents at IM ingestion time.
-          if (isWorkerSessionId(getChatBindingPolicy(chatJid).sessionId)) continue;
+          if (isWorkerSessionId(getChatBindingPolicy(chatJid).sessionId))
+            continue;
 
           // Use only the new messages from this poll cycle.
           // processGroupMessages() handles the initial full fetch from
@@ -4411,7 +4643,11 @@ async function startMessageLoop(): Promise<void> {
             } else {
               // no_active — shouldn't happen if TurnManager thinks there's an active turn,
               // but handle gracefully by treating as start_new
-              broadcastRunnerState(chatJid, 'queued', '当前 Turn 尚未接管，请稍候');
+              broadcastRunnerState(
+                chatJid,
+                'queued',
+                '当前 Turn 尚未接管，请稍候',
+              );
               queue.enqueueMessageCheck(chatJid);
             }
           } else {
@@ -4458,7 +4694,9 @@ async function startMessageLoop(): Promise<void> {
                 !hasActiveProgressSession(channel)
               ) {
                 const resolved = resolveEffectiveGroup(chatJid, group);
-                const ownerId = resolveSessionOwnerKey(resolved.effectiveGroup.folder);
+                const ownerId = resolveSessionOwnerKey(
+                  resolved.effectiveGroup.folder,
+                );
                 const fc = ownerId ? getImFeishuConfig() : null;
                 if (fc?.streamingCard) {
                   const card = imManager.createProgressCard(channel);
@@ -4484,7 +4722,11 @@ async function startMessageLoop(): Promise<void> {
               saveState();
             } else {
               // no_active — truly no agent running, start a new one
-              broadcastRunnerState(chatJid, 'queued', '等待当前工作区开始处理这一轮');
+              broadcastRunnerState(
+                chatJid,
+                'queued',
+                '等待当前工作区开始处理这一轮',
+              );
               queue.enqueueMessageCheck(chatJid);
             }
           }
@@ -4501,7 +4743,11 @@ async function startMessageLoop(): Promise<void> {
 // Tracks which groups had running agents, so we can auto-resume after restart.
 // Uses atomic write (tmp + rename) to avoid corruption on hard crash.
 
-const ACTIVE_GROUPS_STORE_PATH = path.join(DATA_DIR, 'state', 'active-groups.json');
+const ACTIVE_GROUPS_STORE_PATH = path.join(
+  DATA_DIR,
+  'state',
+  'active-groups.json',
+);
 
 interface ActiveGroupEntry {
   chatJid: string;
@@ -4557,7 +4803,10 @@ function recoverPendingMessages(): void {
     const seenFolders = new Set<string>();
 
     logger.info(
-      { count: activeEntries.length, groups: activeEntries.map((e) => e.folder) },
+      {
+        count: activeEntries.length,
+        groups: activeEntries.map((e) => e.folder),
+      },
       'Recovery: found previously active groups, injecting resume messages',
     );
     for (const entry of activeEntries) {
@@ -4632,18 +4881,25 @@ function buildOnNewChat(
           // Update the IM chat name (chats table)
           updateChatName(chatJid, chatName);
           // Update the bound workspace name if it still has the generic name
-          const boundSession = binding ? getSessionRecord(binding.session_id) : null;
-          const targetFolder = boundSession?.kind === 'main'
-            ? boundSession.id.slice('main:'.length)
-            : boundSession?.parent_session_id?.startsWith('main:')
-              ? boundSession.parent_session_id.slice('main:'.length)
-              : null;
+          const boundSession = binding
+            ? getSessionRecord(binding.session_id)
+            : null;
+          const targetFolder =
+            boundSession?.kind === 'main'
+              ? boundSession.id.slice('main:'.length)
+              : boundSession?.parent_session_id?.startsWith('main:')
+                ? boundSession.parent_session_id.slice('main:'.length)
+                : null;
           const targetJid = targetFolder
-            ? (findWebJidForFolder(targetFolder) || `web:${targetFolder}`)
+            ? findWebJidForFolder(targetFolder) || `web:${targetFolder}`
             : null;
           if (targetJid && targetJid !== `web:${primarySessionFolder}`) {
-            const targetGroup = registeredGroups[targetJid] ?? getRegisteredGroup(targetJid);
-            if (targetGroup && (!targetGroup.name || targetGroup.name === '飞书群聊')) {
+            const targetGroup =
+              registeredGroups[targetJid] ?? getRegisteredGroup(targetJid);
+            if (
+              targetGroup &&
+              (!targetGroup.name || targetGroup.name === '飞书群聊')
+            ) {
               // Update the workspace channel projection name kept in session_channels.
               targetGroup.name = chatName;
               setRegisteredGroup(targetJid, targetGroup);
@@ -4667,7 +4923,11 @@ function buildOnNewChat(
         const previousOwnerKey = existingOwnerKey;
         existing.folder = primarySessionFolder;
         setRegisteredGroup(chatJid, existing);
-        applyExplicitChatBinding(chatJid, existing, `main:${primarySessionFolder}`);
+        applyExplicitChatBinding(
+          chatJid,
+          existing,
+          `main:${primarySessionFolder}`,
+        );
         registeredGroups[chatJid] = existing;
         logger.info(
           {
@@ -4687,8 +4947,7 @@ function buildOnNewChat(
     // Auto-create independent workspace for group chats if preference is on
     const prefs = getImPreferences();
     const shouldAutoCreate =
-      chatType === 'group' &&
-      prefs.autoCreateWorkspaceForGroups === true;
+      chatType === 'group' && prefs.autoCreateWorkspaceForGroups === true;
 
     if (shouldAutoCreate) {
       // 1. Create a new workspace
@@ -4728,7 +4987,8 @@ function buildOnNewChat(
           now,
           true,
         );
-        broadcastToWebClients(newJid,
+        broadcastToWebClients(
+          newJid,
           '⚠️ 无法获取飞书群名称，工作区暂时命名为"飞书群聊"。请在飞书开放平台为应用开通 `im:chat:readonly` 权限后，发送新消息即可自动更新名称。',
         );
       }
@@ -4959,7 +5219,12 @@ async function connectUserIMChannels(
   qqConfig?: QQConnectConfig | null,
   wechatConfig?: WeChatConnectConfig | null,
   ignoreMessagesBefore?: number,
-): Promise<{ feishu: boolean; telegram: boolean; qq: boolean; wechat: boolean }> {
+): Promise<{
+  feishu: boolean;
+  telegram: boolean;
+  qq: boolean;
+  wechat: boolean;
+}> {
   const onNewChat = buildOnNewChat(userId, primarySessionFolder);
   const resolveGroupFolder = (chatJid: string): string | undefined => {
     return resolveEffectiveFolder(chatJid);
@@ -5015,7 +5280,10 @@ async function connectUserIMChannels(
         resolveGroupFolder,
         resolveEffectiveChatJid,
         onAgentMessage,
-        onBotAddedToGroup: buildTelegramBotAddedHandler(userId, primarySessionFolder),
+        onBotAddedToGroup: buildTelegramBotAddedHandler(
+          userId,
+          primarySessionFolder,
+        ),
         onBotRemovedFromGroup,
         onInterruptRequest: handleIMInterruptRequest,
       },
@@ -5195,16 +5463,14 @@ async function main(): Promise<void> {
     if (!ownerContext) return;
 
     const allJids = getJidsByFolder(ownerContext.folder);
-    memoryOrchestrator.exportTranscripts(
-      ownerContext.userId,
-      ownerContext.folder,
-      allJids,
-    ).catch((err) => {
-      logger.warn(
-        { groupJid, err },
-        'Memory Agent session_wrapup failed (non-blocking)',
-      );
-    });
+    memoryOrchestrator
+      .exportTranscripts(ownerContext.userId, ownerContext.folder, allJids)
+      .catch((err) => {
+        logger.warn(
+          { groupJid, err },
+          'Memory Agent session_wrapup failed (non-blocking)',
+        );
+      });
   });
 
   // --- Channel reload helpers (hot-reload on config save) ---
@@ -5567,15 +5833,13 @@ async function main(): Promise<void> {
       const ownerKey = resolveSessionOwnerKey(folder);
       if (!ownerKey) return;
       const allJids = getJidsByFolder(folder);
-      await memoryOrchestrator.exportTranscripts(
-        ownerKey,
-        folder,
-        allJids,
-      );
+      await memoryOrchestrator.exportTranscripts(ownerKey, folder, allJids);
     },
     getActiveTurnRuntime: (folder: string) => turnManager.getActiveTurn(folder),
-    getPendingTurnCounts: (folder: string) => turnManager.getPendingCounts(folder),
-    getTurnObservability: (folder: string) => turnObservabilityManager.get(folder),
+    getPendingTurnCounts: (folder: string) =>
+      turnManager.getPendingCounts(folder),
+    getTurnObservability: (folder: string) =>
+      turnObservabilityManager.get(folder),
   });
 
   // Clean expired sessions every hour
@@ -5652,8 +5916,9 @@ async function main(): Promise<void> {
         ? (registeredGroups[worker.source_chat_jid] ??
           getRegisteredGroup(worker.source_chat_jid))
         : undefined;
-      const folder = group?.folder
-        || (parentSession?.id?.startsWith('main:')
+      const folder =
+        group?.folder ||
+        (parentSession?.id?.startsWith('main:')
           ? parentSession.id.slice('main:'.length)
           : groupJid);
       return agentId ? `${folder}#${agentId}` : folder;
@@ -5847,7 +6112,9 @@ async function checkImBindingsHealth(): Promise<void> {
       const group =
         registeredGroups[binding.channel_jid] ??
         getRegisteredGroup(binding.channel_jid);
-      if (isImplicitDefaultSessionBinding(binding.channel_jid, group, binding)) {
+      if (
+        isImplicitDefaultSessionBinding(binding.channel_jid, group, binding)
+      ) {
         deleteSessionBinding(binding.channel_jid);
         return null;
       }
@@ -5874,7 +6141,10 @@ async function checkImBindingsHealth(): Promise<void> {
   for (const { jid, group, sessionId } of boundEntries) {
     const boundSession = getSessionRecord(sessionId);
     if (!boundSession) {
-      unbindImGroup(jid, `Orphaned session binding: session ${sessionId} no longer exists`);
+      unbindImGroup(
+        jid,
+        `Orphaned session binding: session ${sessionId} no longer exists`,
+      );
       continue;
     }
 
@@ -5893,13 +6163,19 @@ async function checkImBindingsHealth(): Promise<void> {
         // Chat not reachable — could be temporary (connection down, API permission issue)
         const count = (imHealthCheckFailCounts.get(jid) ?? 0) + 1;
         imHealthCheckFailCounts.set(jid, count);
-        if (count >= IM_HEALTH_CHECK_FAIL_THRESHOLD && shouldAutoUnbindOnFailure(jid)) {
+        if (
+          count >= IM_HEALTH_CHECK_FAIL_THRESHOLD &&
+          shouldAutoUnbindOnFailure(jid)
+        ) {
           unbindImGroup(
             jid,
             'IM group not reachable after multiple checks, auto-unbinding',
           );
         } else if (count >= IM_HEALTH_CHECK_FAIL_THRESHOLD) {
-          logger.warn({ jid, count }, 'IM health check threshold reached but auto-unbind disabled');
+          logger.warn(
+            { jid, count },
+            'IM health check threshold reached but auto-unbind disabled',
+          );
         } else {
           logger.debug(
             {
