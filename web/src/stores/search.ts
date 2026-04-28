@@ -9,7 +9,9 @@ export interface GlobalSearchResult {
   snippet: string;
   timestamp: string;
   is_from_me: boolean;
-  group_folder?: string;
+  session_id?: string;
+  session_folder?: string;
+  session_name?: string;
   group_name?: string;
 }
 

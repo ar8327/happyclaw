@@ -1,6 +1,5 @@
 import { useState, useRef, useCallback, memo } from 'react';
 import { Copy, Check, ChevronDown, ChevronUp, Ellipsis, Loader2 } from 'lucide-react';
-import { Link } from 'react-router-dom';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { Message, useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
@@ -330,67 +329,6 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
     );
   }
 
-  // Billing system message (quota exceeded / insufficient balance)
-  if (message.sender === '__billing__') {
-    const displayMsg = message.content.replace(/^⚠️\s*/, '');
-    const isBalanceBlocked = displayMsg.includes('充值余额后继续使用');
-    // Detect which quota window was exceeded
-    const windowLabels: Record<string, string> = { daily: '日度', weekly: '周度', monthly: '月度' };
-    let exceededWindow = '';
-    if (displayMsg.includes('日度')) exceededWindow = 'daily';
-    else if (displayMsg.includes('周度')) exceededWindow = 'weekly';
-    else if (displayMsg.includes('月度')) exceededWindow = 'monthly';
-    const windowTag = isBalanceBlocked ? '余额' : windowLabels[exceededWindow] || '配额';
-    // Extract reset hint if present (e.g. "约 3 小时后重置" or "约 1 天后重置")
-    const resetMatch = displayMsg.match(/约\s*(\d+)\s*(小时|天)后重置/);
-    return (
-      <div className="mb-6">
-        {showTime && (
-          <div className="flex items-center gap-2 mb-2">
-            <span className="text-xs text-slate-500">{time}</span>
-            <span className="text-xs font-medium text-amber-600">
-              {isBalanceBlocked ? '余额提醒' : '配额提醒'}
-            </span>
-          </div>
-        )}
-        <div className="relative bg-amber-50 dark:bg-amber-950/30 rounded-xl border border-amber-200 dark:border-amber-800 border-l-[3px] border-l-amber-500 px-5 py-4">
-          <div className="flex items-start gap-3">
-            <div className="flex-shrink-0 w-6 h-6 bg-amber-500 rounded-full flex items-center justify-center text-white font-bold text-sm">
-              !
-            </div>
-            <div className="flex-1">
-              <div className="flex items-center gap-2 mb-1">
-                <h3 className="text-sm font-semibold text-amber-900 dark:text-amber-200">
-                  {isBalanceBlocked ? '余额不足' : `${windowTag}配额已用完`}
-                </h3>
-                {!isBalanceBlocked && exceededWindow && (
-                  <span className={`px-1.5 py-0.5 text-[10px] rounded-full font-medium ${
-                    exceededWindow === 'daily'
-                      ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
-                      : exceededWindow === 'weekly'
-                        ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300'
-                        : 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
-                  }`}>
-                    {windowTag}限额
-                  </span>
-                )}
-              </div>
-              <p className="text-sm text-amber-800 dark:text-amber-300 leading-relaxed">{displayMsg}</p>
-              {resetMatch && (
-                <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
-                  预计 {resetMatch[1]} {resetMatch[2]}后自动重置
-                </p>
-              )}
-              <Link to="/billing" className="inline-block mt-2 text-sm text-primary hover:underline font-medium">
-                查看账单 &rarr;
-              </Link>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   // Scheduled task trigger message
   if (message.sender === '__task__') {
     const taskMatch = message.content.match(/^\[task:[^\]]+\]\s*([\s\S]*)/);
@@ -459,7 +397,7 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
         {!hasOnlyImages && (
           <div className="min-w-0 overflow-hidden [&>div>*:first-child]:!mt-0">
             {isAI ? (
-              <MarkdownRenderer content={message.content} groupJid={message.chat_jid} variant="chat" />
+              <MarkdownRenderer content={message.content} sessionId={message.chat_jid} variant="chat" />
             ) : (
               <p className="text-[15px] leading-relaxed whitespace-pre-wrap break-words text-foreground">{message.content}</p>
             )}
@@ -702,7 +640,7 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
             {/* Content */}
             {!hasOnlyImages && (
               <div className="max-w-none overflow-hidden">
-                <MarkdownRenderer content={message.content} groupJid={message.chat_jid} variant="chat" />
+                <MarkdownRenderer content={message.content} sessionId={message.chat_jid} variant="chat" />
               </div>
             )}
 

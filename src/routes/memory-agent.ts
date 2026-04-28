@@ -2,7 +2,7 @@
  * Internal HTTP endpoints for Memory Agent communication.
  *
  * These endpoints are called by agent-runner (inside containers or host processes)
- * to interact with the per-user Memory Agent managed by MemoryAgentManager.
+ * to interact with the per-user memory orchestration runtime.
  *
  * Authentication: Bearer token (HAPPYCLAW_INTERNAL_TOKEN), generated at startup.
  * Only accepts requests from localhost.
@@ -12,20 +12,20 @@ import { Hono } from 'hono';
 import type { Variables } from '../web-context.js';
 import { getChatNamesByJids } from '../db.js';
 import { logger } from '../logger.js';
-import type { MemoryAgentManager } from '../memory-agent.js';
+import type { MemoryOrchestrator } from '../memory-orchestrator.js';
 import { resolveChannelLabel } from '../memory-agent.js';
-let manager: MemoryAgentManager | null = null;
+let orchestrator: MemoryOrchestrator | null = null;
 let internalToken: string | null = null;
 
 /**
  * Inject dependencies at startup.
- * Called from src/index.ts after MemoryAgentManager is initialized.
+ * Called from src/index.ts after MemoryOrchestrator is initialized.
  */
-export function injectMemoryAgentDeps(deps: {
-  manager: MemoryAgentManager;
+export function injectMemoryOrchestratorDeps(deps: {
+  orchestrator: MemoryOrchestrator;
   token: string;
 }): void {
-  manager = deps.manager;
+  orchestrator = deps.orchestrator;
   internalToken = deps.token;
 }
 
@@ -52,7 +52,7 @@ memoryAgentRoutes.post('/query', async (c) => {
   if (!checkInternalAuth(c)) {
     return c.json({ error: 'Unauthorized' }, 401);
   }
-  if (!manager) {
+  if (!orchestrator) {
     return c.json({ error: 'Memory Agent not initialized' }, 503);
   }
 
@@ -69,17 +69,19 @@ memoryAgentRoutes.post('/query', async (c) => {
     // Resolve channel label from chatJid if provided
     let channelLabel: string | undefined;
     const chatJid = body.chatJid as string | undefined;
-    const groupFolder = body.groupFolder as string | undefined;
+    const workspaceFolder =
+      (body.workspaceFolder as string | undefined)
+      || (body.groupFolder as string | undefined);
     if (chatJid) {
       const names = getChatNamesByJids([chatJid]);
       channelLabel = resolveChannelLabel(chatJid, names.get(chatJid));
     }
 
-    const result = await manager.query(body.userId, {
+    const result = await orchestrator.query(body.userId, {
       query: body.query,
       context: body.context as string | undefined,
       chatJid,
-      groupFolder,
+      workspaceFolder,
       channelLabel,
     });
 
@@ -114,7 +116,7 @@ memoryAgentRoutes.post('/remember', async (c) => {
   if (!checkInternalAuth(c)) {
     return c.json({ error: 'Unauthorized' }, 401);
   }
-  if (!manager) {
+  if (!orchestrator) {
     return c.json({ error: 'Memory Agent not initialized' }, 503);
   }
 
@@ -134,19 +136,23 @@ memoryAgentRoutes.post('/remember', async (c) => {
     // Resolve channel label from chatJid if provided
     let channelLabel: string | undefined;
     const chatJid = body.chatJid as string | undefined;
-    const groupFolder = body.groupFolder as string | undefined;
+    const workspaceFolder =
+      (body.workspaceFolder as string | undefined)
+      || (body.groupFolder as string | undefined);
     if (chatJid) {
       const names = getChatNamesByJids([chatJid]);
       channelLabel = resolveChannelLabel(chatJid, names.get(chatJid));
     }
 
-    await manager.send(body.userId, {
+    void orchestrator.send(body.userId, {
       type: 'remember',
       content: body.content,
       importance: body.importance || 'normal',
       chatJid,
-      groupFolder,
+      workspaceFolder,
       channelLabel,
+    }).catch((err) => {
+      logger.error({ err, userId: body.userId }, 'Memory remember background task failed');
     });
     return c.json({ accepted: true });
   } catch (err) {
@@ -161,7 +167,7 @@ memoryAgentRoutes.post('/session-wrapup', async (c) => {
   if (!checkInternalAuth(c)) {
     return c.json({ error: 'Unauthorized' }, 401);
   }
-  if (!manager) {
+  if (!orchestrator) {
     return c.json({ error: 'Memory Agent not initialized' }, 503);
   }
 
@@ -171,10 +177,13 @@ memoryAgentRoutes.post('/session-wrapup', async (c) => {
   }
 
   try {
-    await manager.send(body.userId, {
+    const workspaceFolder =
+      (body.workspaceFolder as string | undefined)
+      || (body.groupFolder as string | undefined);
+    await orchestrator.send(body.userId, {
       type: 'session_wrapup',
       transcriptFile: body.transcriptFile,
-      groupFolder: body.groupFolder,
+      workspaceFolder,
       chatJids: body.chatJids,
     });
     return c.json({ accepted: true });

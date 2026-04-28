@@ -10,7 +10,7 @@ interface PairingCodeResult {
 }
 
 interface UsePairingCodeOptions {
-  /** API endpoint for generating pairing codes, e.g. '/api/config/user-im/telegram/pairing-code' */
+  /** API endpoint for generating pairing codes, e.g. '/api/config/im/telegram/pairing-code' */
   endpoint: string;
   setNotice: (msg: string | null) => void;
   setError: (msg: string | null) => void;

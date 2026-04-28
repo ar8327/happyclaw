@@ -1,117 +1,182 @@
 /**
  * Codex Archive Manager — token-threshold-based conversation archival.
  *
- * Since Codex has no PreCompact hook, we archive based on cumulative
- * token usage between turns.
+ * Since Codex has no PreCompact hook, we archive based on the current
+ * model context-window usage reported by the latest turn.
  */
 
-import fs from 'fs';
-import path from 'path';
-import { writeIpcFile } from 'happyclaw-agent-runner-core';
 import type { UsageInfo } from '../../runner-interface.js';
+import {
+  enqueueSessionWrapupTask,
+  waitForSessionWrapupResponse,
+  type SessionWrapupResponse,
+} from '../../session-wrapup-ipc.js';
 
 const ARCHIVE_TOKEN_THRESHOLD = parseInt(
-  process.env.HAPPYCLAW_CODEX_ARCHIVE_THRESHOLD || '100000', 10,
+  process.env.HAPPYCLAW_CODEX_ARCHIVE_THRESHOLD
+    || process.env.CODEX_ARCHIVE_THRESHOLD
+    || '200000',
+  10,
 );
-
-const WORKSPACE_GROUP = process.env.HAPPYCLAW_WORKSPACE_GROUP || '/workspace/group';
-const WORKSPACE_IPC = process.env.HAPPYCLAW_WORKSPACE_IPC || '/workspace/ipc';
 
 function log(message: string): void {
   console.error(`[codex-archive] ${message}`);
 }
 
 export class CodexArchiveManager {
-  private cumulativeInputTokens = 0;
-  private cumulativeOutputTokens = 0;
+  private lastContextWindowTokens = 0;
+  private lastInputTokens = 0;
+  private lastOutputTokens = 0;
+  private lastCacheReadInputTokens = 0;
   private turnCount = 0;
-  private conversationLines: string[] = [];
+  private lastCompactedAt: string | null = null;
 
-  /**
-   * Record a completed turn's usage and final text.
-   */
-  recordTurn(usage: UsageInfo | undefined, finalText: string | null): void {
+  hydrate(snapshot?: {
+    lastContextWindowTokens?: unknown;
+    lastInputTokens?: unknown;
+    lastOutputTokens?: unknown;
+    lastCacheReadInputTokens?: unknown;
+    cumulativeInputTokens?: unknown;
+    cumulativeOutputTokens?: unknown;
+    turnCount?: unknown;
+    lastCompactedAt?: unknown;
+  }): void {
+    if (!snapshot || typeof snapshot !== 'object') return;
+    this.lastContextWindowTokens =
+      typeof snapshot.lastContextWindowTokens === 'number'
+      && Number.isFinite(snapshot.lastContextWindowTokens)
+        ? snapshot.lastContextWindowTokens
+        : 0;
+    this.lastInputTokens =
+      typeof snapshot.lastInputTokens === 'number'
+      && Number.isFinite(snapshot.lastInputTokens)
+        ? snapshot.lastInputTokens
+        : 0;
+    this.lastOutputTokens =
+      typeof snapshot.lastOutputTokens === 'number'
+      && Number.isFinite(snapshot.lastOutputTokens)
+        ? snapshot.lastOutputTokens
+        : 0;
+    this.lastCacheReadInputTokens =
+      typeof snapshot.lastCacheReadInputTokens === 'number'
+      && Number.isFinite(snapshot.lastCacheReadInputTokens)
+        ? snapshot.lastCacheReadInputTokens
+        : 0;
+    this.turnCount =
+      typeof snapshot.turnCount === 'number'
+      && Number.isFinite(snapshot.turnCount)
+        ? snapshot.turnCount
+        : 0;
+    this.lastCompactedAt =
+      typeof snapshot.lastCompactedAt === 'string'
+      && snapshot.lastCompactedAt.trim().length > 0
+        ? snapshot.lastCompactedAt
+        : null;
+  }
+
+  snapshot(): {
+    lastContextWindowTokens: number;
+    lastInputTokens: number;
+    lastOutputTokens: number;
+    lastCacheReadInputTokens: number;
+    turnCount: number;
+    lastCompactedAt: string | null;
+  } {
+    return {
+      lastContextWindowTokens: this.lastContextWindowTokens,
+      lastInputTokens: this.lastInputTokens,
+      lastOutputTokens: this.lastOutputTokens,
+      lastCacheReadInputTokens: this.lastCacheReadInputTokens,
+      turnCount: this.turnCount,
+      lastCompactedAt: this.lastCompactedAt,
+    };
+  }
+
+  recordTurn(usage: UsageInfo | undefined): void {
     this.turnCount++;
     if (usage) {
-      this.cumulativeInputTokens += usage.inputTokens;
-      this.cumulativeOutputTokens += usage.outputTokens;
-    }
-    if (finalText) {
-      this.conversationLines.push(`**Assistant**: ${finalText.slice(0, 2000)}${finalText.length > 2000 ? '...' : ''}`);
+      this.lastInputTokens = usage.inputTokens;
+      this.lastOutputTokens = usage.outputTokens;
+      this.lastCacheReadInputTokens = usage.cacheReadInputTokens;
+      this.lastContextWindowTokens = usage.inputTokens + usage.outputTokens;
+      log(
+        `Recorded turn usage for archive: contextWindow=${this.lastContextWindowTokens}/${ARCHIVE_TOKEN_THRESHOLD}, input=${usage.inputTokens}, output=${usage.outputTokens}, cachedInput=${usage.cacheReadInputTokens}`,
+      );
     }
   }
 
-  /**
-   * Record a user prompt for the conversation log.
-   */
-  recordUserMessage(prompt: string): void {
-    this.conversationLines.push(`**User**: ${prompt.slice(0, 2000)}${prompt.length > 2000 ? '...' : ''}`);
-  }
-
-  /**
-   * Check if we should archive based on cumulative tokens.
-   */
   shouldArchive(): boolean {
-    return (this.cumulativeInputTokens + this.cumulativeOutputTokens) >= ARCHIVE_TOKEN_THRESHOLD;
+    return this.lastContextWindowTokens >= ARCHIVE_TOKEN_THRESHOLD;
   }
 
-  /**
-   * Archive the conversation and reset counters.
-   */
-  async archive(groupFolder: string, userId?: string): Promise<void> {
-    if (this.conversationLines.length === 0) return;
+  async archive(
+    groupFolder: string,
+    userId?: string,
+  ): Promise<SessionWrapupResponse | null> {
+    if (this.turnCount === 0) return null;
+    return this.executeArchive(groupFolder, userId, true);
+  }
 
+  async forceArchive(
+    groupFolder: string,
+    userId?: string,
+  ): Promise<SessionWrapupResponse | null> {
+    if (this.turnCount === 0) return null;
+    return this.executeArchive(groupFolder, userId, false);
+  }
+
+  private async executeArchive(
+    groupFolder: string,
+    userId: string | undefined,
+    markAsCompact: boolean,
+  ): Promise<SessionWrapupResponse | null> {
+    let response: SessionWrapupResponse | null = null;
     try {
-      const conversationsDir = path.join(WORKSPACE_GROUP, 'conversations');
-      fs.mkdirSync(conversationsDir, { recursive: true });
-
-      const date = new Date().toISOString().split('T')[0];
-      const time = new Date().toISOString().split('T')[1].replace(/[:.]/g, '-').slice(0, 8);
-      const filename = `${date}-codex-${time}.md`;
-      const filePath = path.join(conversationsDir, filename);
-
-      const header = [
-        `# Codex Conversation`,
-        '',
-        `Archived: ${new Date().toLocaleString()}`,
-        `Turns: ${this.turnCount}`,
-        `Tokens: ${this.cumulativeInputTokens} in / ${this.cumulativeOutputTokens} out`,
-        '',
-        '---',
-        '',
-      ].join('\n');
-
-      fs.writeFileSync(filePath, header + this.conversationLines.join('\n\n') + '\n');
-      log(`Archived conversation to ${filePath} (${this.turnCount} turns, ${this.cumulativeInputTokens + this.cumulativeOutputTokens} tokens)`);
-
-      // Signal session_wrapup for memory system
       if (userId) {
-        const tasksDir = path.join(WORKSPACE_IPC, 'tasks');
-        writeIpcFile(tasksDir, {
-          type: 'session_wrapup',
+        const requestId = enqueueSessionWrapupTask({
+          workspaceFolder: groupFolder,
           groupFolder,
           userId,
-          timestamp: new Date().toISOString(),
+          archiveConversation: true,
         });
-        log(`Sent session_wrapup IPC signal for ${groupFolder}`);
+        log(
+          `Sent session_wrapup request ${requestId} for ${groupFolder} (${this.turnCount} turns, contextWindow=${this.lastContextWindowTokens} tokens)`,
+        );
+        response = await waitForSessionWrapupResponse(requestId);
+        if (response.success) {
+          log(
+            `session_wrapup completed for ${groupFolder}${response.conversationArchiveFile ? ` -> ${response.conversationArchiveFile}` : ''}`,
+          );
+        } else {
+          log(
+            `session_wrapup failed for ${groupFolder}: ${response.error || 'unknown error'}`,
+          );
+        }
+      } else {
+        log(`Skipping session_wrapup for ${groupFolder}: missing userId`);
       }
     } catch (err) {
       log(`Archive failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    // Reset
-    this.cumulativeInputTokens = 0;
-    this.cumulativeOutputTokens = 0;
-    this.turnCount = 0;
-    this.conversationLines = [];
+    if (response?.success) {
+      if (markAsCompact) {
+        this.lastCompactedAt = new Date().toISOString();
+      }
+      this.reset();
+    } else {
+      log(
+        `Preserving archive state for ${groupFolder}; session will not compact until session_wrapup succeeds`,
+      );
+    }
+    return response;
   }
 
-  /**
-   * Force archive on runner cleanup (exit).
-   */
-  async forceArchive(groupFolder: string, userId?: string): Promise<void> {
-    if (this.conversationLines.length > 0) {
-      await this.archive(groupFolder, userId);
-    }
+  private reset(): void {
+    this.lastContextWindowTokens = 0;
+    this.lastInputTokens = 0;
+    this.lastOutputTokens = 0;
+    this.lastCacheReadInputTokens = 0;
+    this.turnCount = 0;
   }
 }

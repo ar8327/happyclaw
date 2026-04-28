@@ -9,7 +9,6 @@ import type {
   ThreadEvent,
   ItemStartedEvent,
   ItemCompletedEvent,
-  TurnCompletedEvent,
   TurnFailedEvent,
   ThreadErrorEvent,
 } from '@openai/codex-sdk';
@@ -30,17 +29,19 @@ export function convertThreadEvent(event: ThreadEvent): StreamEvent[] {
       return handleItemStarted(event);
 
     case 'item.updated':
-      // Codex item.updated carries the latest snapshot; extract text delta if agent_message
-      if (event.item.type === 'agent_message') {
-        return [{ eventType: 'text_delta', text: event.item.text }];
-      }
+      // Codex item.updated carries the latest full snapshot instead of a true
+      // delta. Downstream consumers append text_delta payloads, so emitting the
+      // snapshot here would duplicate content in streaming views.
       return [];
 
     case 'item.completed':
       return handleItemCompleted(event);
 
     case 'turn.completed':
-      return handleTurnCompleted(event);
+      // Codex SDK's turn.completed usage is cumulative for the whole thread in
+      // recent CLI builds. CodexRunner emits normalized per-request usage after
+      // inspecting token_count events, so do not emit usage from the adapter.
+      return [];
 
     case 'turn.failed':
       return handleTurnFailed(event);
@@ -85,7 +86,7 @@ function handleItemStarted(event: ItemStartedEvent): StreamEvent[] {
       }];
 
     case 'reasoning':
-      return [{ eventType: 'thinking_delta', text: item.text }];
+      return [];
 
     case 'todo_list':
       // Emit as a status update
@@ -160,21 +161,6 @@ function handleItemCompleted(event: ItemCompletedEvent): StreamEvent[] {
   }
 
   return events;
-}
-
-function handleTurnCompleted(event: TurnCompletedEvent): StreamEvent[] {
-  return [{
-    eventType: 'usage',
-    usage: {
-      inputTokens: event.usage.input_tokens,
-      outputTokens: event.usage.output_tokens,
-      cacheReadInputTokens: event.usage.cached_input_tokens,
-      cacheCreationInputTokens: 0,
-      costUSD: 0, // Codex SDK doesn't report cost
-      durationMs: 0,
-      numTurns: 1,
-    },
-  }];
 }
 
 function handleTurnFailed(event: TurnFailedEvent): StreamEvent[] {

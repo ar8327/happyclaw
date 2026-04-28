@@ -11,8 +11,8 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { spawn, spawnSync } from 'child_process';
 import { Codex, type ModelReasoningEffort } from '@openai/codex-sdk';
-import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { ContextPlugin, PluginContext, ToolDefinition, ToolResult } from 'happyclaw-agent-runner-core';
 
 const INVOKE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
@@ -34,7 +34,7 @@ interface ProviderInfo {
 }
 
 function detectProviders(): { claude: ProviderInfo; codex: ProviderInfo } {
-  // Claude: available if we have API key, OAuth token, or container-runner flagged it
+  // Claude: available if we have API key, OAuth token, or the launcher flagged it
   const hasClaudeKey = !!(process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY);
   const isClaudeCode = !!process.env.CLAUDE_CODE;
   const hasClaudeOAuth = !!process.env.CLAUDE_CODE_OAUTH_TOKEN;
@@ -42,7 +42,7 @@ function detectProviders(): { claude: ProviderInfo; codex: ProviderInfo } {
   const claudeAvailable = hasClaudeKey || isClaudeCode || hasClaudeOAuth || flaggedAvailable;
   const claudeDefault = process.env.HAPPYCLAW_MODEL || 'sonnet';
 
-  // Codex: available via API key, CLI login credentials, or container-runner flag
+  // Codex: available via API key, CLI login credentials, or the launcher flag
   const hasOpenAIKey = !!(process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY);
   const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
   let hasCodexCliAuth = false;
@@ -171,9 +171,6 @@ async function invokeClaude(
   maxTurns: number,
   effort?: string,
 ): Promise<string> {
-  const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), INVOKE_TIMEOUT_MS);
-
   // Use shared home session credentials for OAuth token freshness.
   // Same pattern as memory-agent: avoids stale refresh tokens when the home
   // Claude session has already rotated the token.
@@ -238,27 +235,69 @@ async function invokeClaude(
   try { fs.appendFileSync(debugFile, debugLines.join('\n') + '\n'); } catch {}
   // ── END DEBUG ──
 
+  const claudeProbe = spawnSync('claude', ['--version'], { encoding: 'utf8' });
+  if (claudeProbe.error || claudeProbe.status !== 0) {
+    throw new Error(`Claude CLI not available: ${claudeProbe.error?.message || claudeProbe.stderr || claudeProbe.stdout}`);
+  }
+
+  const boundedPrompt = [
+    `You must complete this task within at most ${maxTurns} tool-use turns.`,
+    '',
+    prompt,
+  ].join('\n');
+
+  const args = [
+    '-p',
+    '--output-format',
+    'json',
+    '--model',
+    model,
+    '--permission-mode',
+    'bypassPermissions',
+    '--allow-dangerously-skip-permissions',
+    '--allowedTools',
+    CLAUDE_ALLOWED_TOOLS.join(','),
+    boundedPrompt,
+  ];
+  if (effort) {
+    args.splice(args.length - 1, 0, '--effort', toClaudeEffort(effort));
+  }
+
+  const child = spawn('claude', args, {
+    cwd,
+    env: process.env as Record<string, string>,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk: string) => { stdout += chunk; });
+  child.stderr.on('data', (chunk: string) => { stderr += chunk; });
+
+  const timer = setTimeout(() => {
+    child.kill('SIGINT');
+    setTimeout(() => {
+      if (!child.killed) child.kill('SIGKILL');
+    }, 1000);
+  }, INVOKE_TIMEOUT_MS);
+
   try {
-    const gen = query({
-      prompt,
-      options: {
-        cwd,
-        model,
-        maxTurns,
-        permissionMode: 'bypassPermissions' as const,
-        allowedTools: CLAUDE_ALLOWED_TOOLS,
-        abortController: abort,
-        ...(effort ? { effort: toClaudeEffort(effort) } : {}),
-      },
+    const exitCode = await new Promise<number>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (code) => resolve(code ?? 0));
     });
 
-    let resultText = '';
-    for await (const msg of gen) {
-      if ((msg as { type: string; result?: string }).type === 'result') {
-        resultText = (msg as { result?: string }).result || '';
-      }
+    if (exitCode !== 0) {
+      throw new Error(stderr.trim() || stdout.trim() || `Claude CLI exited with code ${exitCode}`);
     }
-    return resultText;
+
+    const parsed = JSON.parse(stdout) as { result?: string; is_error?: boolean };
+    if (parsed.is_error) {
+      throw new Error(parsed.result || 'Claude CLI returned an error');
+    }
+    return parsed.result || '';
   } catch (err) {
     // ── DEBUG: log the actual error to file ──
     try {

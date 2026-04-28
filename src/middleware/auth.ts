@@ -1,90 +1,19 @@
-// Authentication and authorization middleware
-
-import {
-  lastActiveCache,
-  LAST_ACTIVE_DEBOUNCE_MS,
-  parseCookie,
-  type Variables,
-} from '../web-context.js';
-import {
-  getSessionWithUser,
-  updateSessionLastActive,
-  deleteUserSession,
-} from '../db.js';
-import { isSessionExpired } from '../auth.js';
-import type { AuthUser, Permission } from '../types.js';
+import type { Permission } from '../types.js';
 import { hasPermission } from '../permissions.js';
-import { SESSION_COOKIE_NAME } from '../config.js';
+import {
+  getLocalWorkbenchAuthUser,
+  getLocalWorkbenchSessionId,
+} from '../local-user.js';
 
 export const authMiddleware = async (c: any, next: any) => {
-  const cookies = parseCookie(c.req.header('cookie'));
-  const token = cookies[SESSION_COOKIE_NAME];
-  if (!token) {
-    return c.json({ error: 'Unauthorized' }, 401);
-  }
-
-  const session = getSessionWithUser(token);
-  if (!session) {
-    lastActiveCache.delete(token);
-    return c.json({ error: 'Unauthorized' }, 401);
-  }
-
-  if (isSessionExpired(session.expires_at)) {
-    deleteUserSession(token);
-    lastActiveCache.delete(token);
-    return c.json({ error: 'Session expired' }, 401);
-  }
-
-  if (session.status === 'disabled') {
-    return c.json({ error: 'Account disabled' }, 403);
-  }
-  if (session.status === 'deleted') {
-    return c.json({ error: 'Account deleted' }, 403);
-  }
-
-  c.set('user', {
-    id: session.user_id,
-    username: session.username,
-    role: session.role,
-    status: session.status,
-    display_name: session.display_name,
-    permissions: session.permissions,
-    must_change_password: session.must_change_password,
-  } as AuthUser);
-  c.set('sessionId', token);
-
-  const requestPath = c.req.path;
-  const canBypassForcedChange =
-    requestPath === '/api/auth/me' ||
-    requestPath === '/api/auth/password' ||
-    requestPath === '/api/auth/logout' ||
-    requestPath === '/api/auth/profile' ||
-    requestPath.startsWith('/api/auth/sessions');
-  if (session.must_change_password && !canBypassForcedChange) {
-    return c.json(
-      { error: 'Password change required', code: 'PASSWORD_CHANGE_REQUIRED' },
-      403,
-    );
-  }
-
-  // Low-frequency last_active_at update (every 5 min)
-  const now = Date.now();
-  const lastUpdate = lastActiveCache.get(token) || 0;
-  if (now - lastUpdate > LAST_ACTIVE_DEBOUNCE_MS) {
-    lastActiveCache.set(token, now);
-    try {
-      updateSessionLastActive(token);
-    } catch {
-      /* best effort */
-    }
-  }
-
+  c.set('user', getLocalWorkbenchAuthUser());
+  c.set('sessionId', getLocalWorkbenchSessionId());
   await next();
 };
 
 export const requirePermission =
   (permission: Permission) => async (c: any, next: any) => {
-    const user = c.get('user') as AuthUser;
+    const user = c.get('user') ?? getLocalWorkbenchAuthUser();
     if (!hasPermission(user, permission)) {
       return c.json({ error: `Forbidden: ${permission} required` }, 403);
     }
@@ -93,10 +22,8 @@ export const requirePermission =
 
 export const requireAnyPermission =
   (permissions: Permission[]) => async (c: any, next: any) => {
-    const user = c.get('user') as AuthUser;
-    const ok = permissions.some((permission) =>
-      hasPermission(user, permission),
-    );
+    const user = c.get('user') ?? getLocalWorkbenchAuthUser();
+    const ok = permissions.some((permission) => hasPermission(user, permission));
     if (!ok) {
       return c.json(
         { error: `Forbidden: one of [${permissions.join(', ')}] required` },
@@ -111,6 +38,3 @@ export const groupEnvMiddleware = requireAnyPermission([
   'manage_group_env',
   'manage_system_config',
 ]);
-export const usersManageMiddleware = requirePermission('manage_users');
-export const inviteManageMiddleware = requirePermission('manage_invites');
-export const auditViewMiddleware = requirePermission('view_audit_log');

@@ -9,6 +9,9 @@ import { canAccessGroup } from '../web-context.js';
 import {
   getRegisteredGroup,
   getAllRegisteredGroups,
+  getSessionBinding,
+  getSessionRecord,
+  isPrimarySessionFolder,
   listAgentsByJid,
   getAgent,
   deleteAgent,
@@ -18,6 +21,7 @@ import {
   deleteMessagesForChatJid,
   deleteSession,
   getGroupsByTargetAgent,
+  saveSessionBinding,
   setRegisteredGroup,
   getJidsByFolder,
 } from '../db.js';
@@ -25,28 +29,112 @@ import { DATA_DIR } from '../config.js';
 import type { RegisteredGroup, SubAgent } from '../types.js';
 import { logger } from '../logger.js';
 import { getChannelType, extractChatId } from '../im-channel.js';
+import {
+  buildWorkerConversationJid,
+  buildWorkerSessionId,
+  extractAgentIdFromWorkerSessionId,
+} from '../worker-session.js';
 
 const router = new Hono<{ Variables: Variables }>();
 
-// GET /api/groups/:jid/agents — list all agents for a group
+function syncImGroupCache(imJid: string, updated: RegisteredGroup): void {
+  const deps = getWebDeps();
+  if (!deps) return;
+  const groups = deps.getRegisteredGroups();
+  if (groups[imJid]) groups[imJid] = updated;
+}
+
+function upsertImBinding(
+  imJid: string,
+  imGroup: RegisteredGroup,
+  sessionId: string,
+  replyPolicy: 'source_only' | 'mirror',
+): void {
+  const current = getSessionBinding(imJid);
+  const now = new Date().toISOString();
+  const session = getSessionRecord(sessionId);
+  saveSessionBinding({
+    channel_jid: imJid,
+    session_id: sessionId,
+    binding_mode:
+      replyPolicy === 'mirror'
+        ? 'mirror'
+        : session?.kind === 'worker'
+          ? 'direct'
+          : 'source_only',
+    activation_mode: imGroup.activation_mode ?? 'auto',
+    require_mention: imGroup.require_mention === true,
+    display_name: imGroup.name,
+    reply_policy: replyPolicy,
+    created_at: current?.created_at || imGroup.added_at || now,
+    updated_at: now,
+  });
+}
+
+function isImplicitDefaultSessionBinding(
+  imGroup: RegisteredGroup,
+  binding: ReturnType<typeof getSessionBinding> | undefined,
+): boolean {
+  return !!binding
+    && binding.session_id === `main:${imGroup.folder}`
+    && binding.binding_mode === 'source_only'
+    && binding.reply_policy === 'source_only'
+    && binding.activation_mode === 'auto'
+    && binding.require_mention !== true;
+}
+
+function getExplicitSessionBinding(
+  imJid: string,
+  imGroup: RegisteredGroup,
+): ReturnType<typeof getSessionBinding> | undefined {
+  const binding = getSessionBinding(imJid);
+  return isImplicitDefaultSessionBinding(imGroup, binding) ? undefined : binding;
+}
+
+function resolveRouteGroup(
+  id: string,
+): { accessJid: string; group: RegisteredGroup } | null {
+  const direct = getRegisteredGroup(id);
+  if (direct && id.startsWith('web:')) {
+    return { accessJid: id, group: direct };
+  }
+
+  const session = getSessionRecord(id);
+  if (!session) return null;
+
+  const folder = session.id.startsWith('main:')
+    ? session.id.slice('main:'.length)
+    : session.parent_session_id?.startsWith('main:')
+      ? session.parent_session_id.slice('main:'.length)
+      : null;
+  if (!folder) return null;
+
+  const accessJid = getJidsByFolder(folder).find((jid) => jid.startsWith('web:'));
+  if (!accessJid) return null;
+  const group = getRegisteredGroup(accessJid);
+  return group ? { accessJid, group } : null;
+}
+
+// GET /api/sessions/:jid/agents — list all agents for a session
 router.get('/:jid/agents', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const user = c.get('user');
-
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) {
+    return c.json({ error: 'Session not found' }, 404);
   }
+  const { accessJid, group } = resolved;
 
-  if (!canAccessGroup(user, { ...group, jid })) {
+  if (!canAccessGroup(user, { ...group, jid: accessJid })) {
     return c.json({ error: 'Forbidden' }, 403);
   }
 
-  const agents = listAgentsByJid(jid);
+  const agents = listAgentsByJid(accessJid);
   return c.json({
     agents: agents.map((a) => {
       const base = {
         id: a.id,
+        session_id: a.kind === 'conversation' ? buildWorkerSessionId(a.id) : undefined,
         name: a.name,
         prompt: a.prompt,
         status: a.status,
@@ -70,17 +158,17 @@ router.get('/:jid/agents', authMiddleware, async (c) => {
   });
 });
 
-// POST /api/groups/:jid/agents — create a user conversation
+// POST /api/sessions/:jid/agents — create a user conversation
 router.post('/:jid/agents', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const user = c.get('user');
-
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) {
+    return c.json({ error: 'Session not found' }, 404);
   }
+  const { accessJid, group } = resolved;
 
-  if (!canAccessGroup(user, { ...group, jid })) {
+  if (!canAccessGroup(user, { ...group, jid: accessJid })) {
     return c.json({ error: 'Forbidden' }, 403);
   }
 
@@ -98,7 +186,7 @@ router.post('/:jid/agents', authMiddleware, async (c) => {
   const agent: SubAgent = {
     id: agentId,
     group_folder: group.folder,
-    chat_jid: jid,
+    chat_jid: accessJid,
     name,
     prompt: description,
     status: 'idle',
@@ -135,22 +223,23 @@ router.post('/:jid/agents', authMiddleware, async (c) => {
   fs.mkdirSync(agentSessionDir, { recursive: true });
 
   // Create virtual chat record for this agent's messages
-  const virtualChatJid = `${jid}#agent:${agentId}`;
+  const virtualChatJid = buildWorkerConversationJid(accessJid, agentId);
   ensureChatExists(virtualChatJid);
 
   // Broadcast agent_status (idle) via WebSocket
   // Import dynamically to avoid circular deps
   const { broadcastAgentStatus } = await import('../web.js');
-  broadcastAgentStatus(jid, agentId, 'idle', name, description);
+  broadcastAgentStatus(accessJid, agentId, 'idle', name, description);
 
   logger.info(
-    { agentId, jid, name, userId: user.id },
+    { agentId, jid: accessJid, name, userId: user.id },
     'User conversation created',
   );
 
   return c.json({
     agent: {
       id: agent.id,
+      session_id: buildWorkerSessionId(agent.id),
       name: agent.name,
       prompt: agent.prompt,
       status: agent.status,
@@ -160,23 +249,23 @@ router.post('/:jid/agents', authMiddleware, async (c) => {
   });
 });
 
-// DELETE /api/groups/:jid/agents/:agentId — stop and delete an agent
+// DELETE /api/sessions/:jid/agents/:agentId — stop and delete an agent
 router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const agentId = c.req.param('agentId');
   const user = c.get('user');
-
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) {
+    return c.json({ error: 'Session not found' }, 404);
   }
+  const { accessJid, group } = resolved;
 
-  if (!canAccessGroup(user, { ...group, jid })) {
+  if (!canAccessGroup(user, { ...group, jid: accessJid })) {
     return c.json({ error: 'Forbidden' }, 403);
   }
 
   const agent = getAgent(agentId);
-  if (!agent || agent.chat_jid !== jid) {
+  if (!agent || agent.chat_jid !== accessJid) {
     return c.json({ error: 'Agent not found' }, 404);
   }
 
@@ -206,8 +295,7 @@ router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
     // Stop running process via queue
     const deps = getWebDeps();
     if (deps) {
-      const virtualJid = `${jid}#agent:${agentId}`;
-      deps.queue.stopGroup(virtualJid);
+      deps.queue.stopSession(buildWorkerSessionId(agentId));
     }
   }
 
@@ -239,7 +327,7 @@ router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
 
   // Delete virtual chat messages for conversation agents
   if (agent.kind === 'conversation') {
-    const virtualChatJid = `${jid}#agent:${agentId}`;
+    const virtualChatJid = buildWorkerConversationJid(accessJid, agentId);
     deleteMessagesForChatJid(virtualChatJid);
 
     // Note: IM bindings are checked above and block deletion if present.
@@ -254,7 +342,7 @@ router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
   // Broadcast removal
   const { broadcastAgentStatus } = await import('../web.js');
   broadcastAgentStatus(
-    jid,
+    accessJid,
     agentId,
     'error',
     agent.name,
@@ -262,7 +350,7 @@ router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
     '__removed__',
   );
 
-  logger.info({ agentId, jid, userId: user.id }, 'Agent deleted by user');
+  logger.info({ agentId, jid: accessJid, userId: user.id }, 'Agent deleted by user');
   return c.json({ success: true });
 });
 
@@ -273,16 +361,16 @@ function isTelegramPrivateChat(jid: string): boolean {
   return !id.startsWith('-');
 }
 
-// GET /api/groups/:jid/im-groups — list available IM group chats for this folder
+// GET /api/sessions/:jid/im-groups — list available IM group chats for this folder
 router.get('/:jid/im-groups', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const user = c.get('user');
-
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) {
+    return c.json({ error: 'Session not found' }, 404);
   }
-  if (!canAccessGroup(user, { ...group, jid })) {
+  const { accessJid, group } = resolved;
+  if (!canAccessGroup(user, { ...group, jid: accessJid })) {
     return c.json({ error: 'Forbidden' }, 403);
   }
 
@@ -299,9 +387,12 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
   interface ImGroupCandidate {
     jid: string;
     name: string;
-    bound_agent_id: string | null;
-    bound_main_jid: string | null;
+    bound_session_id: string | null;
+    bound_session_kind: 'main' | 'workspace' | 'worker' | 'memory' | null;
+    binding_mode: 'direct' | 'source_only' | 'mirror';
     reply_policy: 'source_only' | 'mirror';
+    activation_mode: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+    require_mention: boolean;
     bound_target_name: string | null;
     bound_workspace_name: string | null;
     avatar?: string;
@@ -313,39 +404,45 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
   const candidates: ImGroupCandidate[] = [];
   for (const j of imJids) {
     const g = allGroups[j];
+    const binding = getExplicitSessionBinding(j, g);
+    const boundSession = binding?.session_id
+      ? getSessionRecord(binding.session_id)
+      : null;
 
     // Resolve bound target name for display
     let boundTargetName: string | null = null;
     let boundWorkspaceName: string | null = null;
-    if (g.target_agent_id) {
-      const boundAgent = getAgent(g.target_agent_id);
-      if (boundAgent) {
-        boundTargetName = boundAgent.name;
-        const ownerGroup = getRegisteredGroup(boundAgent.chat_jid);
-        if (ownerGroup) boundWorkspaceName = ownerGroup.name;
-      }
-    } else if (g.target_main_jid) {
-      let boundGroup = getRegisteredGroup(g.target_main_jid);
-      // Legacy fallback: old bindings stored web:${folder} instead of actual JID
-      if (!boundGroup && g.target_main_jid.startsWith('web:')) {
-        const folder = g.target_main_jid.slice(4);
-        const jids = getJidsByFolder(folder);
-        for (const fj of jids) {
-          if (fj.startsWith('web:')) {
-            boundGroup = getRegisteredGroup(fj);
-            if (boundGroup) break;
-          }
+    if (boundSession) {
+      if (boundSession.kind === 'worker') {
+        const agentId = extractAgentIdFromWorkerSessionId(boundSession.id) || '';
+        const boundAgent = agentId ? getAgent(agentId) : undefined;
+        if (boundAgent) {
+          boundTargetName = boundAgent.name;
+          const ownerGroup = getRegisteredGroup(boundAgent.chat_jid);
+          if (ownerGroup) boundWorkspaceName = ownerGroup.name;
         }
+      } else if (
+        (boundSession.kind === 'main' || boundSession.kind === 'workspace')
+      ) {
+        const backingJid = boundSession.id.startsWith('main:')
+          ? getJidsByFolder(boundSession.id.slice('main:'.length)).find((jid) =>
+              jid.startsWith('web:'),
+            ) || `web:${boundSession.id.slice('main:'.length)}`
+          : null;
+        const boundGroup = backingJid ? getRegisteredGroup(backingJid) : null;
+        if (boundGroup) boundTargetName = boundGroup.name;
       }
-      if (boundGroup) boundTargetName = boundGroup.name;
     }
 
     candidates.push({
       jid: j,
       name: g.name,
-      bound_agent_id: g.target_agent_id ?? null,
-      bound_main_jid: g.target_main_jid ?? null,
-      reply_policy: g.reply_policy === 'mirror' ? 'mirror' : 'source_only',
+      bound_session_id: binding?.session_id || null,
+      bound_session_kind: boundSession?.kind || null,
+      binding_mode: binding?.binding_mode || 'source_only',
+      reply_policy: binding?.reply_policy || 'source_only',
+      activation_mode: binding?.activation_mode || g.activation_mode || 'auto',
+      require_mention: binding?.require_mention ?? g.require_mention === true,
       bound_target_name: boundTargetName,
       bound_workspace_name: boundWorkspaceName,
       channel_type: getChannelType(j) ?? 'unknown',
@@ -394,22 +491,22 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
   return c.json({ imGroups });
 });
 
-// PUT /api/groups/:jid/agents/:agentId/im-binding — bind an IM group to this agent
+// PUT /api/sessions/:jid/agents/:agentId/im-binding — bind an IM group to this agent
 router.put('/:jid/agents/:agentId/im-binding', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const agentId = c.req.param('agentId');
   const user = c.get('user');
-
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) {
+    return c.json({ error: 'Session not found' }, 404);
   }
-  if (!canAccessGroup(user, { ...group, jid })) {
+  const { accessJid, group } = resolved;
+  if (!canAccessGroup(user, { ...group, jid: accessJid })) {
     return c.json({ error: 'Forbidden' }, 403);
   }
 
   const agent = getAgent(agentId);
-  if (!agent || agent.chat_jid !== jid) {
+  if (!agent || agent.chat_jid !== accessJid) {
     return c.json({ error: 'Agent not found' }, 404);
   }
   if (agent.kind !== 'conversation') {
@@ -434,51 +531,49 @@ router.put('/:jid/agents/:agentId/im-binding', authMiddleware, async (c) => {
   }
   const force = body.force === true;
   const replyPolicy = body.reply_policy === 'mirror' ? 'mirror' : 'source_only';
+  const currentBinding = getExplicitSessionBinding(imJid, imGroup);
+  const targetSessionId = buildWorkerSessionId(agentId);
   const hasConflict =
-    (imGroup.target_agent_id && imGroup.target_agent_id !== agentId) ||
-    !!imGroup.target_main_jid;
+    !!currentBinding && currentBinding.session_id !== targetSessionId;
   if (hasConflict && !force) {
     return c.json({ error: 'IM group is already bound elsewhere' }, 409);
   }
 
-  // Update DB + in-memory cache — clear target_main_jid to avoid conflicts
+  // Explicit bindings now persist through session_bindings only.
   const updated: RegisteredGroup = {
     ...imGroup,
-    target_agent_id: agentId,
-    target_main_jid: undefined,
     reply_policy: replyPolicy,
+    activation_mode:
+      imGroup.activation_mode === 'disabled' ? 'auto' : imGroup.activation_mode,
   };
   setRegisteredGroup(imJid, updated);
-  const deps = getWebDeps();
-  if (deps) {
-    const groups = deps.getRegisteredGroups();
-    if (groups[imJid]) groups[imJid] = updated;
-  }
+  upsertImBinding(imJid, updated, targetSessionId, replyPolicy);
+  syncImGroupCache(imJid, updated);
 
   logger.info({ imJid, agentId, userId: user.id }, 'IM group bound to agent');
   return c.json({ success: true });
 });
 
-// DELETE /api/groups/:jid/agents/:agentId/im-binding/:imJid — unbind an IM group
+// DELETE /api/sessions/:jid/agents/:agentId/im-binding/:imJid — unbind an IM group
 router.delete(
   '/:jid/agents/:agentId/im-binding/:imJid',
   authMiddleware,
   async (c) => {
-    const jid = decodeURIComponent(c.req.param('jid'));
-    const agentId = c.req.param('agentId');
-    const imJid = decodeURIComponent(c.req.param('imJid'));
-    const user = c.get('user');
-
-    const group = getRegisteredGroup(jid);
-    if (!group) {
-      return c.json({ error: 'Group not found' }, 404);
+  const jid = decodeURIComponent(c.req.param('jid'));
+  const agentId = c.req.param('agentId');
+  const imJid = decodeURIComponent(c.req.param('imJid'));
+  const user = c.get('user');
+  const resolved = resolveRouteGroup(jid);
+    if (!resolved) {
+      return c.json({ error: 'Session not found' }, 404);
     }
-    if (!canAccessGroup(user, { ...group, jid })) {
+    const { accessJid, group } = resolved;
+    if (!canAccessGroup(user, { ...group, jid: accessJid })) {
       return c.json({ error: 'Forbidden' }, 403);
     }
 
     const agent = getAgent(agentId);
-    if (!agent || agent.chat_jid !== jid) {
+    if (!agent || agent.chat_jid !== accessJid) {
       return c.json({ error: 'Agent not found' }, 404);
     }
 
@@ -489,18 +584,19 @@ router.delete(
     if (!canAccessGroup(user, { ...imGroup, jid: imJid })) {
       return c.json({ error: 'Forbidden' }, 403);
     }
-    if (imGroup.target_agent_id !== agentId) {
+    const currentBinding = getExplicitSessionBinding(imJid, imGroup);
+    if (currentBinding?.session_id !== buildWorkerSessionId(agentId)) {
       return c.json({ error: 'IM group is not bound to this agent' }, 400);
     }
 
     // Update DB + in-memory cache
-    const updated = { ...imGroup, target_agent_id: undefined };
+    const updated = {
+      ...imGroup,
+      activation_mode: 'disabled' as const,
+    };
     setRegisteredGroup(imJid, updated);
-    const deps = getWebDeps();
-    if (deps) {
-      const groups = deps.getRegisteredGroups();
-      if (groups[imJid]) groups[imJid] = updated;
-    }
+    upsertImBinding(imJid, updated, `main:${updated.folder}`, 'source_only');
+    syncImGroupCache(imJid, updated);
 
     logger.info(
       { imJid, agentId, userId: user.id },
@@ -510,19 +606,19 @@ router.delete(
   },
 );
 
-// PUT /api/groups/:jid/im-binding — bind an IM group to this workspace's main conversation
+// PUT /api/sessions/:jid/im-binding — bind an IM group to this workspace's main conversation
 router.put('/:jid/im-binding', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const user = c.get('user');
-
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) {
+    return c.json({ error: 'Session not found' }, 404);
   }
-  if (!canAccessGroup(user, { ...group, jid })) {
+  const { accessJid, group } = resolved;
+  if (!canAccessGroup(user, { ...group, jid: accessJid })) {
     return c.json({ error: 'Forbidden' }, 403);
   }
-  if (group.is_home) {
+  if (isPrimarySessionFolder(group.folder)) {
     return c.json(
       { error: 'Home workspace main conversation uses default IM routing' },
       400,
@@ -542,51 +638,45 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
   if (!canAccessGroup(user, { ...imGroup, jid: imJid })) {
     return c.json({ error: 'Forbidden' }, 403);
   }
-  const targetMainJid = jid; // Use actual registered JID (not folder-based)
-  const legacyMainJid = `web:${group.folder}`;
   const force = body.force === true;
   const replyPolicy = body.reply_policy === 'mirror' ? 'mirror' : 'source_only';
+  const currentBinding = getExplicitSessionBinding(imJid, imGroup);
+  const targetSessionId = `main:${group.folder}`;
   const hasConflict =
-    !!imGroup.target_agent_id ||
-    (imGroup.target_main_jid &&
-      imGroup.target_main_jid !== targetMainJid &&
-      imGroup.target_main_jid !== legacyMainJid);
+    !!currentBinding && currentBinding.session_id !== targetSessionId;
   if (hasConflict && !force) {
     return c.json({ error: 'IM group is already bound elsewhere' }, 409);
   }
 
-  // Update DB + in-memory cache — clear target_agent_id to avoid conflicts
+  // Explicit bindings now persist through session_bindings only.
   const updated: RegisteredGroup = {
     ...imGroup,
-    target_main_jid: targetMainJid,
-    target_agent_id: undefined,
     reply_policy: replyPolicy,
+    activation_mode:
+      imGroup.activation_mode === 'disabled' ? 'auto' : imGroup.activation_mode,
   };
   setRegisteredGroup(imJid, updated);
-  const deps = getWebDeps();
-  if (deps) {
-    const groups = deps.getRegisteredGroups();
-    if (groups[imJid]) groups[imJid] = updated;
-  }
+  upsertImBinding(imJid, updated, targetSessionId, replyPolicy);
+  syncImGroupCache(imJid, updated);
 
   logger.info(
-    { imJid, targetMainJid, userId: user.id },
+    { imJid, sessionId: targetSessionId, userId: user.id },
     'IM group bound to workspace main conversation',
   );
   return c.json({ success: true });
 });
 
-// DELETE /api/groups/:jid/im-binding/:imJid — unbind an IM group from this workspace's main conversation
+// DELETE /api/sessions/:jid/im-binding/:imJid — unbind an IM group from this workspace's main conversation
 router.delete('/:jid/im-binding/:imJid', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const imJid = decodeURIComponent(c.req.param('imJid'));
   const user = c.get('user');
-
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) {
+    return c.json({ error: 'Session not found' }, 404);
   }
-  if (!canAccessGroup(user, { ...group, jid })) {
+  const { accessJid, group } = resolved;
+  if (!canAccessGroup(user, { ...group, jid: accessJid })) {
     return c.json({ error: 'Forbidden' }, 403);
   }
 
@@ -597,26 +687,22 @@ router.delete('/:jid/im-binding/:imJid', authMiddleware, async (c) => {
   if (!canAccessGroup(user, { ...imGroup, jid: imJid })) {
     return c.json({ error: 'Forbidden' }, 403);
   }
-  const targetMainJid = jid; // Use actual registered JID (not folder-based)
-  const legacyMainJid = `web:${group.folder}`;
-  if (
-    imGroup.target_main_jid !== targetMainJid &&
-    imGroup.target_main_jid !== legacyMainJid
-  ) {
+  const currentBinding = getExplicitSessionBinding(imJid, imGroup);
+  if (currentBinding?.session_id !== `main:${group.folder}`) {
     return c.json({ error: 'IM group is not bound to this workspace' }, 400);
   }
 
   // Update DB + in-memory cache
-  const updated = { ...imGroup, target_main_jid: undefined };
+  const updated = {
+    ...imGroup,
+    activation_mode: 'disabled' as const,
+  };
   setRegisteredGroup(imJid, updated);
-  const deps = getWebDeps();
-  if (deps) {
-    const groups = deps.getRegisteredGroups();
-    if (groups[imJid]) groups[imJid] = updated;
-  }
+  upsertImBinding(imJid, updated, `main:${updated.folder}`, 'source_only');
+  syncImGroupCache(imJid, updated);
 
   logger.info(
-    { imJid, targetMainJid, userId: user.id },
+    { imJid, sessionId: `main:${group.folder}`, userId: user.id },
     'IM group unbound from workspace main conversation',
   );
   return c.json({ success: true });

@@ -3,7 +3,8 @@ import path from 'path';
 import type { Logger } from 'pino';
 
 import { TIMEZONE } from './config.js';
-import { getGroupsByOwner, getMessagesByTimeRange, listUsers } from './db.js';
+import { getGroupsByOwner, getMessagesByTimeRange } from './db.js';
+import { getLocalWorkbenchUserPublic } from './local-user.js';
 
 export interface DailySummaryDeps {
   logger: Logger;
@@ -86,35 +87,23 @@ function generateSummaries(deps: DailySummaryDeps, nowMs: number): void {
   const dateStr = getLocalDateString(yesterdayMs);
   const { startTs, endTs } = getDayBounds(dateStr);
 
-  // Get all active users
-  let page = 1;
+  const operator = getLocalWorkbenchUserPublic();
   let processedUsers = 0;
-  while (true) {
-    const result = listUsers({ status: 'active', page, pageSize: 200 });
-    for (const user of result.users) {
-      try {
-        const generated = generateUserSummary(
-          deps,
-          user.id,
-          user.username,
-          dateStr,
-          startTs,
-          endTs,
-        );
-        if (generated) processedUsers++;
-      } catch (err) {
-        deps.logger.error(
-          { err, userId: user.id },
-          'Daily summary: failed for user',
-        );
-      }
-    }
-    if (
-      result.users.length < result.pageSize ||
-      page * result.pageSize >= result.total
-    )
-      break;
-    page++;
+  try {
+    const generated = generateUserSummary(
+      deps,
+      operator.id,
+      operator.username,
+      dateStr,
+      startTs,
+      endTs,
+    );
+    if (generated) processedUsers++;
+  } catch (err) {
+    deps.logger.error(
+      { err, userId: operator.id },
+      'Daily summary: failed for local operator',
+    );
   }
 
   deps.logger.info(
@@ -150,11 +139,11 @@ function generateUserSummary(
     return false;
   }
 
-  // Get all groups owned by this user
+  // Resolve all registered Session channels owned by this operator
   const groups = getGroupsByOwner(userId);
   if (groups.length === 0) return false;
 
-  // Collect all chat_jids for the user's groups
+  // Collect channel JIDs covered by those Session channels
   const chatJids = groups.map((g) => g.jid);
 
   // Fetch messages for all jids in the time range

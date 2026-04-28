@@ -52,7 +52,7 @@ export function WeChatQRDialog({ isOpen, onClose, onSuccess }: WeChatQRDialogPro
     clearPoll();
 
     try {
-      const data = await api.post<QRCodeResponse>('/api/config/user-im/wechat/qrcode');
+      const data = await api.post<QRCodeResponse>('/api/config/im/wechat/qrcode');
       setQrcodeUrl(data.qrcodeUrl);
       setQrcode(data.qrcode);
       setStatus('wait');
@@ -69,7 +69,7 @@ export function WeChatQRDialog({ isOpen, onClose, onSuccess }: WeChatQRDialogPro
     pollRef.current = setInterval(async () => {
       try {
         const data = await api.get<QRStatusResponse>(
-          `/api/config/user-im/wechat/qrcode-status?qrcode=${encodeURIComponent(qrcode)}`,
+          `/api/config/im/wechat/qrcode-status?qrcode=${encodeURIComponent(qrcode)}`,
         );
         setStatus(data.status);
 

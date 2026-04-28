@@ -1,29 +1,16 @@
 import { useMemo } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
-import { LogOut } from 'lucide-react';
 import { useAuthStore } from '../../stores/auth';
-import { useBillingStore } from '../../stores/billing';
 import { EmojiAvatar } from '../common/EmojiAvatar';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { baseNavItems } from './nav-items';
 
 export function NavRail() {
   const user = useAuthStore((s) => s.user);
-  const logout = useAuthStore((s) => s.logout);
   const navigate = useNavigate();
-  const billingEnabled = useBillingStore((s) => s.billingEnabled);
-
-  const navItems = useMemo(
-    () => baseNavItems.filter((item) => !item.requiresBilling || billingEnabled),
-    [billingEnabled],
-  );
+  const navItems = useMemo(() => baseNavItems, []);
 
   const userInitial = (user?.display_name || user?.username || '?')[0].toUpperCase();
-
-  const handleLogout = async () => {
-    await logout();
-    navigate('/login');
-  };
 
   return (
     <TooltipProvider delayDuration={200}>
@@ -59,7 +46,6 @@ export function NavRail() {
         {/* Spacer */}
         <div className="flex-1" />
 
-        {/* User avatar + logout */}
         <div className="flex flex-col items-center gap-1.5 mb-1">
           <Tooltip>
             <TooltipTrigger asChild>
@@ -78,19 +64,6 @@ export function NavRail() {
             </TooltipTrigger>
             <TooltipContent side="right">
               {user?.display_name || user?.username}
-            </TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                onClick={handleLogout}
-                className="w-9 h-9 rounded-lg flex items-center justify-center text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
-              >
-                <LogOut className="w-4 h-4" />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="right">
-              退出登录
             </TooltipContent>
           </Tooltip>
         </div>

@@ -169,10 +169,11 @@ export function buildBasePrompt(ctx: PluginContext): string {
 export function buildAppendPrompt(
   ctx: PluginContext,
   plugins: ContextPlugin[],
+  options?: { includeGlobalInstructions?: boolean },
 ): string {
   // 1. Global CLAUDE.md — only for home containers
   let globalClaudeMd = '';
-  if (ctx.isHome) {
+  if (options?.includeGlobalInstructions !== false && ctx.isHome) {
     const globalClaudeMdPath = path.join(ctx.workspaceGlobal, 'CLAUDE.md');
     globalClaudeMd = tryReadFile(globalClaudeMdPath) || '';
   }
@@ -214,7 +215,11 @@ export function buildFullPrompt(
   ctx: PluginContext,
   plugins: ContextPlugin[],
 ): string {
-  return buildBasePrompt(ctx) + '\n' + buildAppendPrompt(ctx, plugins);
+  return (
+    buildBasePrompt(ctx) +
+    '\n' +
+    buildAppendPrompt(ctx, plugins, { includeGlobalInstructions: false })
+  );
 }
 
 /**

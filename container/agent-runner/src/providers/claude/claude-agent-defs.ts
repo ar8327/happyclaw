@@ -1,13 +1,12 @@
-/**
- * Predefined SubAgent definitions for HappyClaw.
- *
- * These agents are registered via the SDK `agents` option in query(),
- * making them available as Task tool targets within the agent session.
- */
+export interface ClaudeAgentDefinition {
+  description: string;
+  prompt: string;
+  tools?: string[];
+  maxTurns?: number;
+  model?: string;
+}
 
-import type { AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
-
-export const PREDEFINED_AGENTS: Record<string, AgentDefinition> = {
+export const PREDEFINED_AGENTS: Record<string, ClaudeAgentDefinition> = {
   'code-reviewer': {
     description: 'Code review agent that analyzes code quality, best practices, and potential issues',
     prompt:

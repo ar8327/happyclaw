@@ -47,17 +47,40 @@ export function createContextManager(
     ?? parseInt(process.env.HAPPYCLAW_MEMORY_QUERY_TIMEOUT || '60000', 10);
   const memorySendTimeoutMs = options?.memorySendTimeoutMs
     ?? parseInt(process.env.HAPPYCLAW_MEMORY_SEND_TIMEOUT || '120000', 10);
+  const disabledPlugins = (() => {
+    const raw = process.env.HAPPYCLAW_DISABLED_PLUGINS;
+    if (!raw) return new Set<string>();
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return new Set<string>();
+      return new Set(
+        parsed.filter(
+          (plugin): plugin is string =>
+            typeof plugin === 'string' && plugin.trim().length > 0,
+        ),
+      );
+    } catch {
+      return new Set<string>();
+    }
+  })();
+  const isPluginEnabled = (name: string) => !disabledPlugins.has(name);
 
   const ctxMgr = new ContextManager(ctx, options?.nativeCapabilities);
 
-  // ── Always-on plugins ──
-  ctxMgr.register(new MessagingPlugin());
-  ctxMgr.register(new TasksPlugin());
-  ctxMgr.register(new GroupsPlugin());
-  ctxMgr.register(new SkillsPlugin());
+  if (isPluginEnabled('messaging')) {
+    ctxMgr.register(new MessagingPlugin());
+  }
+  if (isPluginEnabled('tasks')) {
+    ctxMgr.register(new TasksPlugin());
+  }
+  if (isPluginEnabled('groups')) {
+    ctxMgr.register(new GroupsPlugin());
+  }
+  if (isPluginEnabled('skills')) {
+    ctxMgr.register(new SkillsPlugin());
+  }
 
-  // ── Memory (requires userId to be meaningful) ──
-  if (ctx.userId) {
+  if (isPluginEnabled('memory') && ctx.userId) {
     ctxMgr.register(new MemoryPlugin({
       apiUrl,
       apiToken,
@@ -66,8 +89,9 @@ export function createContextManager(
     }));
   }
 
-  // ── Invoke Agent (cross-provider sub-agent calls) ──
-  ctxMgr.register(new InvokeAgentPlugin());
+  if (isPluginEnabled('invoke-agent')) {
+    ctxMgr.register(new InvokeAgentPlugin());
+  }
 
   return ctxMgr;
 }

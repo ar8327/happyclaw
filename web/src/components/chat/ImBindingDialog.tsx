@@ -16,16 +16,21 @@ import { ChannelBadge } from '../settings/channel-meta';
 
 interface ImBindingDialogProps {
   open: boolean;
-  groupJid: string;
+  sessionId: string;
+  targetSessionId: string | null;
   /** agentId for conversation agent binding; null for main conversation binding */
   agentId: string | null;
   agent?: AgentInfo;
   onClose: () => void;
 }
-
-
-
-export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImBindingDialogProps) {
+export function ImBindingDialog({
+  open,
+  sessionId,
+  targetSessionId,
+  agentId,
+  agent,
+  onClose,
+}: ImBindingDialogProps) {
   const [imGroups, setImGroups] = useState<AvailableImGroup[]>([]);
   const [loading, setLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -53,11 +58,11 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
     setRebindTarget(null);
     setLoading(true);
     setFilter('');
-    loadAvailableImGroups(groupJid).then((groups) => {
+    loadAvailableImGroups(sessionId).then((groups) => {
       setImGroups(groups);
       setLoading(false);
     });
-  }, [open, groupJid, agentId, loadAvailableImGroups]);
+  }, [open, sessionId, agentId, loadAvailableImGroups]);
 
   const filteredGroups = useMemo(() => {
     if (!filter.trim()) return imGroups;
@@ -68,20 +73,17 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
   }, [imGroups, filter]);
 
   const isBoundToThis = (group: AvailableImGroup): boolean => {
-    if (isMainMode) {
-      return group.bound_main_jid === groupJid;
-    }
-    return group.bound_agent_id === agentId;
+    return !!targetSessionId && group.bound_session_id === targetSessionId;
   };
 
   const isBoundToOther = (group: AvailableImGroup): boolean => {
     if (isBoundToThis(group)) return false;
-    return !!group.bound_agent_id || !!group.bound_main_jid;
+    return !!group.bound_session_id;
   };
 
   const reloadGroups = async () => {
     try {
-      const groups = await loadAvailableImGroups(groupJid);
+      const groups = await loadAvailableImGroups(sessionId);
       setImGroups(groups);
     } catch {
       // ignore — stale list is acceptable
@@ -93,9 +95,9 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
     try {
       let ok: boolean;
       if (isMainMode) {
-        ok = await bindMainImGroup(groupJid, imJid);
+        ok = await bindMainImGroup(sessionId, imJid);
       } else {
-        ok = await bindImGroup(groupJid, agentId, imJid);
+        ok = await bindImGroup(sessionId, agentId, imJid);
       }
       if (ok) {
         await reloadGroups();
@@ -113,9 +115,9 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
     try {
       let ok: boolean;
       if (isMainMode) {
-        ok = await unbindMainImGroup(groupJid, imJid);
+        ok = await unbindMainImGroup(sessionId, imJid);
       } else {
-        ok = await unbindImGroup(groupJid, agentId!, imJid);
+        ok = await unbindImGroup(sessionId, agentId!, imJid);
       }
       if (ok) {
         await reloadGroups();
@@ -129,12 +131,12 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
   };
 
   const describeBindTarget = (group: AvailableImGroup): string => {
-    if (group.bound_agent_id && group.bound_target_name) {
+    if (group.bound_session_kind === 'worker' && group.bound_target_name) {
       return group.bound_workspace_name && group.bound_workspace_name !== group.bound_target_name
         ? `Agent「${group.bound_workspace_name} / ${group.bound_target_name}」`
         : `Agent「${group.bound_target_name}」`;
     }
-    if (group.bound_main_jid && group.bound_target_name) {
+    if (group.bound_session_id && group.bound_target_name) {
       return `工作区「${group.bound_target_name}」`;
     }
     return '其他对话';
@@ -148,9 +150,9 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
     try {
       let ok: boolean;
       if (isMainMode) {
-        ok = await bindMainImGroup(groupJid, imJid, true);
+        ok = await bindMainImGroup(sessionId, imJid, true);
       } else {
-        ok = await bindImGroup(groupJid, agentId!, imJid, true);
+        ok = await bindImGroup(sessionId, agentId!, imJid, true);
       }
       if (ok) {
         await reloadGroups();
@@ -252,7 +254,7 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
                       )}
                       {boundToOther && (
                         <span className="text-amber-500 truncate">
-                          已绑定{group.bound_agent_id ? ' Agent' : ''}
+                          已绑定{group.bound_session_kind === 'worker' ? ' Agent' : ''}
                           {group.bound_target_name && `「${
                             group.bound_workspace_name && group.bound_workspace_name !== group.bound_target_name
                               ? `${group.bound_workspace_name} / ${group.bound_target_name}`

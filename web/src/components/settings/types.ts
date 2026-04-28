@@ -66,31 +66,42 @@ export interface SettingsNotification {
 }
 
 export interface SystemSettings {
-  containerTimeout: number;
+  runtimeTimeout: number;
   idleTimeout: number;
-  containerMaxOutputSize: number;
-  maxConcurrentContainers: number;
-  maxConcurrentHostProcesses: number;
-  maxLoginAttempts: number;
-  loginLockoutMinutes: number;
+  runtimeMaxOutputSize: number;
+  maxConcurrentRuntimes: number;
   maxConcurrentScripts: number;
   scriptTimeout: number;
-  billingEnabled: boolean;
-  billingMode: 'wallet_first';
-  billingMinStartBalanceUsd: number;
-  billingCurrency: string;
-  billingCurrencyRate: number;
+  queryActivityTimeoutMs: number;
+  toolCallHardTimeoutMs: number;
   memoryQueryTimeout: number;
   memoryGlobalSleepTimeout: number;
   memorySendTimeout: number;
+  codexArchiveThreshold: number;
   turnBatchWindowMs: number;
   turnMaxBatchMs: number;
   traceRetentionDays: number;
+  feishuApiDomain: string;
+  feishuDocDomain: string;
   webPublicUrl: string;
   defaultClaudeModel: string;
 }
 
-export type SettingsTab = 'claude' | 'codex' | 'registration' | 'appearance' | 'system' | 'profile' | 'my-channels' | 'security' | 'groups' | 'memory' | 'skills' | 'mcp-servers' | 'agent-definitions' | 'users' | 'about' | 'bindings';
+export type SettingsTab =
+  | 'claude'
+  | 'codex'
+  | 'runners'
+  | 'appearance'
+  | 'system'
+  | 'profile'
+  | 'channels'
+  | 'sessions'
+  | 'memory'
+  | 'skills'
+  | 'mcp-servers'
+  | 'agent-definitions'
+  | 'about'
+  | 'bindings';
 
 // ─── Codex Provider Types ───────────────────────────────────────
 

@@ -1,12 +1,11 @@
 /**
- * Context Compressor — generates conversation summaries using the Anthropic Messages API.
+ * Context Compressor — generates conversation summaries.
  *
- * Uses Sonnet to summarize conversation history, then resets the SDK session
- * so the next agent invocation starts fresh with the summary injected.
- *
- * Optionally extracts factual knowledge (decisions, conventions, preferences)
- * and writes them to the Memory Agent for persistent cross-session recall.
+ * Stores summaries used when the next agent invocation starts fresh with
+ * prior context injected.
  */
+
+import fs from 'fs';
 
 import { logger } from './logger.js';
 import {
@@ -17,7 +16,7 @@ import {
   countMessagesSince,
   type ContextSummary,
 } from './db.js';
-import { getClaudeProviderConfig } from './runtime-config.js';
+import { importLocalClaudeCredentials } from './runtime-config.js';
 import type { NewMessage } from './types.js';
 
 // OAuth tokens (from Claude Code subscription) only allow Haiku for direct Messages API.
@@ -34,15 +33,10 @@ export interface CompressResult {
   success: boolean;
   summary?: string;
   messageCount?: number;
-  extractedKnowledge?: number; // number of knowledge entries extracted
   error?: string;
 }
 
 export interface CompressOptions {
-  /** Whether to extract knowledge and write to Memory Agent */
-  extractKnowledge?: boolean;
-  /** Callback to send knowledge entries to Memory Agent (type: 'remember') */
-  onKnowledgeEntry?: (content: string, importance: string) => Promise<void>;
   /**
    * Only compress messages with timestamp <= this value.
    * Prevents race condition where new messages arriving during compression
@@ -51,11 +45,21 @@ export interface CompressOptions {
   beforeTimestamp?: string;
 }
 
-interface KnowledgeEntry {
-  type: 'decision' | 'convention' | 'preference' | 'fact';
-  topic: string;
-  content: string;
-  confidence: 'high' | 'medium';
+export interface ContinuationSummaryOptions {
+  groupFolder: string;
+  chatJids: string[];
+  transcriptFilePath: string;
+  generateSummary: (input: {
+    systemPrompt: string;
+    userMessage: string;
+  }) => Promise<{ summary: string; modelUsed?: string }>;
+}
+
+export interface ContinuationSummaryResult {
+  success: boolean;
+  summary?: string;
+  chatJids?: string[];
+  error?: string;
 }
 
 /** Check if a folder is currently being compressed */
@@ -65,41 +69,34 @@ export function isCompressing(groupFolder: string): boolean {
 
 /**
  * Get authentication credentials for the Anthropic API.
- * Tries: API key → OAuth credentials → OAuth token → env var.
+ * Tries local machine environment first, then local Claude Code OAuth credentials.
  * Returns { type, token } where type determines the HTTP header to use.
  */
-function getAuthCredentials(): { type: 'api-key' | 'bearer'; token: string } | null {
-  const config = getClaudeProviderConfig();
-
-  // 1. Direct API key (highest priority)
-  if (config.anthropicApiKey) {
-    return { type: 'api-key', token: config.anthropicApiKey };
-  }
-
-  // 2. OAuth credentials (official profile — most common in HappyClaw)
-  if (config.claudeOAuthCredentials?.accessToken) {
-    return { type: 'bearer', token: config.claudeOAuthCredentials.accessToken };
-  }
-
-  // 3. Legacy OAuth token
-  if (config.claudeCodeOauthToken) {
-    return { type: 'bearer', token: config.claudeCodeOauthToken };
-  }
-
-  // 4. Environment variable fallback
+function getAuthCredentials(): {
+  type: 'api-key' | 'bearer';
+  token: string;
+} | null {
   if (process.env.ANTHROPIC_API_KEY) {
     return { type: 'api-key', token: process.env.ANTHROPIC_API_KEY };
+  }
+
+  const oauth = importLocalClaudeCredentials();
+  if (oauth?.accessToken) {
+    return { type: 'bearer', token: oauth.accessToken };
+  }
+
+  if (process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+    return { type: 'bearer', token: process.env.CLAUDE_CODE_OAUTH_TOKEN };
   }
 
   return null;
 }
 
 /**
- * Get the Anthropic base URL from the provider config.
+ * Get the Anthropic base URL from the local environment.
  */
 function getBaseUrl(): string {
-  const config = getClaudeProviderConfig();
-  return config.anthropicBaseUrl || 'https://api.anthropic.com';
+  return process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com';
 }
 
 /**
@@ -122,6 +119,11 @@ function buildTranscript(
   return lines.join('\n\n');
 }
 
+function truncateForSummary(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  return `${text.slice(0, maxLen)}\n\n[...内容截断...]`;
+}
+
 /**
  * Call Sonnet to generate a text response.
  */
@@ -132,7 +134,7 @@ async function callSonnet(
   const auth = getAuthCredentials();
   if (!auth) {
     throw new Error(
-      'No Anthropic credentials configured. Set API key, OAuth credentials, or ANTHROPIC_API_KEY env var.',
+      'No local Anthropic credentials found. Configure Claude Code locally or export ANTHROPIC_API_KEY.',
     );
   }
 
@@ -199,86 +201,115 @@ async function callSonnet(
   return textBlock.text;
 }
 
-/**
- * Extract factual knowledge from a conversation transcript.
- * Returns structured knowledge entries that can be saved to the Memory Agent.
- */
-async function extractKnowledgeEntries(
-  transcript: string,
-): Promise<KnowledgeEntry[]> {
-  const systemPrompt = `You are a knowledge extractor. Extract important factual knowledge from the conversation below.
-
-Output a JSON array of knowledge entries. Each entry:
-{
-  "type": "decision" | "convention" | "preference" | "fact",
-  "topic": "short topic tag",
-  "content": "specific content",
-  "confidence": "high" | "medium"
-}
-
-Only extract:
-- Decisions the user explicitly made (e.g., "use Sonnet for compression")
-- Agreed-upon conventions (e.g., "commit messages in Chinese")
-- User-expressed preferences (e.g., "don't use Haiku")
-- Important technical facts (e.g., "sessions are stored in the sessions table")
-
-Do NOT extract: discussion process, temporary analysis, suggestions not adopted by the user.
-Output ONLY the JSON array, no other text.`;
-
-  const text = await callSonnet(
-    systemPrompt,
-    `Extract knowledge from this conversation:\n\n${transcript}`,
+export async function updateContinuationSummaryFromTranscript(
+  options: ContinuationSummaryOptions,
+): Promise<ContinuationSummaryResult> {
+  const chatJids = Array.from(
+    new Set(options.chatJids.filter((jid) => jid.trim().length > 0)),
   );
-
-  // Extract JSON array — handle markdown code blocks and leading/trailing prose.
-  // Use a stricter approach: try fenced code block first, then outermost [...].
-  let jsonStr: string;
-  const fencedMatch = text.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/);
-  if (fencedMatch) {
-    jsonStr = fencedMatch[1];
-  } else {
-    // Find the first '[' and last ']' for the outermost array
-    const firstBracket = text.indexOf('[');
-    const lastBracket = text.lastIndexOf(']');
-    if (firstBracket !== -1 && lastBracket > firstBracket) {
-      jsonStr = text.slice(firstBracket, lastBracket + 1);
-    } else {
-      jsonStr = text.trim();
-    }
+  if (chatJids.length === 0) {
+    return { success: false, error: 'No chatJids provided' };
   }
 
+  let transcript: string;
   try {
-    const entries = JSON.parse(jsonStr) as KnowledgeEntry[];
-    if (!Array.isArray(entries)) return [];
-    // Validate and filter
-    return entries.filter(
-      (e) =>
-        e &&
-        typeof e.type === 'string' &&
-        typeof e.content === 'string' &&
-        e.content.length > 0,
+    transcript = truncateForSummary(
+      await fs.promises.readFile(options.transcriptFilePath, 'utf-8'),
+      80_000,
     );
-  } catch {
-    logger.warn(
-      { responseLength: text.length },
-      'Failed to parse knowledge extraction response as JSON',
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  const previousSummaries = new Map<string, string>();
+  for (const jid of chatJids) {
+    const existing = getContextSummary(options.groupFolder, jid);
+    if (existing?.summary) {
+      previousSummaries.set(existing.summary, jid);
+    }
+  }
+  const previousSummaryText =
+    previousSummaries.size > 0
+      ? Array.from(previousSummaries.keys()).join('\n\n---\n\n')
+      : '无';
+
+  const summaryPrompt = `你是 HappyClaw 的 continuation summary 生成器。你的输出会被注入到新的模型 thread 中，用于延续刚刚 compact 的对话。
+
+目标：
+1. 保留下一轮继续对话必须知道的上下文，而不是写长期记忆索引
+2. 保留当前任务状态、刚完成的动作、未完成事项、用户最近表达的意图和情绪
+3. 保留短句指代所需的最近上下文，例如“确实”“有道理”“就这样”指向什么
+4. 保留 IM 发送状态，例如已经通过 Telegram 或飞书发给用户的内容
+5. 合并旧摘要和新 transcript，不要丢掉仍然相关的早期上下文
+
+要求：
+- 使用中文
+- 控制在 2000 tokens 以内
+- 直接输出摘要正文，不要输出 JSON，不要加解释性前言
+- 不要编造 transcript 中没有的信息`;
+
+  try {
+    const generated = await options.generateSummary({
+      systemPrompt: summaryPrompt,
+      userMessage: [
+        '旧 continuation summary：',
+        previousSummaryText,
+        '',
+        '新 compact transcript：',
+        transcript,
+      ].join('\n'),
+    });
+    const summary = generated.summary.trim();
+    if (!summary) {
+      return {
+        success: false,
+        error: 'Continuation summary runner returned empty response',
+      };
+    }
+
+    for (const jid of chatJids) {
+      setContextSummary({
+        group_folder: options.groupFolder,
+        chat_jid: jid,
+        summary,
+        message_count: (transcript.match(/^\*\*/gm) || []).length,
+        created_at: new Date().toISOString(),
+        model_used: generated.modelUsed || 'memory-runner',
+      });
+    }
+
+    logger.info(
+      {
+        groupFolder: options.groupFolder,
+        chatJids,
+        summaryLength: summary.length,
+      },
+      'Continuation summary updated from transcript',
     );
-    return [];
+
+    return { success: true, summary, chatJids };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 
 /**
  * Compress the conversation for a group/chat.
  *
- * 1. Acquires per-folder lock (prevents concurrent compression)
+ * 1. Acquires per-folder lock
  * 2. Fetches recent messages from DB
  * 3. Calls Sonnet to generate a summary
- * 4. Optionally extracts knowledge and writes to Memory Agent
- * 5. Stores the summary in context_summaries table
- * 6. Resets the SDK session so next invocation starts fresh
+ * 4. Stores the summary in context_summaries table
+ * 5. Resets the SDK session so next invocation starts fresh
  *
  * Note: The caller is responsible for clearing the in-memory sessions map
- * (since it lives in index.ts, not here).
+ * because it lives in index.ts, not here.
  */
 export async function compressContext(
   groupFolder: string,
@@ -326,7 +357,6 @@ export async function compressContext(
         chatJid,
         messageCount: messages.length,
         transcriptLength: transcript.length,
-        extractKnowledge: !!options?.extractKnowledge,
       },
       'Compressing context',
     );
@@ -348,11 +378,16 @@ Keep the summary under 2000 tokens. Focus on WHAT was decided and done, not the 
       summaryPrompt,
       `Please summarize this conversation:\n\n${transcript}`,
     );
-    logger.info({ groupFolder, durationMs: Date.now() - t0, summaryLength: summary.length }, 'Summary generated');
+    logger.info(
+      {
+        groupFolder,
+        durationMs: Date.now() - t0,
+        summaryLength: summary.length,
+      },
+      'Summary generated',
+    );
 
-    // 4. Store summary FIRST — knowledge extraction runs in background
-    //    (Knowledge extraction + Memory Agent writes can take minutes,
-    //     which would exceed the frontend's 60s request timeout.)
+    // 4. Store summary before resetting the session.
     const contextSummary: ContextSummary = {
       group_folder: groupFolder,
       chat_jid: chatJid,
@@ -376,47 +411,10 @@ Keep the summary under 2000 tokens. Focus on WHAT was decided and done, not the 
       'Context compressed successfully',
     );
 
-    // 5. Fire-and-forget: knowledge extraction in background
-    if (options?.extractKnowledge && options.onKnowledgeEntry) {
-      const onEntry = options.onKnowledgeEntry;
-      void (async () => {
-        try {
-          logger.info({ groupFolder }, 'Background knowledge extraction starting...');
-          const t1 = Date.now();
-          const entries = await extractKnowledgeEntries(transcript);
-          logger.info({ groupFolder, durationMs: Date.now() - t1, entryCount: entries.length }, 'Knowledge entries extracted');
-          let saved = 0;
-          for (const entry of entries) {
-            const content = `[${entry.type}] ${entry.topic}: ${entry.content}`;
-            const importance = entry.confidence === 'high' ? 'high' : 'normal';
-            try {
-              await onEntry(content, importance);
-              saved++;
-            } catch (err) {
-              logger.warn(
-                { topic: entry.topic, error: err instanceof Error ? err.message : String(err) },
-                'Failed to save knowledge entry to Memory Agent',
-              );
-            }
-          }
-          logger.info(
-            { groupFolder, chatJid, extracted: saved, total: entries.length },
-            'Background knowledge extraction completed',
-          );
-        } catch (err) {
-          logger.error(
-            { groupFolder, chatJid, error: err instanceof Error ? err.message : String(err) },
-            'Background knowledge extraction failed',
-          );
-        }
-      })();
-    }
-
     return {
       success: true,
       summary,
       messageCount: messages.length,
-      extractedKnowledge: -1, // -1 indicates extraction is running in background
     };
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);

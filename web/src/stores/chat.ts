@@ -4,9 +4,9 @@ import { wsManager } from '../api/ws';
 import { useFileStore } from './files';
 import { useAuthStore } from './auth';
 import { showToast, notifyIfHidden, shouldEmitBackgroundTaskNotice } from '../utils/toast';
-import type { GroupInfo, AgentInfo, AvailableImGroup } from '../types';
+import type { SessionInfo, AgentInfo, AvailableImGroup } from '../types';
 
-export type { GroupInfo, AgentInfo };
+export type { SessionInfo, AgentInfo };
 
 export interface Message {
   id: string;
@@ -125,6 +125,57 @@ function mergeMessagesChronologically(
   });
 }
 
+export function getRouteSessionId(
+  sessions: Record<string, SessionInfo>,
+  sessionId: string,
+): string {
+  return sessions[sessionId]?.id || sessionId;
+}
+
+export function getRouteJid(
+  groups: Record<string, SessionInfo>,
+  jid: string,
+): string {
+  return getRouteSessionId(groups, jid);
+}
+
+export function resolveStoreSessionId(
+  sessions: Record<string, SessionInfo>,
+  rawSessionId: string,
+): string {
+  const agentSep = rawSessionId.indexOf('#agent:');
+  const baseSessionId =
+    agentSep >= 0 ? rawSessionId.slice(0, agentSep) : rawSessionId;
+  if (sessions[baseSessionId]) return baseSessionId;
+  for (const [storeSessionId, session] of Object.entries(sessions)) {
+    if (session.id === baseSessionId || session.backing_jid === baseSessionId) {
+      return storeSessionId;
+    }
+  }
+  return baseSessionId;
+}
+
+export function resolveStoreJid(
+  groups: Record<string, SessionInfo>,
+  rawJid: string,
+): string {
+  return resolveStoreSessionId(groups, rawJid);
+}
+
+function remapGroupScopedRecord<T>(
+  record: Record<string, T>,
+  keyMap: Record<string, string>,
+  allowedKeys: Set<string>,
+): Record<string, T> {
+  const next: Record<string, T> = {};
+  for (const [key, value] of Object.entries(record)) {
+    const mappedKey = keyMap[key] || key;
+    if (!allowedKeys.has(mappedKey)) continue;
+    next[mappedKey] = value;
+  }
+  return next;
+}
+
 const MAX_THINKING_CACHE_SIZE = 500;
 
 /** Evict oldest entries when cache exceeds capacity (relies on insertion order) */
@@ -154,7 +205,7 @@ function retainThinkingCacheForMessages(
 }
 
 interface ChatState {
-  groups: Record<string, GroupInfo>;
+  groups: Record<string, SessionInfo>;
   currentGroup: string | null;
   messages: Record<string, Message[]>;
   waiting: Record<string, boolean>;
@@ -206,7 +257,7 @@ interface ChatState {
   resetSession: (jid: string, agentId?: string) => Promise<boolean>;
   clearHistory: (jid: string) => Promise<boolean>;
   deleteMessage: (jid: string, messageId: string) => Promise<boolean>;
-  createFlow: (name: string, options?: { execution_mode?: 'container' | 'host'; custom_cwd?: string; init_source_path?: string; init_git_url?: string }) => Promise<{ jid: string; folder: string } | null>;
+  createFlow: (name: string, options?: { init_source_path?: string; init_git_url?: string }) => Promise<{ jid: string; folder: string } | null>;
   renameFlow: (jid: string, name: string) => Promise<void>;
   togglePin: (jid: string) => Promise<void>;
   deleteFlow: (jid: string) => Promise<void>;
@@ -303,7 +354,6 @@ function pickSdkTaskAliasTarget(
 }
 
 function isTerminalSystemMessage(message: Pick<Message, 'sender' | 'content'>): boolean {
-  if (message.sender === '__billing__') return true;
   return message.sender === '__system__' && (
     message.content.startsWith('agent_error:') ||
     message.content.startsWith('agent_max_retries:') ||
@@ -436,6 +486,23 @@ function pushEvent(
     text,
   };
   return [...events, item].slice(-MAX_EVENT_LOG);
+}
+
+function describeLifecycleEvent(event: StreamEvent): string | null {
+  switch (event.phase) {
+    case 'compact_started':
+      return event.trigger === 'synthetic_threshold'
+        ? '开始 synthetic compact'
+        : '开始 compact';
+    case 'compact_completed':
+      return 'compact 完成';
+    case 'archive_started':
+      return '开始 archive';
+    case 'archive_completed':
+      return 'archive 完成';
+    default:
+      return null;
+  }
 }
 
 /**
@@ -572,6 +639,14 @@ function applyStreamEvent(
       }
       break;
     }
+    case 'lifecycle': {
+      const lifecycleText = describeLifecycleEvent(event);
+      next.systemStatus = lifecycleText;
+      if (lifecycleText) {
+        next.recentEvents = pushEvent(prev.recentEvents, 'status', `状态: ${lifecycleText}`);
+      }
+      break;
+    }
   }
 }
 
@@ -649,8 +724,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   loadTurns: async (jid: string) => {
     try {
+      const routeJid = getRouteJid(get().groups, jid);
       const data = await api.get<{ turns: Array<{ id: string; chatJid: string; channel: string; messageIds: string[]; startedAt: string; completedAt: string; status: string }> }>(
-        `/api/groups/${encodeURIComponent(jid)}/turns?limit=200`
+        `/api/sessions/${encodeURIComponent(routeJid)}/turns?limit=200`
       );
       // API returns DESC order, reverse to chronological
       const turns: TurnInfo[] = data.turns.map(t => ({
@@ -666,6 +742,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   handleRunnerState: (chatJid, state, detail) => {
+    chatJid = resolveStoreJid(get().groups, chatJid);
     if (state === 'idle') {
       // Agent 进程退出或 query 无可见输出：清除流式状态，
       // 停止显示"正在思考..."。如果后续有新消息触发新 query，
@@ -697,8 +774,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   loadActiveTurnState: async (jid: string) => {
     try {
+      const routeJid = getRouteJid(get().groups, jid);
       const data = await api.get<ActiveTurnObservabilityResponse>(
-        `/api/groups/${encodeURIComponent(jid)}/turns/active`,
+        `/api/sessions/${encodeURIComponent(routeJid)}/turns/active`,
       );
       set((s) => {
         const nextActiveTurn = { ...s.activeTurn };
@@ -781,26 +859,95 @@ export const useChatStore = create<ChatState>((set, get) => ({
   loadGroups: async () => {
     set({ loading: true });
     try {
-      const data = await api.get<{ groups: Record<string, GroupInfo> }>('/api/groups');
+      const data = await api.get<{
+        sessions: Record<string, SessionInfo>;
+      }>('/api/sessions');
+      const sessionMap = data.sessions;
+      const groups = Object.fromEntries(
+        Object.entries(sessionMap)
+          .filter(([, info]) => info.kind === 'main' || info.kind === 'workspace')
+          .map(([sessionId, info]) => [
+            sessionId,
+            { ...info, id: info.id || sessionId },
+          ]),
+      );
       set((state) => {
-        const currentStillExists =
-          state.currentGroup && !!data.groups[state.currentGroup];
+        const allowedKeys = new Set(Object.keys(groups));
+        const keyMap: Record<string, string> = {};
+        for (const [sessionId, info] of Object.entries(groups)) {
+          if (state.groups[sessionId]) {
+            keyMap[sessionId] = sessionId;
+            continue;
+          }
+          if (info.backing_jid && state.groups[info.backing_jid]) {
+            keyMap[info.backing_jid] = sessionId;
+          }
+        }
 
-        let nextCurrent = currentStillExists ? state.currentGroup : null;
-        if (!nextCurrent) {
-          const homeEntry = Object.entries(data.groups).find(
-            ([_, group]) => group.is_my_home,
+        const nextCurrent =
+          (state.currentGroup && allowedKeys.has(keyMap[state.currentGroup] || state.currentGroup))
+            ? (keyMap[state.currentGroup] || state.currentGroup)
+            : null;
+
+        let selectedCurrent = nextCurrent;
+        const nextGroups = groups;
+        const nextMessages = remapGroupScopedRecord(state.messages, keyMap, allowedKeys);
+        const nextWaiting = remapGroupScopedRecord(state.waiting, keyMap, allowedKeys);
+        const nextHasMore = remapGroupScopedRecord(state.hasMore, keyMap, allowedKeys);
+        const nextStreaming = remapGroupScopedRecord(state.streaming, keyMap, allowedKeys);
+        const nextPendingThinking = remapGroupScopedRecord(state.pendingThinking, keyMap, allowedKeys);
+        const nextClearing = remapGroupScopedRecord(state.clearing, keyMap, allowedKeys);
+        const nextAgents = remapGroupScopedRecord(state.agents, keyMap, allowedKeys);
+        const nextActiveAgentTab = remapGroupScopedRecord(state.activeAgentTab, keyMap, allowedKeys);
+        const nextHighlight = remapGroupScopedRecord(state.highlightMessageId, keyMap, allowedKeys);
+        const nextRunnerState = remapGroupScopedRecord(state.runnerState, keyMap, allowedKeys);
+        const nextActiveTurn = remapGroupScopedRecord(state.activeTurn, keyMap, allowedKeys);
+        const nextPendingBuffer = remapGroupScopedRecord(state.pendingBuffer, keyMap, allowedKeys);
+        const nextTurns = remapGroupScopedRecord(state.turns, keyMap, allowedKeys);
+        const nextSdkTasks = Object.fromEntries(
+          Object.entries(state.sdkTasks)
+            .map(([taskId, task]) => [
+              taskId,
+              { ...task, chatJid: keyMap[task.chatJid] || task.chatJid },
+            ] as const)
+            .filter(([, task]) => allowedKeys.has(task.chatJid)),
+        );
+
+        const currentStillExists =
+          selectedCurrent && !!nextGroups[selectedCurrent];
+        if (!currentStillExists) {
+          selectedCurrent = null;
+        }
+
+        let nextCurrentFinal = selectedCurrent;
+        if (!nextCurrentFinal) {
+          const homeEntry = Object.entries(nextGroups).find(
+            ([, group]) => group.kind === 'main',
           );
           if (homeEntry) {
-            nextCurrent = homeEntry[0];
+            nextCurrentFinal = homeEntry[0];
           } else {
-            nextCurrent = Object.keys(data.groups)[0] || null;
+            nextCurrentFinal = Object.keys(nextGroups)[0] || null;
           }
         }
 
         return {
-          groups: data.groups,
-          currentGroup: nextCurrent,
+          groups: nextGroups,
+          currentGroup: nextCurrentFinal,
+          messages: nextMessages,
+          waiting: nextWaiting,
+          hasMore: nextHasMore,
+          streaming: nextStreaming,
+          pendingThinking: nextPendingThinking,
+          clearing: nextClearing,
+          agents: nextAgents,
+          activeAgentTab: nextActiveAgentTab,
+          highlightMessageId: nextHighlight,
+          runnerState: nextRunnerState,
+          activeTurn: nextActiveTurn,
+          pendingBuffer: nextPendingBuffer,
+          turns: nextTurns,
+          sdkTasks: nextSdkTasks,
           loading: false,
           error: null,
         };
@@ -823,12 +970,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   loadMessages: async (jid: string, loadMore = false) => {
     const state = get();
+    const routeJid = getRouteJid(state.groups, jid);
     const existing = state.messages[jid] || [];
     const before = loadMore && existing.length > 0 ? existing[0].timestamp : undefined;
 
     try {
       const data = await api.get<{ messages: Message[]; hasMore: boolean }>(
-        `/api/groups/${encodeURIComponent(jid)}/messages?${new URLSearchParams(
+        `/api/sessions/${encodeURIComponent(routeJid)}/messages?${new URLSearchParams(
           before ? { before: String(before), limit: '50' } : { limit: '50' }
         )}`
       );
@@ -868,6 +1016,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (get().clearing[jid]) return;
 
     const state = get();
+    const routeJid = getRouteJid(state.groups, jid);
     const existing = state.messages[jid] || [];
     const lastTs = existing.length > 0 ? existing[existing.length - 1].timestamp : undefined;
 
@@ -877,7 +1026,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (lastTs) params.set('after', lastTs);
 
       const data = await api.get<{ messages: Message[] }>(
-        `/api/groups/${encodeURIComponent(jid)}/messages?${params}`
+        `/api/sessions/${encodeURIComponent(routeJid)}/messages?${params}`
       );
 
       // Re-check clearing lock after async fetch — clearHistory may have started mid-request
@@ -939,7 +1088,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 2. agent_reply WebSocket 事件时
       // 3. status:interrupted 事件时
 
-      const body: { chatJid: string; content: string; attachments?: Array<{ type: 'image'; data: string; mimeType: string }> } = { chatJid: jid, content };
+      const routeJid = getRouteJid(get().groups, jid);
+      const body: { chatJid: string; content: string; attachments?: Array<{ type: 'image'; data: string; mimeType: string }> } = { chatJid: routeJid, content };
       if (attachments && attachments.length > 0) {
         body.attachments = attachments.map(att => ({ type: 'image', ...att }));
       }
@@ -989,8 +1139,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   stopGroup: async (jid: string) => {
     try {
+      const routeJid = getRouteJid(get().groups, jid);
       await api.post<{ success: boolean }>(
-        `/api/groups/${encodeURIComponent(jid)}/stop`,
+        `/api/sessions/${encodeURIComponent(routeJid)}/stop`,
       );
       get().clearStreaming(jid, { preserveThinking: false });
       set((s) => {
@@ -1007,8 +1158,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   interruptQuery: async (jid: string) => {
     try {
+      const routeJid = getRouteJid(get().groups, jid);
       const data = await api.post<{ success: boolean; interrupted: boolean }>(
-        `/api/groups/${encodeURIComponent(jid)}/interrupt`,
+        `/api/sessions/${encodeURIComponent(routeJid)}/interrupt`,
       );
       if (!data.interrupted) {
         set({ error: 'No active query to interrupt' });
@@ -1043,8 +1195,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   resetSession: async (jid: string, agentId?: string) => {
     try {
+      const routeJid = getRouteJid(get().groups, jid);
       await api.post<{ success: boolean; dividerMessageId: string }>(
-        `/api/groups/${encodeURIComponent(jid)}/reset-session`,
+        `/api/sessions/${encodeURIComponent(routeJid)}/reset-session`,
         agentId ? { agentId } : undefined,
       );
       if (agentId) {
@@ -1074,8 +1227,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({ clearing: { ...s.clearing, [jid]: true } }));
 
     try {
+      const routeJid = getRouteJid(get().groups, jid);
       await api.post<{ success: boolean }>(
-        `/api/groups/${encodeURIComponent(jid)}/clear-history`,
+        `/api/sessions/${encodeURIComponent(routeJid)}/clear-history`,
       );
 
       set((s) => {
@@ -1119,7 +1273,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   deleteMessage: async (jid: string, messageId: string) => {
     try {
-      await api.delete(`/api/groups/${encodeURIComponent(jid)}/messages/${encodeURIComponent(messageId)}`);
+      const routeJid = getRouteJid(get().groups, jid);
+      await api.delete(`/api/sessions/${encodeURIComponent(routeJid)}/messages/${encodeURIComponent(messageId)}`);
       set((s) => ({
         messages: {
           ...s.messages,
@@ -1133,28 +1288,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  createFlow: async (name: string, options?: { execution_mode?: 'container' | 'host'; custom_cwd?: string; init_source_path?: string; init_git_url?: string }) => {
+  createFlow: async (name: string, options?: { init_source_path?: string; init_git_url?: string }) => {
     try {
       const body: Record<string, string> = { name };
-      if (options?.execution_mode) body.execution_mode = options.execution_mode;
-      if (options?.custom_cwd) body.custom_cwd = options.custom_cwd;
       if (options?.init_source_path) body.init_source_path = options.init_source_path;
       if (options?.init_git_url) body.init_git_url = options.init_git_url;
 
       const needsLongTimeout = !!(options?.init_source_path || options?.init_git_url);
       const data = await api.post<{
         success: boolean;
-        jid: string;
-        group: GroupInfo;
-      }>('/api/groups', body, needsLongTimeout ? 120_000 : undefined);
+        session: SessionInfo;
+      }>('/api/sessions', body, needsLongTimeout ? 120_000 : undefined);
       if (!data.success) return null;
-
-      set((s) => ({
-        groups: { ...s.groups, [data.jid]: data.group },
-        error: null,
-      }));
-
-      return { jid: data.jid, folder: data.group.folder };
+      const createdSession = data.session;
+      await get().loadGroups();
+      const createdEntry = Object.entries(get().groups).find(
+        ([, group]) =>
+          group.folder === createdSession.folder ||
+          group.backing_jid === createdSession.id ||
+          group.id === createdSession.id,
+      );
+      return {
+        jid: createdEntry?.[0] || createdSession.id || createdSession.folder,
+        folder: createdEntry?.[1].folder || createdSession.folder,
+      };
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
       return null;
@@ -1163,7 +1320,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   renameFlow: async (jid: string, name: string) => {
     try {
-      await api.patch<{ success: boolean }>(`/api/groups/${encodeURIComponent(jid)}`, { name });
+      const path = `/api/sessions/${encodeURIComponent(getRouteJid(get().groups, jid))}`;
+      await api.patch<{ success: boolean }>(path, { name });
       set((s) => {
         const group = s.groups[jid];
         if (!group) return s;
@@ -1188,8 +1346,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!group) return;
     const willPin = !group.pinned_at;
     try {
-      const data = await api.patch<{ success: boolean; pinned_at?: string }>(
-        `/api/groups/${encodeURIComponent(jid)}`,
+      const path = `/api/sessions/${encodeURIComponent(getRouteJid(get().groups, jid))}`;
+      const data = await api.patch<{ success: boolean; pinned_at?: string; session?: SessionInfo }>(
+        path,
         { is_pinned: willPin },
       );
       set((s) => {
@@ -1200,7 +1359,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             ...s.groups,
             [jid]: {
               ...g,
-              pinned_at: willPin ? (data.pinned_at || new Date().toISOString()) : undefined,
+              pinned_at:
+                willPin
+                  ? (data.session?.pinned_at || data.pinned_at || new Date().toISOString())
+                  : undefined,
             },
           },
         };
@@ -1212,7 +1374,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   deleteFlow: async (jid: string) => {
     try {
-      await api.delete<{ success: boolean }>(`/api/groups/${encodeURIComponent(jid)}`);
+      const routeJid = getRouteJid(get().groups, jid);
+      await api.delete<{ success: boolean }>(
+        `/api/sessions/${encodeURIComponent(routeJid)}`,
+      );
       set((s) => {
         const nextGroups = { ...s.groups };
         const nextMessages = { ...s.messages };
@@ -1263,6 +1428,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   // 处理流式事件
   handleStreamEvent: (chatJid, event, agentId?) => {
+    chatJid = resolveStoreJid(get().groups, chatJid);
     // Skip while clearHistory is in-flight
     if (get().clearing[chatJid]) return;
 
@@ -1651,6 +1817,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // 通过 WebSocket new_message 事件立即添加消息（避免轮询延迟导致消息"丢失"）
   handleWsNewMessage: (chatJid, wsMsg, agentId?) => {
     if (!wsMsg || !wsMsg.id) return;
+    chatJid = resolveStoreJid(get().groups, chatJid);
     // Skip while clearHistory is in-flight to prevent race re-injection
     if (get().clearing[chatJid]) return;
 
@@ -1732,6 +1899,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   // 处理子 Agent 状态变更事件
   handleAgentStatus: (chatJid, agentId, status, name, prompt, resultSummary?, kind?) => {
+    chatJid = resolveStoreJid(get().groups, chatJid);
     set((s) => {
       const existing = s.agents[chatJid] || [];
 
@@ -1770,6 +1938,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const resolvedKind = kind || (idx >= 0 ? existing[idx].kind : 'task');
       const agentInfo: AgentInfo = {
         id: agentId,
+        session_id:
+          resolvedKind === 'conversation'
+            ? existing[idx]?.session_id || `worker:${agentId}`
+            : undefined,
         name,
         prompt,
         status,
@@ -1818,8 +1990,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // 加载子 Agent 列表
   loadAgents: async (jid) => {
     try {
+      const routeJid = getRouteJid(get().groups, jid);
       const data = await api.get<{ agents: AgentInfo[] }>(
-        `/api/groups/${encodeURIComponent(jid)}/agents`,
+        `/api/sessions/${encodeURIComponent(routeJid)}/agents`,
       );
       set((s) => {
         const visibleAgents = data.agents.filter((a) => a.kind === 'conversation' || a.status === 'running');
@@ -1895,7 +2068,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // 删除子 Agent
   deleteAgentAction: async (jid, agentId) => {
     try {
-      await api.delete(`/api/groups/${encodeURIComponent(jid)}/agents/${agentId}`);
+      const routeJid = getRouteJid(get().groups, jid);
+      await api.delete(`/api/sessions/${encodeURIComponent(routeJid)}/agents/${agentId}`);
       clearSdkTaskCleanupTimer(agentId);
       clearSdkTaskStaleTimer(agentId);
       set((s) => {
@@ -1941,8 +2115,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   createConversation: async (jid, name, description?) => {
     try {
+      const routeJid = getRouteJid(get().groups, jid);
       const data = await api.post<{ agent: AgentInfo }>(
-        `/api/groups/${encodeURIComponent(jid)}/agents`,
+        `/api/sessions/${encodeURIComponent(routeJid)}/agents`,
         { name, description },
       );
       set((s) => {
@@ -1960,6 +2135,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   loadAgentMessages: async (jid, agentId, loadMore = false) => {
     const existing = get().agentMessages[agentId] || [];
+    const routeJid = getRouteJid(get().groups, jid);
     const before = loadMore && existing.length > 0 ? existing[0].timestamp : undefined;
 
     try {
@@ -1969,7 +2145,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           : { limit: '50', agentId },
       );
       const data = await api.get<{ messages: Message[]; hasMore: boolean }>(
-        `/api/groups/${encodeURIComponent(jid)}/messages?${params}`,
+        `/api/sessions/${encodeURIComponent(routeJid)}/messages?${params}`,
       );
       const sorted = [...data.messages].reverse();
       set((s) => {
@@ -1995,7 +2171,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return { agentStreaming: next };
     });
     // Send via WebSocket with agentId
-    wsManager.send({ type: 'send_message', chatJid: jid, content, agentId });
+    wsManager.send({
+      type: 'send_message',
+      chatJid: getRouteJid(get().groups, jid),
+      content,
+      agentId,
+    });
     set((s) => ({
       agentWaiting: { ...s.agentWaiting, [agentId]: true },
     }));
@@ -2003,6 +2184,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   refreshAgentMessages: async (jid, agentId) => {
     const existing = get().agentMessages[agentId] || [];
+    const routeJid = getRouteJid(get().groups, jid);
     const lastTs = existing.length > 0 ? existing[existing.length - 1].timestamp : undefined;
 
     try {
@@ -2010,7 +2192,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (lastTs) params.set('after', lastTs);
 
       const data = await api.get<{ messages: Message[] }>(
-        `/api/groups/${encodeURIComponent(jid)}/messages?${params}`,
+        `/api/sessions/${encodeURIComponent(routeJid)}/messages?${params}`,
       );
 
       if (data.messages.length > 0) {
@@ -2043,8 +2225,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // IM binding actions
   loadAvailableImGroups: async (jid) => {
     try {
+      const routeJid = getRouteJid(get().groups, jid);
       const data = await api.get<{ imGroups: AvailableImGroup[] }>(
-        `/api/groups/${encodeURIComponent(jid)}/im-groups`,
+        `/api/sessions/${encodeURIComponent(routeJid)}/im-groups`,
       );
       return data.imGroups;
     } catch {
@@ -2054,8 +2237,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   bindImGroup: async (jid, agentId, imJid, force) => {
     try {
+      const routeJid = getRouteJid(get().groups, jid);
       await api.put(
-        `/api/groups/${encodeURIComponent(jid)}/agents/${agentId}/im-binding`,
+        `/api/sessions/${encodeURIComponent(routeJid)}/agents/${agentId}/im-binding`,
         { im_jid: imJid, ...(force ? { force: true } : {}) },
       );
       // Refresh agents to get updated linked_im_groups
@@ -2068,8 +2252,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   unbindImGroup: async (jid, agentId, imJid) => {
     try {
+      const routeJid = getRouteJid(get().groups, jid);
       await api.delete(
-        `/api/groups/${encodeURIComponent(jid)}/agents/${agentId}/im-binding/${encodeURIComponent(imJid)}`,
+        `/api/sessions/${encodeURIComponent(routeJid)}/agents/${agentId}/im-binding/${encodeURIComponent(imJid)}`,
       );
       get().loadAgents(jid);
       return true;
@@ -2080,8 +2265,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   bindMainImGroup: async (jid, imJid, force) => {
     try {
+      const routeJid = getRouteJid(get().groups, jid);
       await api.put(
-        `/api/groups/${encodeURIComponent(jid)}/im-binding`,
+        `/api/sessions/${encodeURIComponent(routeJid)}/im-binding`,
         { im_jid: imJid, ...(force ? { force: true } : {}) },
       );
       return true;
@@ -2092,8 +2278,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   unbindMainImGroup: async (jid, imJid) => {
     try {
+      const routeJid = getRouteJid(get().groups, jid);
       await api.delete(
-        `/api/groups/${encodeURIComponent(jid)}/im-binding/${encodeURIComponent(imJid)}`,
+        `/api/sessions/${encodeURIComponent(routeJid)}/im-binding/${encodeURIComponent(imJid)}`,
       );
       return true;
     } catch {
@@ -2104,14 +2291,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // 刷新/重连时恢复正在运行的 agent 状态
   restoreActiveState: async () => {
     try {
-      const data = await api.get<{ groups: Array<{ jid: string; active: boolean; pendingMessages?: boolean }> }>('/api/status');
+      const data = await api.get<{
+        sessions: Array<{ jid: string; active: boolean; pendingMessages?: boolean }>;
+      }>('/api/status');
       set((s) => {
         const nextWaiting = { ...s.waiting };
         const nextStreaming = { ...s.streaming };
 
-        // 构建后端已知的群组集合；不在集合中的 JID 说明后端无活跃进程
+        // 构建后端已知的会话集合；不在集合中的 JID 说明后端无活跃进程
         // （pm2 restart 后 queue 为空，所有 JID 都不在集合中）。
-        const knownJids = new Set(data.groups.map((g) => g.jid));
+        const knownJids = new Set(
+          data.sessions.map((session) => resolveStoreJid(s.groups, session.jid)),
+        );
 
         // 清除后端不可见的 JID 的 waiting/streaming（进程已死）
         for (const jid of Object.keys(nextWaiting)) {
@@ -2121,26 +2312,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
         }
 
-        for (const g of data.groups) {
-          if (g.pendingMessages) {
-            nextWaiting[g.jid] = true;
+        for (const session of data.sessions) {
+          const storeJid = resolveStoreJid(s.groups, session.jid);
+          if (session.pendingMessages) {
+            nextWaiting[storeJid] = true;
             continue;
           }
           // 没有活跃进程且没有待处理消息 → 不应等待。
-          if (!g.active) {
-            delete nextWaiting[g.jid];
-            delete nextStreaming[g.jid];
+          if (!session.active) {
+            delete nextWaiting[storeJid];
+            delete nextStreaming[storeJid];
             continue;
           }
           // active 可能仅表示 runner 空闲存活，这里回退到消息语义推断。
-          const msgs = s.messages[g.jid] || [];
+          const msgs = s.messages[storeJid] || [];
           const latest = msgs.length > 0 ? msgs[msgs.length - 1] : null;
           const inferredWaiting =
             !!latest &&
             latest.sender !== '__system__' &&
             latest.is_from_me === false;
           if (inferredWaiting) {
-            nextWaiting[g.jid] = true;
+            nextWaiting[storeJid] = true;
           }
           // active 且最新消息是 Agent 回复时：不删除 waiting，
           // 让 stream_event / new_message 自然管理状态。
@@ -2157,10 +2349,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // 已缓存则跳过
     if (get().traceCache[messageId]) return;
     try {
-      const jid = encodeURIComponent(chatJid);
+      const jid = encodeURIComponent(getRouteJid(get().groups, chatJid));
       const msgId = encodeURIComponent(messageId);
       const data = await api.get<{ blocks: StreamingBlock[] }>(
-        `/api/groups/${jid}/messages/${msgId}/trace`,
+        `/api/sessions/${jid}/messages/${msgId}/trace`,
       );
       if (!data.blocks?.length) return;
       set((s) => {
@@ -2244,13 +2436,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // API uses strict < for before and strict > for after, so bump timestamp by 1ms
       // to include the target message in the "before" result set.
       const tsPlusOne = new Date(new Date(timestamp).getTime() + 1).toISOString();
-      const encJid = encodeURIComponent(jid);
+      const routeJid = getRouteJid(get().groups, jid);
+      const encJid = encodeURIComponent(routeJid);
       const [beforeData, afterData] = await Promise.all([
         api.get<{ messages: Message[]; hasMore: boolean }>(
-          `/api/groups/${encJid}/messages?${new URLSearchParams({ before: tsPlusOne, limit: '30' })}`,
+          `/api/sessions/${encJid}/messages?${new URLSearchParams({ before: tsPlusOne, limit: '30' })}`,
         ),
         api.get<{ messages: Message[] }>(
-          `/api/groups/${encJid}/messages?${new URLSearchParams({ after: timestamp, limit: '20' })}`,
+          `/api/sessions/${encJid}/messages?${new URLSearchParams({ after: timestamp, limit: '20' })}`,
         ),
       ]);
 

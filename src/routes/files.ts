@@ -8,7 +8,7 @@ import {
 } from '../web-context.js';
 import type { AuthUser } from '../types.js';
 import type { RegisteredGroup } from '../types.js';
-import { getRegisteredGroup } from '../db.js';
+import { getRegisteredGroup, getJidsByFolder, getSessionRecord } from '../db.js';
 import { GROUPS_DIR } from '../config.js';
 import { logger } from '../logger.js';
 import {
@@ -21,7 +21,6 @@ import {
   getGroupStorageUsage,
   invalidateGroupStorageUsage,
 } from '../file-manager.js';
-import { checkStorageLimit, isBillingEnabled } from '../billing.js';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -29,6 +28,35 @@ import { Readable } from 'node:stream';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
+
+function resolveRouteGroup(id: string): {
+  accessJid: string;
+  group: RegisteredGroup;
+  session: ReturnType<typeof getSessionRecord> | null;
+} | null {
+  const direct = getRegisteredGroup(id);
+  if (direct && id.startsWith('web:')) {
+    const session = id.startsWith('web:')
+      ? getSessionRecord(`main:${direct.folder}`) || null
+      : null;
+    return { accessJid: id, group: direct, session };
+  }
+
+  const session = getSessionRecord(id);
+  if (!session) return null;
+
+  const folder = session.id.startsWith('main:')
+    ? session.id.slice('main:'.length)
+    : session.parent_session_id?.startsWith('main:')
+      ? session.parent_session_id.slice('main:'.length)
+      : null;
+  if (!folder) return null;
+
+  const accessJid = getJidsByFolder(folder).find((jid) => jid.startsWith('web:'));
+  if (!accessJid) return null;
+  const group = getRegisteredGroup(accessJid);
+  return group ? { accessJid, group, session } : null;
+}
 
 // MIME 类型映射（预览和编辑端点共用）
 const MIME_MAP: Record<string, string> = {
@@ -132,22 +160,39 @@ const SAFE_PREVIEW_MIME_TYPES = new Set([
 
 /**
  * 获取文件操作的根目录覆盖。
- * 宿主机模式下设置了 customCwd 时，文件面板以 customCwd 为根。
+ * 单一路径本地 runtime 下，session 的 cwd 始终由 customCwd 承接。
  */
-function getFileRootOverride(group: RegisteredGroup): string | undefined {
-  return group.executionMode === 'host' && group.customCwd
-    ? group.customCwd
-    : undefined;
+function getFileRootOverride(
+  group: RegisteredGroup,
+  session?: ReturnType<typeof getSessionRecord> | null,
+): string | undefined {
+  if (session?.cwd) return session.cwd;
+  return group.customCwd || undefined;
+}
+
+function resolveFileOwnerKey(
+  group: RegisteredGroup,
+  session?: ReturnType<typeof getSessionRecord> | null,
+): string | null {
+  if (session?.owner_key) return session.owner_key;
+  if (session?.parent_session_id) {
+    const parentSession = getSessionRecord(session.parent_session_id);
+    if (parentSession?.owner_key) return parentSession.owner_key;
+  }
+  if (group.folder) {
+    const mainSession = getSessionRecord(`main:${group.folder}`);
+    if (mainSession?.owner_key) return mainSession.owner_key;
+  }
+  return null;
 }
 
 /** Try to resolve a relative path from the user-global directory as fallback. */
 function tryUserGlobalFallback(
-  group: RegisteredGroup,
+  ownerKey: string | null,
   relativePath: string,
 ): string | null {
-  const userId = group.created_by;
-  if (!userId) return null;
-  const globalRoot = path.join(GROUPS_DIR, 'user-global', userId);
+  if (!ownerKey) return null;
+  const globalRoot = path.join(GROUPS_DIR, 'user-global', ownerKey);
   const resolved = path.resolve(globalRoot, path.normalize(relativePath));
   // Security: must stay within user-global dir
   if (!resolved.startsWith(globalRoot + path.sep) && resolved !== globalRoot) {
@@ -238,29 +283,34 @@ async function openDirectoryInFileManager(targetDir: string): Promise<void> {
 
 const fileRoutes = new Hono<{ Variables: Variables }>();
 
-// GET /api/groups/:jid/files?path= - 列出文件
+// GET /api/sessions/:jid/files?path= - 列出文件
 fileRoutes.get('/:jid/files', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const subPath = c.req.query('path') || '';
 
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) {
+    return c.json({ error: 'Session not found' }, 404);
   }
+  const { accessJid, group, session } = resolved;
 
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
-    return c.json({ error: 'Group not found' }, 404);
+  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid: accessJid })) {
+    return c.json({ error: 'Session not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
+      { error: 'Insufficient permissions for local runtime workspace access' },
       403,
     );
   }
 
   try {
-    const result = listFiles(group.folder, subPath, getFileRootOverride(group));
+    const result = listFiles(
+      group.folder,
+      subPath,
+      getFileRootOverride(group, session),
+    );
     return c.json(result);
   } catch (error) {
     logger.error({ err: error }, `Failed to list files for ${jid}`);
@@ -268,27 +318,29 @@ fileRoutes.get('/:jid/files', authMiddleware, (c) => {
   }
 });
 
-// POST /api/groups/:jid/files - 上传文件
+// POST /api/sessions/:jid/files - 上传文件
 fileRoutes.post('/:jid/files', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
 
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) {
+    return c.json({ error: 'Session not found' }, 404);
   }
+  const { accessJid, group, session } = resolved;
 
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
-    return c.json({ error: 'Group not found' }, 404);
+  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid: accessJid })) {
+    return c.json({ error: 'Session not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
+      { error: 'Insufficient permissions for local runtime workspace access' },
       403,
     );
   }
 
-  const rootOverride = getFileRootOverride(group);
+  const rootOverride = getFileRootOverride(group, session);
+  const ownerKey = resolveFileOwnerKey(group, session);
 
   try {
     const body = await c.req.parseBody({ all: true });
@@ -302,24 +354,6 @@ fileRoutes.post('/:jid/files', authMiddleware, async (c) => {
     // 支持单文件和多文件上传
     const fileList = Array.isArray(files) ? files : [files];
     const uploadedFiles: string[] = [];
-
-    // Billing: check storage limit before uploading
-    if (isBillingEnabled() && group.created_by) {
-      const totalUploadSize = fileList.reduce(
-        (sum, f) => sum + (f instanceof File ? f.size : 0),
-        0,
-      );
-      const currentUsage = getGroupStorageUsage(group.folder, rootOverride);
-      const storageCheck = checkStorageLimit(
-        group.created_by,
-        authUser.role,
-        currentUsage,
-        totalUploadSize,
-      );
-      if (!storageCheck.allowed) {
-        return c.json({ error: storageCheck.reason }, 403);
-      }
-    }
 
     for (const file of fileList) {
       if (!(file instanceof File)) continue;
@@ -372,18 +406,19 @@ fileRoutes.post('/:jid/files', authMiddleware, async (c) => {
   }
 });
 
-// POST /api/groups/:jid/files/open-directory - 在本地文件管理器中打开目录
+// POST /api/sessions/:jid/files/open-directory - 在本地文件管理器中打开目录
 fileRoutes.post('/:jid/files/open-directory', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
 
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) {
+    return c.json({ error: 'Session not found' }, 404);
   }
+  const { accessJid, group, session } = resolved;
 
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
-    return c.json({ error: 'Group not found' }, 404);
+  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid: accessJid })) {
+    return c.json({ error: 'Session not found' }, 404);
   }
   // 打开本地目录属于宿主机操作，限制为有宿主机权限的用户
   if (!hasHostExecutionPermission(authUser)) {
@@ -399,7 +434,7 @@ fileRoutes.post('/:jid/files/open-directory', authMiddleware, async (c) => {
     const absolutePath = validateAndResolvePath(
       group.folder,
       targetPath,
-      getFileRootOverride(group),
+      getFileRootOverride(group, session),
     );
 
     if (!fs.existsSync(absolutePath)) {
@@ -432,28 +467,30 @@ fileRoutes.post('/:jid/files/open-directory', authMiddleware, async (c) => {
   }
 });
 
-// GET /api/groups/:jid/files/download/:path - 下载文件
+// GET /api/sessions/:jid/files/download/:path - 下载文件
 fileRoutes.get('/:jid/files/download/:path', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) {
+    return c.json({ error: 'Session not found' }, 404);
   }
+  const { accessJid, group, session } = resolved;
 
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
-    return c.json({ error: 'Group not found' }, 404);
+  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid: accessJid })) {
+    return c.json({ error: 'Session not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
+      { error: 'Insufficient permissions for local runtime workspace access' },
       403,
     );
   }
 
   try {
+    const ownerKey = resolveFileOwnerKey(group, session);
     // 解码 base64url 路径
     const relativePath = Buffer.from(encodedPath, 'base64url').toString(
       'utf-8',
@@ -461,12 +498,12 @@ fileRoutes.get('/:jid/files/download/:path', authMiddleware, (c) => {
     let absolutePath = validateAndResolvePath(
       group.folder,
       relativePath,
-      getFileRootOverride(group),
+      getFileRootOverride(group, session),
     );
 
     if (!fs.existsSync(absolutePath)) {
       // Fallback: try user-global directory (e.g. shared expression images)
-      const globalFallback = tryUserGlobalFallback(group, relativePath);
+      const globalFallback = tryUserGlobalFallback(ownerKey, relativePath);
       if (globalFallback) {
         absolutePath = globalFallback;
       } else {
@@ -546,23 +583,24 @@ fileRoutes.get('/:jid/files/download/:path', authMiddleware, (c) => {
   }
 });
 
-// GET /api/groups/:jid/files/preview/:path - 预览文件
+// GET /api/sessions/:jid/files/preview/:path - 预览文件
 fileRoutes.get('/:jid/files/preview/:path', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) {
+    return c.json({ error: 'Session not found' }, 404);
   }
+  const { accessJid, group, session } = resolved;
 
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
-    return c.json({ error: 'Group not found' }, 404);
+  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid: accessJid })) {
+    return c.json({ error: 'Session not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
+      { error: 'Insufficient permissions for local runtime workspace access' },
       403,
     );
   }
@@ -575,7 +613,7 @@ fileRoutes.get('/:jid/files/preview/:path', authMiddleware, (c) => {
     const absolutePath = validateAndResolvePath(
       group.folder,
       relativePath,
-      getFileRootOverride(group),
+      getFileRootOverride(group, session),
     );
 
     if (!fs.existsSync(absolutePath)) {
@@ -619,29 +657,31 @@ fileRoutes.get('/:jid/files/preview/:path', authMiddleware, (c) => {
   }
 });
 
-// GET /api/groups/:jid/files/content/:path - 读取文本文件内容
+// GET /api/sessions/:jid/files/content/:path - 读取文本文件内容
 fileRoutes.get('/:jid/files/content/:path', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) {
+    return c.json({ error: 'Session not found' }, 404);
   }
+  const { accessJid, group, session } = resolved;
 
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
-    return c.json({ error: 'Group not found' }, 404);
+  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid: accessJid })) {
+    return c.json({ error: 'Session not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
+      { error: 'Insufficient permissions for local runtime workspace access' },
       403,
     );
   }
 
   try {
-    const rootOverride = getFileRootOverride(group);
+    const rootOverride = getFileRootOverride(group, session);
+    const ownerKey = resolveFileOwnerKey(group, session);
     const relativePath = Buffer.from(encodedPath, 'base64url').toString(
       'utf-8',
     );
@@ -682,29 +722,31 @@ fileRoutes.get('/:jid/files/content/:path', authMiddleware, (c) => {
   }
 });
 
-// PUT /api/groups/:jid/files/content/:path - 保存文本文件内容
+// PUT /api/sessions/:jid/files/content/:path - 保存文本文件内容
 fileRoutes.put('/:jid/files/content/:path', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) {
+    return c.json({ error: 'Session not found' }, 404);
   }
+  const { accessJid, group, session } = resolved;
 
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
-    return c.json({ error: 'Group not found' }, 404);
+  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid: accessJid })) {
+    return c.json({ error: 'Session not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
+      { error: 'Insufficient permissions for local runtime workspace access' },
       403,
     );
   }
 
   try {
-    const rootOverride = getFileRootOverride(group);
+    const rootOverride = getFileRootOverride(group, session);
+    const ownerKey = resolveFileOwnerKey(group, session);
     const relativePath = Buffer.from(encodedPath, 'base64url').toString(
       'utf-8',
     );
@@ -745,23 +787,6 @@ fileRoutes.put('/:jid/files/content/:path', authMiddleware, async (c) => {
       return c.json({ error: 'Content too large (max 10MB)' }, 400);
     }
 
-    if (isBillingEnabled() && group.created_by) {
-      const nextSize = Buffer.byteLength(body.content, 'utf-8');
-      const additionalBytes = Math.max(0, nextSize - stats.size);
-      if (additionalBytes > 0) {
-        const currentUsage = getGroupStorageUsage(group.folder, rootOverride);
-        const storageCheck = checkStorageLimit(
-          group.created_by,
-          authUser.role,
-          currentUsage,
-          additionalBytes,
-        );
-        if (!storageCheck.allowed) {
-          return c.json({ error: storageCheck.reason }, 403);
-        }
-      }
-    }
-
     // 原子写入
     const tmp = `${absolutePath}.tmp`;
     fs.writeFileSync(tmp, body.content, 'utf-8');
@@ -775,29 +800,30 @@ fileRoutes.put('/:jid/files/content/:path', authMiddleware, async (c) => {
   }
 });
 
-// DELETE /api/groups/:jid/files/:path - 删除文件
+// DELETE /api/sessions/:jid/files/:path - 删除文件
 fileRoutes.delete('/:jid/files/:path', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) {
+    return c.json({ error: 'Session not found' }, 404);
   }
+  const { accessJid, group, session } = resolved;
 
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
-    return c.json({ error: 'Group not found' }, 404);
+  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid: accessJid })) {
+    return c.json({ error: 'Session not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
+      { error: 'Insufficient permissions for local runtime workspace access' },
       403,
     );
   }
 
   try {
-    const rootOverride = getFileRootOverride(group);
+    const rootOverride = getFileRootOverride(group, session);
     // 解码 base64url 路径
     const relativePath = Buffer.from(encodedPath, 'base64url').toString(
       'utf-8',
@@ -824,22 +850,23 @@ fileRoutes.delete('/:jid/files/:path', authMiddleware, (c) => {
   }
 });
 
-// POST /api/groups/:jid/directories - 创建目录
+// POST /api/sessions/:jid/directories - 创建目录
 fileRoutes.post('/:jid/directories', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
 
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(jid);
+  if (!resolved) {
+    return c.json({ error: 'Session not found' }, 404);
   }
+  const { accessJid, group, session } = resolved;
 
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
-    return c.json({ error: 'Group not found' }, 404);
+  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid: accessJid })) {
+    return c.json({ error: 'Session not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
+      { error: 'Insufficient permissions for local runtime workspace access' },
       403,
     );
   }
@@ -856,7 +883,7 @@ fileRoutes.post('/:jid/directories', authMiddleware, async (c) => {
       group.folder,
       parentPath || '',
       name,
-      getFileRootOverride(group),
+      getFileRootOverride(group, session),
     );
 
     return c.json({ success: true });

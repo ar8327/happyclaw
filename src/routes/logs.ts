@@ -59,11 +59,13 @@ function parseLogHeader(
     timestamp: '',
     duration: 0,
     exitCode: null,
-    filePrefix: filename.startsWith('host')
-      ? 'host'
-      : filename.startsWith('memory')
-        ? 'memory'
-        : 'container',
+    filePrefix: filename.startsWith('memory')
+      ? 'memory'
+      : filename.startsWith('host') || filename.startsWith('local')
+        ? 'local'
+        : filename.startsWith('container')
+          ? 'local'
+          : 'runtime',
     fileSize,
   };
 

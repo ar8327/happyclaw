@@ -1,12 +1,14 @@
 .PHONY: dev dev-backend dev-web build build-backend build-web build-memory-agent start \
        typecheck typecheck-backend typecheck-web typecheck-agent-runner-core typecheck-agent-runner typecheck-memory-agent \
-       format format-check install clean reset-init update-sdk sync-types \
+       format format-check install clean reset-init sync-types ensure-deps \
        backup restore help
 
 # ─── Development ─────────────────────────────────────────────
 
-dev: ## 启动前后端（首次自动安装依赖和构建容器镜像）
-	@if [ ! -d node_modules ] || [ package.json -nt node_modules ] || [ web/package.json -nt web/node_modules ] || [ container/agent-runner/package.json -nt container/agent-runner/node_modules ]; then echo "📦 依赖有更新，安装依赖..."; $(MAKE) install; fi
+ensure-deps: ## 检查依赖是否齐全，缺失时自动安装
+	@if [ ! -d node_modules ] || [ package.json -nt node_modules ] || [ ! -d web/node_modules ] || [ web/package.json -nt web/node_modules ] || [ ! -d container/agent-runner-core/node_modules ] || [ container/agent-runner-core/package.json -nt container/agent-runner-core/node_modules ] || [ ! -d container/agent-runner/node_modules ] || [ container/agent-runner/package.json -nt container/agent-runner/node_modules ] || [ ! -d container/memory-agent/node_modules ] || [ container/memory-agent/package.json -nt container/memory-agent/node_modules ]; then echo "📦 依赖有更新，安装依赖..."; $(MAKE) install; fi
+
+dev: ensure-deps ## 启动前后端（首次自动安装依赖和构建容器镜像）
 	@if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && ! docker image inspect happyclaw-agent:latest >/dev/null 2>&1; then echo "🐳 构建 Agent 容器镜像..."; ./container/build.sh; fi
 	@npm --prefix container/agent-runner run build --silent 2>/dev/null || npm --prefix container/agent-runner run build
 	@npm --prefix container/memory-agent run build --silent 2>/dev/null || npm --prefix container/memory-agent run build
@@ -20,7 +22,7 @@ dev-web: ## 仅启动前端
 
 # ─── Build ───────────────────────────────────────────────────
 
-build: sync-types ## 编译前后端及 agent-runner
+build: ensure-deps sync-types ## 编译前后端及 agent-runner
 	npm run build:all
 	npm --prefix container/agent-runner-core run build
 	npm --prefix container/agent-runner run build
@@ -37,8 +39,7 @@ build-memory-agent: ## 仅编译 memory-agent
 
 # ─── Production ──────────────────────────────────────────────
 
-start: ## 一键启动生产环境（首次自动安装依赖和构建容器镜像）
-	@if [ ! -d node_modules ] || [ package.json -nt node_modules ] || [ web/package.json -nt web/node_modules ] || [ container/agent-runner/package.json -nt container/agent-runner/node_modules ]; then echo "📦 依赖有更新，安装依赖..."; $(MAKE) install; fi
+start: ensure-deps ## 一键启动生产环境（首次自动安装依赖和构建容器镜像）
 	@if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && ! docker image inspect happyclaw-agent:latest >/dev/null 2>&1; then echo "🐳 构建 Agent 容器镜像..."; ./container/build.sh; fi
 	$(MAKE) build
 	npm run start
@@ -73,12 +74,6 @@ format-check: ## 检查代码格式
 
 sync-types: ## 同步 shared/ 下的类型定义到各子项目
 	@./scripts/sync-stream-event.sh
-
-# ─── SDK ─────────────────────────────────────────────────────
-
-update-sdk: ## 更新 agent-runner 的 Claude Agent SDK 到最新版本
-	cd container/agent-runner && npm update @anthropic-ai/claude-agent-sdk && npm run build
-	@echo "SDK updated. Run 'make typecheck' to verify."
 
 # ─── Setup ───────────────────────────────────────────────────
 

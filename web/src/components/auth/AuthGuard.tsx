@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Navigate, useLocation, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 import { type Permission, useAuthStore } from '../../stores/auth';
 
@@ -16,8 +16,7 @@ export function AuthGuard({
   requiredPermission,
   requiredAnyPermissions,
 }: AuthGuardProps) {
-  const { authenticated, checking, checkAuth, user, initialized, setupStatus, hasPermission } = useAuthStore();
-  const location = useLocation();
+  const { authenticated, checking, checkAuth, user, initialized, hasPermission } = useAuthStore();
   const navigate = useNavigate();
   const checkedRef = useRef(false);
   const [timedOut, setTimedOut] = useState(false);
@@ -44,7 +43,7 @@ export function AuthGuard({
           <div className="max-w-md text-center bg-card rounded-xl border border-border p-6">
             <h2 className="text-lg font-semibold text-foreground mb-2">页面初始化超时</h2>
             <p className="text-sm text-slate-600 mb-4">
-              后端可能刚启动或浏览器缓存异常，请先刷新页面；若仍失败，重新登录。
+              后端可能刚启动或浏览器缓存异常，请先刷新页面。
             </p>
             <div className="flex items-center justify-center gap-3">
               <button
@@ -53,13 +52,13 @@ export function AuthGuard({
               >
                 刷新页面
               </button>
-              <button
-                onClick={() => {
-                  navigate('/login', { replace: true });
-                }}
+                <button
+                  onClick={() => {
+                    navigate('/chat', { replace: true });
+                  }}
                 className="px-4 py-2 text-sm rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-100"
               >
-                去登录页
+                返回工作台
               </button>
             </div>
           </div>
@@ -76,36 +75,30 @@ export function AuthGuard({
     );
   }
 
-  // System not initialized — redirect to setup page
-  if (initialized === false) {
-    return <Navigate to="/setup" replace />;
-  }
-
-  if (!authenticated) {
-    return <Navigate to="/login" state={{ from: location }} replace />;
-  }
-
-  // Users with must_change_password go to settings
-  if (user?.must_change_password && location.pathname !== '/settings') {
-    return <Navigate to="/settings" replace />;
-  }
-
-  // Admin onboarding: force provider setup flow before entering full app.
-  if (user?.role === 'admin' && setupStatus?.needsSetup && location.pathname !== '/setup/providers') {
-    return <Navigate to="/setup/providers" replace />;
+  if (initialized === false || !authenticated) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center p-6">
+        <div className="max-w-md text-center bg-card rounded-xl border border-border p-6">
+          <h2 className="text-lg font-semibold text-foreground mb-2">本地工作台初始化中</h2>
+          <p className="text-sm text-slate-600">
+            后端尚未准备好，刷新页面后会自动恢复本地单用户上下文。
+          </p>
+        </div>
+      </div>
+    );
   }
 
   if (requireAdmin && user?.role !== 'admin') {
-    return <Navigate to="/chat" replace />;
+    return null;
   }
 
   if (requiredPermission && !hasPermission(requiredPermission)) {
-    return <Navigate to="/chat" replace />;
+    return null;
   }
 
   if (requiredAnyPermissions && requiredAnyPermissions.length > 0) {
     const matched = requiredAnyPermissions.some((perm) => hasPermission(perm));
-    if (!matched) return <Navigate to="/chat" replace />;
+    if (!matched) return null;
   }
 
   return <>{children}</>;

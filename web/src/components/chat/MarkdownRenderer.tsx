@@ -15,18 +15,18 @@ import 'katex/dist/katex.min.css';
 
 interface MarkdownRendererProps {
   content: string;
-  groupJid?: string;
+  sessionId?: string;
   variant?: 'chat' | 'docs';
 }
 
 /** Resolve relative image paths to the file download API */
-function resolveImageSrc(src: string, groupJid?: string): string {
-  if (!groupJid || !src) return src;
+function resolveImageSrc(src: string, sessionId?: string): string {
+  if (!sessionId || !src) return src;
   if (/^(https?:\/\/|data:|\/\/)/.test(src) || src.startsWith('/')) return src;
   // Strip #agent:xxx suffix — files belong to the group, not individual agents
-  const baseJid = groupJid.replace(/#agent:.*$/, '');
+  const baseJid = sessionId.replace(/#agent:.*$/, '');
   const encoded = toBase64Url(src);
-  return withBasePath(`/api/groups/${encodeURIComponent(baseJid)}/files/download/${encoded}`);
+  return withBasePath(`/api/sessions/${encodeURIComponent(baseJid)}/files/download/${encoded}`);
 }
 
 /** Image lightbox for markdown images */
@@ -179,7 +179,7 @@ function CodeBlock({
   );
 }
 
-export const MarkdownRenderer = memo(function MarkdownRenderer({ content, groupJid, variant = 'chat' }: MarkdownRendererProps) {
+export const MarkdownRenderer = memo(function MarkdownRenderer({ content, sessionId, variant = 'chat' }: MarkdownRendererProps) {
   const textSizeClass = variant === 'chat'
     ? 'text-[15px] leading-7 text-foreground'
     : 'text-sm leading-6 text-foreground';
@@ -196,7 +196,7 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, groupJ
         ]}
         components={{
           code: (props) => <CodeBlock {...props} variant={variant} />,
-          img: ({ src, alt }) => <MarkdownImage src={src ? resolveImageSrc(src, groupJid) : undefined} alt={alt} />,
+          img: ({ src, alt }) => <MarkdownImage src={src ? resolveImageSrc(src, sessionId) : undefined} alt={alt} />,
           a: ({ href, children }) => (
             <a
               href={href}

@@ -12,17 +12,16 @@ import {
 } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 
-interface Group {
-  jid: string;
+interface SessionOption {
+  id: string;
   name: string;
   folder: string;
 }
 
 interface CreateTaskFormProps {
-  groups: Group[];
+  sessions: SessionOption[];
   onSubmit: (data: {
-    groupFolder: string;
-    chatJid: string;
+    sessionId: string;
     prompt: string;
     scheduleType: 'cron' | 'interval' | 'once';
     scheduleValue: string;
@@ -43,10 +42,9 @@ const INTERVAL_UNITS = [
   { label: '天', ms: 24 * 60 * 60 * 1000 },
 ] as const;
 
-export function CreateTaskForm({ groups, onSubmit, onClose, isAdmin }: CreateTaskFormProps) {
+export function CreateTaskForm({ sessions, onSubmit, onClose, isAdmin }: CreateTaskFormProps) {
   const [formData, setFormData] = useState({
-    groupFolder: '',
-    chatJid: '',
+    sessionId: '',
     prompt: '',
     scheduleType: 'cron' as 'cron' | 'interval' | 'once',
     scheduleValue: '',
@@ -66,8 +64,8 @@ export function CreateTaskForm({ groups, onSubmit, onClose, isAdmin }: CreateTas
   const validateForm = () => {
     const newErrors: Record<string, string> = {};
 
-    if (!formData.groupFolder) {
-      newErrors.groupFolder = '请选择群组';
+    if (!formData.sessionId) {
+      newErrors.sessionId = '请选择会话';
     }
 
     if (isScript) {
@@ -138,12 +136,11 @@ export function CreateTaskForm({ groups, onSubmit, onClose, isAdmin }: CreateTas
     }
   };
 
-  const handleGroupChange = (value: string) => {
-    const selectedGroup = groups.find((g) => g.folder === value);
+  const handleSessionChange = (value: string) => {
+    const selectedSession = sessions.find((session) => session.id === value);
     setFormData({
       ...formData,
-      groupFolder: value,
-      chatJid: selectedGroup?.jid || '',
+      sessionId: selectedSession?.id || value,
     });
   };
 
@@ -166,22 +163,22 @@ export function CreateTaskForm({ groups, onSubmit, onClose, isAdmin }: CreateTas
           {/* Group Selection */}
           <div>
             <label className="block text-sm font-medium text-foreground mb-2">
-              选择群组 <span className="text-red-500">*</span>
+              选择会话 <span className="text-red-500">*</span>
             </label>
-            <Select value={formData.groupFolder || undefined} onValueChange={handleGroupChange}>
-              <SelectTrigger className={cn("w-full", errors.groupFolder && "border-red-500")}>
+            <Select value={formData.sessionId || undefined} onValueChange={handleSessionChange}>
+              <SelectTrigger className={cn("w-full", errors.sessionId && "border-red-500")}>
                 <SelectValue placeholder="请选择" />
               </SelectTrigger>
               <SelectContent>
-                {groups.map((group) => (
-                  <SelectItem key={group.jid} value={group.folder}>
-                    {group.name} ({group.folder})
+                {sessions.map((session) => (
+                  <SelectItem key={session.id} value={session.id}>
+                    {session.name} ({session.folder})
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
-            {errors.groupFolder && (
-              <p className="mt-1 text-sm text-red-600">{errors.groupFolder}</p>
+            {errors.sessionId && (
+              <p className="mt-1 text-sm text-red-600">{errors.sessionId}</p>
             )}
           </div>
 
@@ -234,7 +231,7 @@ export function CreateTaskForm({ groups, onSubmit, onClose, isAdmin }: CreateTas
                 <p className="mt-1 text-sm text-red-600">{errors.scriptCommand}</p>
               )}
               <p className="mt-1 text-xs text-slate-500">
-                命令在群组工作目录下执行，最大 4096 字符
+                命令在会话工作目录下执行，最大 4096 字符
               </p>
             </div>
           )}
@@ -370,17 +367,17 @@ export function CreateTaskForm({ groups, onSubmit, onClose, isAdmin }: CreateTas
                 }
               >
                 <SelectTrigger className="w-full">
-                  <SelectValue placeholder="默认（跟随工作区配置）" />
+                  <SelectValue placeholder="默认（跟随会话配置）" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__default__">默认（跟随工作区配置）</SelectItem>
+                  <SelectItem value="__default__">默认（跟随会话配置）</SelectItem>
                   <SelectItem value="opus">Opus（最强）</SelectItem>
                   <SelectItem value="sonnet">Sonnet（均衡）</SelectItem>
                   <SelectItem value="haiku">Haiku（快速/低成本）</SelectItem>
                 </SelectContent>
               </Select>
               <p className="mt-1 text-xs text-slate-500">
-                覆盖此任务使用的模型，留空则跟随工作区配置
+                覆盖此任务使用的模型，留空则跟随会话配置
               </p>
             </div>
           )}

@@ -14,8 +14,10 @@ import {
   deleteTask,
   getTaskRunLogs,
   getRegisteredGroup,
+  getSessionRecord,
+  getJidsByFolder,
 } from '../db.js';
-import type { AuthUser } from '../types.js';
+import type { AuthUser, ScheduledTask, SessionRecord } from '../types.js';
 import { TIMEZONE } from '../config.js';
 import {
   isHostExecutionGroup,
@@ -25,12 +27,121 @@ import {
 
 const tasksRoutes = new Hono<{ Variables: Variables }>();
 
+interface TaskResponse {
+  id: string;
+  session_id: string;
+  session_folder: string;
+  session_name: string | null;
+  chat_jid: string;
+  prompt: string;
+  schedule_type: 'cron' | 'interval' | 'once';
+  schedule_value: string;
+  context_mode: 'group' | 'isolated';
+  execution_type: 'agent' | 'script';
+  script_command: string | null;
+  model?: string;
+  next_run: string | null;
+  last_run: string | null;
+  last_result: string | null;
+  status: 'active' | 'paused' | 'completed';
+  created_at: string;
+}
+
+function resolveTaskSession(id: string): SessionRecord | undefined {
+  const direct = getSessionRecord(id);
+  if (direct) return direct;
+  const backingGroup = getRegisteredGroup(id);
+  if (!backingGroup || !id.startsWith('web:')) return undefined;
+  return getSessionRecord(`main:${backingGroup.folder}`);
+}
+
+function getFolderForTaskSession(session: SessionRecord): string | null {
+  if (session.id.startsWith('main:')) return session.id.slice('main:'.length);
+  if (session.parent_session_id?.startsWith('main:')) {
+    return session.parent_session_id.slice('main:'.length);
+  }
+  return null;
+}
+
+function resolveTaskTarget(
+  sessionId: string,
+): {
+  session: SessionRecord;
+  group: NonNullable<ReturnType<typeof getRegisteredGroup>>;
+  chatJid: string;
+  groupFolder: string;
+} | null {
+  const session = resolveTaskSession(sessionId);
+  if (!session) return null;
+  if (session.kind !== 'main' && session.kind !== 'workspace') return null;
+
+  const folder = getFolderForTaskSession(session);
+  if (!folder) return null;
+  const chatJid = getJidsByFolder(folder).find((jid) => jid.startsWith('web:'));
+  if (!chatJid) return null;
+  const group = getRegisteredGroup(chatJid);
+  if (!group) return null;
+  return { session, group, chatJid, groupFolder: folder };
+}
+
+function buildTaskPayload(task: ScheduledTask): TaskResponse {
+  const sessionId = task.session_id?.trim() || `main:${task.group_folder}`;
+  const session = resolveTaskSession(sessionId);
+  return {
+    session_id: session?.id || sessionId,
+    session_folder: task.group_folder,
+    session_name: session?.name || getRegisteredGroup(task.chat_jid)?.name || null,
+    id: task.id,
+    chat_jid: task.chat_jid,
+    prompt: task.prompt,
+    schedule_type: task.schedule_type,
+    schedule_value: task.schedule_value,
+    context_mode: task.context_mode,
+    execution_type: task.execution_type,
+    script_command: task.script_command,
+    model: task.model,
+    next_run: task.next_run,
+    last_run: task.last_run,
+    last_result: task.last_result,
+    status: task.status,
+    created_at: task.created_at,
+  };
+}
+
+function resolveStoredTaskTarget(
+  task: ScheduledTask,
+): {
+  session: SessionRecord;
+  group: NonNullable<ReturnType<typeof getRegisteredGroup>>;
+  chatJid: string;
+  groupFolder: string;
+} | null {
+  const sessionId = task.session_id?.trim();
+  if (sessionId) {
+    const target = resolveTaskTarget(sessionId);
+    if (target) return target;
+  }
+
+  const legacyGroup = getRegisteredGroup(task.chat_jid);
+  if (!legacyGroup || legacyGroup.folder !== task.group_folder) return null;
+  const session = getSessionRecord(`main:${task.group_folder}`);
+  return session
+    ? {
+        session,
+        group: legacyGroup,
+        chatJid: task.chat_jid,
+        groupFolder: task.group_folder,
+      }
+    : null;
+}
+
 // --- Routes ---
 
 tasksRoutes.get('/', authMiddleware, (c) => {
   const authUser = c.get('user') as AuthUser;
   const tasks = getAllTasks().filter((task) => {
-    const group = getRegisteredGroup(task.chat_jid);
+    const group =
+      resolveStoredTaskTarget(task)?.group || getRegisteredGroup(task.chat_jid);
     // Conservative: if group can't be resolved, only admin can see (may be orphaned task)
     if (!group) return authUser.role === 'admin';
     if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group))
@@ -39,7 +150,7 @@ tasksRoutes.get('/', authMiddleware, (c) => {
       return false;
     return true;
   });
-  return c.json({ tasks });
+  return c.json({ tasks: tasks.map(buildTaskPayload) });
 });
 
 tasksRoutes.post('/', authMiddleware, async (c) => {
@@ -54,6 +165,7 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
   }
 
   const {
+    session_id,
     group_folder,
     chat_jid,
     prompt,
@@ -64,21 +176,50 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
     script_command,
     model,
   } = validation.data;
-  const group = getRegisteredGroup(chat_jid);
-  if (!group) return c.json({ error: 'Group not found' }, 404);
-  if (group.folder !== group_folder) {
-    return c.json(
-      { error: 'group_folder does not match chat_jid group folder' },
-      400,
+  const target = session_id
+    ? resolveTaskTarget(session_id)
+    : (
+      chat_jid && group_folder
+        ? (() => {
+            const legacyGroup = getRegisteredGroup(chat_jid);
+            if (!legacyGroup || legacyGroup.folder !== group_folder) return null;
+            const session = getSessionRecord(`main:${group_folder}`);
+            return session
+              ? {
+                  session,
+                  group: legacyGroup,
+                  chatJid: chat_jid,
+                  groupFolder: group_folder,
+                }
+              : null;
+          })()
+        : null
     );
+  if (!target) {
+    return c.json({ error: 'Session not found or cannot accept tasks' }, 404);
+  }
+  const { session, group, chatJid, groupFolder } = target;
+  if (
+    session_id &&
+    group_folder &&
+    groupFolder !== group_folder
+  ) {
+    return c.json({ error: 'session_id does not match group_folder' }, 400);
+  }
+  if (
+    session_id &&
+    chat_jid &&
+    chatJid !== chat_jid
+  ) {
+    return c.json({ error: 'session_id does not match chat_jid' }, 400);
   }
   const authUser = c.get('user') as AuthUser;
   if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
-    return c.json({ error: 'Group not found' }, 404);
+    return c.json({ error: 'Session not found' }, 404);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
+      { error: 'Insufficient permissions for local runtime workspace access' },
       403,
     );
   }
@@ -107,8 +248,9 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
 
   createTask({
     id: taskId,
-    group_folder,
-    chat_jid,
+    session_id: session.id,
+    group_folder: groupFolder,
+    chat_jid: chatJid,
     prompt: prompt || '',
     schedule_type,
     schedule_value,
@@ -130,7 +272,8 @@ tasksRoutes.patch('/:id', authMiddleware, async (c) => {
   const existing = getTaskById(id);
   if (!existing) return c.json({ error: 'Task not found' }, 404);
   const authUser = c.get('user') as AuthUser;
-  const group = getRegisteredGroup(existing.chat_jid);
+  const group =
+    resolveStoredTaskTarget(existing)?.group || getRegisteredGroup(existing.chat_jid);
   if (!group) {
     if (authUser.role !== 'admin')
       return c.json({ error: 'Task not found' }, 404);
@@ -140,7 +283,7 @@ tasksRoutes.patch('/:id', authMiddleware, async (c) => {
     }
     if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
       return c.json(
-        { error: 'Insufficient permissions for host execution mode' },
+        { error: 'Insufficient permissions for local runtime workspace access' },
         403,
       );
     }
@@ -174,7 +317,8 @@ tasksRoutes.delete('/:id', authMiddleware, (c) => {
   const existing = getTaskById(id);
   if (!existing) return c.json({ error: 'Task not found' }, 404);
   const authUser = c.get('user') as AuthUser;
-  const group = getRegisteredGroup(existing.chat_jid);
+  const group =
+    resolveStoredTaskTarget(existing)?.group || getRegisteredGroup(existing.chat_jid);
   if (!group) {
     if (authUser.role !== 'admin')
       return c.json({ error: 'Task not found' }, 404);
@@ -184,7 +328,7 @@ tasksRoutes.delete('/:id', authMiddleware, (c) => {
     }
     if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
       return c.json(
-        { error: 'Insufficient permissions for host execution mode' },
+        { error: 'Insufficient permissions for local runtime workspace access' },
         403,
       );
     }
@@ -198,7 +342,8 @@ tasksRoutes.get('/:id/logs', authMiddleware, (c) => {
   const existing = getTaskById(id);
   if (!existing) return c.json({ error: 'Task not found' }, 404);
   const authUser = c.get('user') as AuthUser;
-  const group = getRegisteredGroup(existing.chat_jid);
+  const group =
+    resolveStoredTaskTarget(existing)?.group || getRegisteredGroup(existing.chat_jid);
   if (!group) {
     if (authUser.role !== 'admin')
       return c.json({ error: 'Task not found' }, 404);
@@ -208,7 +353,7 @@ tasksRoutes.get('/:id/logs', authMiddleware, (c) => {
     }
     if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
       return c.json(
-        { error: 'Insufficient permissions for host execution mode' },
+        { error: 'Insufficient permissions for local runtime workspace access' },
         403,
       );
     }

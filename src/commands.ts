@@ -8,23 +8,31 @@ import path from 'path';
 import {
   deleteSession,
   getJidsByFolder,
+  listSessionRecords,
   storeMessageDirect,
   ensureChatExists,
 } from './db.js';
 import { DATA_DIR } from './config.js';
 import { logger } from './logger.js';
 import type { NewMessage, MessageCursor } from './types.js';
+import {
+  buildWorkerConversationJid,
+  buildWorkerSessionId,
+  isWorkerSessionId,
+} from './worker-session.js';
 
 // ─── Types ──────────────────────────────────────────────────────
 
 export interface CommandDeps {
-  queue: { stopGroup(jid: string, opts?: { force?: boolean }): Promise<void> };
+  queue: {
+    stopSession(jid: string, opts?: { force?: boolean }): Promise<void>;
+  };
   sessions: Record<string, string>;
   broadcast: (jid: string, msg: NewMessage & { is_from_me: boolean }) => void;
   setLastAgentTimestamp: (jid: string, cursor: MessageCursor) => void;
 }
 
-// ─── Session file cleanup (mirrors groups.ts clearSessionJsonlFiles) ────
+// ─── Session file cleanup for main and worker session state ─────────────
 
 function clearSessionFiles(folder: string, agentId?: string): void {
   const claudeDir = agentId
@@ -47,6 +55,22 @@ function clearSessionFiles(folder: string, agentId?: string): void {
   }
 }
 
+function getWorkerRuntimeJidsForFolder(folder: string): string[] {
+  const parentSessionId = `main:${folder}`;
+  return Array.from(
+    new Set(
+      listSessionRecords()
+        .filter(
+          (session) =>
+            session.parent_session_id === parentSessionId
+            && session.kind === 'worker'
+            && isWorkerSessionId(session.id),
+        )
+        .map((session) => session.id),
+    ),
+  );
+}
+
 // ─── Core reset ─────────────────────────────────────────────────
 
 export async function executeSessionReset(
@@ -56,14 +80,15 @@ export async function executeSessionReset(
   agentId?: string,
 ): Promise<void> {
   if (agentId) {
-    // Agent-specific reset: only stop the agent's virtual JID process
-    const virtualJid = `web:${folder}#agent:${agentId}`;
-    await deps.queue.stopGroup(virtualJid, { force: true });
+    await deps.queue.stopSession(buildWorkerSessionId(agentId), { force: true });
   } else {
     // Main session reset: stop all processes for this folder
     const siblingJids = getJidsByFolder(folder);
+    const workerRuntimeJids = getWorkerRuntimeJidsForFolder(folder);
     await Promise.all(
-      siblingJids.map((j) => deps.queue.stopGroup(j, { force: true })),
+      [...siblingJids, ...workerRuntimeJids].map((j) =>
+        deps.queue.stopSession(j, { force: true })
+      ),
     );
   }
 
@@ -77,7 +102,9 @@ export async function executeSessionReset(
   }
 
   // 4. Insert context_reset divider message into the correct JID
-  const targetJid = agentId ? `web:${folder}#agent:${agentId}` : chatJid;
+  const targetJid = agentId
+    ? buildWorkerConversationJid(chatJid, agentId)
+    : chatJid;
   const dividerMessageId = crypto.randomUUID();
   const timestamp = new Date().toISOString();
   ensureChatExists(targetJid);
@@ -104,8 +131,9 @@ export async function executeSessionReset(
   // 5. Advance lastAgentTimestamp so old messages before the reset are not
   //    re-sent to the next fresh agent session.
   if (agentId) {
-    const virtualJid = `web:${folder}#agent:${agentId}`;
-    deps.setLastAgentTimestamp(virtualJid, { rowid: dividerRowid });
+    deps.setLastAgentTimestamp(buildWorkerConversationJid(chatJid, agentId), {
+      rowid: dividerRowid,
+    });
   } else {
     const siblingJids = getJidsByFolder(folder);
     for (const siblingJid of siblingJids) {

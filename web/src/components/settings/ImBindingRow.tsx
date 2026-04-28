@@ -8,22 +8,43 @@ interface ImBindingRowProps {
   isActioning: boolean;
   onRebind: (group: AvailableImGroup) => void;
   onUnbind: (group: AvailableImGroup) => void;
+  onUpdatePolicy: (
+    group: AvailableImGroup,
+    updates: {
+      reply_policy?: 'source_only' | 'mirror';
+      activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+      require_mention?: boolean;
+    },
+  ) => void;
 }
 
-export function ImBindingRow({ group, isActioning, onRebind, onUnbind }: ImBindingRowProps) {
-  const hasBound = !!group.bound_agent_id || !!group.bound_main_jid;
+export function ImBindingRow({
+  group,
+  isActioning,
+  onRebind,
+  onUnbind,
+  onUpdatePolicy,
+}: ImBindingRowProps) {
+  const hasBound = !!group.bound_session_id;
 
   const bindingLabel = (): string => {
-    if (group.bound_agent_id && group.bound_target_name) {
+    if (group.bound_session_kind === 'worker' && group.bound_target_name) {
       return group.bound_workspace_name && group.bound_workspace_name !== group.bound_target_name
         ? `${group.bound_workspace_name} / ${group.bound_target_name}`
         : group.bound_target_name;
     }
-    if (group.bound_main_jid && group.bound_target_name) {
+    if (group.bound_session_id && group.bound_target_name) {
       return `${group.bound_target_name} / 主会话`;
     }
-    return '默认（主工作区）';
+    return '默认（主会话）';
   };
+
+  const bindingModeLabel =
+    group.binding_mode === 'mirror'
+      ? '镜像'
+      : group.binding_mode === 'direct'
+        ? '直绑'
+        : '默认';
 
   return (
     <div className={`flex items-center gap-3 p-3 rounded-lg border transition-colors ${
@@ -60,6 +81,55 @@ export function ImBindingRow({ group, isActioning, onRebind, onUnbind }: ImBindi
           <span className={hasBound ? 'text-teal-600 dark:text-teal-400' : 'text-slate-400'}>
             → {bindingLabel()}
           </span>
+          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">
+            {bindingModeLabel}
+          </span>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 mt-2">
+          <select
+            value={group.reply_policy || 'source_only'}
+            onChange={(e) =>
+              onUpdatePolicy(group, {
+                reply_policy: e.target.value as 'source_only' | 'mirror',
+              })
+            }
+            disabled={isActioning}
+            className="h-7 rounded border border-border bg-background px-2 text-[11px]"
+          >
+            <option value="source_only">回复原渠道</option>
+            <option value="mirror">镜像回流</option>
+          </select>
+          <select
+            value={group.activation_mode || 'auto'}
+            onChange={(e) =>
+              onUpdatePolicy(group, {
+                activation_mode: e.target.value as
+                  | 'auto'
+                  | 'always'
+                  | 'when_mentioned'
+                  | 'disabled',
+              })
+            }
+            disabled={isActioning}
+            className="h-7 rounded border border-border bg-background px-2 text-[11px]"
+          >
+            <option value="auto">自动响应</option>
+            <option value="always">始终响应</option>
+            <option value="when_mentioned">仅 @mention</option>
+            <option value="disabled">禁用</option>
+          </select>
+          <label className="flex items-center gap-1 text-[11px] text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={group.require_mention === true}
+              disabled={isActioning}
+              onChange={(e) =>
+                onUpdatePolicy(group, { require_mention: e.target.checked })
+              }
+              className="rounded border-gray-300"
+            />
+            群聊需 @
+          </label>
         </div>
       </div>
 

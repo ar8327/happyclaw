@@ -15,11 +15,18 @@ import type { SessionState } from './session-state.js';
 export type LogFn = (message: string) => void;
 export type WriteOutputFn = (output: ContainerOutput) => void;
 
+export interface IpcMessage {
+  text: string;
+  images?: Array<{ data: string; mimeType?: string }>;
+  ackTargets?: string[];
+  ackSourceChannels?: string[];
+}
+
 /**
  * Drain result: parsed messages plus optional mode change instruction.
  */
 export interface IpcDrainResult {
-  messages: Array<{ text: string; images?: Array<{ data: string; mimeType?: string }> }>;
+  messages: IpcMessage[];
   modeChange?: string; // 'plan' | 'bypassPermissions'
 }
 
@@ -38,6 +45,44 @@ export interface IpcPaths {
 // ---------------------------------------------------------------------------
 
 export const IPC_POLL_MS = 500;
+
+function normalizeStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const normalized = value.filter(
+    (item): item is string => typeof item === 'string' && item.length > 0,
+  );
+  return normalized.length > 0 ? [...new Set(normalized)] : undefined;
+}
+
+function extractAckSourceChannels(text: string): string[] | undefined {
+  const sources = [...text.matchAll(/source="([^"]+)"/g)]
+    .map((match) => match[1])
+    .filter(Boolean);
+  return sources.length > 0 ? [...new Set(sources)] : undefined;
+}
+
+export function buildIpcAckStreamEvent(
+  sessionRecordId: string,
+  messageOrMessages: IpcMessage | IpcMessage[],
+): NonNullable<ContainerOutput['streamEvent']> {
+  const messages = Array.isArray(messageOrMessages)
+    ? messageOrMessages
+    : [messageOrMessages];
+  const ipcAckTargets = normalizeStringArray(
+    messages.flatMap((message) => message.ackTargets || []),
+  );
+  const ipcAckSources = normalizeStringArray(
+    messages.flatMap((message) => message.ackSourceChannels || []),
+  );
+  return {
+    eventType: 'status',
+    statusText: 'ipc_message_received',
+    ipcAckSessionId: sessionRecordId,
+    ipcAckTargets,
+    ipcAckSources,
+    ipcAckMessageCount: messages.length,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -122,10 +167,15 @@ export function drainIpcInput(paths: IpcPaths, log: LogFn): IpcDrainResult {
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
         fs.unlinkSync(filePath);
-        if (data.type === 'message' && data.text) {
+        if (data.type === 'message' && typeof data.text === 'string' && data.text.length > 0) {
           result.messages.push({
             text: data.text,
             images: data.images,
+            ackTargets: normalizeStringArray(data.ackTargets),
+            ackSourceChannels:
+              normalizeStringArray(data.ackSourceChannels)
+              || normalizeStringArray(data.sourceChannels)
+              || extractAckSourceChannels(data.text),
           });
         } else if (data.type === 'set_mode' && data.mode) {
           result.modeChange = data.mode;
@@ -155,7 +205,9 @@ export function waitForIpcMessage(
   writeOutput: WriteOutputFn,
   state: SessionState,
   imChannelsFile: string,
-): Promise<{ text: string; images?: Array<{ data: string; mimeType?: string }> } | null> {
+  sessionRecordId: string,
+  onDrain?: () => Promise<void> | void,
+): Promise<IpcMessage | null> {
   return new Promise((resolve) => {
     let pollCount = 0;
     const HEARTBEAT_INTERVAL = 120; // Log every ~60 seconds (120 polls * 500ms)
@@ -167,10 +219,19 @@ export function waitForIpcMessage(
       }
       if (shouldDrain(paths)) {
         log('Drain sentinel received while idle, exiting for turn boundary');
-        writeOutput({ status: 'drained', result: null });
-        // Must self-exit: unlike _close (host sends SIGTERM), _drain expects
-        // the process to terminate. SDK/MCP resources keep the event loop alive.
-        process.exit(0);
+        Promise.resolve(onDrain?.())
+          .catch((err) => {
+            log(
+              `Idle drain cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          })
+          .finally(() => {
+            writeOutput({ status: 'drained', result: null });
+            // Must self-exit: unlike _close (host sends SIGTERM), _drain expects
+            // the process to terminate. SDK/MCP resources keep the event loop alive.
+            process.exit(0);
+          });
+        return;
       }
       if (shouldInterrupt(paths)) {
         log('Interrupt sentinel received while idle, ignoring');
@@ -197,9 +258,24 @@ export function waitForIpcMessage(
         // Track IM channels for post-compaction routing reminder
         state.extractSourceChannels(combinedText, imChannelsFile);
         log(`Idle IPC pickup: ${messages.length} message(s), ${combinedText.length} chars`);
-        // Emit acknowledgement so host can track IPC delivery (mirrors pollIpcDuringQuery)
-        writeOutput({ status: 'stream', result: null, streamEvent: { eventType: 'status', statusText: 'ipc_message_received' } });
-        resolve({ text: combinedText, images: allImages.length > 0 ? allImages : undefined });
+        // Emit one acknowledgement per IPC message file so host-side counts stay balanced.
+        for (const message of messages) {
+          writeOutput({
+            status: 'stream',
+            result: null,
+            streamEvent: buildIpcAckStreamEvent(sessionRecordId, message),
+          });
+        }
+        resolve({
+          text: combinedText,
+          images: allImages.length > 0 ? allImages : undefined,
+          ackTargets: normalizeStringArray(
+            messages.flatMap((message) => message.ackTargets || []),
+          ),
+          ackSourceChannels: normalizeStringArray(
+            messages.flatMap((message) => message.ackSourceChannels || []),
+          ),
+        });
         return;
       }
       setTimeout(poll, IPC_POLL_MS);

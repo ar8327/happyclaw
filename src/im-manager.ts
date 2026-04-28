@@ -1,9 +1,9 @@
 /**
  * IM Connection Pool Manager
  *
- * Manages per-user IM connections using the unified IMChannel interface.
- * Each user can have independent IM connections that route messages
- * to their home container.
+ * Manages the single global IM channel set using the unified IMChannel interface.
+ * Session owner_key remains the only routing source for deciding whether a chat belongs
+ * to the local operator.
  */
 import {
   type IMChannel,
@@ -22,13 +22,12 @@ import type { QQConnectionConfig } from './qq.js';
 import type { WeChatConnectionConfig } from './wechat.js';
 import type { StreamingCardController } from './feishu-streaming-card.js';
 import { ProgressCardController } from './feishu-progress-card.js';
-import { getRegisteredGroup, getJidsByFolder } from './db.js';
+import {
+  getRegisteredGroup,
+  getSessionBinding,
+  getSessionRecord,
+} from './db.js';
 import { logger } from './logger.js';
-
-export interface UserIMConnection {
-  userId: string;
-  channels: Map<string, IMChannel>;
-}
 
 export interface FeishuConnectConfig {
   appId: string;
@@ -72,27 +71,18 @@ export interface ConnectFeishuOptions {
 }
 
 class IMConnectionManager {
-  private connections = new Map<string, UserIMConnection>();
-  private adminUserIds = new Set<string>();
+  private channels = new Map<string, IMChannel>();
+  private ownerKey: string | null = null;
 
   /** Register a user ID as admin (for fallback routing) */
   registerAdminUser(userId: string): void {
-    this.adminUserIds.add(userId);
-  }
-
-  private getOrCreate(userId: string): UserIMConnection {
-    let conn = this.connections.get(userId);
-    if (!conn) {
-      conn = { userId, channels: new Map() };
-      this.connections.set(userId, conn);
-    }
-    return conn;
+    this.ownerKey = userId;
   }
 
   // ─── Generic Channel Methods ────────────────────────────────
 
   /**
-   * Connect any IMChannel for a user.
+   * Connect any IMChannel for the global operator.
    */
   async connectChannel(
     userId: string,
@@ -103,32 +93,32 @@ class IMConnectionManager {
     // Disconnect existing channel of same type
     await this.disconnectChannel(userId, channelType);
 
-    const conn = this.getOrCreate(userId);
+    if (!this.ownerKey) {
+      this.ownerKey = userId;
+    }
     const connected = await channel.connect(opts);
     if (connected) {
-      conn.channels.set(channelType, channel);
+      this.channels.set(channelType, channel);
       logger.info({ userId, channelType }, 'IM channel connected');
     }
     return connected;
   }
 
   /**
-   * Disconnect a specific channel type for a user.
+   * Disconnect a specific channel type for the global operator.
    */
   async disconnectChannel(userId: string, channelType: string): Promise<void> {
-    const conn = this.connections.get(userId);
-    const channel = conn?.channels.get(channelType);
+    const channel = this.channels.get(channelType);
     if (channel) {
       await channel.disconnect();
-      conn!.channels.delete(channelType);
+      this.channels.delete(channelType);
       logger.info({ userId, channelType }, 'IM channel disconnected');
     }
   }
 
   /**
    * Send a message to an IM chat, auto-routing via JID prefix.
-   * Resolves the user by looking up chatJid -> registered_groups.created_by.
-   * Falls back to iterating sibling groups if no created_by is set.
+   * Resolves the owner from session binding / session owner_key first.
    */
   async sendMessage(
     jid: string,
@@ -273,38 +263,32 @@ class IMConnectionManager {
   }
 
   /**
-   * Find the appropriate IMChannel for a given JID, using group ownership lookup
-   * and sibling fallback.
+   * Find the appropriate IMChannel for a given JID by resolving its bound Session owner.
    */
   private findChannelForJid(
     jid: string,
     channelType: string,
   ): IMChannel | undefined {
-    // Direct lookup via group ownership
-    const group = getRegisteredGroup(jid);
-    if (group?.created_by) {
-      const conn = this.connections.get(group.created_by);
-      const ch = conn?.channels.get(channelType);
-      if (ch?.isConnected()) return ch;
+    const binding = getSessionBinding(jid);
+    if (binding) {
+      const boundSession = getSessionRecord(binding.session_id);
+      const ownerKey =
+        boundSession?.owner_key
+        || (boundSession?.parent_session_id
+          ? getSessionRecord(boundSession.parent_session_id)?.owner_key
+          : undefined);
+      if (ownerKey && this.ownerKey && ownerKey === this.ownerKey) {
+        const channel = this.channels.get(channelType);
+        if (channel?.isConnected()) return channel;
+      }
     }
 
-    // Fallback: find owner via sibling groups sharing the same folder
+    const group = getRegisteredGroup(jid);
     if (group) {
-      const siblingJids = getJidsByFolder(group.folder);
-      for (const sibJid of siblingJids) {
-        if (sibJid === jid) continue;
-        const sibling = getRegisteredGroup(sibJid);
-        if (sibling?.created_by) {
-          const conn = this.connections.get(sibling.created_by);
-          const ch = conn?.channels.get(channelType);
-          if (ch?.isConnected()) {
-            logger.warn(
-              { jid, fallbackUserId: sibling.created_by, folder: group.folder },
-              'IM message routed via sibling group owner connection',
-            );
-            return ch;
-          }
-        }
+      const sessionOwner = getSessionRecord(`main:${group.folder}`)?.owner_key;
+      if (sessionOwner && this.ownerKey && sessionOwner === this.ownerKey) {
+        const channel = this.channels.get(channelType);
+        if (channel?.isConnected()) return channel;
       }
     }
 
@@ -315,11 +299,9 @@ class IMConnectionManager {
    * Get any available Feishu Lark client (for cleanup tasks that don't need a specific chat).
    */
   getAnyLarkClient(): ReturnType<NonNullable<IMChannel['getLarkClient']>> | undefined {
-    for (const conn of this.connections.values()) {
-      const ch = conn.channels.get('feishu');
-      if (ch?.isConnected()) {
-        return ch.getLarkClient?.();
-      }
+    const channel = this.channels.get('feishu');
+    if (channel?.isConnected()) {
+      return channel.getLarkClient?.();
     }
     return undefined;
   }
@@ -327,7 +309,7 @@ class IMConnectionManager {
   // ─── Convenience Methods (API-compatible wrappers) ──────────
 
   /**
-   * Connect a Feishu instance for a specific user.
+   * Connect the global Feishu instance.
    */
   async connectUserFeishu(
     userId: string,
@@ -363,7 +345,7 @@ class IMConnectionManager {
   }
 
   /**
-   * Connect a Telegram instance for a specific user.
+   * Connect the global Telegram instance.
    */
   async connectUserTelegram(
     userId: string,
@@ -418,7 +400,7 @@ class IMConnectionManager {
   }
 
   /**
-   * Connect a QQ instance for a specific user.
+   * Connect the global QQ instance.
    */
   async connectUserQQ(
     userId: string,
@@ -481,7 +463,7 @@ class IMConnectionManager {
   }
 
   /**
-   * Connect a WeChat iLink instance for a specific user.
+   * Connect the global WeChat iLink instance.
    */
   async connectUserWeChat(
     userId: string,
@@ -589,84 +571,75 @@ class IMConnectionManager {
   }
 
   /**
-   * Sync Feishu groups via a specific user's connection.
+   * Sync Feishu chats via the local operator connection.
    */
   async syncFeishuGroups(userId: string): Promise<void> {
-    const conn = this.connections.get(userId);
-    const channel = conn?.channels.get('feishu');
+    if (this.ownerKey && userId !== this.ownerKey) return;
+    const channel = this.channels.get('feishu');
     if (channel?.isConnected() && channel.syncGroups) {
       await channel.syncGroups();
     }
   }
 
   isFeishuConnected(userId: string): boolean {
-    const conn = this.connections.get(userId);
-    return conn?.channels.get('feishu')?.isConnected() ?? false;
+    if (this.ownerKey && userId !== this.ownerKey) return false;
+    return this.channels.get('feishu')?.isConnected() ?? false;
   }
 
   isTelegramConnected(userId: string): boolean {
-    const conn = this.connections.get(userId);
-    return conn?.channels.get('telegram')?.isConnected() ?? false;
+    if (this.ownerKey && userId !== this.ownerKey) return false;
+    return this.channels.get('telegram')?.isConnected() ?? false;
   }
 
   isQQConnected(userId: string): boolean {
-    const conn = this.connections.get(userId);
-    return conn?.channels.get('qq')?.isConnected() ?? false;
+    if (this.ownerKey && userId !== this.ownerKey) return false;
+    return this.channels.get('qq')?.isConnected() ?? false;
   }
 
   /** Check if any user has an active Feishu connection */
   isAnyFeishuConnected(): boolean {
-    for (const conn of this.connections.values()) {
-      if (conn.channels.get('feishu')?.isConnected()) return true;
-    }
-    return false;
+    return this.channels.get('feishu')?.isConnected() ?? false;
   }
 
   /** Check if any user has an active Telegram connection */
   isAnyTelegramConnected(): boolean {
-    for (const conn of this.connections.values()) {
-      if (conn.channels.get('telegram')?.isConnected()) return true;
-    }
-    return false;
+    return this.channels.get('telegram')?.isConnected() ?? false;
   }
 
   /** Check if any user has an active QQ connection */
   isAnyQQConnected(): boolean {
-    for (const conn of this.connections.values()) {
-      if (conn.channels.get('qq')?.isConnected()) return true;
-    }
-    return false;
+    return this.channels.get('qq')?.isConnected() ?? false;
   }
 
   isWeChatConnected(userId: string): boolean {
-    const conn = this.connections.get(userId);
-    return conn?.channels.get('wechat')?.isConnected() ?? false;
+    if (this.ownerKey && userId !== this.ownerKey) return false;
+    return this.channels.get('wechat')?.isConnected() ?? false;
   }
 
   /** Check if any user has an active WeChat connection */
   isAnyWeChatConnected(): boolean {
-    for (const conn of this.connections.values()) {
-      if (conn.channels.get('wechat')?.isConnected()) return true;
-    }
-    return false;
+    return this.channels.get('wechat')?.isConnected() ?? false;
   }
 
-  /** Get the Feishu channel for a user (for direct access like syncGroups) */
+  /** Get the Feishu channel for the global operator (for direct access like syncGroups) */
   getFeishuConnection(userId: string): IMChannel | undefined {
-    return this.connections.get(userId)?.channels.get('feishu');
+    if (this.ownerKey && userId !== this.ownerKey) return undefined;
+    return this.channels.get('feishu');
   }
 
-  /** Get the Telegram channel for a user */
+  /** Get the Telegram channel for the global operator */
   getTelegramConnection(userId: string): IMChannel | undefined {
-    return this.connections.get(userId)?.channels.get('telegram');
+    if (this.ownerKey && userId !== this.ownerKey) return undefined;
+    return this.channels.get('telegram');
   }
 
-  /** Get the QQ channel for a user */
+  /** Get the QQ channel for the global operator */
   getQQConnection(userId: string): IMChannel | undefined {
-    return this.connections.get(userId)?.channels.get('qq');
+    if (this.ownerKey && userId !== this.ownerKey) return undefined;
+    return this.channels.get('qq');
   }
 
-  /** Get chat info from the Feishu API for a specific user's connection */
+  /** Get chat info from the Feishu API for the global Feishu connection */
   async getFeishuChatInfo(
     userId: string,
     chatId: string,
@@ -706,40 +679,33 @@ class IMConnectionManager {
 
   /** Get all user IDs with active connections */
   getConnectedUserIds(): string[] {
-    const ids: string[] = [];
-    for (const [userId, conn] of this.connections.entries()) {
-      for (const ch of conn.channels.values()) {
-        if (ch.isConnected()) {
-          ids.push(userId);
-          break;
-        }
-      }
+    if (!this.ownerKey) return [];
+    for (const channel of this.channels.values()) {
+      if (channel.isConnected()) return [this.ownerKey];
     }
-    return ids;
+    return [];
   }
 
   /**
-   * Disconnect all IM connections for all users.
+   * Disconnect all IM connections.
    * Called during graceful shutdown.
    */
   async disconnectAll(): Promise<void> {
     const promises: Promise<void>[] = [];
 
-    for (const [userId, conn] of this.connections.entries()) {
-      for (const [channelType, channel] of conn.channels.entries()) {
-        promises.push(
-          channel.disconnect().catch((err) => {
-            logger.warn(
-              { userId, channelType, err },
-              'Error stopping IM channel',
-            );
-          }),
-        );
-      }
+    for (const [channelType, channel] of this.channels.entries()) {
+      promises.push(
+        channel.disconnect().catch((err) => {
+          logger.warn(
+            { ownerKey: this.ownerKey, channelType, err },
+            'Error stopping IM channel',
+          );
+        }),
+      );
     }
 
     await Promise.allSettled(promises);
-    this.connections.clear();
+    this.channels.clear();
     logger.info('All IM connections disconnected');
   }
 }

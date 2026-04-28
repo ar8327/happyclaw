@@ -1,32 +1,46 @@
-export interface GroupInfo {
+export interface SessionInfo {
+  id?: string;
   name: string;
   folder: string;
-  added_at: string;
-  kind?: 'home' | 'main' | 'feishu' | 'web';
-  is_home?: boolean;
-  is_my_home?: boolean;
-  is_shared?: boolean;
-  member_role?: 'owner' | 'member';
-  member_count?: number;
+  created_at: string;
+  kind?: 'home' | 'main' | 'workspace' | 'worker' | 'memory' | 'feishu' | 'web';
   editable?: boolean;
   deletable?: boolean;
   lastMessage?: string;
   lastMessageTime?: string;
-  execution_mode?: 'container' | 'host';
-  custom_cwd?: string;
-  created_by?: string;
   selected_skills?: string[] | null;
   pinned_at?: string;
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
-  llm_provider?: 'claude' | 'openai';
+  runner_id?: string;
+  runner_profile_id?: string | null;
+  runner_label?: string;
   model?: string;
   thinking_effort?: 'low' | 'medium' | 'high' | null;
   context_compression?: 'off' | 'auto' | 'manual';
-  knowledge_extraction?: boolean;
+  cwd?: string;
+  owner_key?: string | null;
+  binding_count?: number;
+  binding_summary?: string;
+  bound_channels?: string[];
+  backing_jid?: string | null;
+  degradation_reasons?: string[];
+  codex_compact?: {
+    current_tokens: number;
+    current_input_tokens: number;
+    current_output_tokens: number;
+    threshold_tokens: number;
+    remaining_tokens: number;
+    progress: number;
+    turn_count: number;
+    start_fresh_on_next_turn: boolean;
+    last_compacted_at: string | null;
+    state_updated_at: string | null;
+  } | null;
 }
 
 export interface AgentInfo {
   id: string;
+  session_id?: string;
   name: string;
   prompt: string;
   status: 'idle' | 'running' | 'completed' | 'error';
@@ -37,24 +51,20 @@ export interface AgentInfo {
   linked_im_groups?: Array<{ jid: string; name: string }>;
 }
 
-export interface AvailableImGroup {
+export interface AvailableImChannel {
   jid: string;
   name: string;
-  bound_agent_id: string | null;
-  bound_main_jid: string | null;
+  bound_session_id: string | null;
+  bound_session_kind?: 'main' | 'workspace' | 'worker' | 'memory' | null;
+  binding_mode?: 'direct' | 'source_only' | 'mirror';
   bound_target_name: string | null;
   bound_workspace_name: string | null;
   reply_policy?: 'source_only' | 'mirror';
+  activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+  require_mention?: boolean;
   avatar?: string;
   member_count?: number;
   channel_type: string;
 }
 
-export interface GroupMember {
-  user_id: string;
-  role: 'owner' | 'member';
-  added_at: string;
-  added_by?: string;
-  username: string;
-  display_name: string;
-}
+export type AvailableImGroup = AvailableImChannel;

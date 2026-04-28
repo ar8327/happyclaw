@@ -34,7 +34,7 @@ const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
 
 interface MessageInputProps {
   onSend: (content: string, attachments?: Array<{ data: string; mimeType: string }>) => void;
-  groupJid?: string;
+  sessionId?: string;
   disabled?: boolean;
   onResetSession?: () => void;
   onToggleTerminal?: () => void;
@@ -44,7 +44,7 @@ interface MessageInputProps {
 
 export function MessageInput({
   onSend,
-  groupJid,
+  sessionId,
   disabled = false,
   onResetSession,
   onToggleTerminal,
@@ -139,7 +139,7 @@ export function MessageInput({
   };
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!groupJid) return;
+    if (!sessionId) return;
     const fileList = e.target.files;
     if (fileList && fileList.length > 0) {
       const files = Array.from(fileList);
@@ -177,7 +177,7 @@ export function MessageInput({
 
       // Upload regular files to workspace
       if (regularFiles.length > 0) {
-        const ok = await uploadFiles(groupJid, regularFiles);
+        const ok = await uploadFiles(sessionId, regularFiles);
         if (ok) {
           const newPending = regularFiles.map((f) => ({
             label: f.webkitRelativePath || f.name,
@@ -272,12 +272,12 @@ export function MessageInput({
   };
 
   const handleFolderSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!groupJid) return;
+    if (!sessionId) return;
     const fileList = e.target.files;
     if (fileList && fileList.length > 0) {
       const files = Array.from(fileList);
       setShowActions(false);
-      const ok = await uploadFiles(groupJid, files);
+      const ok = await uploadFiles(sessionId, files);
       if (ok) {
         const newPending = files.map((f) => ({
           label: f.webkitRelativePath || f.name,
@@ -424,7 +424,7 @@ export function MessageInput({
           )}
 
           {/* Action row — shown when attach is toggled */}
-          {showActions && groupJid && (
+          {showActions && sessionId && (
             <div className="flex items-center gap-2 px-3 pt-2.5 pb-1.5 border-b border-slate-100">
               <button
                 onClick={() => imageInputRef.current?.click()}
@@ -474,7 +474,7 @@ export function MessageInput({
           <div className="flex items-center px-2 pb-2.5">
             {/* Left: action icons */}
             <div className="flex items-center gap-0.5">
-              {groupJid && (
+              {sessionId && (
                 <button
                   type="button"
                   onClick={() => setShowActions(!showActions)}

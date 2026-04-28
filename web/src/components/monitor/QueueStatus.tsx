@@ -6,7 +6,9 @@ interface QueueStatusProps {
 }
 
 export function QueueStatus({ status }: QueueStatusProps) {
-  const groupsWithQueue = status.groups?.filter((g) => g.pendingMessages || g.pendingTasks > 0) || [];
+  const sessionsWithQueue = status.sessions.filter((session) =>
+    session.pendingMessages || session.pendingTasks > 0,
+  );
 
   return (
     <div className="bg-card rounded-xl border border-border p-6">
@@ -24,25 +26,27 @@ export function QueueStatus({ status }: QueueStatusProps) {
 
       <div className="space-y-1">
         <div className="text-xs text-slate-500">
-          {groupsWithQueue.length} 个群组有待处理任务或消息
+          {sessionsWithQueue.length} 个会话 runtime 有待处理任务或消息
         </div>
 
-        {groupsWithQueue.length > 0 && (
+        {sessionsWithQueue.length > 0 && (
           <div className="mt-3 space-y-1">
-            {groupsWithQueue.slice(0, 3).map((group) => (
+            {sessionsWithQueue.slice(0, 3).map((session) => (
               <div
-                key={group.jid}
+                key={session.runtime_key}
                 className="flex items-center justify-between text-xs"
               >
-                <span className="text-slate-600 truncate">{group.jid}</span>
+                <span className="text-slate-600 truncate">
+                  {session.session_name || session.session_id || '未知会话'}
+                </span>
                 <span className="text-foreground font-medium ml-2">
-                  {group.pendingTasks}{group.pendingMessages ? ' + 消息' : ''}
+                  {session.pendingTasks}{session.pendingMessages ? ' + 消息' : ''}
                 </span>
               </div>
             ))}
-            {groupsWithQueue.length > 3 && (
+            {sessionsWithQueue.length > 3 && (
               <div className="text-xs text-slate-400">
-                ... 还有 {groupsWithQueue.length - 3} 个群组
+                ... 还有 {sessionsWithQueue.length - 3} 个会话
               </div>
             )}
           </div>

@@ -34,12 +34,12 @@ export function QQChannelCard({ setNotice, setError }: QQChannelCardProps) {
   const enabled = config?.enabled ?? false;
 
   const pairing = usePairingCode({
-    endpoint: '/api/config/user-im/qq/pairing-code',
+    endpoint: '/api/config/im/qq/pairing-code',
     setNotice,
     setError,
   });
   const paired = usePairedChats({
-    endpoint: '/api/config/user-im/qq/paired-chats',
+    endpoint: '/api/config/im/qq/paired-chats',
     setNotice,
     setError,
   });
@@ -47,7 +47,7 @@ export function QQChannelCard({ setNotice, setError }: QQChannelCardProps) {
   const loadConfig = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await api.get<UserQQConfig>('/api/config/user-im/qq');
+      const data = await api.get<UserQQConfig>('/api/config/im/qq');
       setConfig(data);
       setAppId(data.appId || '');
       setAppSecret('');
@@ -68,7 +68,7 @@ export function QQChannelCard({ setNotice, setError }: QQChannelCardProps) {
     setNotice(null);
     setError(null);
     try {
-      const data = await api.put<UserQQConfig>('/api/config/user-im/qq', { enabled: newEnabled });
+      const data = await api.put<UserQQConfig>('/api/config/im/qq', { enabled: newEnabled });
       setConfig(data);
       setNotice(`QQ 渠道已${newEnabled ? '启用' : '停用'}`);
     } catch (err) {
@@ -105,7 +105,7 @@ export function QQChannelCard({ setNotice, setError }: QQChannelCardProps) {
       const payload: Record<string, string | boolean> = { enabled: true };
       if (id) payload.appId = id;
       if (secret) payload.appSecret = secret;
-      const data = await api.put<UserQQConfig>('/api/config/user-im/qq', payload);
+      const data = await api.put<UserQQConfig>('/api/config/im/qq', payload);
       setConfig(data);
       setAppSecret('');
       setNotice('QQ 配置已保存');
@@ -121,7 +121,7 @@ export function QQChannelCard({ setNotice, setError }: QQChannelCardProps) {
     setError(null);
     setNotice(null);
     try {
-      await api.post('/api/config/user-im/qq/test');
+      await api.post('/api/config/im/qq/test');
       setNotice('QQ 连接测试成功');
     } catch (err) {
       setError(getErrorMessage(err, 'QQ 连接测试失败'));

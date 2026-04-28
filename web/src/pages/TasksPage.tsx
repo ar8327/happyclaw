@@ -23,8 +23,7 @@ export function TasksPage() {
   }, [loadTasks, loadGroups]);
 
   const handleCreateTask = async (data: {
-    groupFolder: string;
-    chatJid: string;
+    sessionId: string;
     prompt: string;
     scheduleType: 'cron' | 'interval' | 'once';
     scheduleValue: string;
@@ -34,8 +33,7 @@ export function TasksPage() {
     model: string;
   }) => {
     await createTask(
-      data.groupFolder,
-      data.chatJid,
+      data.sessionId,
       data.prompt,
       data.scheduleType,
       data.scheduleValue,
@@ -65,11 +63,18 @@ export function TasksPage() {
     }
   };
 
-  const groupsList = Object.entries(groups).map(([jid, group]) => ({
-    jid,
-    name: group.name,
-    folder: group.folder,
-  }));
+  const sessionOptions = Object.values(groups)
+    .filter(
+      (group) =>
+        !!group.id &&
+        group.kind !== 'worker' &&
+        group.kind !== 'memory',
+    )
+    .map((group) => ({
+      id: group.id!,
+      name: group.name,
+      folder: group.folder,
+    }));
 
   const activeTasks = tasks.filter((t) => t.status === 'active');
   const pausedTasks = tasks.filter((t) => t.status === 'paused');
@@ -179,7 +184,7 @@ export function TasksPage() {
 
       {showCreateForm && (
         <CreateTaskForm
-          groups={groupsList}
+          sessions={sessionOptions}
           onSubmit={handleCreateTask}
           onClose={() => setShowCreateForm(false)}
           isAdmin={isAdmin}

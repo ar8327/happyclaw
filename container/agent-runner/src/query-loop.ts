@@ -10,6 +10,7 @@
  */
 
 import fs from 'fs';
+import { buildChannelRoutingReminder } from 'happyclaw-agent-runner-core';
 import type {
   AgentRunner,
   QueryConfig,
@@ -20,11 +21,13 @@ import type { ContainerOutput } from './types.js';
 import type { SessionState } from './session-state.js';
 import {
   IPC_POLL_MS,
+  buildIpcAckStreamEvent,
   shouldClose,
   shouldDrain,
   shouldInterrupt,
   drainIpcInput,
   waitForIpcMessage,
+  type IpcMessage,
   type IpcPaths,
   type LogFn,
   type WriteOutputFn,
@@ -36,20 +39,19 @@ import {
 
 export interface QueryLoopConfig {
   runner: AgentRunner;
+  buildSystemPrompt: (prompt: string) => string;
   initialPrompt: string;
   initialImages?: Array<{ data: string; mimeType?: string }>;
+  sessionRecordId: string;
   sessionId?: string;
+  initialResumeAnchor?: string;
+  ephemeralSession?: boolean;
   state: SessionState;
   ipcPaths: IpcPaths;
   imChannelsFile: string;
   log: LogFn;
   writeOutput: WriteOutputFn;
   maxOverflowRetries?: number; // default 3
-}
-
-interface IpcMessage {
-  text: string;
-  images?: Array<{ data: string; mimeType?: string }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -71,6 +73,7 @@ interface IpcPollerOptions {
   log: LogFn;
   writeOutput: WriteOutputFn;
   imChannelsFile: string;
+  sessionRecordId: string;
   onMessage: (msg: IpcMessage) => void;
   onModeChange?: (mode: string) => void;
 }
@@ -114,17 +117,18 @@ function createUnifiedIpcPoller(opts: IpcPollerOptions): IpcPollerState {
 
     // 4. Messages and mode changes
     const { messages, modeChange } = drainIpcInput(opts.ipcPaths, opts.log);
-    if (modeChange && opts.onModeChange) {
+    if (modeChange) {
       opts.state.currentPermissionMode = modeChange;
       opts.log(`Mode change via IPC: ${modeChange}`);
-      opts.onModeChange(modeChange);
+      opts.onModeChange?.(modeChange);
     }
     for (const msg of messages) {
       opts.log(`IPC message (${msg.text.length} chars, ${msg.images?.length || 0} images)`);
       opts.state.extractSourceChannels(msg.text, opts.imChannelsFile);
       opts.writeOutput({
-        status: 'stream', result: null,
-        streamEvent: { eventType: 'status', statusText: 'ipc_message_received' },
+        status: 'stream',
+        result: null,
+        streamEvent: buildIpcAckStreamEvent(opts.sessionRecordId, msg),
       });
       opts.onMessage(msg);
     }
@@ -143,17 +147,27 @@ function createUnifiedIpcPoller(opts: IpcPollerOptions): IpcPollerState {
 async function consumeQueryStream(
   runner: AgentRunner,
   config: QueryConfig,
+  state: SessionState,
   poller: IpcPollerState,
   log: LogFn,
   writeOutput: WriteOutputFn,
 ): Promise<QueryResult> {
-  const ACTIVITY_TIMEOUT_MS = 300_000; // 5 minutes
+  const ACTIVITY_TIMEOUT_MS = parseInt(
+    process.env.HAPPYCLAW_QUERY_ACTIVITY_TIMEOUT_MS || '300000',
+    10,
+  );
   const TOOL_HARD_TIMEOUT_MS = parseInt(
-    process.env.TOOL_CALL_HARD_TIMEOUT_MS || '1200000', 10,
+    process.env.HAPPYCLAW_TOOL_CALL_HARD_TIMEOUT_MS
+      || process.env.TOOL_CALL_HARD_TIMEOUT_MS
+      || '1200000',
+    10,
   ); // 20 minutes
 
   const gen = runner.runQuery(config);
   let activityTimer: ReturnType<typeof setTimeout> | null = null;
+  // Codex already emits usage as a stream_event on turn completion. Keep the
+  // result-level fallback only for providers that do not stream usage.
+  let sawUsageStreamEvent = false;
 
   const resetActivityTimer = () => {
     if (activityTimer) clearTimeout(activityTimer);
@@ -191,7 +205,7 @@ async function consumeQueryStream(
 
   // Manual iteration to get generator return value
   let newSessionId: string | undefined;
-  let resumeAnchor: string | undefined;
+  let resumeAnchor: string | undefined = config.resumeAt;
 
   let iterResult: IteratorResult<NormalizedMessage, QueryResult>;
   while (!(iterResult = await gen.next()).done) {
@@ -200,21 +214,50 @@ async function consumeQueryStream(
 
     switch (msg.kind) {
       case 'stream_event':
+        if (msg.event.eventType === 'usage') {
+          sawUsageStreamEvent = true;
+        }
+        if (
+          msg.event.eventType === 'lifecycle' &&
+          msg.event.phase === 'compact_completed'
+        ) {
+          state.setPendingRoutingRecentImChannels(
+            msg.event.repairHints?.recentImChannels ?? [],
+          );
+        }
+        if (msg.event.eventType === 'mode_change') {
+          emitRuntimeState(writeOutput, runner, state, {
+            providerSessionId: newSessionId,
+            resumeAnchor,
+          });
+        }
         writeOutput({ status: 'stream', result: null, streamEvent: msg.event });
         break;
 
       case 'session_init':
         newSessionId = msg.sessionId;
         log(`Session initialized: ${newSessionId}`);
+        emitRuntimeState(writeOutput, runner, state, {
+          providerSessionId: newSessionId,
+          resumeAnchor,
+        });
         break;
 
       case 'resume_anchor':
         resumeAnchor = msg.anchor;
+        emitRuntimeState(writeOutput, runner, state, {
+          providerSessionId: newSessionId,
+          resumeAnchor,
+        });
         break;
 
       case 'result':
+        emitRuntimeState(writeOutput, runner, state, {
+          providerSessionId: newSessionId,
+          resumeAnchor,
+        });
         writeOutput({ status: 'success', result: msg.text, newSessionId });
-        if (msg.usage) {
+        if (msg.usage && !sawUsageStreamEvent) {
           writeOutput({
             status: 'stream', result: null,
             streamEvent: { eventType: 'usage', usage: msg.usage },
@@ -257,16 +300,81 @@ function mergeImages(messages: IpcMessage[]): Array<{ data: string; mimeType?: s
   return all.length > 0 ? all : undefined;
 }
 
+function emitRuntimeState(
+  writeOutput: WriteOutputFn,
+  runner: AgentRunner,
+  state: SessionState,
+  overrides?: {
+    providerSessionId?: string;
+    resumeAnchor?: string;
+    providerState?: Record<string, unknown>;
+    lastMessageCursor?: string | null;
+  },
+): void {
+  const runtimeSnapshot: {
+    providerState?: Record<string, unknown>;
+    lastMessageCursor?: string | null;
+  } = {};
+  const providerSnapshot = runner.getRuntimePersistenceSnapshot?.();
+  if (overrides && Object.prototype.hasOwnProperty.call(overrides, 'providerState')) {
+    runtimeSnapshot.providerState = overrides.providerState;
+  } else if (
+    providerSnapshot
+    && Object.prototype.hasOwnProperty.call(providerSnapshot, 'providerState')
+  ) {
+    runtimeSnapshot.providerState = providerSnapshot.providerState;
+  }
+  if (overrides && Object.prototype.hasOwnProperty.call(overrides, 'lastMessageCursor')) {
+    runtimeSnapshot.lastMessageCursor = overrides.lastMessageCursor;
+  } else if (
+    providerSnapshot
+    && Object.prototype.hasOwnProperty.call(providerSnapshot, 'lastMessageCursor')
+  ) {
+    runtimeSnapshot.lastMessageCursor = providerSnapshot.lastMessageCursor ?? null;
+  }
+  state.applyRuntimeSnapshot(runtimeSnapshot);
+  writeOutput({
+    status: 'stream',
+    result: null,
+    runtimeState: state.snapshot({
+      ...overrides,
+      ...(Object.prototype.hasOwnProperty.call(runtimeSnapshot, 'providerState')
+        ? { providerState: runtimeSnapshot.providerState }
+        : {}),
+      ...(Object.prototype.hasOwnProperty.call(runtimeSnapshot, 'lastMessageCursor')
+        ? { lastMessageCursor: runtimeSnapshot.lastMessageCursor }
+        : {}),
+    }),
+  });
+}
+
+function shouldClearProviderSession(runner: AgentRunner): boolean {
+  const providerState = runner.getRuntimePersistenceSnapshot?.().providerState;
+  if (!providerState || typeof providerState !== 'object') return false;
+  if (providerState.startFreshOnNextTurn !== true) return false;
+  return Object.prototype.hasOwnProperty.call(providerState, 'activeThreadId')
+    && providerState.activeThreadId == null;
+}
+
 export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
   const { runner, state, ipcPaths, log, writeOutput } = config;
   const MAX_RETRIES = config.maxOverflowRetries ?? 3;
 
   let prompt = config.initialPrompt;
   let images = config.initialImages;
-  let sessionId = config.sessionId;
-  let resumeAnchor: string | undefined;
+  let sessionId = config.ephemeralSession ? undefined : config.sessionId;
+  let resumeAnchor: string | undefined = config.ephemeralSession
+    ? undefined
+    : config.initialResumeAnchor;
   let overflowRetryCount = 0;
   let pendingMessages: IpcMessage[] = [];
+  const handleIdleDrain = async (): Promise<void> => {
+    await runner.cleanup?.();
+    emitRuntimeState(writeOutput, runner, state, {
+      providerSessionId: sessionId,
+      resumeAnchor,
+    });
+  };
 
   while (true) {
     // Clear stale interrupt sentinel
@@ -282,6 +390,7 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
       log,
       writeOutput,
       imChannelsFile: config.imChannelsFile,
+      sessionRecordId: config.sessionRecordId,
       onMessage: runner.ipcCapabilities.supportsMidQueryPush
         ? (msg) => {
             const rejected = runner.pushMessage(msg.text, msg.images);
@@ -296,17 +405,31 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
     });
 
     // Execute query
+    const pendingRoutingRecentImChannels =
+      state.takePendingRoutingRecentImChannels();
+    const effectivePrompt =
+      pendingRoutingRecentImChannels !== null
+        ? `${buildChannelRoutingReminder(pendingRoutingRecentImChannels)}\n\n${prompt}`
+        : prompt;
     const queryConfig: QueryConfig = {
-      prompt,
-      sessionId,
-      resumeAt: resumeAnchor,
+      prompt: effectivePrompt,
+      systemPrompt: config.buildSystemPrompt(prompt),
+      sessionId: config.ephemeralSession ? undefined : sessionId,
+      resumeAt: config.ephemeralSession ? undefined : resumeAnchor,
       images,
       permissionMode: state.currentPermissionMode,
     };
 
     let result: QueryResult;
     try {
-      result = await consumeQueryStream(runner, queryConfig, poller, log, writeOutput);
+      result = await consumeQueryStream(
+        runner,
+        queryConfig,
+        state,
+        poller,
+        log,
+        writeOutput,
+      );
     } catch (err) {
       poller.stop();
       throw err;
@@ -319,8 +442,17 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
     if (poller.drainDetectedDuringQuery) result.drainDetectedDuringQuery = true;
 
     // Update session state
-    if (result.newSessionId) sessionId = result.newSessionId;
-    if (result.resumeAnchor) resumeAnchor = result.resumeAnchor;
+    if (config.ephemeralSession || shouldClearProviderSession(runner)) {
+      sessionId = undefined;
+      resumeAnchor = undefined;
+    } else {
+      if (result.newSessionId) sessionId = result.newSessionId;
+      if (result.resumeAnchor) resumeAnchor = result.resumeAnchor;
+    }
+    emitRuntimeState(writeOutput, runner, state, {
+      providerSessionId: sessionId,
+      resumeAnchor,
+    });
     await runner.betweenQueries?.();
 
     // Error recovery
@@ -363,25 +495,76 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
         streamEvent: { eventType: 'status', statusText: 'interrupted' },
       });
       try { fs.unlinkSync(ipcPaths.interruptSentinel); } catch { /* ignore */ }
-      const next = await waitForIpcMessage(ipcPaths, log, writeOutput, state, config.imChannelsFile);
+      if (pendingMessages.length > 0) {
+        prompt = mergeMessages(pendingMessages);
+        images = mergeImages(pendingMessages);
+        pendingMessages = [];
+        continue;
+      }
+      const next = await waitForIpcMessage(
+        ipcPaths,
+        log,
+        writeOutput,
+        state,
+        config.imChannelsFile,
+        config.sessionRecordId,
+        handleIdleDrain,
+      );
       if (!next) break;
       state.clearInterruptRequested();
       prompt = next.text;
       images = next.images;
-      pendingMessages = [];
       continue;
     }
     if (result.drainDetectedDuringQuery || shouldDrain(ipcPaths)) {
       await runner.cleanup?.();
+      emitRuntimeState(writeOutput, runner, state, {
+        providerSessionId: sessionId,
+        resumeAnchor,
+      });
       writeOutput({ status: 'drained', result: null, newSessionId: sessionId });
       process.exit(0);
     }
 
+    if (config.ephemeralSession) {
+      await runner.cleanup?.();
+      emitRuntimeState(writeOutput, runner, state, {
+        providerSessionId: sessionId,
+        resumeAnchor,
+      });
+      writeOutput({ status: 'success', result: null, newSessionId: sessionId });
+      return;
+    }
+
+    // Runners without mid-query push may have already drained follow-up IPC
+    // messages into pendingMessages while the current turn was still running.
+    // In that case start the next turn immediately instead of blocking for yet
+    // another IPC file and effectively swallowing the first follow-up message.
+    if (pendingMessages.length > 0) {
+      prompt = mergeMessages(pendingMessages);
+      images = mergeImages(pendingMessages);
+      pendingMessages = [];
+      log('Query ended with buffered IPC follow-ups, starting next turn immediately');
+      continue;
+    }
+
     // Wait for next message
+    emitRuntimeState(writeOutput, runner, state, {
+      providerSessionId: sessionId,
+      resumeAnchor,
+    });
     writeOutput({ status: 'success', result: null, newSessionId: sessionId });
     log('Query ended, waiting for next IPC message...');
 
-    const nextMsg = await waitForIpcMessage(ipcPaths, log, writeOutput, state, config.imChannelsFile);
+    const nextMsg = await waitForIpcMessage(
+      ipcPaths,
+      log,
+      writeOutput,
+      state,
+      config.imChannelsFile,
+      config.sessionRecordId,
+      handleIdleDrain,
+    );
     if (!nextMsg) {
       await runner.cleanup?.();
       break;

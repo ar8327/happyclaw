@@ -13,8 +13,10 @@ import {
   cleanupOldTaskRunLogs,
   ensureChatExists,
   getDueTasks,
+  getJidsByFolder,
+  getSessionRecord,
   getTaskById,
-  getUserById,
+  getRegisteredGroup,
   logTaskRun,
   storeMessageDirect,
   updateTaskAfterRun,
@@ -22,7 +24,6 @@ import {
 import { logger } from './logger.js';
 import { hasScriptCapacity, runScript } from './script-runner.js';
 import { NewMessage, RegisteredGroup, ScheduledTask } from './types.js';
-import { checkBillingAccessFresh, isBillingEnabled } from './billing.js';
 
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
@@ -115,6 +116,40 @@ function triggerAgentTask(
   );
 }
 
+function getTaskTargetSession(task: ScheduledTask) {
+  const sessionId = task.session_id?.trim();
+  return sessionId
+    ? getSessionRecord(sessionId)
+    : getSessionRecord(`main:${task.group_folder}`);
+}
+
+function resolveScheduledTaskTargetJid(
+  task: ScheduledTask,
+  groups: Record<string, RegisteredGroup>,
+): string {
+  const taskSession = getTaskTargetSession(task);
+  const folder =
+    taskSession?.id.startsWith('main:')
+      ? taskSession.id.slice('main:'.length)
+      : taskSession?.parent_session_id?.startsWith('main:')
+        ? taskSession.parent_session_id.slice('main:'.length)
+        : task.group_folder;
+  const directTarget = groups[task.chat_jid];
+  if (directTarget && directTarget.folder === folder) {
+    return task.chat_jid;
+  }
+  const backingJid = getJidsByFolder(folder).find((jid) => jid.startsWith('web:'));
+  if (backingJid && getRegisteredGroup(backingJid)) {
+    return backingJid;
+  }
+  const sameFolder = Object.entries(groups).filter(
+    ([, group]) => group.folder === folder,
+  );
+  const preferred =
+    sameFolder.find(([jid]) => jid.startsWith('web:')) || sameFolder[0];
+  return preferred?.[0] || '';
+}
+
 async function runScriptTask(
   task: ScheduledTask,
   deps: SchedulerDependencies,
@@ -127,45 +162,8 @@ async function runScriptTask(
     'Running script task',
   );
 
-  // Billing quota check before running script task
-  if (isBillingEnabled() && task.group_folder) {
-    const groups = deps.registeredGroups();
-    const group = groups[groupJid];
-    if (group?.created_by) {
-      const owner = getUserById(group.created_by);
-      if (owner && owner.role !== 'admin') {
-        const accessResult = checkBillingAccessFresh(
-          group.created_by,
-          owner.role,
-        );
-        if (!accessResult.allowed) {
-          const reason = accessResult.reason || '当前账户不可用';
-          logger.info(
-            {
-              taskId: task.id,
-              userId: group.created_by,
-              reason,
-              blockType: accessResult.blockType,
-            },
-            'Billing access denied, blocking script task',
-          );
-          logTaskRun({
-            task_id: task.id,
-            run_at: new Date().toISOString(),
-            duration_ms: Date.now() - startTime,
-            status: 'error',
-            result: null,
-            error: `计费限制: ${reason}`,
-          });
-          const nextRun = computeNextRun(task);
-          updateTaskAfterRun(task.id, nextRun, `Error: 计费限制: ${reason}`);
-          return;
-        }
-      }
-    }
-  }
-
-  const groupDir = path.join(GROUPS_DIR, task.group_folder);
+  const taskSession = getTaskTargetSession(task);
+  const groupDir = taskSession?.cwd || path.join(GROUPS_DIR, task.group_folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
   if (!task.script_command) {
@@ -191,6 +189,7 @@ async function runScriptTask(
     const scriptResult = await runScript(
       task.script_command,
       task.group_folder,
+      groupDir,
     );
 
     if (scriptResult.timedOut) {
@@ -292,20 +291,15 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         }
 
         const groups = deps.registeredGroups();
-        let targetGroupJid = currentTask.chat_jid;
-        const directTarget = groups[targetGroupJid];
-        if (!directTarget || directTarget.folder !== currentTask.group_folder) {
-          const sameFolder = Object.entries(groups).filter(
-            ([, group]) => group.folder === currentTask.group_folder,
-          );
-          const preferred =
-            sameFolder.find(([jid]) => jid.startsWith('web:')) || sameFolder[0];
-          targetGroupJid = preferred?.[0] || '';
-        }
+        const targetGroupJid = resolveScheduledTaskTargetJid(currentTask, groups);
 
         if (!targetGroupJid) {
           logger.error(
-            { taskId: currentTask.id, groupFolder: currentTask.group_folder },
+            {
+              taskId: currentTask.id,
+              sessionId: currentTask.session_id ?? null,
+              groupFolder: currentTask.group_folder,
+            },
             'Target group not registered, skipping scheduled task',
           );
           continue;

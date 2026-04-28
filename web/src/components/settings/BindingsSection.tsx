@@ -59,6 +59,21 @@ export function BindingsSection() {
     setUnbindGroup(group);
   }, []);
 
+  const handlePolicyUpdate = useCallback(async (
+    group: AvailableImGroup,
+    updates: {
+      reply_policy?: 'source_only' | 'mirror';
+      activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+      require_mention?: boolean;
+    },
+  ) => {
+    setActioningJid(group.jid);
+    setLocalError(null);
+    const err = await rebind(group.jid, updates);
+    setActioningJid(null);
+    if (err) setLocalError(err);
+  }, [rebind]);
+
   const confirmUnbind = useCallback(async () => {
     if (!unbindGroup) return;
     const jid = unbindGroup.jid;
@@ -73,25 +88,11 @@ export function BindingsSection() {
   const handleSelectTarget = useCallback(async (target: BindingTarget) => {
     if (!rebindGroup) return;
     const imJid = rebindGroup.jid;
-    const key = target.agentId || `main:${target.groupJid}`;
+    const key = target.sessionId;
     setSelectingKey(key);
     setLocalError(null);
 
-    const hasBound = !!rebindGroup.bound_agent_id || !!rebindGroup.bound_main_jid;
-    const payload: {
-      target_agent_id?: string;
-      target_main_jid?: string;
-      force?: boolean;
-    } = {};
-
-    if (target.type === 'agent' && target.agentId) {
-      payload.target_agent_id = target.agentId;
-    } else {
-      payload.target_main_jid = target.groupJid;
-    }
-    if (hasBound) payload.force = true;
-
-    const err = await rebind(imJid, payload);
+    const err = await rebind(imJid, { session_id: target.sessionId });
     setSelectingKey(null);
     if (!err) setRebindGroup(null);
     else setLocalError(err);
@@ -127,7 +128,7 @@ export function BindingsSection() {
               IM 绑定管理
             </h1>
             <p className="text-sm text-muted-foreground mt-1">
-              查看和管理所有 IM 渠道的消息路由。未绑定的渠道默认发送到你的主工作区。
+              查看和管理所有 IM 渠道的消息路由。未绑定的渠道默认发送到你的主会话。
             </p>
           </div>
           <Button
@@ -206,6 +207,7 @@ export function BindingsSection() {
                 isActioning={actioningJid === group.jid}
                 onRebind={handleRebind}
                 onUnbind={handleUnbind}
+                onUpdatePolicy={handlePolicyUpdate}
               />
             ))}
           </div>
@@ -230,7 +232,7 @@ export function BindingsSection() {
         onClose={() => setUnbindGroup(null)}
         onConfirm={confirmUnbind}
         title="确认解绑"
-        message={unbindGroup ? `解绑后，「${unbindGroup.name}」的消息将恢复默认路由到主工作区。确认解绑？` : ''}
+        message={unbindGroup ? `解绑后，「${unbindGroup.name}」的消息将恢复默认路由到主会话。确认解绑？` : ''}
         confirmText="解绑"
       />
 
@@ -240,7 +242,7 @@ export function BindingsSection() {
         onClose={() => setRestoreConfirmGroup(null)}
         onConfirm={confirmRestoreDefault}
         title="恢复默认路由"
-        message={restoreConfirmGroup ? `确认将「${restoreConfirmGroup.name}」恢复为默认路由（消息发送到主工作区）？` : ''}
+        message={restoreConfirmGroup ? `确认将「${restoreConfirmGroup.name}」恢复为默认路由，消息会发送到主会话。` : ''}
         confirmText="恢复默认"
       />
     </div>

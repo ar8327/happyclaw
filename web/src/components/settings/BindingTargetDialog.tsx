@@ -105,7 +105,7 @@ export function BindingTargetDialog({
                   {items[0].groupName}
                 </div>
                 {items.map((target) => {
-                  const key = target.agentId || `main:${target.groupJid}`;
+                  const key = target.sessionId;
                   const isSelecting = selecting === key;
                   return (
                     <button

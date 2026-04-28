@@ -3,55 +3,100 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 
-import { STORE_DIR, GROUPS_DIR } from './config.js';
+import { DATA_DIR, STORE_DIR, GROUPS_DIR } from './config.js';
 import { logger } from './logger.js';
+import {
+  getDefaultRunnerId,
+  resolveMemoryRunnerId,
+} from './runner-registry.js';
 import {
   AgentKind,
   AgentStatus,
-  AuthAuditLog,
-  AuthEventType,
-  BalanceOperatorType,
-  BalanceReferenceType,
-  BalanceTransaction,
-  BalanceTransactionSource,
-  BalanceTransactionType,
-  BillingAuditEventType,
-  BillingAuditLog,
-  BillingPlan,
-  DailyUsage,
-  ExecutionMode,
-  GroupMember,
-  InviteCode,
-  InviteCodeWithCreator,
-  MonthlyUsage,
   NewMessage,
   DbMessage,
   MessageCursor,
-  RedeemCode,
+  Permission,
+  PermissionTemplateKey,
   RegisteredGroup,
+  RuntimeStateSnapshot,
   ScheduledTask,
+  SessionBindingMode,
+  SessionBindingRecord,
+  SessionKind,
+  SessionRecord,
+  SessionRuntimeStateRecord,
+  RunnerProfileRecord,
   SubAgent,
   TaskRunLog,
+  WorkerSessionRecord,
   User,
-  UserBalance,
   UserPublic,
   UserStatus,
   UserRole,
-  UserSubscription,
-  UserSession,
-  UserSessionWithUser,
-  Permission,
-  PermissionTemplateKey,
 } from './types.js';
 import { getDefaultPermissions, normalizePermissions } from './permissions.js';
 
 let db: Database.Database;
+
+const MAIN_SESSION_ID_PREFIX = 'main:';
+const WORKER_SESSION_ID_PREFIX = 'worker:';
+const MEMORY_SESSION_ID_PREFIX = 'memory:';
+
+type SessionChannelRow = {
+  jid: string;
+  session_id: string;
+  name: string;
+  created_at: string;
+  container_config: string | null;
+  custom_cwd: string | null;
+  init_source_path: string | null;
+  init_git_url: string | null;
+  selected_skills: string | null;
+  mcp_mode: string | null;
+  selected_mcps: string | null;
+  model: string | null;
+  thinking_effort: string | null;
+  context_compression: string | null;
+};
+
+function tableExists(tableName: string): boolean {
+  const row = db
+    .prepare(
+      "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?",
+    )
+    .get(tableName) as { ok: number } | undefined;
+  return row?.ok === 1;
+}
 
 function hasColumn(tableName: string, columnName: string): boolean {
   const columns = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{
     name: string;
   }>;
   return columns.some((column) => column.name === columnName);
+}
+
+function getTableColumns(tableName: string): string[] {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{
+    name: string;
+  }>;
+  return columns.map((column) => column.name);
+}
+
+function withForeignKeysDisabled<T>(fn: () => T): T {
+  const foreignKeysEnabled = db.pragma('foreign_keys', {
+    simple: true,
+  }) as number;
+  if (foreignKeysEnabled) {
+    db.pragma('foreign_keys = OFF');
+  }
+
+  try {
+    return fn();
+  } finally {
+    if (foreignKeysEnabled) {
+      db.pragma('foreign_keys = ON');
+    }
+  }
 }
 
 function ensureColumn(
@@ -63,6 +108,541 @@ function ensureColumn(
   db.exec(
     `ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${sqlTypeWithDefault}`,
   );
+}
+
+function resolveFolderFromSessionId(sessionId: string): string {
+  if (sessionId.startsWith(MAIN_SESSION_ID_PREFIX)) {
+    return sessionId.slice(MAIN_SESSION_ID_PREFIX.length);
+  }
+  const session = getSessionRecord(sessionId);
+  if (session?.parent_session_id?.startsWith(MAIN_SESSION_ID_PREFIX)) {
+    return session.parent_session_id.slice(MAIN_SESSION_ID_PREFIX.length);
+  }
+  if (session) {
+    return path.basename(session.cwd);
+  }
+  return '';
+}
+
+function resolveLegacyMainSessionId(targetMainJid: string): string | null {
+  const trimmed = targetMainJid.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith(MAIN_SESSION_ID_PREFIX)) return trimmed;
+
+  const direct = db
+    .prepare('SELECT session_id FROM session_channels WHERE jid = ? LIMIT 1')
+    .get(trimmed) as { session_id: string } | undefined;
+  if (direct?.session_id) return direct.session_id;
+
+  if (!trimmed.startsWith('web:')) return null;
+  const folder = trimmed.slice(4).trim();
+  if (!folder) return null;
+
+  return buildMainSessionId(folder);
+}
+
+function migrateLegacyRegisteredGroupBindings(): void {
+  const hasReplyPolicy = hasColumn('registered_groups', 'reply_policy');
+  const hasActivationMode = hasColumn('registered_groups', 'activation_mode');
+  const hasRequireMention = hasColumn('registered_groups', 'require_mention');
+  const hasTargetAgent = hasColumn('registered_groups', 'target_agent_id');
+  const hasTargetMain = hasColumn('registered_groups', 'target_main_jid');
+  if (
+    !hasReplyPolicy
+    && !hasActivationMode
+    && !hasRequireMention
+    && !hasTargetAgent
+    && !hasTargetMain
+  ) {
+    return;
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT jid, name, folder, added_at${
+        hasReplyPolicy ? ', reply_policy' : ", 'source_only' AS reply_policy"
+      }${
+        hasActivationMode ? ', activation_mode' : ", 'auto' AS activation_mode"
+      }${
+        hasRequireMention ? ', require_mention' : ', 0 AS require_mention'
+      }${
+        hasTargetAgent ? ', target_agent_id' : ", NULL AS target_agent_id"
+      }${hasTargetMain ? ', target_main_jid' : ", NULL AS target_main_jid"}
+       FROM registered_groups`,
+    )
+    .all() as Array<{
+      jid: string;
+      name: string;
+      folder: string;
+      added_at: string;
+      reply_policy: string | null;
+      activation_mode: string | null;
+      require_mention: number | null;
+      target_agent_id: string | null;
+      target_main_jid: string | null;
+    }>;
+
+  const tx = db.transaction(() => {
+    for (const row of rows) {
+      if (row.jid.startsWith('web:')) {
+        db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(row.jid);
+        continue;
+      }
+
+      const targetAgentId = row.target_agent_id?.trim() || null;
+      const targetMainJid = row.target_main_jid?.trim() || null;
+      const defaultSessionId = buildMainSessionId(row.folder);
+      const current = getSessionBinding(row.jid);
+      const sessionId = targetAgentId
+        ? buildWorkerSessionId(targetAgentId)
+        : resolveLegacyMainSessionId(targetMainJid || '')
+          || current?.session_id
+          || defaultSessionId;
+      if (!sessionId) continue;
+
+      const session = getSessionRecord(sessionId);
+      const now = new Date().toISOString();
+      const replyPolicy = row.reply_policy === 'mirror' ? 'mirror' : 'source_only';
+      saveSessionBinding({
+        channel_jid: row.jid,
+        session_id: sessionId,
+        binding_mode:
+          replyPolicy === 'mirror'
+            ? 'mirror'
+            : targetAgentId
+              ? 'direct'
+              : session?.kind === 'worker'
+              ? 'direct'
+              : 'source_only',
+        activation_mode: parseActivationMode(row.activation_mode),
+        require_mention: row.require_mention === 1,
+        display_name: row.name,
+        reply_policy: replyPolicy,
+        created_at: current?.created_at || row.added_at || now,
+        updated_at: now,
+      });
+    }
+  });
+
+  tx();
+}
+
+function backfillLegacyGroupOwnersIntoSessions(): void {
+  if (!hasColumn('registered_groups', 'created_by')) return;
+
+  const hasIsHome = hasColumn('registered_groups', 'is_home');
+  const rows = db
+    .prepare(
+      `SELECT jid, name, folder, added_at, container_config, custom_cwd,
+              init_source_path, init_git_url, created_by, selected_skills,
+              mcp_mode, selected_mcps, model, thinking_effort,
+              context_compression${
+                hasIsHome ? ', is_home' : ', 0 AS is_home'
+              }
+       FROM registered_groups
+       WHERE jid LIKE 'web:%'`,
+    )
+    .all() as Array<Record<string, unknown>>;
+
+  for (const row of rows) {
+    const legacyIsPrimarySession = Number(row.is_home || 0) === 1;
+    const ownerKey =
+      typeof row.created_by === 'string' && row.created_by.trim()
+        ? row.created_by.trim()
+        : null;
+    const folder = String(row.folder);
+    const sessionId = buildMainSessionId(folder);
+    const existing = getSessionRecord(sessionId);
+    const fallbackGroup: RegisteredGroup = {
+      name: String(row.name),
+      folder,
+      added_at: String(row.added_at),
+      containerConfig:
+        typeof row.container_config === 'string'
+          ? JSON.parse(row.container_config)
+          : undefined,
+      customCwd:
+        typeof row.custom_cwd === 'string' ? row.custom_cwd : undefined,
+      initSourcePath:
+        typeof row.init_source_path === 'string'
+          ? row.init_source_path
+          : undefined,
+      initGitUrl:
+        typeof row.init_git_url === 'string' ? row.init_git_url : undefined,
+      is_home: legacyIsPrimarySession,
+      selected_skills:
+        typeof row.selected_skills === 'string'
+          ? JSON.parse(row.selected_skills)
+          : null,
+      mcp_mode: row.mcp_mode === 'custom' ? 'custom' : 'inherit',
+      selected_mcps:
+        typeof row.selected_mcps === 'string'
+          ? JSON.parse(row.selected_mcps)
+          : null,
+      model: typeof row.model === 'string' ? row.model : undefined,
+      thinking_effort: parseThinkingEffort(
+        typeof row.thinking_effort === 'string' ? row.thinking_effort : null,
+      ),
+      context_compression: parseCompressionMode(
+        typeof row.context_compression === 'string'
+          ? row.context_compression
+          : null,
+      ),
+    };
+    const nextSession: SessionRecord = existing || {
+      id: sessionId,
+      name: fallbackGroup.name,
+      kind:
+        legacyIsPrimarySession || folder === 'main' ? 'main' : 'workspace',
+      parent_session_id: null,
+      cwd: deriveSessionCwd(fallbackGroup),
+      runner_id: deriveRunnerId(fallbackGroup),
+      runner_profile_id: null,
+      model: fallbackGroup.model ?? null,
+      thinking_effort: fallbackGroup.thinking_effort ?? null,
+      context_compression: fallbackGroup.context_compression ?? 'off',
+      is_pinned: false,
+      archived: false,
+      owner_key: null,
+      created_at: fallbackGroup.added_at,
+      updated_at: fallbackGroup.added_at,
+    };
+    if (legacyIsPrimarySession && nextSession.kind !== 'main') {
+      nextSession.kind = 'main';
+    }
+    if (!nextSession.owner_key && ownerKey) {
+      nextSession.owner_key = ownerKey;
+    }
+    saveSessionRecord({
+      ...nextSession,
+      updated_at: new Date().toISOString(),
+    });
+  }
+}
+
+function migrateRegisteredGroupsToSessionChannels(): void {
+  if (!tableExists('registered_groups')) return;
+
+  const hasCustomCwd = hasColumn('registered_groups', 'custom_cwd');
+  const hasInitSourcePath = hasColumn('registered_groups', 'init_source_path');
+  const hasInitGitUrl = hasColumn('registered_groups', 'init_git_url');
+  const hasSelectedSkills = hasColumn('registered_groups', 'selected_skills');
+  const hasMcpMode = hasColumn('registered_groups', 'mcp_mode');
+  const hasSelectedMcps = hasColumn('registered_groups', 'selected_mcps');
+  const hasModel = hasColumn('registered_groups', 'model');
+  const hasThinkingEffort = hasColumn('registered_groups', 'thinking_effort');
+  const hasContextCompression = hasColumn(
+    'registered_groups',
+    'context_compression',
+  );
+
+  const rows = db
+    .prepare(
+      `SELECT jid, name, folder, added_at, container_config${
+        hasCustomCwd ? ', custom_cwd' : ', NULL AS custom_cwd'
+      }${
+        hasInitSourcePath ? ', init_source_path' : ', NULL AS init_source_path'
+      }${
+        hasInitGitUrl ? ', init_git_url' : ', NULL AS init_git_url'
+      }${
+        hasSelectedSkills ? ', selected_skills' : ', NULL AS selected_skills'
+      }${hasMcpMode ? ', mcp_mode' : ", 'inherit' AS mcp_mode"}${
+        hasSelectedMcps ? ', selected_mcps' : ', NULL AS selected_mcps'
+      }${hasModel ? ', model' : ', NULL AS model'}${
+        hasThinkingEffort ? ', thinking_effort' : ', NULL AS thinking_effort'
+      }${
+        hasContextCompression
+          ? ', context_compression'
+          : ", 'off' AS context_compression"
+      }
+       FROM registered_groups`,
+    )
+    .all() as Array<{
+      jid: string;
+      name: string;
+      folder: string;
+      added_at: string;
+      container_config: string | null;
+      custom_cwd: string | null;
+      init_source_path: string | null;
+      init_git_url: string | null;
+      selected_skills: string | null;
+      mcp_mode: string | null;
+      selected_mcps: string | null;
+      model: string | null;
+      thinking_effort: string | null;
+      context_compression: string | null;
+    }>;
+
+  const tx = db.transaction(() => {
+    for (const row of rows) {
+      const sessionId = buildMainSessionId(row.folder);
+      db.prepare(
+        `INSERT INTO session_channels (
+          jid, session_id, name, created_at, container_config, custom_cwd,
+          init_source_path, init_git_url, selected_skills, mcp_mode,
+          selected_mcps, model, thinking_effort, context_compression
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(jid) DO UPDATE SET
+          session_id = excluded.session_id,
+          name = excluded.name,
+          created_at = excluded.created_at,
+          container_config = excluded.container_config,
+          custom_cwd = excluded.custom_cwd,
+          init_source_path = excluded.init_source_path,
+          init_git_url = excluded.init_git_url,
+          selected_skills = excluded.selected_skills,
+          mcp_mode = excluded.mcp_mode,
+          selected_mcps = excluded.selected_mcps,
+          model = excluded.model,
+          thinking_effort = excluded.thinking_effort,
+          context_compression = excluded.context_compression`,
+      ).run(
+        row.jid,
+        sessionId,
+        row.name,
+        row.added_at,
+        row.container_config,
+        row.custom_cwd,
+        row.init_source_path,
+        row.init_git_url,
+        row.selected_skills,
+        row.mcp_mode || 'inherit',
+        row.selected_mcps,
+        row.model,
+        row.thinking_effort,
+        row.context_compression || 'off',
+      );
+    }
+
+    db.exec('DROP TABLE registered_groups');
+  });
+
+  tx();
+}
+
+function dropLegacySessionRuntimeModeColumn(): void {
+  if (!hasColumn('sessions', 'runtime_mode')) return;
+
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE sessions_new (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        parent_session_id TEXT,
+        cwd TEXT NOT NULL,
+        runner_id TEXT NOT NULL,
+        runner_profile_id TEXT,
+        model TEXT,
+        thinking_effort TEXT,
+        context_compression TEXT NOT NULL DEFAULT 'off',
+        is_pinned INTEGER NOT NULL DEFAULT 0,
+        archived INTEGER NOT NULL DEFAULT 0,
+        owner_key TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO sessions_new (
+        id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
+        model, thinking_effort, context_compression,
+        is_pinned, archived, owner_key, created_at, updated_at
+      )
+      SELECT
+        id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
+        model, thinking_effort, COALESCE(context_compression, 'off'),
+        COALESCE(is_pinned, 0),
+        COALESCE(archived, 0), owner_key, created_at, updated_at
+      FROM sessions;
+      DROP TABLE sessions;
+      ALTER TABLE sessions_new RENAME TO sessions;
+      CREATE INDEX IF NOT EXISTS idx_sessions_kind ON sessions(kind);
+      CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
+    `);
+  })();
+}
+
+function dropLegacyUnusedAuthTables(): void {
+  for (const tableName of ['invite_codes', 'user_sessions', 'auth_audit_log']) {
+    if (!tableExists(tableName)) continue;
+    db.exec(`DROP TABLE ${tableName}`);
+  }
+}
+
+const LEGACY_BILLING_TABLES = [
+  'billing_plans',
+  'user_subscriptions',
+  'user_balances',
+  'balance_transactions',
+  'monthly_usage',
+  'redeem_codes',
+  'redeem_code_usage',
+  'billing_audit_log',
+  'daily_usage',
+  'user_quotas',
+] as const;
+
+function archiveLegacyBillingData(): void {
+  const existingTables = LEGACY_BILLING_TABLES.filter((tableName) =>
+    tableExists(tableName),
+  );
+  const hasLegacyUsersColumn = hasColumn('users', 'subscription_plan_id');
+  if (existingTables.length === 0 && !hasLegacyUsersColumn) {
+    return;
+  }
+
+  const archivePath = path.join(STORE_DIR, 'legacy-billing-archive.json');
+  if (fs.existsSync(archivePath)) {
+    return;
+  }
+
+  const archive: Record<string, unknown> = {
+    archived_at: new Date().toISOString(),
+    schema_version: getRouterStateInternal('schema_version') ?? null,
+    tables: {},
+  };
+
+  for (const tableName of existingTables) {
+    const rowCount = (
+      db.prepare(`SELECT COUNT(*) AS cnt FROM ${tableName}`).get() as {
+        cnt: number;
+      }
+    ).cnt;
+    const columns = getTableColumns(tableName);
+    const rows = db.prepare(`SELECT * FROM ${tableName}`).all();
+    (archive.tables as Record<string, unknown>)[tableName] = {
+      columns,
+      row_count: rowCount,
+      rows,
+    };
+  }
+
+  if (hasLegacyUsersColumn) {
+    archive.users = {
+      columns: getTableColumns('users'),
+      rows: db
+        .prepare('SELECT * FROM users WHERE subscription_plan_id IS NOT NULL')
+        .all(),
+    };
+  }
+
+  fs.writeFileSync(archivePath, JSON.stringify(archive, null, 2), 'utf8');
+}
+
+function migrateLegacyBillingUsageSummary(): void {
+  if (!tableExists('daily_usage')) {
+    return;
+  }
+
+  db.exec(`
+    INSERT INTO usage_daily_summary (
+      user_id,
+      model,
+      date,
+      total_input_tokens,
+      total_output_tokens,
+      total_cache_read_tokens,
+      total_cache_creation_tokens,
+      total_cost_usd,
+      request_count,
+      updated_at
+    )
+    SELECT
+      du.user_id,
+      'legacy-billing-total',
+      du.date,
+      du.total_input_tokens,
+      du.total_output_tokens,
+      0,
+      0,
+      du.total_cost_usd,
+      du.message_count,
+      datetime('now')
+    FROM daily_usage du
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM usage_daily_summary uds
+      WHERE uds.user_id = du.user_id
+        AND uds.date = du.date
+    )
+  `);
+}
+
+function dropLegacyBillingCompatibility(): void {
+  archiveLegacyBillingData();
+  migrateLegacyBillingUsageSummary();
+
+  withForeignKeysDisabled(() => {
+    for (const tableName of [
+      'user_subscriptions',
+      'user_balances',
+      'balance_transactions',
+      'redeem_code_usage',
+      'redeem_codes',
+      'monthly_usage',
+      'billing_audit_log',
+      'daily_usage',
+      'user_quotas',
+      'billing_plans',
+    ]) {
+      if (!tableExists(tableName)) continue;
+      db.exec(`DROP TABLE ${tableName}`);
+    }
+
+    if (!hasColumn('users', 'subscription_plan_id')) {
+      return;
+    }
+
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE users_new (
+          id TEXT PRIMARY KEY,
+          username TEXT NOT NULL UNIQUE,
+          password_hash TEXT NOT NULL,
+          display_name TEXT NOT NULL DEFAULT '',
+          role TEXT NOT NULL DEFAULT 'member',
+          status TEXT NOT NULL DEFAULT 'active',
+          permissions TEXT NOT NULL DEFAULT '[]',
+          must_change_password INTEGER NOT NULL DEFAULT 0,
+          disable_reason TEXT,
+          notes TEXT,
+          avatar_emoji TEXT,
+          avatar_color TEXT,
+          ai_name TEXT,
+          ai_avatar_emoji TEXT,
+          ai_avatar_color TEXT,
+          ai_avatar_url TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          last_login_at TEXT,
+          deleted_at TEXT
+        );
+        INSERT INTO users_new (
+          id, username, password_hash, display_name, role, status, permissions,
+          must_change_password, disable_reason, notes, avatar_emoji,
+          avatar_color, ai_name, ai_avatar_emoji, ai_avatar_color,
+          ai_avatar_url, created_at, updated_at, last_login_at, deleted_at
+        )
+        SELECT
+          id, username, password_hash, display_name, role, status, permissions,
+          must_change_password, disable_reason, notes, avatar_emoji,
+          avatar_color, ai_name, ai_avatar_emoji, ai_avatar_color,
+          ai_avatar_url, created_at, updated_at, last_login_at, deleted_at
+        FROM users;
+        DROP TABLE users;
+        ALTER TABLE users_new RENAME TO users;
+        CREATE INDEX IF NOT EXISTS idx_users_status_role ON users(status, role);
+        CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at);
+      `);
+    })();
+  });
+}
+
+function dropLegacyGroupAccessTables(): void {
+  for (const tableName of ['group_members', 'user_pinned_groups']) {
+    if (!tableExists(tableName)) continue;
+    db.exec(`DROP TABLE ${tableName}`);
+  }
 }
 
 function assertSchema(
@@ -151,6 +731,7 @@ export function initDatabase(): void {
 
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       id TEXT PRIMARY KEY,
+      session_id TEXT,
       group_folder TEXT NOT NULL,
       chat_jid TEXT NOT NULL,
       prompt TEXT NOT NULL,
@@ -188,21 +769,24 @@ export function initDatabase(): void {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
-    CREATE TABLE IF NOT EXISTS sessions (
-      group_folder TEXT NOT NULL,
-      session_id TEXT NOT NULL,
-      agent_id TEXT NOT NULL DEFAULT '',
-      PRIMARY KEY (group_folder, agent_id)
-    );
-    CREATE TABLE IF NOT EXISTS registered_groups (
+    CREATE TABLE IF NOT EXISTS session_channels (
       jid TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
       name TEXT NOT NULL,
-      folder TEXT NOT NULL,
-      added_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
       container_config TEXT,
-      created_by TEXT,
-      is_home INTEGER DEFAULT 0
+      custom_cwd TEXT,
+      init_source_path TEXT,
+      init_git_url TEXT,
+      selected_skills TEXT,
+      mcp_mode TEXT DEFAULT 'inherit',
+      selected_mcps TEXT,
+      model TEXT,
+      thinking_effort TEXT,
+      context_compression TEXT DEFAULT 'off'
     );
+    CREATE INDEX IF NOT EXISTS idx_session_channels_session
+      ON session_channels(session_id);
   `);
 
   // Auth tables
@@ -229,225 +813,8 @@ export function initDatabase(): void {
       last_login_at TEXT,
       deleted_at TEXT
     );
-
-    CREATE TABLE IF NOT EXISTS invite_codes (
-      code TEXT PRIMARY KEY,
-      created_by TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'member',
-      permission_template TEXT,
-      permissions TEXT NOT NULL DEFAULT '[]',
-      max_uses INTEGER NOT NULL DEFAULT 1,
-      used_count INTEGER NOT NULL DEFAULT 0,
-      expires_at TEXT,
-      created_at TEXT NOT NULL,
-      FOREIGN KEY (created_by) REFERENCES users(id)
-    );
-
-    CREATE TABLE IF NOT EXISTS user_sessions (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      ip_address TEXT,
-      user_agent TEXT,
-      created_at TEXT NOT NULL,
-      expires_at TEXT NOT NULL,
-      last_active_at TEXT NOT NULL,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS auth_audit_log (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      event_type TEXT NOT NULL,
-      username TEXT NOT NULL,
-      actor_username TEXT,
-      ip_address TEXT,
-      user_agent TEXT,
-      details TEXT,
-      created_at TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_auth_audit_created ON auth_audit_log(created_at);
-    CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
-    CREATE INDEX IF NOT EXISTS idx_user_sessions_expires ON user_sessions(expires_at);
     CREATE INDEX IF NOT EXISTS idx_users_status_role ON users(status, role);
     CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at);
-    CREATE INDEX IF NOT EXISTS idx_invites_created_at ON invite_codes(created_at);
-  `);
-
-  // Group members table for shared workspaces
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS group_members (
-      group_folder TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'member',
-      added_at TEXT NOT NULL,
-      added_by TEXT,
-      PRIMARY KEY (group_folder, user_id)
-    );
-    CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(user_id);
-  `);
-
-  // User pinned groups (per-user workspace pinning)
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS user_pinned_groups (
-      user_id TEXT NOT NULL,
-      jid TEXT NOT NULL,
-      pinned_at TEXT NOT NULL,
-      PRIMARY KEY (user_id, jid)
-    );
-  `);
-
-  // Sub-agents table for multi-agent parallel execution
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS agents (
-      id TEXT PRIMARY KEY,
-      group_folder TEXT NOT NULL,
-      chat_jid TEXT NOT NULL,
-      name TEXT NOT NULL,
-      prompt TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'running',
-      created_by TEXT,
-      created_at TEXT NOT NULL,
-      completed_at TEXT,
-      result_summary TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_agents_group ON agents(group_folder);
-    CREATE INDEX IF NOT EXISTS idx_agents_jid ON agents(chat_jid);
-    CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
-  `);
-
-  // Billing tables
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS billing_plans (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      description TEXT,
-      tier INTEGER NOT NULL DEFAULT 0,
-      monthly_cost_usd REAL NOT NULL DEFAULT 0,
-      monthly_token_quota INTEGER,
-      monthly_cost_quota REAL,
-      daily_cost_quota REAL,
-      weekly_cost_quota REAL,
-      daily_token_quota INTEGER,
-      weekly_token_quota INTEGER,
-      rate_multiplier REAL NOT NULL DEFAULT 1.0,
-      trial_days INTEGER,
-      sort_order INTEGER NOT NULL DEFAULT 0,
-      display_price TEXT,
-      highlight INTEGER NOT NULL DEFAULT 0,
-      max_groups INTEGER,
-      max_concurrent_containers INTEGER,
-      max_im_channels INTEGER,
-      max_mcp_servers INTEGER,
-      max_storage_mb INTEGER,
-      allow_overage INTEGER NOT NULL DEFAULT 0,
-      features TEXT NOT NULL DEFAULT '[]',
-      is_default INTEGER NOT NULL DEFAULT 0,
-      is_active INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS user_subscriptions (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      plan_id TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'active',
-      started_at TEXT NOT NULL,
-      expires_at TEXT,
-      cancelled_at TEXT,
-      trial_ends_at TEXT,
-      notes TEXT,
-      auto_renew INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL,
-      FOREIGN KEY (user_id) REFERENCES users(id),
-      FOREIGN KEY (plan_id) REFERENCES billing_plans(id)
-    );
-    CREATE INDEX IF NOT EXISTS idx_user_sub_user ON user_subscriptions(user_id);
-    CREATE INDEX IF NOT EXISTS idx_user_sub_status ON user_subscriptions(status);
-
-    CREATE TABLE IF NOT EXISTS user_balances (
-      user_id TEXT PRIMARY KEY,
-      balance_usd REAL NOT NULL DEFAULT 0,
-      total_deposited_usd REAL NOT NULL DEFAULT 0,
-      total_consumed_usd REAL NOT NULL DEFAULT 0,
-      updated_at TEXT NOT NULL,
-      FOREIGN KEY (user_id) REFERENCES users(id)
-    );
-
-    CREATE TABLE IF NOT EXISTS balance_transactions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id TEXT NOT NULL,
-      type TEXT NOT NULL,
-      amount_usd REAL NOT NULL,
-      balance_after REAL NOT NULL,
-      description TEXT,
-      reference_type TEXT,
-      reference_id TEXT,
-      actor_id TEXT,
-      source TEXT NOT NULL DEFAULT 'system_adjustment',
-      operator_type TEXT NOT NULL DEFAULT 'system',
-      notes TEXT,
-      idempotency_key TEXT,
-      created_at TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_bal_tx_user ON balance_transactions(user_id);
-    CREATE INDEX IF NOT EXISTS idx_bal_tx_created ON balance_transactions(created_at);
-
-    CREATE TABLE IF NOT EXISTS monthly_usage (
-      user_id TEXT NOT NULL,
-      month TEXT NOT NULL,
-      total_input_tokens INTEGER NOT NULL DEFAULT 0,
-      total_output_tokens INTEGER NOT NULL DEFAULT 0,
-      total_cost_usd REAL NOT NULL DEFAULT 0,
-      message_count INTEGER NOT NULL DEFAULT 0,
-      updated_at TEXT NOT NULL,
-      PRIMARY KEY (user_id, month)
-    );
-
-    CREATE TABLE IF NOT EXISTS redeem_codes (
-      code TEXT PRIMARY KEY,
-      type TEXT NOT NULL,
-      value_usd REAL,
-      plan_id TEXT,
-      duration_days INTEGER,
-      max_uses INTEGER NOT NULL DEFAULT 1,
-      used_count INTEGER NOT NULL DEFAULT 0,
-      expires_at TEXT,
-      created_by TEXT NOT NULL,
-      notes TEXT,
-      batch_id TEXT,
-      created_at TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS redeem_code_usage (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      code TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      redeemed_at TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_redeem_usage_user ON redeem_code_usage(user_id);
-
-    CREATE TABLE IF NOT EXISTS billing_audit_log (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      event_type TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      actor_id TEXT,
-      details TEXT,
-      created_at TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_bill_audit_user ON billing_audit_log(user_id);
-    CREATE INDEX IF NOT EXISTS idx_bill_audit_created ON billing_audit_log(created_at);
-
-    CREATE TABLE IF NOT EXISTS daily_usage (
-      user_id TEXT NOT NULL,
-      date TEXT NOT NULL,
-      total_input_tokens INTEGER NOT NULL DEFAULT 0,
-      total_output_tokens INTEGER NOT NULL DEFAULT 0,
-      total_cost_usd REAL NOT NULL DEFAULT 0,
-      message_count INTEGER NOT NULL DEFAULT 0,
-      PRIMARY KEY (user_id, date)
-    );
-    CREATE INDEX IF NOT EXISTS idx_daily_usage_date ON daily_usage(date);
-    CREATE INDEX IF NOT EXISTS idx_daily_usage_user_date ON daily_usage(user_id, date);
   `);
 
   // Token usage tracking tables
@@ -488,20 +855,94 @@ export function initDatabase(): void {
       UNIQUE(user_id, model, date)
     );
     CREATE INDEX IF NOT EXISTS idx_daily_user_date ON usage_daily_summary(user_id, date);
-
-    CREATE TABLE IF NOT EXISTS user_quotas (
-      user_id TEXT PRIMARY KEY,
-      monthly_cost_limit_usd REAL NOT NULL DEFAULT -1,
-      monthly_token_limit INTEGER NOT NULL DEFAULT -1,
-      daily_cost_limit_usd REAL NOT NULL DEFAULT -1,
-      daily_request_limit INTEGER NOT NULL DEFAULT -1,
-      billing_cycle_start TEXT,
-      subscription_tier TEXT,
-      subscription_expires_at TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
   `);
+
+  const hasLegacyProviderSessions =
+    tableExists('sessions') &&
+    hasColumn('sessions', 'group_folder') &&
+    hasColumn('sessions', 'session_id') &&
+    !hasColumn('sessions', 'id');
+  if (hasLegacyProviderSessions && !tableExists('provider_sessions_legacy')) {
+    db.exec('ALTER TABLE sessions RENAME TO provider_sessions_legacy');
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      parent_session_id TEXT,
+      cwd TEXT NOT NULL,
+      runner_id TEXT NOT NULL,
+      runner_profile_id TEXT,
+      model TEXT,
+      thinking_effort TEXT,
+      context_compression TEXT NOT NULL DEFAULT 'off',
+      is_pinned INTEGER NOT NULL DEFAULT 0,
+      archived INTEGER NOT NULL DEFAULT 0,
+      owner_key TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS session_bindings (
+      channel_jid TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      binding_mode TEXT NOT NULL,
+      activation_mode TEXT NOT NULL DEFAULT 'auto',
+      require_mention INTEGER NOT NULL DEFAULT 0,
+      display_name TEXT,
+      reply_policy TEXT NOT NULL DEFAULT 'source_only',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS session_state (
+      session_id TEXT PRIMARY KEY,
+      provider_session_id TEXT,
+      resume_anchor TEXT,
+      provider_state_json TEXT,
+      recent_im_channels_json TEXT,
+      im_channel_last_seen_json TEXT,
+      current_permission_mode TEXT,
+      last_message_cursor TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS worker_sessions (
+      session_id TEXT PRIMARY KEY,
+      parent_session_id TEXT NOT NULL,
+      source_chat_jid TEXT NOT NULL,
+      name TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      completed_at TEXT,
+      result_summary TEXT
+    );
+    CREATE TABLE IF NOT EXISTS runner_profiles (
+      id TEXT PRIMARY KEY,
+      runner_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      config_json TEXT NOT NULL,
+      is_default INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS app_state (
+      key TEXT PRIMARY KEY,
+      value_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_sessions_kind ON sessions(kind);
+    CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
+    CREATE INDEX IF NOT EXISTS idx_bindings_session ON session_bindings(session_id);
+    CREATE INDEX IF NOT EXISTS idx_worker_parent ON worker_sessions(parent_session_id);
+    CREATE INDEX IF NOT EXISTS idx_profiles_runner ON runner_profiles(runner_id);
+  `);
+
+  dropLegacySessionRuntimeModeColumn();
+  migrateLegacyRegisteredGroupBindings();
+  backfillLegacyGroupOwnersIntoSessions();
+  migrateRegisteredGroupsToSessionChannels();
 
   // Lightweight migrations for existing DBs
   ensureColumn('users', 'permissions', "TEXT NOT NULL DEFAULT '[]'");
@@ -509,49 +950,35 @@ export function initDatabase(): void {
   ensureColumn('users', 'disable_reason', 'TEXT');
   ensureColumn('users', 'notes', 'TEXT');
   ensureColumn('users', 'deleted_at', 'TEXT');
-  ensureColumn('invite_codes', 'permission_template', 'TEXT');
-  ensureColumn('invite_codes', 'permissions', "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn('users', 'avatar_emoji', 'TEXT');
   ensureColumn('users', 'avatar_color', 'TEXT');
-  ensureColumn(
-    'registered_groups',
-    'execution_mode',
-    "TEXT DEFAULT 'container'",
-  );
-  ensureColumn('registered_groups', 'custom_cwd', 'TEXT');
-  ensureColumn('registered_groups', 'init_source_path', 'TEXT');
-  ensureColumn('registered_groups', 'init_git_url', 'TEXT');
   ensureColumn('messages', 'attachments', 'TEXT');
   ensureColumn('messages', 'source_jid', 'TEXT');
-  ensureColumn('registered_groups', 'created_by', 'TEXT');
-  ensureColumn('registered_groups', 'is_home', 'INTEGER DEFAULT 0');
   ensureColumn('users', 'ai_name', 'TEXT');
   ensureColumn('users', 'ai_avatar_emoji', 'TEXT');
   ensureColumn('users', 'ai_avatar_color', 'TEXT');
   ensureColumn('users', 'ai_avatar_url', 'TEXT');
   ensureColumn('scheduled_tasks', 'created_by', 'TEXT');
+  ensureColumn('scheduled_tasks', 'session_id', 'TEXT');
   ensureColumn('scheduled_tasks', 'execution_type', "TEXT DEFAULT 'agent'");
   ensureColumn('scheduled_tasks', 'script_command', 'TEXT');
-  ensureColumn('registered_groups', 'selected_skills', 'TEXT');
-  ensureColumn('sessions', 'agent_id', "TEXT NOT NULL DEFAULT ''");
-  ensureColumn('agents', 'kind', "TEXT NOT NULL DEFAULT 'task'");
-  ensureColumn('registered_groups', 'target_agent_id', 'TEXT');
-  ensureColumn('registered_groups', 'target_main_jid', 'TEXT');
-  ensureColumn(
-    'registered_groups',
-    'reply_policy',
-    "TEXT DEFAULT 'source_only'",
-  );
-  ensureColumn('registered_groups', 'require_mention', 'INTEGER DEFAULT 0');
-  ensureColumn('registered_groups', 'mcp_mode', "TEXT DEFAULT 'inherit'");
-  ensureColumn('registered_groups', 'selected_mcps', 'TEXT');
-  ensureColumn('registered_groups', 'activation_mode', "TEXT DEFAULT 'auto'");
-  ensureColumn('registered_groups', 'llm_provider', "TEXT DEFAULT 'claude'");
-  ensureColumn('registered_groups', 'model', 'TEXT');
-  ensureColumn('registered_groups', 'thinking_effort', 'TEXT');
-  ensureColumn('registered_groups', 'context_compression', "TEXT DEFAULT 'off'");
-  ensureColumn('registered_groups', 'knowledge_extraction', 'INTEGER DEFAULT 0');
+  ensureColumn('session_channels', 'custom_cwd', 'TEXT');
+  ensureColumn('session_channels', 'init_source_path', 'TEXT');
+  ensureColumn('session_channels', 'init_git_url', 'TEXT');
+  ensureColumn('session_channels', 'selected_skills', 'TEXT');
+  ensureColumn('session_channels', 'mcp_mode', "TEXT DEFAULT 'inherit'");
+  ensureColumn('session_channels', 'selected_mcps', 'TEXT');
+  ensureColumn('session_channels', 'model', 'TEXT');
+  ensureColumn('session_channels', 'thinking_effort', 'TEXT');
+  ensureColumn('session_channels', 'context_compression', "TEXT DEFAULT 'off'");
   ensureColumn('scheduled_tasks', 'model', 'TEXT');
+  db.prepare(
+    `UPDATE scheduled_tasks
+       SET session_id = 'main:' || group_folder
+     WHERE (session_id IS NULL OR TRIM(session_id) = '')
+       AND group_folder IS NOT NULL
+       AND TRIM(group_folder) != ''`,
+  ).run();
 
   // Context summaries table for conversation compression
   db.exec(`
@@ -567,50 +994,9 @@ export function initDatabase(): void {
   `);
   ensureColumn('messages', 'token_usage', 'TEXT');
 
-  // Add index on target_agent_id for fast lookup of IM bindings
-  db.exec(
-    'CREATE INDEX IF NOT EXISTS idx_rg_target_agent ON registered_groups(target_agent_id)',
-  );
-  db.exec(
-    'CREATE INDEX IF NOT EXISTS idx_rg_target_main ON registered_groups(target_main_jid)',
-  );
-
-  // Migration: remove UNIQUE constraint from registered_groups.folder
-  // Multiple groups (web:main + feishu chats) share folder='main' by design.
-  // The old UNIQUE constraint caused INSERT OR REPLACE to silently delete
-  // the conflicting row, making web:main and feishu groups mutually exclusive.
-  const hasUniqueFolder =
-    (
-      db
-        .prepare(
-          `SELECT COUNT(*) as cnt FROM sqlite_master
-         WHERE type='index' AND tbl_name='registered_groups'
-         AND name='sqlite_autoindex_registered_groups_2'`,
-        )
-        .get() as { cnt: number }
-    ).cnt > 0;
-  if (hasUniqueFolder) {
-    db.transaction(() => {
-      db.exec(`
-        CREATE TABLE registered_groups_new (
-          jid TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          folder TEXT NOT NULL,
-          added_at TEXT NOT NULL,
-          container_config TEXT,
-          execution_mode TEXT DEFAULT 'container',
-          custom_cwd TEXT,
-          init_source_path TEXT,
-          init_git_url TEXT,
-          created_by TEXT,
-          is_home INTEGER DEFAULT 0
-        );
-        INSERT INTO registered_groups_new SELECT jid, name, folder, added_at, container_config, execution_mode, custom_cwd, NULL, NULL, NULL, 0 FROM registered_groups;
-        DROP TABLE registered_groups;
-        ALTER TABLE registered_groups_new RENAME TO registered_groups;
-      `);
-    })();
-  }
+  dropLegacyUnusedAuthTables();
+  dropLegacyBillingCompatibility();
+  dropLegacyGroupAccessTables();
 
   // v19→v20 migration: add token_usage column to messages
   ensureColumn('messages', 'token_usage', 'TEXT');
@@ -628,39 +1014,41 @@ export function initDatabase(): void {
   ]);
   assertSchema('scheduled_tasks', [
     'id',
+    'session_id',
     'group_folder',
     'chat_jid',
     'prompt',
     'schedule_type',
     'schedule_value',
     'context_mode',
+    'execution_type',
+    'script_command',
     'next_run',
     'last_run',
     'last_result',
     'status',
     'created_at',
     'created_by',
+    'model',
   ]);
   assertSchema(
-    'registered_groups',
+    'session_channels',
     [
       'jid',
+      'session_id',
       'name',
-      'folder',
-      'added_at',
+      'created_at',
       'container_config',
-      'execution_mode',
       'custom_cwd',
       'init_source_path',
       'init_git_url',
-      'created_by',
-      'is_home',
       'selected_skills',
-      'target_agent_id',
-      'target_main_jid',
-      'reply_policy',
+      'mcp_mode',
+      'selected_mcps',
+      'model',
+      'thinking_effort',
+      'context_compression',
     ],
-    ['trigger_pattern', 'requires_trigger'],
   );
 
   assertSchema('users', [
@@ -684,292 +1072,12 @@ export function initDatabase(): void {
     'updated_at',
     'last_login_at',
     'deleted_at',
-  ]);
-  assertSchema('user_sessions', [
-    'id',
-    'user_id',
-    'ip_address',
-    'user_agent',
-    'created_at',
-    'expires_at',
-    'last_active_at',
-  ]);
-  assertSchema('invite_codes', [
-    'code',
-    'created_by',
-    'role',
-    'permission_template',
-    'permissions',
-    'max_uses',
-    'used_count',
-    'expires_at',
-    'created_at',
-  ]);
-  assertSchema('auth_audit_log', [
-    'id',
-    'event_type',
-    'username',
-    'actor_username',
-    'ip_address',
-    'user_agent',
-    'details',
-    'created_at',
-  ]);
+  ], ['subscription_plan_id']);
+  // Store schema version after all migrations complete.
 
-  // Store schema version after all migrations complete
-  // Migrate existing web groups: assign to first admin
-  db.exec(`
-    UPDATE registered_groups SET created_by = (
-      SELECT id FROM users WHERE role = 'admin' AND status = 'active' ORDER BY created_at ASC LIMIT 1
-    ) WHERE jid LIKE 'web:%' AND folder != 'main' AND created_by IS NULL
-  `);
-
-  // Backfill owner for legacy web:main if missing.
-  db.exec(`
-    UPDATE registered_groups SET created_by = (
-      SELECT id FROM users WHERE role = 'admin' AND status = 'active' ORDER BY created_at ASC LIMIT 1
-    ) WHERE jid = 'web:main' AND created_by IS NULL
-  `);
-
-  // Backfill created_by for feishu/telegram groups by matching sibling groups in the same folder.
-  // Only backfill when the folder has exactly one distinct owner; otherwise keep NULL
-  // to avoid misrouting in ambiguous folders (e.g., shared admin main).
-  db.exec(`
-    UPDATE registered_groups
-    SET created_by = (
-      SELECT MIN(rg2.created_by)
-      FROM registered_groups rg2
-      WHERE rg2.folder = registered_groups.folder
-        AND rg2.created_by IS NOT NULL
-    )
-    WHERE (jid LIKE 'feishu:%' OR jid LIKE 'telegram:%')
-      AND created_by IS NULL
-      AND (
-        SELECT COUNT(DISTINCT rg3.created_by)
-        FROM registered_groups rg3
-        WHERE rg3.folder = registered_groups.folder
-          AND rg3.created_by IS NOT NULL
-      ) = 1
-  `);
-
-  // v13 migration: mark existing web:main group as is_home=1
-  db.exec(`
-    UPDATE registered_groups SET is_home = 1
-    WHERE jid = 'web:main' AND folder = 'main' AND is_home = 0
-  `);
-
-  // v15 migration: backfill group_members for existing web groups
-  const currentVersion = getRouterStateInternal('schema_version');
-  if (!currentVersion || parseInt(currentVersion, 10) < 15) {
-    db.transaction(() => {
-      // Backfill owner records for all web groups with created_by set
-      const webGroups = db
-        .prepare(
-          "SELECT DISTINCT folder, created_by FROM registered_groups WHERE jid LIKE 'web:%' AND created_by IS NOT NULL",
-        )
-        .all() as Array<{ folder: string; created_by: string }>;
-      for (const g of webGroups) {
-        db.prepare(
-          `INSERT OR IGNORE INTO group_members (group_folder, user_id, role, added_at, added_by)
-           VALUES (?, ?, 'owner', ?, ?)`,
-        ).run(g.folder, g.created_by, new Date().toISOString(), g.created_by);
-      }
-    })();
-  }
-
-  // v16→v17 migration: rebuild sessions table with composite primary key
-  // Old PK was (group_folder), which cannot store multiple agent sessions per folder.
-  // New PK is (group_folder, COALESCE(agent_id, '')) to support per-agent sessions.
-  const curVer = getRouterStateInternal('schema_version');
-  if (curVer && parseInt(curVer, 10) < 17) {
-    db.transaction(() => {
-      // Check if the old table has single-column PK by inspecting table_info
-      const pkCols = (
-        db.prepare("PRAGMA table_info('sessions')").all() as Array<{
-          name: string;
-          pk: number;
-        }>
-      ).filter((c) => c.pk > 0);
-      // Old schema: single PK column 'group_folder'. New schema: composite PK needs rebuild.
-      if (pkCols.length === 1 && pkCols[0].name === 'group_folder') {
-        db.exec(`
-          CREATE TABLE sessions_new (
-            group_folder TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            agent_id TEXT NOT NULL DEFAULT '',
-            PRIMARY KEY (group_folder, agent_id)
-          );
-          INSERT OR IGNORE INTO sessions_new (group_folder, session_id, agent_id)
-            SELECT group_folder, session_id, COALESCE(agent_id, '') FROM sessions;
-          DROP TABLE sessions;
-          ALTER TABLE sessions_new RENAME TO sessions;
-        `);
-      }
-    })();
-  }
-
-  // v22: Fix target_main_jid that used folder-based JID (web:${folder})
-  // instead of actual registered group JID (web:${uuid}).
-  // Only affects non-home workspaces where folder != uuid.
-  if (curVer && parseInt(curVer, 10) < 22) {
-    const rows = db
-      .prepare(
-        "SELECT jid, target_main_jid FROM registered_groups WHERE target_main_jid IS NOT NULL AND target_main_jid != ''",
-      )
-      .all() as Array<{ jid: string; target_main_jid: string }>;
-    for (const row of rows) {
-      const targetJid = row.target_main_jid;
-      // Check if target_main_jid is a real registered group JID
-      const exists = db
-        .prepare('SELECT 1 FROM registered_groups WHERE jid = ?')
-        .get(targetJid);
-      if (exists) continue;
-      // Not a valid JID — try to resolve via folder
-      if (!targetJid.startsWith('web:')) continue;
-      const folder = targetJid.slice(4);
-      const candidates = db
-        .prepare(
-          "SELECT jid FROM registered_groups WHERE folder = ? AND jid LIKE 'web:%'",
-        )
-        .all(folder) as Array<{ jid: string }>;
-      if (candidates.length === 1) {
-        db.prepare(
-          'UPDATE registered_groups SET target_main_jid = ? WHERE jid = ?',
-        ).run(candidates[0].jid, row.jid);
-      }
-    }
-  }
-
-  // v23→v24 migration: billing system initialization
-  ensureColumn('users', 'subscription_plan_id', 'TEXT');
-  const v24Ver = getRouterStateInternal('schema_version');
-  if (!v24Ver || parseInt(v24Ver, 10) < 24) {
-    db.transaction(() => {
-      // Ensure a default free plan exists
-      const existingDefault = db
-        .prepare('SELECT id FROM billing_plans WHERE is_default = 1')
-        .get();
-      if (!existingDefault) {
-        const now = new Date().toISOString();
-        db.prepare(
-          `INSERT OR IGNORE INTO billing_plans (id, name, description, tier, monthly_cost_usd, allow_overage, features, is_default, is_active, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run('free', '免费版', '基础免费套餐', 0, 0, 0, '[]', 1, 1, now, now);
-      }
-
-      // Initialize balances for all existing users
-      const users = db
-        .prepare("SELECT id FROM users WHERE status != 'deleted'")
-        .all() as Array<{ id: string }>;
-      const now = new Date().toISOString();
-      for (const u of users) {
-        db.prepare(
-          'INSERT OR IGNORE INTO user_balances (user_id, balance_usd, total_deposited_usd, total_consumed_usd, updated_at) VALUES (?, 0, 0, 0, ?)',
-        ).run(u.id, now);
-      }
-
-      // Create active subscriptions for existing users → free plan
-      const freePlan = db
-        .prepare('SELECT id FROM billing_plans WHERE is_default = 1')
-        .get() as { id: string } | undefined;
-      if (freePlan) {
-        for (const u of users) {
-          const existing = db
-            .prepare(
-              "SELECT id FROM user_subscriptions WHERE user_id = ? AND status = 'active'",
-            )
-            .get(u.id);
-          if (!existing) {
-            const subId = `sub_${u.id}_${Date.now()}`;
-            db.prepare(
-              `INSERT INTO user_subscriptions (id, user_id, plan_id, status, started_at, created_at)
-               VALUES (?, ?, ?, 'active', ?, ?)`,
-            ).run(subId, u.id, freePlan.id, now, now);
-          }
-        }
-      }
-    })();
-  }
-
-  // v24→v25 migration: billing system enhancement (daily/weekly quotas, rate_multiplier, trial)
-  ensureColumn('billing_plans', 'daily_cost_quota', 'REAL');
-  ensureColumn('billing_plans', 'weekly_cost_quota', 'REAL');
-  ensureColumn('billing_plans', 'daily_token_quota', 'INTEGER');
-  ensureColumn('billing_plans', 'weekly_token_quota', 'INTEGER');
-  ensureColumn('billing_plans', 'rate_multiplier', 'REAL NOT NULL DEFAULT 1.0');
-  ensureColumn('billing_plans', 'trial_days', 'INTEGER');
-  ensureColumn('billing_plans', 'sort_order', 'INTEGER NOT NULL DEFAULT 0');
-  ensureColumn('billing_plans', 'display_price', 'TEXT');
-  ensureColumn('billing_plans', 'highlight', 'INTEGER NOT NULL DEFAULT 0');
-  ensureColumn('user_subscriptions', 'trial_ends_at', 'TEXT');
-  ensureColumn('user_subscriptions', 'notes', 'TEXT');
-  ensureColumn('redeem_codes', 'batch_id', 'TEXT');
-
-  // v25→v26 migration: cost_usd on messages + idempotency key for balance transactions
+  // v25→v26 migration: cost_usd on messages
   ensureColumn('messages', 'cost_usd', 'REAL');
   ensureColumn('messages', 'reply_to_id', 'TEXT');
-
-  // idempotency key for balance transactions
-  ensureColumn('balance_transactions', 'idempotency_key', 'TEXT');
-  ensureColumn(
-    'balance_transactions',
-    'source',
-    "TEXT NOT NULL DEFAULT 'system_adjustment'",
-  );
-  ensureColumn(
-    'balance_transactions',
-    'operator_type',
-    "TEXT NOT NULL DEFAULT 'system'",
-  );
-  ensureColumn('balance_transactions', 'notes', 'TEXT');
-  // Create unique index only if it doesn't exist
-  db.exec(
-    `CREATE UNIQUE INDEX IF NOT EXISTS idx_bal_tx_idempotency ON balance_transactions(idempotency_key) WHERE idempotency_key IS NOT NULL`,
-  );
-
-  // v26→v27 migration: wallet-first commercialization baseline
-  const v27Ver = getRouterStateInternal('schema_version');
-  if (!v27Ver || parseInt(v27Ver, 10) < 27) {
-    db.transaction(() => {
-      const now = new Date().toISOString();
-      const users = db
-        .prepare(
-          "SELECT id, role FROM users WHERE status != 'deleted' AND role != 'admin'",
-        )
-        .all() as Array<{ id: string; role: UserRole }>;
-      for (const user of users) {
-        db.prepare(
-          `INSERT OR IGNORE INTO user_balances (
-            user_id, balance_usd, total_deposited_usd, total_consumed_usd, updated_at
-          ) VALUES (?, 0, 0, 0, ?)`,
-        ).run(user.id, now);
-        db.prepare(
-          `UPDATE user_balances
-           SET balance_usd = 0, total_deposited_usd = 0, total_consumed_usd = 0, updated_at = ?
-           WHERE user_id = ?`,
-        ).run(now, user.id);
-
-        const hasOpening = db
-          .prepare(
-            "SELECT 1 FROM balance_transactions WHERE user_id = ? AND source = 'migration_opening' LIMIT 1",
-          )
-          .get(user.id);
-        if (!hasOpening) {
-          db.prepare(
-            `INSERT INTO balance_transactions (
-              user_id, type, amount_usd, balance_after, description, reference_type,
-              reference_id, actor_id, source, operator_type, notes, idempotency_key, created_at
-            ) VALUES (?, 'adjustment', 0, 0, ?, NULL, NULL, NULL, 'migration_opening', 'system', ?, NULL, ?)`,
-          ).run(
-            user.id,
-            '商业化计费上线初始化',
-            '上线迁移：普通用户默认余额归零，需充值后使用',
-            now,
-          );
-        }
-      }
-    })();
-  }
 
   // v27→v28: Token usage tables + history migration
   const v28Check = getRouterStateInternal('schema_version');
@@ -991,8 +1099,8 @@ export function initDatabase(): void {
           cost_usd, duration_ms, num_turns, source, created_at)
         SELECT
           lower(hex(randomblob(16))),
-          COALESCE(rg.created_by, 'system'),
-          COALESCE(rg.folder, m.chat_jid),
+          COALESCE(ms.owner_key, 'system'),
+          COALESCE(substr(sc.session_id, 6), m.chat_jid),
           m.id,
           COALESCE(jme.key, 'unknown'),
           COALESCE(json_extract(jme.value, '$.inputTokens'), 0),
@@ -1005,7 +1113,8 @@ export function initDatabase(): void {
           m.timestamp
         FROM messages m
           JOIN json_each(json_extract(m.token_usage, '$.modelUsage')) jme
-          LEFT JOIN registered_groups rg ON rg.jid = m.chat_jid
+          LEFT JOIN session_channels sc ON sc.jid = m.chat_jid
+          LEFT JOIN sessions ms ON ms.id = sc.session_id
         WHERE m.token_usage IS NOT NULL
           AND json_extract(m.token_usage, '$.modelUsage') IS NOT NULL
       `);
@@ -1017,8 +1126,8 @@ export function initDatabase(): void {
           cost_usd, duration_ms, num_turns, source, created_at)
         SELECT
           lower(hex(randomblob(16))),
-          COALESCE(rg.created_by, 'system'),
-          COALESCE(rg.folder, m.chat_jid),
+          COALESCE(ms.owner_key, 'system'),
+          COALESCE(substr(sc.session_id, 6), m.chat_jid),
           m.id,
           'legacy-unknown',
           COALESCE(json_extract(m.token_usage, '$.inputTokens'), 0),
@@ -1031,7 +1140,8 @@ export function initDatabase(): void {
           'agent',
           m.timestamp
         FROM messages m
-          LEFT JOIN registered_groups rg ON rg.jid = m.chat_jid
+          LEFT JOIN session_channels sc ON sc.jid = m.chat_jid
+          LEFT JOIN sessions ms ON ms.id = sc.session_id
         WHERE m.token_usage IS NOT NULL
           AND (json_extract(m.token_usage, '$.modelUsage') IS NULL
                OR json_type(json_extract(m.token_usage, '$.modelUsage')) != 'object')
@@ -1062,35 +1172,6 @@ export function initDatabase(): void {
         'Token usage migration v27→v28 completed',
       );
     })();
-  }
-
-  // v29: Auto-registered IM groups should route to their home web JID.
-  // Previously buildOnNewChat did not set target_main_jid, causing messages
-  // to be stored under the IM JID directly — leading to duplicate replies
-  // when multiple IM groups share the same folder.
-  if (curVer && parseInt(curVer, 10) < 29) {
-    db.exec(`
-      UPDATE registered_groups
-      SET target_main_jid = (
-        SELECT home.jid FROM registered_groups AS home
-        WHERE home.folder = registered_groups.folder
-          AND home.is_home = 1
-          AND home.jid LIKE 'web:%'
-        LIMIT 1
-      )
-      WHERE jid NOT LIKE 'web:%'
-        AND target_main_jid IS NULL
-        AND target_agent_id IS NULL
-        AND is_home = 0
-        AND EXISTS (
-          SELECT 1 FROM registered_groups AS home
-          WHERE home.folder = registered_groups.folder
-            AND home.is_home = 1
-        )
-    `);
-    logger.info(
-      'Migration v28→v29: set target_main_jid for auto-registered IM groups',
-    );
   }
 
   // v30: turns table for Turn-based message routing
@@ -1153,7 +1234,9 @@ export function initDatabase(): void {
     logger.info('FTS5 rebuild complete');
   }
 
-  const SCHEMA_VERSION = '34';
+  syncSessionWorkbenchProjection();
+
+  const SCHEMA_VERSION = '42';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -1902,6 +1985,13 @@ export function getTranscriptMessagesSince(
   >;
 }
 
+export function getMaxMessageRowid(chatJid: string): number {
+  const row = db
+    .prepare('SELECT MAX(rowid) AS rowid FROM messages WHERE chat_jid = ?')
+    .get(chatJid) as { rowid: number | null } | undefined;
+  return row?.rowid ?? 0;
+}
+
 /**
  * Migration helper: look up the rowid of a message by its old-format
  * (timestamp, id) cursor. Falls back to MAX(rowid) at or before that
@@ -1924,11 +2014,12 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, execution_type, script_command, next_run, status, created_at, created_by, model)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, session_id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, execution_type, script_command, next_run, status, created_at, created_by, model)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
+    task.session_id ?? null,
     task.group_folder,
     task.chat_jid,
     task.prompt,
@@ -2106,16 +2197,6 @@ export function cleanupOldTaskRunLogs(retentionDays = 30): number {
   return result.changes;
 }
 
-export function cleanupOldDailyUsage(retentionDays = 90): number {
-  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000)
-    .toISOString()
-    .slice(0, 10);
-  const result = db
-    .prepare('DELETE FROM daily_usage WHERE date < ?')
-    .run(cutoff);
-  return result.changes;
-}
-
 // ── Context Summaries ───────────────────────────────────────
 
 export interface ContextSummary {
@@ -2177,16 +2258,6 @@ export function countMessagesSince(
   return row?.cnt ?? 0;
 }
 
-export function cleanupOldBillingAuditLog(retentionDays = 365): number {
-  const cutoff = new Date(
-    Date.now() - retentionDays * 24 * 60 * 60 * 1000,
-  ).toISOString();
-  const result = db
-    .prepare('DELETE FROM billing_audit_log WHERE created_at < ?')
-    .run(cutoff);
-  return result.changes;
-}
-
 // --- Router state accessors ---
 
 export function getRouterState(key: string): string | undefined {
@@ -2204,17 +2275,355 @@ export function setRouterState(key: string, value: string): void {
 
 // --- Session accessors ---
 
+function buildMainSessionId(groupFolder: string): string {
+  return `${MAIN_SESSION_ID_PREFIX}${groupFolder}`;
+}
+
+function buildWorkerSessionId(agentId: string): string {
+  return `${WORKER_SESSION_ID_PREFIX}${agentId}`;
+}
+
+function buildMemorySessionId(ownerKey: string): string {
+  return `${MEMORY_SESSION_ID_PREFIX}${ownerKey}`;
+}
+
+function resolveLegacySessionKey(
+  groupFolder: string,
+  agentId?: string | null,
+): string {
+  const effectiveAgentId = agentId?.trim();
+  return effectiveAgentId
+    ? buildWorkerSessionId(effectiveAgentId)
+    : buildMainSessionId(groupFolder);
+}
+
+function parseSessionRecord(row: Record<string, unknown>): SessionRecord {
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    kind: row.kind as SessionKind,
+    parent_session_id:
+      typeof row.parent_session_id === 'string' ? row.parent_session_id : null,
+    cwd: String(row.cwd),
+    runner_id: normalizeStoredRunnerId(row.runner_id),
+    runner_profile_id:
+      typeof row.runner_profile_id === 'string' ? row.runner_profile_id : null,
+    model: typeof row.model === 'string' ? row.model : null,
+    thinking_effort:
+      row.thinking_effort === 'low' ||
+      row.thinking_effort === 'medium' ||
+      row.thinking_effort === 'high'
+        ? row.thinking_effort
+        : null,
+    context_compression:
+      row.context_compression === 'auto' || row.context_compression === 'manual'
+        ? (row.context_compression as 'auto' | 'manual')
+        : 'off',
+    is_pinned: Number(row.is_pinned || 0) === 1,
+    archived: Number(row.archived || 0) === 1,
+    owner_key: typeof row.owner_key === 'string' ? row.owner_key : null,
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  };
+}
+
+function parseRunnerProfileRecord(
+  row: Record<string, unknown>,
+): RunnerProfileRecord {
+  return {
+    id: String(row.id),
+    runner_id: normalizeStoredRunnerId(row.runner_id),
+    name: String(row.name),
+    config_json:
+      typeof row.config_json === 'string' ? row.config_json : '{}',
+    is_default: Number(row.is_default || 0) === 1,
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  };
+}
+
+function parseSessionBindingRecord(
+  row: Record<string, unknown>,
+): SessionBindingRecord {
+  return {
+    channel_jid: String(row.channel_jid),
+    session_id: String(row.session_id),
+    binding_mode: (row.binding_mode || 'source_only') as SessionBindingMode,
+    activation_mode: parseActivationMode(
+      typeof row.activation_mode === 'string' ? row.activation_mode : null,
+    ),
+    require_mention: Number(row.require_mention || 0) === 1,
+    display_name:
+      typeof row.display_name === 'string' ? row.display_name : null,
+    reply_policy: row.reply_policy === 'mirror' ? 'mirror' : 'source_only',
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  };
+}
+
+function parseSessionStateRow(
+  row: Record<string, unknown>,
+): SessionRuntimeStateRecord {
+  return {
+    session_id: String(row.session_id),
+    provider_session_id:
+      typeof row.provider_session_id === 'string'
+        ? row.provider_session_id
+        : null,
+    resume_anchor:
+      typeof row.resume_anchor === 'string' ? row.resume_anchor : null,
+    provider_state_json:
+      typeof row.provider_state_json === 'string'
+        ? row.provider_state_json
+        : null,
+    recent_im_channels_json:
+      typeof row.recent_im_channels_json === 'string'
+        ? row.recent_im_channels_json
+        : null,
+    im_channel_last_seen_json:
+      typeof row.im_channel_last_seen_json === 'string'
+        ? row.im_channel_last_seen_json
+        : null,
+    current_permission_mode:
+      typeof row.current_permission_mode === 'string'
+        ? row.current_permission_mode
+        : null,
+    last_message_cursor:
+      typeof row.last_message_cursor === 'string' ? row.last_message_cursor : null,
+    updated_at: String(row.updated_at),
+  };
+}
+
+function parseWorkerSessionRow(
+  row: Record<string, unknown>,
+): WorkerSessionRecord {
+  return {
+    session_id: String(row.session_id),
+    parent_session_id: String(row.parent_session_id),
+    source_chat_jid: String(row.source_chat_jid),
+    name: String(row.name),
+    kind: (row.kind as AgentKind) || 'task',
+    prompt: String(row.prompt),
+    status: (row.status as AgentStatus) || 'idle',
+    created_at: String(row.created_at),
+    completed_at:
+      typeof row.completed_at === 'string' ? row.completed_at : null,
+    result_summary:
+      typeof row.result_summary === 'string' ? row.result_summary : null,
+  };
+}
+
+function extractAgentIdFromWorkerSessionId(sessionId: string): string {
+  return sessionId.startsWith(WORKER_SESSION_ID_PREFIX)
+    ? sessionId.slice(WORKER_SESSION_ID_PREFIX.length)
+    : sessionId;
+}
+
+function deriveWorkerGroupFolder(
+  row: Record<string, unknown>,
+): string {
+  const parentSessionId =
+    typeof row.parent_session_id === 'string' ? row.parent_session_id : '';
+  if (parentSessionId.startsWith(MAIN_SESSION_ID_PREFIX)) {
+    return parentSessionId.slice(MAIN_SESSION_ID_PREFIX.length);
+  }
+  const sourceChatJid =
+    typeof row.source_chat_jid === 'string' ? row.source_chat_jid : '';
+  const sourceGroup = sourceChatJid ? getRegisteredGroup(sourceChatJid) : undefined;
+  return sourceGroup?.folder || '';
+}
+
+function mapWorkerAgentRow(row: Record<string, unknown>): SubAgent {
+  const sessionId = String(row.session_id);
+  return {
+    id: extractAgentIdFromWorkerSessionId(sessionId),
+    group_folder: deriveWorkerGroupFolder(row),
+    chat_jid: String(row.source_chat_jid),
+    name: String(row.name),
+    prompt: String(row.prompt),
+    status: (row.status as AgentStatus) || 'idle',
+    kind: (row.kind as AgentKind) || 'task',
+    created_by: typeof row.owner_key === 'string' ? row.owner_key : null,
+    created_at: String(row.created_at),
+    completed_at:
+      typeof row.completed_at === 'string' ? row.completed_at : null,
+    result_summary:
+      typeof row.result_summary === 'string' ? row.result_summary : null,
+  };
+}
+
+function deriveRunnerId(group?: unknown): SessionRecord['runner_id'] {
+  void group;
+  return getDefaultRunnerId();
+}
+
+function normalizeStoredRunnerId(
+  raw: unknown,
+  fallback: SessionRecord['runner_id'] = getDefaultRunnerId(),
+): SessionRecord['runner_id'] {
+  if (typeof raw !== 'string') return fallback;
+  const runnerId = raw.trim();
+  return runnerId || fallback;
+}
+
+function deriveSessionKind(group: RegisteredGroup): SessionKind {
+  if (isPrimarySessionFolder(group.folder) || group.folder === 'main') {
+    return 'main';
+  }
+  return 'workspace';
+}
+
+function isCompatibilityHomeGroup(jid: string, folder: string): boolean {
+  if (!jid.startsWith('web:')) return false;
+  return getSessionRecord(buildMainSessionId(folder))?.kind === 'main';
+}
+
+function deriveSessionCwd(group: RegisteredGroup): string {
+  if (group.customCwd && path.isAbsolute(group.customCwd)) return group.customCwd;
+  return path.join(GROUPS_DIR, group.folder);
+}
+
+function findPrimarySessionChannelForFolder(
+  groupFolder: string,
+): RegisteredGroup | undefined {
+  const primary = getPrimarySessionChannelByFolder(groupFolder);
+  if (primary) return primary;
+  const candidates = getJidsByFolder(groupFolder)
+    .map((jid) => getRegisteredGroup(jid))
+    .filter((group): group is RegisteredGroup & { jid: string } => group != null);
+  return candidates.find((group) => group.name.length > 0) || candidates[0];
+}
+
+function ensureSessionRecordFromGroup(
+  jid: string,
+  group: RegisteredGroup,
+): string | null {
+  if (!jid.startsWith('web:')) return null;
+  const now = group.added_at || new Date().toISOString();
+  const sessionId = buildMainSessionId(group.folder);
+  const existing = getSessionRecord(sessionId);
+  const resolvedRunnerId = existing?.runner_id || deriveRunnerId(group);
+  db.prepare(
+    `INSERT INTO sessions (
+      id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
+      model, thinking_effort, context_compression, is_pinned, archived,
+      owner_key, created_at, updated_at
+    ) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, 0, 0, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      kind = excluded.kind,
+      cwd = excluded.cwd,
+      runner_id = excluded.runner_id,
+      model = excluded.model,
+      thinking_effort = excluded.thinking_effort,
+      context_compression = excluded.context_compression,
+      owner_key = excluded.owner_key,
+      updated_at = excluded.updated_at`,
+  ).run(
+    sessionId,
+    group.name,
+    deriveSessionKind(group),
+    deriveSessionCwd(group),
+    resolvedRunnerId,
+    group.model ?? null,
+    group.thinking_effort ?? null,
+    group.context_compression ?? 'off',
+    existing?.owner_key ?? null,
+    now,
+    new Date().toISOString(),
+  );
+  return sessionId;
+}
+
+function ensureSessionRecordForLegacyKey(
+  groupFolder: string,
+  agentId?: string | null,
+): string {
+  const now = new Date().toISOString();
+  const sessionId = resolveLegacySessionKey(groupFolder, agentId);
+  const folderGroup = groupFolder
+    ? findPrimarySessionChannelForFolder(groupFolder)
+    : undefined;
+  if (agentId?.trim()) {
+    const parentSession = getSessionRecord(buildMainSessionId(groupFolder));
+    if (!parentSession?.owner_key) {
+      throw new Error(
+        `Missing parent session owner for legacy worker session ${agentId} in ${groupFolder}`,
+      );
+    }
+    db.prepare(
+      `INSERT OR IGNORE INTO sessions (
+        id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
+        model, thinking_effort, context_compression, is_pinned, archived,
+        owner_key, created_at, updated_at
+      ) VALUES (?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
+    ).run(
+      sessionId,
+      agentId,
+      buildMainSessionId(groupFolder),
+      parentSession?.cwd || path.join(GROUPS_DIR, groupFolder),
+      parentSession?.runner_id || deriveRunnerId(folderGroup || null),
+      parentSession?.runner_profile_id || null,
+      parentSession?.model || null,
+      parentSession?.thinking_effort || null,
+      parentSession?.context_compression || 'off',
+      parentSession.owner_key,
+      now,
+      now,
+    );
+    return sessionId;
+  }
+  const folderOwnerKey = getSessionRecord(buildMainSessionId(groupFolder))?.owner_key ?? null;
+  db.prepare(
+    `INSERT OR IGNORE INTO sessions (
+      id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
+      model, thinking_effort, context_compression, is_pinned, archived,
+      owner_key, created_at, updated_at
+    ) VALUES (?, ?, 'workspace', NULL, ?, ?, NULL, ?, ?, ?, 0, 0, ?, ?, ?)`,
+  ).run(
+    sessionId,
+    groupFolder,
+    folderGroup ? deriveSessionCwd(folderGroup) : path.join(GROUPS_DIR, groupFolder),
+    deriveRunnerId(folderGroup || null),
+    folderGroup?.model ?? null,
+    folderGroup?.thinking_effort ?? null,
+    folderGroup?.context_compression ?? 'off',
+    folderOwnerKey,
+    now,
+    now,
+  );
+  return sessionId;
+}
+
+function syncSessionProjectionForGroup(
+  jid: string,
+  group: RegisteredGroup,
+): void {
+  ensureSessionRecordFromGroup(jid, group);
+}
+
+function deleteSessionProjectionForGroup(jid: string): void {
+  const group = getRegisteredGroup(jid);
+  if (jid.startsWith('web:') && group) {
+    const sessionId = buildMainSessionId(group.folder);
+    db.prepare('DELETE FROM session_bindings WHERE session_id = ?').run(sessionId);
+    db.prepare('DELETE FROM session_state WHERE session_id = ?').run(sessionId);
+    db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+  }
+  db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(jid);
+}
+
 export function getSession(
   groupFolder: string,
   agentId?: string | null,
 ): string | undefined {
-  const effectiveAgentId = agentId || '';
+  const sessionKey = resolveLegacySessionKey(groupFolder, agentId);
   const row = db
     .prepare(
-      'SELECT session_id FROM sessions WHERE group_folder = ? AND agent_id = ?',
+      'SELECT provider_session_id FROM session_state WHERE session_id = ?',
     )
-    .get(groupFolder, effectiveAgentId) as { session_id: string } | undefined;
-  return row?.session_id;
+    .get(sessionKey) as { provider_session_id: string } | undefined;
+  return row?.provider_session_id;
 }
 
 export function setSession(
@@ -2222,117 +2631,429 @@ export function setSession(
   sessionId: string,
   agentId?: string | null,
 ): void {
-  const effectiveAgentId = agentId || '';
+  const sessionKey = ensureSessionRecordForLegacyKey(groupFolder, agentId);
   db.prepare(
-    `INSERT INTO sessions (group_folder, session_id, agent_id) VALUES (?, ?, ?)
-     ON CONFLICT(group_folder, agent_id) DO UPDATE SET session_id = excluded.session_id`,
-  ).run(groupFolder, sessionId, effectiveAgentId);
+    `INSERT INTO session_state (session_id, provider_session_id, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(session_id) DO UPDATE SET
+       provider_session_id = excluded.provider_session_id,
+       updated_at = excluded.updated_at`,
+  ).run(sessionKey, sessionId, new Date().toISOString());
 }
 
 export function deleteSession(
   groupFolder: string,
   agentId?: string | null,
 ): void {
-  const effectiveAgentId = agentId || '';
-  db.prepare(
-    'DELETE FROM sessions WHERE group_folder = ? AND agent_id = ?',
-  ).run(groupFolder, effectiveAgentId);
+  db.prepare('DELETE FROM session_state WHERE session_id = ?').run(
+    resolveLegacySessionKey(groupFolder, agentId),
+  );
+}
+
+function deleteWorkerArtifactsForFolderRows(groupFolder: string): void {
+  const mainSessionId = buildMainSessionId(groupFolder);
+  const workerRows = db
+    .prepare(
+      `SELECT session_id, source_chat_jid
+       FROM worker_sessions
+       WHERE parent_session_id = ?`,
+    )
+    .all(mainSessionId) as Array<{
+      session_id: string;
+      source_chat_jid: string;
+    }>;
+  const sessionIds = new Set<string>();
+  const virtualChatJids = new Set<string>();
+
+  for (const row of workerRows) {
+    const sessionId = String(row.session_id);
+    const agentId = extractAgentIdFromWorkerSessionId(sessionId);
+    sessionIds.add(sessionId);
+    if (row.source_chat_jid) {
+      virtualChatJids.add(`${row.source_chat_jid}#agent:${agentId}`);
+    }
+  }
+
+  const sessionIdList = Array.from(sessionIds);
+  if (sessionIdList.length > 0) {
+    const placeholders = sessionIdList.map(() => '?').join(', ');
+    db.prepare(
+      `DELETE FROM session_bindings WHERE session_id IN (${placeholders})`,
+    ).run(...sessionIdList);
+    db.prepare(
+      `DELETE FROM session_state WHERE session_id IN (${placeholders})`,
+    ).run(...sessionIdList);
+    db.prepare(
+      `DELETE FROM worker_sessions WHERE session_id IN (${placeholders})`,
+    ).run(...sessionIdList);
+    db.prepare(
+      `DELETE FROM sessions WHERE id IN (${placeholders})`,
+    ).run(...sessionIdList);
+  }
+
+  const virtualChatJidList = Array.from(virtualChatJids);
+  if (virtualChatJidList.length > 0) {
+    const placeholders = virtualChatJidList.map(() => '?').join(', ');
+    db.prepare(`DELETE FROM messages WHERE chat_jid IN (${placeholders})`).run(
+      ...virtualChatJidList,
+    );
+    db.prepare(`DELETE FROM chats WHERE jid IN (${placeholders})`).run(
+      ...virtualChatJidList,
+    );
+  }
+}
+
+export function clearWorkerArtifactsForFolder(groupFolder: string): void {
+  const tx = db.transaction((folder: string) => {
+    deleteWorkerArtifactsForFolderRows(folder);
+  });
+  tx(groupFolder);
 }
 
 export function deleteAllSessionsForFolder(groupFolder: string): void {
-  db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(groupFolder);
+  const mainSessionId = buildMainSessionId(groupFolder);
+  deleteWorkerArtifactsForFolderRows(groupFolder);
+  db.prepare('DELETE FROM session_bindings WHERE session_id = ?').run(mainSessionId);
+  db.prepare('DELETE FROM session_state WHERE session_id = ?').run(mainSessionId);
+  db.prepare('DELETE FROM sessions WHERE id = ? OR parent_session_id = ?').run(
+    mainSessionId,
+    mainSessionId,
+  );
 }
 
 export function getAllSessions(): Record<string, string> {
   const rows = db
     .prepare(
-      "SELECT group_folder, session_id FROM sessions WHERE agent_id = ''",
+      'SELECT session_id, provider_session_id FROM session_state WHERE session_id LIKE ? AND provider_session_id IS NOT NULL',
     )
-    .all() as Array<{ group_folder: string; session_id: string }>;
+    .all(`${MAIN_SESSION_ID_PREFIX}%`) as Array<{
+      session_id: string;
+      provider_session_id: string;
+    }>;
   const result: Record<string, string> = {};
   for (const row of rows) {
-    result[row.group_folder] = row.session_id;
+    result[row.session_id.slice(MAIN_SESSION_ID_PREFIX.length)] =
+      row.provider_session_id;
   }
   return result;
 }
 
-// --- Registered group accessors ---
-
-function parseExecutionMode(
-  raw: string | null,
-  context: string,
-): ExecutionMode {
-  if (raw === 'container' || raw === 'host') return raw;
-  if (raw !== null && raw !== '') {
-    console.warn(
-      `Invalid execution_mode "${raw}" for ${context}, falling back to "container"`,
-    );
-  }
-  return 'container';
+export function getSessionRecord(id: string): SessionRecord | undefined {
+  const row = db
+    .prepare('SELECT * FROM sessions WHERE id = ?')
+    .get(id) as Record<string, unknown> | undefined;
+  return row ? parseSessionRecord(row) : undefined;
 }
 
-/** Raw row shape from registered_groups table — single source of truth for column mapping. */
-type RegisteredGroupRow = {
-  jid: string;
-  name: string;
-  folder: string;
-  added_at: string;
-  container_config: string | null;
-  execution_mode: string | null;
-  custom_cwd: string | null;
-  init_source_path: string | null;
-  init_git_url: string | null;
-  created_by: string | null;
-  is_home: number;
-  selected_skills: string | null;
-  target_agent_id: string | null;
-  target_main_jid: string | null;
-  reply_policy: string | null;
-  require_mention: number;
-  activation_mode: string | null;
-  mcp_mode: string | null;
-  selected_mcps: string | null;
-  llm_provider: string | null;
-  model: string | null;
-  thinking_effort: string | null;
-  context_compression: string | null;
-  knowledge_extraction: number | null;
-};
+export function getPrimarySessionForOwner(
+  ownerKey: string,
+): SessionRecord | undefined {
+  const rows = db
+    .prepare(
+      `SELECT * FROM sessions
+       WHERE archived = 0
+         AND owner_key = ?
+         AND kind IN ('main', 'workspace')
+       ORDER BY CASE kind WHEN 'main' THEN 0 ELSE 1 END, updated_at DESC, id ASC`,
+    )
+    .all(ownerKey) as Array<Record<string, unknown>>;
+  return rows[0] ? parseSessionRecord(rows[0]) : undefined;
+}
 
-/** Convert a raw DB row into a RegisteredGroup domain object. */
+export function isPrimarySessionFolder(folder: string): boolean {
+  return getSessionRecord(buildMainSessionId(folder))?.kind === 'main';
+}
+
+export function saveSessionRecord(session: SessionRecord): void {
+  db.prepare(
+    `INSERT INTO sessions (
+      id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
+      model, thinking_effort, context_compression, is_pinned, archived,
+      owner_key, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      kind = excluded.kind,
+      parent_session_id = excluded.parent_session_id,
+      cwd = excluded.cwd,
+      runner_id = excluded.runner_id,
+      runner_profile_id = excluded.runner_profile_id,
+      model = excluded.model,
+      thinking_effort = excluded.thinking_effort,
+      context_compression = excluded.context_compression,
+      is_pinned = excluded.is_pinned,
+      archived = excluded.archived,
+      owner_key = excluded.owner_key,
+      updated_at = excluded.updated_at`,
+  ).run(
+    session.id,
+    session.name,
+    session.kind,
+    session.parent_session_id,
+    session.cwd,
+    session.runner_id,
+    session.runner_profile_id,
+    session.model,
+    session.thinking_effort,
+    session.context_compression,
+    session.is_pinned ? 1 : 0,
+    session.archived ? 1 : 0,
+    session.owner_key,
+    session.created_at,
+    session.updated_at,
+  );
+}
+
+export function listSessionRecords(): SessionRecord[] {
+  const rows = db
+    .prepare('SELECT * FROM sessions WHERE archived = 0 ORDER BY kind, name, id')
+    .all() as Array<Record<string, unknown>>;
+  return rows.map(parseSessionRecord);
+}
+
+export function listRunnerProfiles(
+  runnerId?: RunnerProfileRecord['runner_id'],
+): RunnerProfileRecord[] {
+  const rows = runnerId
+    ? db
+        .prepare(
+          'SELECT * FROM runner_profiles WHERE runner_id = ? ORDER BY is_default DESC, updated_at DESC, name ASC',
+        )
+        .all(runnerId)
+    : db
+        .prepare(
+          'SELECT * FROM runner_profiles ORDER BY runner_id ASC, is_default DESC, updated_at DESC, name ASC',
+        )
+        .all();
+  return (rows as Array<Record<string, unknown>>).map(parseRunnerProfileRecord);
+}
+
+export function getRunnerProfile(id: string): RunnerProfileRecord | undefined {
+  const row = db
+    .prepare('SELECT * FROM runner_profiles WHERE id = ?')
+    .get(id) as Record<string, unknown> | undefined;
+  return row ? parseRunnerProfileRecord(row) : undefined;
+}
+
+export function saveRunnerProfile(profile: RunnerProfileRecord): void {
+  const now = profile.updated_at || new Date().toISOString();
+  const createdAt = profile.created_at || now;
+  const tx = db.transaction(() => {
+    if (profile.is_default) {
+      db.prepare(
+        'UPDATE runner_profiles SET is_default = 0, updated_at = ? WHERE runner_id = ? AND id != ?',
+      ).run(now, profile.runner_id, profile.id);
+    }
+    db.prepare(
+      `INSERT INTO runner_profiles (
+        id, runner_id, name, config_json, is_default, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        runner_id = excluded.runner_id,
+        name = excluded.name,
+        config_json = excluded.config_json,
+        is_default = excluded.is_default,
+        updated_at = excluded.updated_at`,
+    ).run(
+      profile.id,
+      profile.runner_id,
+      profile.name,
+      profile.config_json,
+      profile.is_default ? 1 : 0,
+      createdAt,
+      now,
+    );
+  });
+  tx();
+}
+
+export function deleteRunnerProfile(id: string): void {
+  db.prepare('DELETE FROM runner_profiles WHERE id = ?').run(id);
+}
+
+export function listSessionBindings(): SessionBindingRecord[] {
+  const rows = db
+    .prepare('SELECT * FROM session_bindings ORDER BY updated_at DESC')
+    .all() as Array<Record<string, unknown>>;
+  return rows.map(parseSessionBindingRecord);
+}
+
+export function saveSessionBinding(binding: SessionBindingRecord): void {
+  db.prepare(
+    `INSERT INTO session_bindings (
+      channel_jid, session_id, binding_mode, activation_mode, require_mention,
+      display_name, reply_policy, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(channel_jid) DO UPDATE SET
+      session_id = excluded.session_id,
+      binding_mode = excluded.binding_mode,
+      activation_mode = excluded.activation_mode,
+      require_mention = excluded.require_mention,
+      display_name = excluded.display_name,
+      reply_policy = excluded.reply_policy,
+      updated_at = excluded.updated_at`,
+  ).run(
+    binding.channel_jid,
+    binding.session_id,
+    binding.binding_mode,
+    binding.activation_mode,
+    binding.require_mention ? 1 : 0,
+    binding.display_name,
+    binding.reply_policy,
+    binding.created_at,
+    binding.updated_at,
+  );
+}
+
+export function deleteSessionBinding(channelJid: string): void {
+  db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(channelJid);
+}
+
+export function updateSessionBindingPolicies(
+  sessionId: string,
+  updates: {
+    activation_mode?: SessionBindingRecord['activation_mode'];
+    require_mention?: boolean;
+    reply_policy?: SessionBindingRecord['reply_policy'];
+  },
+): number {
+  const sets: string[] = [];
+  const params: unknown[] = [];
+
+  if (updates.activation_mode !== undefined) {
+    sets.push('activation_mode = ?');
+    params.push(updates.activation_mode);
+  }
+  if (updates.require_mention !== undefined) {
+    sets.push('require_mention = ?');
+    params.push(updates.require_mention ? 1 : 0);
+  }
+  if (updates.reply_policy !== undefined) {
+    sets.push('reply_policy = ?');
+    params.push(updates.reply_policy);
+  }
+  if (sets.length === 0) return 0;
+
+  sets.push('updated_at = ?');
+  params.push(new Date().toISOString(), sessionId);
+
+  const result = db
+    .prepare(
+      `UPDATE session_bindings
+       SET ${sets.join(', ')}
+       WHERE session_id = ?`,
+    )
+    .run(...params);
+  return result.changes;
+}
+
+export function getSessionBinding(
+  channelJid: string,
+): SessionBindingRecord | undefined {
+  const row = db
+    .prepare('SELECT * FROM session_bindings WHERE channel_jid = ?')
+    .get(channelJid) as Record<string, unknown> | undefined;
+  return row ? parseSessionBindingRecord(row) : undefined;
+}
+
+export function getWorkerSessionRecord(
+  sessionId: string,
+): WorkerSessionRecord | undefined {
+  const row = db
+    .prepare('SELECT * FROM worker_sessions WHERE session_id = ?')
+    .get(sessionId) as Record<string, unknown> | undefined;
+  return row ? parseWorkerSessionRow(row) : undefined;
+}
+
+export function getSessionRuntimeState(
+  sessionId: string,
+): SessionRuntimeStateRecord | undefined {
+  const row = db
+    .prepare('SELECT * FROM session_state WHERE session_id = ?')
+    .get(sessionId) as Record<string, unknown> | undefined;
+  return row ? parseSessionStateRow(row) : undefined;
+}
+
+export function upsertSessionRuntimeState(
+  sessionId: string,
+  snapshot: RuntimeStateSnapshot,
+): void {
+  if (sessionId.startsWith(MAIN_SESSION_ID_PREFIX)) {
+    ensureSessionRecordForLegacyKey(
+      sessionId.slice(MAIN_SESSION_ID_PREFIX.length),
+    );
+  } else if (sessionId.startsWith(WORKER_SESSION_ID_PREFIX)) {
+    ensureSessionRecordForLegacyKey(
+      '',
+      sessionId.slice(WORKER_SESSION_ID_PREFIX.length),
+    );
+  }
+  db.prepare(
+    `INSERT INTO session_state (
+      session_id, provider_session_id, resume_anchor, provider_state_json,
+      recent_im_channels_json, im_channel_last_seen_json, current_permission_mode,
+      last_message_cursor, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(session_id) DO UPDATE SET
+      provider_session_id = excluded.provider_session_id,
+      resume_anchor = excluded.resume_anchor,
+      provider_state_json = excluded.provider_state_json,
+      recent_im_channels_json = excluded.recent_im_channels_json,
+      im_channel_last_seen_json = excluded.im_channel_last_seen_json,
+      current_permission_mode = excluded.current_permission_mode,
+      last_message_cursor = excluded.last_message_cursor,
+      updated_at = excluded.updated_at`,
+  ).run(
+    sessionId,
+    snapshot.providerSessionId ?? null,
+    snapshot.resumeAnchor ?? null,
+    snapshot.providerState ? JSON.stringify(snapshot.providerState) : null,
+    JSON.stringify(snapshot.recentImChannels ?? []),
+    JSON.stringify(snapshot.imChannelLastSeen ?? {}),
+    snapshot.currentPermissionMode ?? null,
+    snapshot.lastMessageCursor ?? null,
+    new Date().toISOString(),
+  );
+}
+
+export function deleteSessionRuntimeState(sessionId: string): void {
+  db.prepare('DELETE FROM session_state WHERE session_id = ?').run(sessionId);
+}
+
+// --- Session channel accessors ---
+
 function parseGroupRow(
-  row: RegisteredGroupRow,
+  row: SessionChannelRow,
 ): RegisteredGroup & { jid: string } {
-  return {
+  const folder = resolveFolderFromSessionId(row.session_id);
+  const group: RegisteredGroup & { jid: string } = {
     jid: row.jid,
     name: row.name,
-    folder: row.folder,
-    added_at: row.added_at,
+    folder,
+    added_at: row.created_at,
     containerConfig: row.container_config
       ? JSON.parse(row.container_config)
       : undefined,
-    executionMode: parseExecutionMode(row.execution_mode, `group ${row.jid}`),
     customCwd: row.custom_cwd ?? undefined,
     initSourcePath: row.init_source_path ?? undefined,
     initGitUrl: row.init_git_url ?? undefined,
-    created_by: row.created_by ?? undefined,
-    is_home: row.is_home === 1,
+    is_home: isCompatibilityHomeGroup(row.jid, folder),
     selected_skills: row.selected_skills
       ? JSON.parse(row.selected_skills)
       : null,
-    target_agent_id: row.target_agent_id ?? undefined,
-    target_main_jid: row.target_main_jid ?? undefined,
-    reply_policy: row.reply_policy === 'mirror' ? 'mirror' : 'source_only',
-    require_mention: row.require_mention === 1,
-    activation_mode: parseActivationMode(row.activation_mode),
     mcp_mode: row.mcp_mode === 'custom' ? 'custom' : 'inherit',
     selected_mcps: row.selected_mcps ? JSON.parse(row.selected_mcps) : null,
-    llm_provider: row.llm_provider === 'openai' ? 'openai' : 'claude',
     model: row.model ?? undefined,
     thinking_effort: parseThinkingEffort(row.thinking_effort),
     context_compression: parseCompressionMode(row.context_compression),
-    knowledge_extraction: row.knowledge_extraction === 1,
   };
+  if (!row.jid.startsWith('web:')) {
+    const binding = getSessionBinding(row.jid);
+    group.reply_policy = binding?.reply_policy ?? 'source_only';
+    group.require_mention = binding?.require_mention === true;
+    group.activation_mode = binding?.activation_mode ?? 'auto';
+  }
+  return group;
 }
 
 function parseThinkingEffort(
@@ -2365,79 +3086,240 @@ function parseActivationMode(
   return 'auto';
 }
 
+function resolveSessionOwnerKeyFromSessionId(
+  sessionId: string | null | undefined,
+): string | null {
+  if (!sessionId) return null;
+  const session = getSessionRecord(sessionId);
+  if (session?.owner_key) return session.owner_key;
+  if (!session?.parent_session_id) return null;
+  return getSessionRecord(session.parent_session_id)?.owner_key ?? null;
+}
+
+function resolveRegisteredGroupOwnerKey(
+  jid: string,
+  fallbackGroup?: RegisteredGroup,
+): string | null {
+  const binding = getSessionBinding(jid);
+  const boundOwnerKey = resolveSessionOwnerKeyFromSessionId(binding?.session_id);
+  if (boundOwnerKey) return boundOwnerKey;
+
+  const group = fallbackGroup ?? getRegisteredGroup(jid);
+  if (!group) return null;
+  return getSessionRecord(buildMainSessionId(group.folder))?.owner_key ?? null;
+}
+
 export function getRegisteredGroup(
   jid: string,
 ): (RegisteredGroup & { jid: string }) | undefined {
   const row = db
-    .prepare('SELECT * FROM registered_groups WHERE jid = ?')
-    .get(jid) as RegisteredGroupRow | undefined;
+    .prepare('SELECT * FROM session_channels WHERE jid = ?')
+    .get(jid) as SessionChannelRow | undefined;
   if (!row) return undefined;
   return parseGroupRow(row);
 }
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps, llm_provider, model, thinking_effort, context_compression, knowledge_extraction)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO session_channels (
+      jid, session_id, name, created_at, container_config, custom_cwd,
+      init_source_path, init_git_url, selected_skills, mcp_mode,
+      selected_mcps, model, thinking_effort, context_compression
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
+    buildMainSessionId(group.folder),
     group.name,
-    group.folder,
     group.added_at,
     group.containerConfig ? JSON.stringify(group.containerConfig) : null,
-    group.executionMode ?? 'container',
     group.customCwd ?? null,
     group.initSourcePath ?? null,
     group.initGitUrl ?? null,
-    group.created_by ?? null,
-    group.is_home ? 1 : 0,
     group.selected_skills ? JSON.stringify(group.selected_skills) : null,
-    group.target_agent_id ?? null,
-    group.target_main_jid ?? null,
-    group.reply_policy ?? 'source_only',
-    group.require_mention === true ? 1 : 0,
-    group.activation_mode ?? 'auto',
     group.mcp_mode ?? 'inherit',
     group.selected_mcps ? JSON.stringify(group.selected_mcps) : null,
-    group.llm_provider ?? 'claude',
     group.model ?? null,
     group.thinking_effort ?? null,
     group.context_compression ?? 'off',
-    group.knowledge_extraction ? 1 : 0,
   );
+  if (!jid.startsWith('web:')) {
+    const currentBinding = getSessionBinding(jid);
+    const sessionId = currentBinding?.session_id || buildMainSessionId(group.folder);
+    const session = getSessionRecord(sessionId);
+    const now = new Date().toISOString();
+    const replyPolicy = group.reply_policy ?? currentBinding?.reply_policy ?? 'source_only';
+    const activationMode = group.activation_mode ?? currentBinding?.activation_mode ?? 'auto';
+    const requireMention =
+      group.require_mention ?? currentBinding?.require_mention ?? false;
+    saveSessionBinding({
+      channel_jid: jid,
+      session_id: sessionId,
+      binding_mode:
+        replyPolicy === 'mirror'
+          ? 'mirror'
+          : session?.kind === 'worker'
+            ? 'direct'
+            : 'source_only',
+      activation_mode: activationMode,
+      require_mention: requireMention,
+      display_name: group.name,
+      reply_policy: replyPolicy,
+      created_at: currentBinding?.created_at || group.added_at || now,
+      updated_at: now,
+    });
+  }
+  syncSessionProjectionForGroup(jid, group);
+  const sessionOwnerKey = resolveRegisteredGroupOwnerKey(jid, group);
+  if (sessionOwnerKey) {
+    syncMemorySessionProjectionForOwner(sessionOwnerKey);
+  }
 }
 
 export function deleteRegisteredGroup(jid: string): void {
-  db.prepare('DELETE FROM registered_groups WHERE jid = ?').run(jid);
+  deleteSessionProjectionForGroup(jid);
+  db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(jid);
+  db.prepare('DELETE FROM session_channels WHERE jid = ?').run(jid);
 }
 
 /** Get all JIDs that share the same folder (e.g., all JIDs with folder='main'). */
 export function getJidsByFolder(folder: string): string[] {
+  const sessionId = buildMainSessionId(folder);
   const rows = db
-    .prepare('SELECT jid FROM registered_groups WHERE folder = ?')
-    .all(folder) as Array<{ jid: string }>;
+    .prepare('SELECT jid FROM session_channels WHERE session_id = ?')
+    .all(sessionId) as Array<{ jid: string }>;
   return rows.map((r) => r.jid);
-}
-
-/** Check if any registered group uses container execution mode (efficient targeted query). */
-export function hasContainerModeGroups(): boolean {
-  const row = db
-    .prepare(
-      "SELECT 1 FROM registered_groups WHERE execution_mode = 'container' OR execution_mode IS NULL LIMIT 1",
-    )
-    .get();
-  return row !== undefined;
 }
 
 export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
   const rows = db
-    .prepare('SELECT * FROM registered_groups')
-    .all() as RegisteredGroupRow[];
+    .prepare('SELECT * FROM session_channels')
+    .all() as SessionChannelRow[];
   const result: Record<string, RegisteredGroup> = {};
   for (const row of rows) {
     result[row.jid] = parseGroupRow(row);
   }
   return result;
+}
+
+function syncSessionWorkbenchProjection(): void {
+  const groups = getAllRegisteredGroups();
+  for (const [jid, group] of Object.entries(groups)) {
+    syncSessionProjectionForGroup(jid, group);
+  }
+
+  if (tableExists('provider_sessions_legacy')) {
+    const legacyHasAgentId = hasColumn('provider_sessions_legacy', 'agent_id');
+    const rows = db
+      .prepare(
+        legacyHasAgentId
+          ? 'SELECT group_folder, session_id, COALESCE(agent_id, \'\') AS agent_id FROM provider_sessions_legacy'
+          : "SELECT group_folder, session_id, '' AS agent_id FROM provider_sessions_legacy",
+      )
+      .all() as Array<{
+      group_folder: string;
+      session_id: string;
+      agent_id: string;
+    }>;
+    for (const row of rows) {
+      const stableSessionId = ensureSessionRecordForLegacyKey(
+        row.group_folder,
+        row.agent_id || undefined,
+      );
+      db.prepare(
+        `INSERT INTO session_state (session_id, provider_session_id, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET
+           provider_session_id = excluded.provider_session_id,
+           updated_at = excluded.updated_at`,
+      ).run(stableSessionId, row.session_id, new Date().toISOString());
+    }
+  }
+
+  if (tableExists('agents')) {
+    const agents = db.prepare('SELECT * FROM agents').all() as Array<
+      Record<string, unknown>
+    >;
+    for (const agentRow of agents) {
+      syncWorkerSession(mapLegacyAgentRow(agentRow));
+    }
+    db.exec('DROP TABLE agents');
+  }
+
+  const memoryOwners = new Set(
+    listSessionRecords()
+      .filter(
+        (session) =>
+          session.owner_key &&
+          (session.kind === 'main' || session.kind === 'workspace'),
+      )
+      .map((session) => session.owner_key!),
+  );
+  for (const ownerKey of memoryOwners) {
+    syncMemorySessionProjectionForOwner(ownerKey);
+  }
+}
+
+function syncMemorySessionProjectionForOwner(ownerKey: string): void {
+  const sessionId = buildMemorySessionId(ownerKey);
+  const primarySession = getPrimarySessionForOwner(ownerKey);
+  const existing = getSessionRecord(sessionId);
+  const now = new Date().toISOString();
+  const resolvedRunnerId = resolveMemoryRunnerId(
+    existing?.runner_id || primarySession?.runner_id || null,
+  );
+  const runnerProfileId =
+    existing?.runner_id === resolvedRunnerId
+      ? existing.runner_profile_id
+      : primarySession?.runner_id === resolvedRunnerId
+        ? primarySession.runner_profile_id
+        : null;
+  const model =
+    existing?.runner_id === resolvedRunnerId
+      ? existing.model
+      : primarySession?.runner_id === resolvedRunnerId
+        ? primarySession.model
+        : null;
+  const thinkingEffort =
+    existing?.runner_id === resolvedRunnerId
+      ? existing.thinking_effort
+      : primarySession?.runner_id === resolvedRunnerId
+        ? primarySession.thinking_effort
+        : null;
+  const contextCompression =
+    existing?.context_compression
+      || primarySession?.context_compression
+      || 'off';
+  db.prepare(
+    `INSERT INTO sessions (
+      id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
+      model, thinking_effort, context_compression, is_pinned, archived,
+      owner_key, created_at, updated_at
+    ) VALUES (?, ?, 'memory', ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      parent_session_id = excluded.parent_session_id,
+      cwd = excluded.cwd,
+      runner_id = excluded.runner_id,
+      runner_profile_id = excluded.runner_profile_id,
+      model = excluded.model,
+      thinking_effort = excluded.thinking_effort,
+      context_compression = excluded.context_compression,
+      owner_key = excluded.owner_key,
+      updated_at = excluded.updated_at`,
+  ).run(
+    sessionId,
+    existing?.name || `memory:${ownerKey}`,
+    primarySession?.id ?? null,
+    path.join(DATA_DIR, 'memory', ownerKey),
+    resolvedRunnerId,
+    runnerProfileId,
+    model,
+    thinkingEffort,
+    contextCompression,
+    ownerKey,
+    existing?.created_at || now,
+    now,
+  );
 }
 
 /**
@@ -2447,9 +3329,15 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
 export function getGroupsByTargetAgent(
   agentId: string,
 ): Array<{ jid: string; group: RegisteredGroup }> {
+  const sessionId = buildWorkerSessionId(agentId);
   const rows = db
-    .prepare('SELECT * FROM registered_groups WHERE target_agent_id = ?')
-    .all(agentId) as RegisteredGroupRow[];
+    .prepare(
+      `SELECT sc.*
+       FROM session_bindings sb
+       JOIN session_channels sc ON sc.jid = sb.channel_jid
+       WHERE sb.session_id = ?`,
+    )
+    .all(sessionId) as SessionChannelRow[];
   return rows.map((row) => ({ jid: row.jid, group: parseGroupRow(row) }));
 }
 
@@ -2459,74 +3347,82 @@ export function getGroupsByTargetAgent(
 export function getGroupsByTargetMainJid(
   webJid: string,
 ): Array<{ jid: string; group: RegisteredGroup }> {
+  const targetChannel = db
+    .prepare('SELECT session_id FROM session_channels WHERE jid = ?')
+    .get(webJid) as { session_id: string } | undefined;
+  if (!targetChannel?.session_id) return [];
   const rows = db
-    .prepare('SELECT * FROM registered_groups WHERE target_main_jid = ?')
-    .all(webJid) as RegisteredGroupRow[];
+    .prepare(
+      `SELECT sc.*
+       FROM session_bindings sb
+       JOIN session_channels sc ON sc.jid = sb.channel_jid
+       WHERE sb.session_id = ?`,
+    )
+    .all(targetChannel.session_id) as SessionChannelRow[];
   return rows.map((row) => ({ jid: row.jid, group: parseGroupRow(row) }));
 }
 
 /**
- * Find the home group for a given folder (is_home=1).
- * Used to resolve the owner of IM channels that share a folder with a home group.
+ * Find the primary-session web compatibility channel for a folder.
+ * Used to resolve the owner of IM channels that share that Session workspace.
  */
-export function getHomeGroupByFolder(
+export function getPrimarySessionChannelByFolder(
   folder: string,
 ): (RegisteredGroup & { jid: string }) | undefined {
+  const session = getSessionRecord(buildMainSessionId(folder));
+  if (!session || session.kind !== 'main') return undefined;
   const row = db
     .prepare(
-      'SELECT * FROM registered_groups WHERE folder = ? AND is_home = 1 LIMIT 1',
+      "SELECT * FROM session_channels WHERE session_id = ? AND jid LIKE 'web:%' LIMIT 1",
     )
-    .get(folder) as RegisteredGroupRow | undefined;
+    .get(buildMainSessionId(folder)) as SessionChannelRow | undefined;
   if (!row) return undefined;
   return parseGroupRow(row);
 }
 
 /**
- * Find a user's home group (is_home=1 + created_by=userId).
- * For admin users, also matches web:main even if created_by differs
- * (all admins share folder=main).
+ * Find a user's primary-session web compatibility channel from the owner mapping.
+ * For admin users, also matches web:main as a final compatibility fallback.
  */
-export function getUserHomeGroup(
+export function getUserPrimarySessionChannel(
   userId: string,
 ): (RegisteredGroup & { jid: string }) | undefined {
-  // First try exact match: is_home=1 AND created_by=userId
-  let row = db
+  const session = db
     .prepare(
-      'SELECT * FROM registered_groups WHERE is_home = 1 AND created_by = ?',
+      `SELECT * FROM sessions
+       WHERE kind = 'main' AND owner_key = ?
+       ORDER BY updated_at DESC, id ASC
+       LIMIT 1`,
     )
-    .get(userId) as RegisteredGroupRow | undefined;
-
-  // Fallback for admin users: all admins share web:main (folder=main).
-  // If no exact match, check if the user is an admin and web:main exists.
-  if (!row) {
-    const user = db
-      .prepare("SELECT role FROM users WHERE id = ? AND status = 'active'")
-      .get(userId) as { role: string } | undefined;
-    if (user?.role === 'admin') {
-      row = db
-        .prepare(
-          "SELECT * FROM registered_groups WHERE jid = 'web:main' AND is_home = 1",
-        )
-        .get() as RegisteredGroupRow | undefined;
+    .get(userId) as Record<string, unknown> | undefined;
+  if (session) {
+    const parsed = parseSessionRecord(session);
+    const folder = parsed.id.startsWith(MAIN_SESSION_ID_PREFIX)
+      ? parsed.id.slice(MAIN_SESSION_ID_PREFIX.length)
+      : null;
+    if (folder) {
+      return getPrimarySessionChannelByFolder(folder);
     }
   }
 
-  if (!row) return undefined;
-  return parseGroupRow(row);
+  const user = db
+    .prepare("SELECT role FROM users WHERE id = ? AND status = 'active'")
+    .get(userId) as { role: string } | undefined;
+  if (user?.role !== 'admin') return undefined;
+  return getPrimarySessionChannelByFolder('main');
 }
 
 /**
- * Ensure a user has a home group. If not, create one.
- * Admin gets folder='main' with executionMode='host'.
- * Member gets folder='home-{userId}' with executionMode='container'.
- * Returns the JID of the home group.
+ * Ensure a user has a primary-session web compatibility channel. If not, create one.
+ * Single-user migration keeps this web row backed by a main session.
+ * Returns the compatibility channel JID.
  */
-export function ensureUserHomeGroup(
+export function ensureUserPrimarySessionChannel(
   userId: string,
   role: 'admin' | 'member',
   username?: string,
 ): string {
-  const existing = getUserHomeGroup(userId);
+  const existing = getUserPrimarySessionChannel(userId);
   if (existing) return existing.jid;
 
   const now = new Date().toISOString();
@@ -2534,30 +3430,31 @@ export function ensureUserHomeGroup(
   const jid = isAdmin ? 'web:main' : `web:home-${userId}`;
   const folder = isAdmin ? 'main' : `home-${userId}`;
 
-  // For admin: check if web:main already exists (created by another admin)
-  // In that case, reuse it rather than overwriting created_by
+  const sessionId = buildMainSessionId(folder);
+
+  // For admin: check if web:main already exists and backfill the main session owner.
   if (isAdmin) {
     const existingMain = getRegisteredGroup(jid);
     if (existingMain) {
-      // web:main already exists.
-      // Ensure is_home, created_by, and executionMode are correct for owner-based routing.
-      const patched = { ...existingMain };
-      let changed = false;
-      if (!patched.is_home) {
-        patched.is_home = true;
-        changed = true;
-      }
-      if (!patched.created_by) {
-        patched.created_by = userId;
-        changed = true;
-      }
-      // Admin home container must use host mode
-      if (patched.executionMode !== 'host') {
-        patched.executionMode = 'host';
-        changed = true;
-      }
-      if (changed) {
-        setRegisteredGroup(jid, patched);
+      const existingSession = getSessionRecord(sessionId);
+      if (!existingSession?.owner_key) {
+        saveSessionRecord({
+          id: sessionId,
+          name: existingSession?.name || existingMain.name,
+          kind: 'main',
+          parent_session_id: null,
+          cwd: existingSession?.cwd || path.join(GROUPS_DIR, folder),
+          runner_id: existingSession?.runner_id || getDefaultRunnerId(),
+          runner_profile_id: existingSession?.runner_profile_id ?? null,
+          model: existingSession?.model ?? null,
+          thinking_effort: existingSession?.thinking_effort ?? null,
+          context_compression: existingSession?.context_compression || 'off',
+          is_pinned: existingSession?.is_pinned ?? false,
+          archived: existingSession?.archived ?? false,
+          owner_key: userId,
+          created_at: existingSession?.created_at || now,
+          updated_at: now,
+        });
       }
       ensureChatExists(jid);
       return jid;
@@ -2570,11 +3467,25 @@ export function ensureUserHomeGroup(
     name,
     folder,
     added_at: now,
-    executionMode: isAdmin ? 'host' : 'container',
-    created_by: userId,
-    is_home: true,
   };
 
+  saveSessionRecord({
+    id: sessionId,
+    name,
+    kind: 'main',
+    parent_session_id: null,
+    cwd: path.join(GROUPS_DIR, folder),
+    runner_id: getDefaultRunnerId(),
+    runner_profile_id: null,
+    model: null,
+    thinking_effort: null,
+    context_compression: 'off',
+    is_pinned: false,
+    archived: false,
+    owner_key: userId,
+    created_at: now,
+    updated_at: now,
+  });
   setRegisteredGroup(jid, group);
 
   // Ensure chat row exists
@@ -2621,44 +3532,16 @@ export function deleteGroupData(jid: string, folder: string): void {
     db.prepare('DELETE FROM scheduled_tasks WHERE group_folder = ?').run(
       folder,
     );
-    // 2. 删除成员记录
-    db.prepare('DELETE FROM group_members WHERE group_folder = ?').run(folder);
-    // 3. 删除注册信息
-    db.prepare('DELETE FROM registered_groups WHERE jid = ?').run(jid);
-    // 4. 删除会话
-    db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(folder);
-    // 5. 删除聊天记录
+    // 2. 删除注册信息
+    db.prepare('DELETE FROM session_channels WHERE jid = ?').run(jid);
+    // 3. 删除会话
+    deleteAllSessionsForFolder(folder);
+    db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(jid);
+    // 4. 删除聊天记录
     db.prepare('DELETE FROM messages WHERE chat_jid = ?').run(jid);
     db.prepare('DELETE FROM chats WHERE jid = ?').run(jid);
-    // 6. 删除 pin 记录
-    db.prepare('DELETE FROM user_pinned_groups WHERE jid = ?').run(jid);
   });
   tx();
-}
-
-// --- User pinned groups ---
-
-export function getUserPinnedGroups(userId: string): Record<string, string> {
-  const rows = db
-    .prepare('SELECT jid, pinned_at FROM user_pinned_groups WHERE user_id = ?')
-    .all(userId) as Array<{ jid: string; pinned_at: string }>;
-  const result: Record<string, string> = {};
-  for (const row of rows) result[row.jid] = row.pinned_at;
-  return result;
-}
-
-export function pinGroup(userId: string, jid: string): string {
-  const pinned_at = new Date().toISOString();
-  db.prepare(
-    'INSERT OR REPLACE INTO user_pinned_groups (user_id, jid, pinned_at) VALUES (?, ?, ?)',
-  ).run(userId, jid, pinned_at);
-  return pinned_at;
-}
-
-export function unpinGroup(userId: string, jid: string): void {
-  db.prepare(
-    'DELETE FROM user_pinned_groups WHERE user_id = ? AND jid = ?',
-  ).run(userId, jid);
 }
 
 // --- Web API accessors ---
@@ -2806,7 +3689,7 @@ export interface SearchResult {
 
 /**
  * Search messages by content using FTS5.
- * Supports single or multiple JIDs (for home group merging).
+ * Supports single or multiple JIDs for compatibility channel aggregation.
  * @param sinceTs - Optional ISO timestamp to limit results to messages after this time
  */
 export function searchMessages(
@@ -2952,46 +3835,18 @@ export function getMessagesByTimeRange(
 }
 
 /**
- * Get all registered groups owned by a specific user.
+ * Get all registered Session channels resolved to a specific owner.
  */
 export function getGroupsByOwner(
   userId: string,
 ): Array<RegisteredGroup & { jid: string }> {
-  const rows = db
-    .prepare('SELECT * FROM registered_groups WHERE created_by = ?')
-    .all(userId) as Array<{
-    jid: string;
-    name: string;
-    folder: string;
-    added_at: string;
-    container_config: string | null;
-    execution_mode: string | null;
-    custom_cwd: string | null;
-    init_source_path: string | null;
-    init_git_url: string | null;
-    created_by: string | null;
-    is_home: number;
-    selected_skills: string | null;
-  }>;
-
-  return rows.map((row) => ({
-    jid: row.jid,
-    name: row.name,
-    folder: row.folder,
-    added_at: row.added_at,
-    containerConfig: row.container_config
-      ? JSON.parse(row.container_config)
-      : undefined,
-    executionMode: parseExecutionMode(row.execution_mode, `group ${row.jid}`),
-    customCwd: row.custom_cwd ?? undefined,
-    initSourcePath: row.init_source_path ?? undefined,
-    initGitUrl: row.init_git_url ?? undefined,
-    created_by: row.created_by ?? undefined,
-    is_home: row.is_home === 1,
-    selected_skills: row.selected_skills
-      ? JSON.parse(row.selected_skills)
-      : null,
-  }));
+  const groups = getAllRegisteredGroups() as Record<
+    string,
+    RegisteredGroup & { jid: string }
+  >;
+  return Object.values(groups).filter(
+    (group) => resolveRegisteredGroupOwnerKey(group.jid, group) === userId,
+  );
 }
 
 // ===================== Auth CRUD =====================
@@ -3107,58 +3962,6 @@ export interface CreateUserInput {
   deleted_at?: string | null;
 }
 
-function initializeBillingForUser(
-  userId: string,
-  role: UserRole,
-  createdAt: string,
-): void {
-  const now = createdAt || new Date().toISOString();
-  db.prepare(
-    'INSERT OR IGNORE INTO user_balances (user_id, balance_usd, total_deposited_usd, total_consumed_usd, updated_at) VALUES (?, 0, 0, 0, ?)',
-  ).run(userId, now);
-
-  if (role === 'admin') return;
-
-  const defaultPlan = getDefaultBillingPlan();
-  if (!defaultPlan) return;
-
-  const activeSubscription = db
-    .prepare(
-      "SELECT id FROM user_subscriptions WHERE user_id = ? AND status = 'active'",
-    )
-    .get(userId) as { id: string } | undefined;
-  if (activeSubscription) return;
-
-  const subId = `sub_${userId}_${Date.now()}`;
-  db.prepare(
-    `INSERT INTO user_subscriptions (id, user_id, plan_id, status, started_at, created_at)
-     VALUES (?, ?, ?, 'active', ?, ?)`,
-  ).run(subId, userId, defaultPlan.id, now, now);
-  db.prepare('UPDATE users SET subscription_plan_id = ? WHERE id = ?').run(
-    defaultPlan.id,
-    userId,
-  );
-
-  const hasOpening = db
-    .prepare(
-      "SELECT 1 FROM balance_transactions WHERE user_id = ? AND source = 'migration_opening' LIMIT 1",
-    )
-    .get(userId);
-  if (!hasOpening) {
-    db.prepare(
-      `INSERT INTO balance_transactions (
-        user_id, type, amount_usd, balance_after, description, reference_type,
-        reference_id, actor_id, source, operator_type, notes, idempotency_key, created_at
-      ) VALUES (?, 'adjustment', 0, 0, ?, NULL, NULL, NULL, 'migration_opening', 'system', ?, NULL, ?)`,
-    ).run(
-      userId,
-      '用户钱包初始化',
-      '新用户默认余额为 0，需管理员充值或兑换后方可消费',
-      now,
-    );
-  }
-}
-
 export function createUser(user: CreateUserInput): void {
   const permissions = normalizePermissions(
     user.permissions ?? getDefaultPermissions(user.role),
@@ -3184,7 +3987,6 @@ export function createUser(user: CreateUserInput): void {
     user.last_login_at ?? null,
     user.deleted_at ?? null,
   );
-  initializeBillingForUser(user.id, user.role, user.created_at);
 }
 
 export type CreateInitialAdminResult =
@@ -3287,11 +4089,9 @@ export function listUsers(options: ListUsersOptions = {}): ListUsersResult {
   const rows = db
     .prepare(
       `
-      SELECT u.*, MAX(s.last_active_at) AS last_active_at
+      SELECT u.*, u.last_login_at AS last_active_at
       FROM users u
-      LEFT JOIN user_sessions s ON s.user_id = u.id
       ${whereClause}
-      GROUP BY u.id
       ORDER BY
         CASE u.status
           WHEN 'active' THEN 0
@@ -3454,15 +4254,11 @@ export function updateUserFields(
 
 export function deleteUser(id: string): void {
   const now = new Date().toISOString();
-  const tx = db.transaction((userId: string) => {
-    db.prepare('DELETE FROM user_sessions WHERE user_id = ?').run(userId);
-    db.prepare(
-      `UPDATE users
-       SET status = 'deleted', deleted_at = ?, disable_reason = COALESCE(disable_reason, 'deleted_by_admin'), updated_at = ?
-       WHERE id = ?`,
-    ).run(now, now, userId);
-  });
-  tx(id);
+  db.prepare(
+    `UPDATE users
+     SET status = 'deleted', deleted_at = ?, disable_reason = COALESCE(disable_reason, 'deleted_by_admin'), updated_at = ?
+     WHERE id = ?`,
+  ).run(now, now, id);
 }
 
 export function restoreUser(id: string): void {
@@ -3473,576 +4269,118 @@ export function restoreUser(id: string): void {
   ).run(new Date().toISOString(), id);
 }
 
-// --- User Sessions ---
-
-export function createUserSession(session: UserSession): void {
-  db.prepare(
-    `INSERT INTO user_sessions (id, user_id, ip_address, user_agent, created_at, expires_at, last_active_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    session.id,
-    session.user_id,
-    session.ip_address,
-    session.user_agent,
-    session.created_at,
-    session.expires_at,
-    session.last_active_at,
-  );
-}
-
-export function getSessionWithUser(
-  sessionId: string,
-): UserSessionWithUser | undefined {
-  const row = db
-    .prepare(
-      `SELECT s.*, u.username, u.role, u.status, u.display_name, u.permissions, u.must_change_password
-       FROM user_sessions s
-       JOIN users u ON s.user_id = u.id
-       WHERE s.id = ?`,
-    )
-    .get(sessionId) as Record<string, unknown> | undefined;
-  if (!row) return undefined;
-  const role = parseUserRole(row.role);
-  return {
-    id: String(row.id),
-    user_id: String(row.user_id),
-    ip_address: typeof row.ip_address === 'string' ? row.ip_address : null,
-    user_agent: typeof row.user_agent === 'string' ? row.user_agent : null,
-    created_at: String(row.created_at),
-    expires_at: String(row.expires_at),
-    last_active_at: String(row.last_active_at),
-    username: String(row.username),
-    role,
-    status: parseUserStatus(row.status),
-    display_name: String(row.display_name ?? ''),
-    permissions: parsePermissionsFromDb(row.permissions, role),
-    must_change_password: !!row.must_change_password,
-  };
-}
-
-export function getUserSessions(userId: string): UserSession[] {
-  return db
-    .prepare(
-      `SELECT * FROM user_sessions WHERE user_id = ? ORDER BY last_active_at DESC`,
-    )
-    .all(userId) as UserSession[];
-}
-
-export function deleteUserSession(sessionId: string): void {
-  db.prepare('DELETE FROM user_sessions WHERE id = ?').run(sessionId);
-}
-
-export function deleteUserSessionsByUserId(userId: string): void {
-  db.prepare('DELETE FROM user_sessions WHERE user_id = ?').run(userId);
-}
-
-export function updateSessionLastActive(sessionId: string): void {
-  db.prepare('UPDATE user_sessions SET last_active_at = ? WHERE id = ?').run(
-    new Date().toISOString(),
-    sessionId,
-  );
-}
-
 export function deleteExpiredSessions(): number {
-  const now = new Date().toISOString();
-  const result = db
-    .prepare('DELETE FROM user_sessions WHERE expires_at < ?')
-    .run(now);
-  return result.changes;
-}
-
-// --- Invite Codes ---
-
-export function createInviteCode(invite: InviteCode): void {
-  const permissions = normalizePermissions(invite.permissions);
-  db.prepare(
-    `INSERT INTO invite_codes (code, created_by, role, permission_template, permissions, max_uses, used_count, expires_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    invite.code,
-    invite.created_by,
-    invite.role,
-    invite.permission_template ?? null,
-    JSON.stringify(permissions),
-    invite.max_uses,
-    invite.used_count,
-    invite.expires_at,
-    invite.created_at,
-  );
-}
-
-export function getInviteCode(code: string): InviteCode | undefined {
-  const row = db
-    .prepare('SELECT * FROM invite_codes WHERE code = ?')
-    .get(code) as Record<string, unknown> | undefined;
-  if (!row) return undefined;
-  const role = parseUserRole(row.role);
-  return {
-    code: String(row.code),
-    created_by: String(row.created_by),
-    role,
-    permission_template:
-      typeof row.permission_template === 'string'
-        ? (row.permission_template as PermissionTemplateKey)
-        : null,
-    permissions: parsePermissionsFromDb(row.permissions, role),
-    max_uses: Number(row.max_uses),
-    used_count: Number(row.used_count),
-    expires_at: typeof row.expires_at === 'string' ? row.expires_at : null,
-    created_at: String(row.created_at),
-  };
-}
-
-export type RegisterUserWithInviteResult =
-  | { ok: true; role: UserRole; permissions: Permission[] }
-  | {
-      ok: false;
-      reason:
-        | 'invalid_or_expired_invite'
-        | 'invite_exhausted'
-        | 'username_taken';
-    };
-
-export function registerUserWithInvite(input: {
-  id: string;
-  username: string;
-  password_hash: string;
-  display_name: string;
-  invite_code: string;
-  created_at: string;
-  updated_at: string;
-}): RegisterUserWithInviteResult {
-  const tx = db.transaction(
-    (params: typeof input): RegisterUserWithInviteResult => {
-      const inviteRow = db
-        .prepare(
-          `SELECT code, role, permissions, max_uses, expires_at
-         FROM invite_codes
-         WHERE code = ?`,
-        )
-        .get(params.invite_code) as Record<string, unknown> | undefined;
-
-      if (!inviteRow) return { ok: false, reason: 'invalid_or_expired_invite' };
-      const inviteRole = parseUserRole(inviteRow.role);
-      const invitePermissions = parsePermissionsFromDb(
-        inviteRow.permissions,
-        inviteRole,
-      );
-      const inviteExpiresAt =
-        typeof inviteRow.expires_at === 'string' ? inviteRow.expires_at : null;
-
-      if (inviteExpiresAt) {
-        const expiresAt = Date.parse(inviteExpiresAt);
-        if (!Number.isFinite(expiresAt) || expiresAt < Date.now()) {
-          return { ok: false, reason: 'invalid_or_expired_invite' };
-        }
-      }
-
-      const existing = db
-        .prepare('SELECT id FROM users WHERE username = ?')
-        .get(params.username) as { id: string } | undefined;
-      if (existing) return { ok: false, reason: 'username_taken' };
-
-      const inviteUsage = db
-        .prepare(
-          `UPDATE invite_codes
-         SET used_count = used_count + 1
-         WHERE code = ?
-           AND (max_uses = 0 OR used_count < max_uses)`,
-        )
-        .run(params.invite_code);
-      if (inviteUsage.changes === 0) {
-        return { ok: false, reason: 'invite_exhausted' };
-      }
-
-      const permissions = normalizePermissions(invitePermissions);
-      db.prepare(
-        `INSERT INTO users (
-        id, username, password_hash, display_name, role, status, permissions, must_change_password,
-        disable_reason, notes, created_at, updated_at, last_login_at, deleted_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        params.id,
-        params.username,
-        params.password_hash,
-        params.display_name,
-        inviteRole,
-        'active',
-        JSON.stringify(permissions),
-        0,
-        null,
-        null,
-        params.created_at,
-        params.updated_at,
-        null,
-        null,
-      );
-      initializeBillingForUser(params.id, inviteRole, params.created_at);
-
-      return { ok: true, role: inviteRole, permissions };
-    },
-  );
-
-  try {
-    return tx(input);
-  } catch (err) {
-    if (
-      err instanceof Error &&
-      err.message.includes('UNIQUE constraint failed: users.username')
-    ) {
-      return { ok: false, reason: 'username_taken' };
-    }
-    throw err;
-  }
-}
-
-export type RegisterUserWithoutInviteResult =
-  | { ok: true; role: UserRole; permissions: Permission[] }
-  | { ok: false; reason: 'username_taken' };
-
-export function registerUserWithoutInvite(input: {
-  id: string;
-  username: string;
-  password_hash: string;
-  display_name: string;
-  created_at: string;
-  updated_at: string;
-}): RegisterUserWithoutInviteResult {
-  const role: UserRole = 'member';
-  const permissions: Permission[] = [];
-
-  try {
-    db.prepare(
-      `INSERT INTO users (
-        id, username, password_hash, display_name, role, status, permissions, must_change_password,
-        disable_reason, notes, created_at, updated_at, last_login_at, deleted_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      input.id,
-      input.username,
-      input.password_hash,
-      input.display_name,
-      role,
-      'active',
-      JSON.stringify(permissions),
-      0,
-      null,
-      null,
-      input.created_at,
-      input.updated_at,
-      null,
-      null,
-    );
-    initializeBillingForUser(input.id, role, input.created_at);
-    return { ok: true, role, permissions };
-  } catch (err) {
-    if (
-      err instanceof Error &&
-      err.message.includes('UNIQUE constraint failed: users.username')
-    ) {
-      return { ok: false, reason: 'username_taken' };
-    }
-    throw err;
-  }
-}
-
-export function getAllInviteCodes(): InviteCodeWithCreator[] {
-  const rows = db
-    .prepare(
-      `SELECT i.*, u.username as creator_username
-       FROM invite_codes i
-       JOIN users u ON i.created_by = u.id
-       ORDER BY i.created_at DESC`,
-    )
-    .all() as Array<Record<string, unknown>>;
-  return rows.map((row) => {
-    const role = parseUserRole(row.role);
-    return {
-      code: String(row.code),
-      created_by: String(row.created_by),
-      creator_username: String(row.creator_username),
-      role,
-      permission_template:
-        typeof row.permission_template === 'string'
-          ? (row.permission_template as PermissionTemplateKey)
-          : null,
-      permissions: parsePermissionsFromDb(row.permissions, role),
-      max_uses: Number(row.max_uses),
-      used_count: Number(row.used_count),
-      expires_at: typeof row.expires_at === 'string' ? row.expires_at : null,
-      created_at: String(row.created_at),
-    };
-  });
-}
-
-export function deleteInviteCode(code: string): void {
-  db.prepare('DELETE FROM invite_codes WHERE code = ?').run(code);
-}
-
-// --- Auth Audit Log ---
-
-export function logAuthEvent(event: {
-  event_type: AuthEventType;
-  username: string;
-  actor_username?: string | null;
-  ip_address?: string | null;
-  user_agent?: string | null;
-  details?: Record<string, unknown> | null;
-}): void {
-  db.prepare(
-    `INSERT INTO auth_audit_log (event_type, username, actor_username, ip_address, user_agent, details, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    event.event_type,
-    event.username,
-    event.actor_username ?? null,
-    event.ip_address ?? null,
-    event.user_agent ?? null,
-    event.details ? JSON.stringify(event.details) : null,
-    new Date().toISOString(),
-  );
-}
-
-export interface AuthAuditLogQuery {
-  limit?: number;
-  offset?: number;
-  event_type?: AuthEventType | 'all';
-  username?: string;
-  actor_username?: string;
-  from?: string;
-  to?: string;
-}
-
-export interface AuthAuditLogPage {
-  logs: AuthAuditLog[];
-  total: number;
-  limit: number;
-  offset: number;
-}
-
-export function queryAuthAuditLogs(
-  query: AuthAuditLogQuery = {},
-): AuthAuditLogPage {
-  const limit = Math.min(500, Math.max(1, Math.floor(query.limit || 100)));
-  const offset = Math.max(0, Math.floor(query.offset || 0));
-
-  const whereParts: string[] = [];
-  const params: unknown[] = [];
-  if (query.event_type && query.event_type !== 'all') {
-    whereParts.push('event_type = ?');
-    params.push(query.event_type);
-  }
-  if (query.username?.trim()) {
-    whereParts.push('username LIKE ?');
-    params.push(`%${query.username.trim()}%`);
-  }
-  if (query.actor_username?.trim()) {
-    whereParts.push('actor_username LIKE ?');
-    params.push(`%${query.actor_username.trim()}%`);
-  }
-  if (query.from) {
-    whereParts.push('created_at >= ?');
-    params.push(query.from);
-  }
-  if (query.to) {
-    whereParts.push('created_at <= ?');
-    params.push(query.to);
-  }
-  const whereClause =
-    whereParts.length > 0 ? `WHERE ${whereParts.join(' AND ')}` : '';
-
-  const total = (
-    db
-      .prepare(`SELECT COUNT(*) as count FROM auth_audit_log ${whereClause}`)
-      .get(...params) as {
-      count: number;
-    }
-  ).count;
-
-  const rows = db
-    .prepare(
-      `SELECT * FROM auth_audit_log ${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-    )
-    .all(...params, limit, offset) as Array<Record<string, unknown>>;
-
-  const logs = rows.map((row) => ({
-    id: Number(row.id),
-    event_type: row.event_type as AuthEventType,
-    username: String(row.username),
-    actor_username:
-      typeof row.actor_username === 'string' ? row.actor_username : null,
-    ip_address: typeof row.ip_address === 'string' ? row.ip_address : null,
-    user_agent: typeof row.user_agent === 'string' ? row.user_agent : null,
-    details: parseJsonDetails(row.details),
-    created_at: String(row.created_at),
-  }));
-
-  return { logs, total, limit, offset };
-}
-
-export function getAuthAuditLogs(limit = 100, offset = 0): AuthAuditLog[] {
-  return queryAuthAuditLogs({ limit, offset }).logs;
-}
-
-export function checkLoginRateLimitFromAudit(
-  username: string,
-  ip: string,
-  maxAttempts: number,
-  lockoutMinutes: number,
-): { allowed: boolean; retryAfterSeconds?: number; attempts: number } {
-  if (maxAttempts <= 0) return { allowed: true, attempts: 0 };
-  const windowStart = new Date(
-    Date.now() - lockoutMinutes * 60 * 1000,
-  ).toISOString();
-  const rows = db
-    .prepare(
-      `
-      SELECT created_at
-      FROM auth_audit_log
-      WHERE event_type = 'login_failed'
-        AND username = ?
-        AND ip_address = ?
-        AND created_at >= ?
-        AND (details IS NULL OR details NOT LIKE '%"reason":"rate_limited"%')
-      ORDER BY created_at ASC
-      `,
-    )
-    .all(username, ip, windowStart) as Array<{ created_at: string }>;
-
-  const attempts = rows.length;
-  if (attempts < maxAttempts) return { allowed: true, attempts };
-
-  const oldest = rows[0]?.created_at;
-  const oldestTs = oldest ? Date.parse(oldest) : Date.now();
-  const retryAt = oldestTs + lockoutMinutes * 60 * 1000;
-  const retryAfterSeconds = Math.max(
-    1,
-    Math.ceil((retryAt - Date.now()) / 1000),
-  );
-  return { allowed: false, retryAfterSeconds, attempts };
-}
-
-// ===================== Group Members =====================
-
-export function addGroupMember(
-  groupFolder: string,
-  userId: string,
-  role: 'owner' | 'member',
-  addedBy?: string,
-): void {
-  db.prepare(
-    `INSERT INTO group_members (group_folder, user_id, role, added_at, added_by)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(group_folder, user_id) DO UPDATE SET
-       role = CASE WHEN excluded.role = 'owner' THEN 'owner'
-                   WHEN group_members.role = 'owner' THEN 'owner'
-                   ELSE excluded.role END,
-       added_by = COALESCE(excluded.added_by, group_members.added_by)`,
-  ).run(groupFolder, userId, role, new Date().toISOString(), addedBy ?? null);
-}
-
-export function removeGroupMember(groupFolder: string, userId: string): void {
-  db.prepare(
-    'DELETE FROM group_members WHERE group_folder = ? AND user_id = ?',
-  ).run(groupFolder, userId);
-}
-
-export function getGroupMembers(groupFolder: string): GroupMember[] {
-  const rows = db
-    .prepare(
-      `SELECT gm.user_id, gm.role, gm.added_at, gm.added_by,
-              u.username, COALESCE(u.display_name, '') as display_name
-       FROM group_members gm
-       JOIN users u ON gm.user_id = u.id
-       WHERE gm.group_folder = ?
-       ORDER BY gm.role DESC, gm.added_at ASC`,
-    )
-    .all(groupFolder) as Array<{
-    user_id: string;
-    role: string;
-    added_at: string;
-    added_by: string | null;
-    username: string;
-    display_name: string;
-  }>;
-  return rows.map((r) => ({
-    user_id: r.user_id,
-    role: r.role as 'owner' | 'member',
-    added_at: r.added_at,
-    added_by: r.added_by ?? undefined,
-    username: r.username,
-    display_name: r.display_name,
-  }));
-}
-
-export function getGroupMemberRole(
-  groupFolder: string,
-  userId: string,
-): 'owner' | 'member' | null {
-  const row = db
-    .prepare(
-      'SELECT role FROM group_members WHERE group_folder = ? AND user_id = ?',
-    )
-    .get(groupFolder, userId) as { role: string } | undefined;
-  if (!row) return null;
-  return row.role as 'owner' | 'member';
-}
-
-export function getUserMemberFolders(
-  userId: string,
-): Array<{ group_folder: string; role: 'owner' | 'member' }> {
-  const rows = db
-    .prepare('SELECT group_folder, role FROM group_members WHERE user_id = ?')
-    .all(userId) as Array<{ group_folder: string; role: string }>;
-  return rows.map((r) => ({
-    group_folder: r.group_folder,
-    role: r.role as 'owner' | 'member',
-  }));
+  return 0;
 }
 
 // ===================== Sub-Agent CRUD =====================
 
-export function createAgent(agent: SubAgent): void {
+function syncWorkerSession(agent: SubAgent): void {
+  const sessionId = buildWorkerSessionId(agent.id);
+  const parentSessionId = buildMainSessionId(agent.group_folder);
+  const parentSession = getSessionRecord(parentSessionId);
+  const parentGroup = findPrimarySessionChannelForFolder(agent.group_folder);
+  const ownerKey = parentSession?.owner_key ?? null;
+  const now = new Date().toISOString();
   db.prepare(
-    `INSERT INTO agents (id, group_folder, chat_jid, name, prompt, status, kind, created_by, created_at, completed_at, result_summary)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO sessions (
+      id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
+      model, thinking_effort, context_compression, is_pinned, archived,
+      owner_key, created_at, updated_at
+    ) VALUES (?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      parent_session_id = excluded.parent_session_id,
+      cwd = excluded.cwd,
+      runner_id = excluded.runner_id,
+      runner_profile_id = excluded.runner_profile_id,
+      model = excluded.model,
+      thinking_effort = excluded.thinking_effort,
+      context_compression = excluded.context_compression,
+      owner_key = excluded.owner_key,
+      updated_at = excluded.updated_at`,
   ).run(
-    agent.id,
-    agent.group_folder,
+    sessionId,
+    agent.name,
+    parentSessionId,
+    parentSession?.cwd || path.join(GROUPS_DIR, agent.group_folder),
+    parentSession?.runner_id || deriveRunnerId(parentGroup || null),
+    parentSession?.runner_profile_id || null,
+    parentSession?.model || null,
+    parentSession?.thinking_effort || null,
+    parentSession?.context_compression || 'off',
+    ownerKey,
+    agent.created_at || now,
+    now,
+  );
+  db.prepare(
+    `INSERT INTO worker_sessions (
+      session_id, parent_session_id, source_chat_jid, name, kind, prompt,
+      status, created_at, completed_at, result_summary
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(session_id) DO UPDATE SET
+      parent_session_id = excluded.parent_session_id,
+      source_chat_jid = excluded.source_chat_jid,
+      name = excluded.name,
+      kind = excluded.kind,
+      prompt = excluded.prompt,
+      status = excluded.status,
+      completed_at = excluded.completed_at,
+      result_summary = excluded.result_summary`,
+  ).run(
+    sessionId,
+    parentSessionId,
     agent.chat_jid,
     agent.name,
+    agent.kind || 'task',
     agent.prompt,
     agent.status,
-    agent.kind || 'task',
-    agent.created_by ?? null,
     agent.created_at,
     agent.completed_at ?? null,
     agent.result_summary ?? null,
   );
 }
 
+export function createAgent(agent: SubAgent): void {
+  syncWorkerSession(agent);
+}
+
 export function getAgent(id: string): SubAgent | undefined {
-  const row = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as
-    | Record<string, unknown>
-    | undefined;
-  if (!row) return undefined;
-  return mapAgentRow(row);
+  const workerRow = db
+    .prepare(
+      `SELECT ws.*, s.owner_key
+       FROM worker_sessions ws
+       LEFT JOIN sessions s ON s.id = ws.session_id
+       WHERE ws.session_id = ?`,
+    )
+    .get(buildWorkerSessionId(id)) as Record<string, unknown> | undefined;
+  return workerRow ? mapWorkerAgentRow(workerRow) : undefined;
 }
 
 export function listAgentsByFolder(folder: string): SubAgent[] {
   const rows = db
     .prepare(
-      'SELECT * FROM agents WHERE group_folder = ? ORDER BY created_at DESC',
+      `SELECT ws.*, s.owner_key
+       FROM worker_sessions ws
+       LEFT JOIN sessions s ON s.id = ws.session_id
+       WHERE ws.parent_session_id = ?
+       ORDER BY ws.created_at DESC`,
     )
-    .all(folder) as Array<Record<string, unknown>>;
-  return rows.map(mapAgentRow);
+    .all(buildMainSessionId(folder)) as Array<Record<string, unknown>>;
+  return rows.map(mapWorkerAgentRow);
 }
 
 export function listAgentsByJid(chatJid: string): SubAgent[] {
   const rows = db
-    .prepare('SELECT * FROM agents WHERE chat_jid = ? ORDER BY created_at DESC')
+    .prepare(
+      `SELECT ws.*, s.owner_key
+       FROM worker_sessions ws
+       LEFT JOIN sessions s ON s.id = ws.session_id
+       WHERE ws.source_chat_jid = ?
+       ORDER BY ws.created_at DESC`,
+    )
     .all(chatJid) as Array<Record<string, unknown>>;
-  return rows.map(mapAgentRow);
+  return rows.map(mapWorkerAgentRow);
 }
 
 export function updateAgentStatus(
@@ -4052,70 +4390,100 @@ export function updateAgentStatus(
 ): void {
   const completedAt =
     status !== 'running' && status !== 'idle' ? new Date().toISOString() : null;
+  const sessionId = buildWorkerSessionId(id);
   db.prepare(
-    'UPDATE agents SET status = ?, completed_at = ?, result_summary = ? WHERE id = ?',
-  ).run(status, completedAt, resultSummary ?? null, id);
+    'UPDATE worker_sessions SET status = ?, completed_at = ?, result_summary = ? WHERE session_id = ?',
+  ).run(status, completedAt, resultSummary ?? null, sessionId);
 }
 
-export function updateAgentInfo(
-  id: string,
-  name: string,
-  prompt: string,
-): void {
-  db.prepare('UPDATE agents SET name = ?, prompt = ? WHERE id = ?').run(
+export function updateAgentInfo(id: string, name: string, prompt: string): void {
+  const sessionId = buildWorkerSessionId(id);
+  db.prepare('UPDATE worker_sessions SET name = ?, prompt = ? WHERE session_id = ?').run(
     name,
     prompt,
-    id,
+    sessionId,
+  );
+  db.prepare('UPDATE sessions SET name = ?, updated_at = ? WHERE id = ?').run(
+    name,
+    new Date().toISOString(),
+    sessionId,
   );
 }
 
 export function deleteCompletedTaskAgents(beforeTimestamp: string): number {
-  const result = db
+  const workerRows = db
     .prepare(
-      "DELETE FROM agents WHERE kind = 'task' AND status IN ('completed', 'error') AND completed_at IS NOT NULL AND completed_at < ?",
+      `SELECT session_id
+       FROM worker_sessions
+       WHERE kind = 'task'
+         AND status IN ('completed', 'error')
+         AND completed_at IS NOT NULL
+         AND completed_at < ?`,
     )
-    .run(beforeTimestamp);
-  return result.changes;
+    .all(beforeTimestamp) as Array<{ session_id: string }>;
+  const sessionIds = workerRows.map((row) => row.session_id);
+
+  if (sessionIds.length > 0) {
+    const placeholders = sessionIds.map(() => '?').join(', ');
+    db.prepare(
+      `DELETE FROM session_state WHERE session_id IN (${placeholders})`,
+    ).run(...sessionIds);
+    db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(
+      ...sessionIds,
+    );
+    db.prepare(
+      `DELETE FROM worker_sessions WHERE session_id IN (${placeholders})`,
+    ).run(...sessionIds);
+  }
+  return sessionIds.length;
 }
 
 export function getRunningTaskAgentsByChat(chatJid: string): SubAgent[] {
   const rows = db
     .prepare(
-      "SELECT * FROM agents WHERE chat_jid = ? AND kind = 'task' AND status = 'running'",
+      `SELECT ws.*, s.owner_key
+       FROM worker_sessions ws
+       LEFT JOIN sessions s ON s.id = ws.session_id
+       WHERE ws.source_chat_jid = ?
+         AND ws.kind = 'task'
+         AND ws.status = 'running'
+       ORDER BY ws.created_at DESC`,
     )
     .all(chatJid) as Array<Record<string, unknown>>;
-  return rows.map(mapAgentRow);
+  return rows.map(mapWorkerAgentRow);
 }
 
 export function markRunningTaskAgentsAsError(chatJid: string): number {
   const now = new Date().toISOString();
-  const result = db
+  const workerResult = db
     .prepare(
-      "UPDATE agents SET status = 'error', completed_at = ? WHERE chat_jid = ? AND kind = 'task' AND status = 'running'",
+      "UPDATE worker_sessions SET status = 'error', completed_at = ? WHERE source_chat_jid = ? AND kind = 'task' AND status = 'running'",
     )
     .run(now, chatJid);
-  return result.changes;
+  return workerResult.changes;
 }
 
 export function markAllRunningTaskAgentsAsError(
   summary = '进程重启，任务中断',
 ): number {
   const now = new Date().toISOString();
-  const result = db
+  const workerResult = db
     .prepare(
-      "UPDATE agents SET status = 'error', completed_at = ?, result_summary = COALESCE(result_summary, ?) WHERE kind = 'task' AND status = 'running'",
+      "UPDATE worker_sessions SET status = 'error', completed_at = ?, result_summary = COALESCE(result_summary, ?) WHERE kind = 'task' AND status = 'running'",
     )
     .run(now, summary);
-  return result.changes;
+  return workerResult.changes;
 }
 
 export function deleteAgent(id: string): void {
-  // Delete associated session
-  db.prepare('DELETE FROM sessions WHERE agent_id = ?').run(id);
-  db.prepare('DELETE FROM agents WHERE id = ?').run(id);
+  const sessionId = buildWorkerSessionId(id);
+  db.prepare('DELETE FROM session_bindings WHERE session_id = ?').run(sessionId);
+  db.prepare('DELETE FROM session_state WHERE session_id = ?').run(sessionId);
+  db.prepare('DELETE FROM worker_sessions WHERE session_id = ?').run(sessionId);
+  db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
 }
 
-function mapAgentRow(row: Record<string, unknown>): SubAgent {
+function mapLegacyAgentRow(row: Record<string, unknown>): SubAgent {
   return {
     id: String(row.id),
     group_folder: String(row.group_folder),
@@ -4167,1386 +4535,6 @@ export function deleteMessage(chatJid: string, messageId: string): boolean {
     .prepare('DELETE FROM messages WHERE id = ? AND chat_jid = ?')
     .run(messageId, chatJid);
   return result.changes > 0;
-}
-
-export function isGroupShared(groupFolder: string): boolean {
-  const row = db
-    .prepare('SELECT COUNT(*) as cnt FROM group_members WHERE group_folder = ?')
-    .get(groupFolder) as { cnt: number };
-  return row.cnt > 1;
-}
-
-// --- Billing CRUD functions ---
-
-export function getBillingPlan(id: string): BillingPlan | undefined {
-  const row = db.prepare('SELECT * FROM billing_plans WHERE id = ?').get(id) as
-    | Record<string, unknown>
-    | undefined;
-  return row ? mapBillingPlanRow(row) : undefined;
-}
-
-export function getActiveBillingPlans(): BillingPlan[] {
-  return (
-    db
-      .prepare(
-        'SELECT * FROM billing_plans WHERE is_active = 1 ORDER BY tier ASC, name ASC',
-      )
-      .all() as Record<string, unknown>[]
-  ).map(mapBillingPlanRow);
-}
-
-export function getAllBillingPlans(): BillingPlan[] {
-  return (
-    db
-      .prepare('SELECT * FROM billing_plans ORDER BY tier ASC, name ASC')
-      .all() as Record<string, unknown>[]
-  ).map(mapBillingPlanRow);
-}
-
-export function getDefaultBillingPlan(): BillingPlan | undefined {
-  const row = db
-    .prepare('SELECT * FROM billing_plans WHERE is_default = 1')
-    .get() as Record<string, unknown> | undefined;
-  return row ? mapBillingPlanRow(row) : undefined;
-}
-
-export function createBillingPlan(plan: BillingPlan): void {
-  db.transaction(() => {
-    // Clear old default BEFORE inserting the new plan to avoid brief dual-default
-    if (plan.is_default) {
-      db.prepare(
-        'UPDATE billing_plans SET is_default = 0 WHERE is_default = 1',
-      ).run();
-    }
-    db.prepare(
-      `INSERT INTO billing_plans (id, name, description, tier, monthly_cost_usd, monthly_token_quota, monthly_cost_quota,
-       daily_cost_quota, weekly_cost_quota, daily_token_quota, weekly_token_quota,
-       rate_multiplier, trial_days, sort_order, display_price, highlight,
-       max_groups, max_concurrent_containers, max_im_channels, max_mcp_servers, max_storage_mb,
-       allow_overage, features, is_default, is_active, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      plan.id,
-      plan.name,
-      plan.description,
-      plan.tier,
-      plan.monthly_cost_usd,
-      plan.monthly_token_quota,
-      plan.monthly_cost_quota,
-      plan.daily_cost_quota,
-      plan.weekly_cost_quota,
-      plan.daily_token_quota,
-      plan.weekly_token_quota,
-      plan.rate_multiplier,
-      plan.trial_days,
-      plan.sort_order,
-      plan.display_price,
-      plan.highlight ? 1 : 0,
-      plan.max_groups,
-      plan.max_concurrent_containers,
-      plan.max_im_channels,
-      plan.max_mcp_servers,
-      plan.max_storage_mb,
-      plan.allow_overage ? 1 : 0,
-      JSON.stringify(plan.features),
-      plan.is_default ? 1 : 0,
-      plan.is_active ? 1 : 0,
-      plan.created_at,
-      plan.updated_at,
-    );
-  })();
-}
-
-export function updateBillingPlan(
-  id: string,
-  updates: Partial<Omit<BillingPlan, 'id' | 'created_at'>>,
-): void {
-  const fields: string[] = [];
-  const values: unknown[] = [];
-
-  if (updates.name !== undefined) {
-    fields.push('name = ?');
-    values.push(updates.name);
-  }
-  if (updates.description !== undefined) {
-    fields.push('description = ?');
-    values.push(updates.description);
-  }
-  if (updates.tier !== undefined) {
-    fields.push('tier = ?');
-    values.push(updates.tier);
-  }
-  if (updates.monthly_cost_usd !== undefined) {
-    fields.push('monthly_cost_usd = ?');
-    values.push(updates.monthly_cost_usd);
-  }
-  if (updates.monthly_token_quota !== undefined) {
-    fields.push('monthly_token_quota = ?');
-    values.push(updates.monthly_token_quota);
-  }
-  if (updates.monthly_cost_quota !== undefined) {
-    fields.push('monthly_cost_quota = ?');
-    values.push(updates.monthly_cost_quota);
-  }
-  if (updates.daily_cost_quota !== undefined) {
-    fields.push('daily_cost_quota = ?');
-    values.push(updates.daily_cost_quota);
-  }
-  if (updates.weekly_cost_quota !== undefined) {
-    fields.push('weekly_cost_quota = ?');
-    values.push(updates.weekly_cost_quota);
-  }
-  if (updates.daily_token_quota !== undefined) {
-    fields.push('daily_token_quota = ?');
-    values.push(updates.daily_token_quota);
-  }
-  if (updates.weekly_token_quota !== undefined) {
-    fields.push('weekly_token_quota = ?');
-    values.push(updates.weekly_token_quota);
-  }
-  if (updates.rate_multiplier !== undefined) {
-    fields.push('rate_multiplier = ?');
-    values.push(updates.rate_multiplier);
-  }
-  if (updates.trial_days !== undefined) {
-    fields.push('trial_days = ?');
-    values.push(updates.trial_days);
-  }
-  if (updates.sort_order !== undefined) {
-    fields.push('sort_order = ?');
-    values.push(updates.sort_order);
-  }
-  if (updates.display_price !== undefined) {
-    fields.push('display_price = ?');
-    values.push(updates.display_price);
-  }
-  if (updates.highlight !== undefined) {
-    fields.push('highlight = ?');
-    values.push(updates.highlight ? 1 : 0);
-  }
-  if (updates.max_groups !== undefined) {
-    fields.push('max_groups = ?');
-    values.push(updates.max_groups);
-  }
-  if (updates.max_concurrent_containers !== undefined) {
-    fields.push('max_concurrent_containers = ?');
-    values.push(updates.max_concurrent_containers);
-  }
-  if (updates.max_im_channels !== undefined) {
-    fields.push('max_im_channels = ?');
-    values.push(updates.max_im_channels);
-  }
-  if (updates.max_mcp_servers !== undefined) {
-    fields.push('max_mcp_servers = ?');
-    values.push(updates.max_mcp_servers);
-  }
-  if (updates.max_storage_mb !== undefined) {
-    fields.push('max_storage_mb = ?');
-    values.push(updates.max_storage_mb);
-  }
-  if (updates.allow_overage !== undefined) {
-    fields.push('allow_overage = ?');
-    values.push(updates.allow_overage ? 1 : 0);
-  }
-  if (updates.features !== undefined) {
-    fields.push('features = ?');
-    values.push(JSON.stringify(updates.features));
-  }
-  if (updates.is_default !== undefined) {
-    fields.push('is_default = ?');
-    values.push(updates.is_default ? 1 : 0);
-  }
-  if (updates.is_active !== undefined) {
-    fields.push('is_active = ?');
-    values.push(updates.is_active ? 1 : 0);
-  }
-
-  if (fields.length === 0) return;
-
-  fields.push('updated_at = ?');
-  values.push(new Date().toISOString());
-  values.push(id);
-
-  db.transaction(() => {
-    // Clear old default BEFORE setting new one to avoid brief dual-default state
-    if (updates.is_default) {
-      db.prepare('UPDATE billing_plans SET is_default = 0 WHERE id != ?').run(
-        id,
-      );
-    }
-    db.prepare(
-      `UPDATE billing_plans SET ${fields.join(', ')} WHERE id = ?`,
-    ).run(...values);
-  })();
-}
-
-export function deleteBillingPlan(id: string): boolean {
-  // Don't delete if users are subscribed
-  const hasSubscribers = db
-    .prepare(
-      "SELECT COUNT(*) as cnt FROM user_subscriptions WHERE plan_id = ? AND status = 'active'",
-    )
-    .get(id) as { cnt: number };
-  if (hasSubscribers.cnt > 0) return false;
-  const result = db.prepare('DELETE FROM billing_plans WHERE id = ?').run(id);
-  return result.changes > 0;
-}
-
-function mapBillingPlanRow(row: Record<string, unknown>): BillingPlan {
-  return {
-    id: String(row.id),
-    name: String(row.name),
-    description: typeof row.description === 'string' ? row.description : null,
-    tier: Number(row.tier) || 0,
-    monthly_cost_usd: Number(row.monthly_cost_usd) || 0,
-    monthly_token_quota:
-      row.monthly_token_quota != null ? Number(row.monthly_token_quota) : null,
-    monthly_cost_quota:
-      row.monthly_cost_quota != null ? Number(row.monthly_cost_quota) : null,
-    daily_cost_quota:
-      row.daily_cost_quota != null ? Number(row.daily_cost_quota) : null,
-    weekly_cost_quota:
-      row.weekly_cost_quota != null ? Number(row.weekly_cost_quota) : null,
-    daily_token_quota:
-      row.daily_token_quota != null ? Number(row.daily_token_quota) : null,
-    weekly_token_quota:
-      row.weekly_token_quota != null ? Number(row.weekly_token_quota) : null,
-    rate_multiplier: Number(row.rate_multiplier) || 1.0,
-    trial_days: row.trial_days != null ? Number(row.trial_days) : null,
-    sort_order: Number(row.sort_order) || 0,
-    display_price:
-      typeof row.display_price === 'string' ? row.display_price : null,
-    highlight: !!(row.highlight as number),
-    max_groups: row.max_groups != null ? Number(row.max_groups) : null,
-    max_concurrent_containers:
-      row.max_concurrent_containers != null
-        ? Number(row.max_concurrent_containers)
-        : null,
-    max_im_channels:
-      row.max_im_channels != null ? Number(row.max_im_channels) : null,
-    max_mcp_servers:
-      row.max_mcp_servers != null ? Number(row.max_mcp_servers) : null,
-    max_storage_mb:
-      row.max_storage_mb != null ? Number(row.max_storage_mb) : null,
-    allow_overage: !!(row.allow_overage as number),
-    features: safeParseJsonArray(row.features),
-    is_default: !!(row.is_default as number),
-    is_active: !!(row.is_active as number),
-    created_at: String(row.created_at),
-    updated_at: String(row.updated_at),
-  };
-}
-
-function safeParseJsonArray(val: unknown): string[] {
-  if (typeof val !== 'string') return [];
-  try {
-    const parsed = JSON.parse(val);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-// --- User Subscriptions ---
-
-export function getUserActiveSubscription(
-  userId: string,
-): (UserSubscription & { plan: BillingPlan }) | undefined {
-  const row = db
-    .prepare(
-      `SELECT s.*, p.name as plan_name FROM user_subscriptions s
-       JOIN billing_plans p ON s.plan_id = p.id
-       WHERE s.user_id = ? AND s.status = 'active'
-       ORDER BY s.created_at DESC LIMIT 1`,
-    )
-    .get(userId) as Record<string, unknown> | undefined;
-  if (!row) return undefined;
-  const plan = getBillingPlan(String(row.plan_id));
-  if (!plan) return undefined;
-  return { ...mapSubscriptionRow(row), plan };
-}
-
-export function createUserSubscription(sub: UserSubscription): void {
-  // Cancel existing active subscriptions
-  db.prepare(
-    "UPDATE user_subscriptions SET status = 'cancelled', cancelled_at = ? WHERE user_id = ? AND status = 'active'",
-  ).run(new Date().toISOString(), sub.user_id);
-
-  db.prepare(
-    `INSERT INTO user_subscriptions (id, user_id, plan_id, status, started_at, expires_at, cancelled_at, trial_ends_at, notes, auto_renew, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    sub.id,
-    sub.user_id,
-    sub.plan_id,
-    sub.status,
-    sub.started_at,
-    sub.expires_at,
-    sub.cancelled_at,
-    sub.trial_ends_at,
-    sub.notes,
-    sub.auto_renew ? 1 : 0,
-    sub.created_at,
-  );
-
-  // Update user's subscription_plan_id
-  db.prepare('UPDATE users SET subscription_plan_id = ? WHERE id = ?').run(
-    sub.plan_id,
-    sub.user_id,
-  );
-}
-
-export function cancelUserSubscription(userId: string): void {
-  const now = new Date().toISOString();
-  db.prepare(
-    "UPDATE user_subscriptions SET status = 'cancelled', cancelled_at = ? WHERE user_id = ? AND status = 'active'",
-  ).run(now, userId);
-  db.prepare('UPDATE users SET subscription_plan_id = NULL WHERE id = ?').run(
-    userId,
-  );
-}
-
-export function expireSubscriptions(): number {
-  const now = new Date().toISOString();
-
-  // Phase 1: Handle auto_renew=1 subscriptions — renew them instead of expiring
-  const renewableRows = db
-    .prepare(
-      "SELECT * FROM user_subscriptions WHERE status = 'active' AND auto_renew = 1 AND expires_at IS NOT NULL AND expires_at <= ?",
-    )
-    .all(now) as Record<string, unknown>[];
-
-  let renewed = 0;
-  for (const row of renewableRows) {
-    const userId = String(row.user_id);
-    const planId = String(row.plan_id);
-    const oldId = String(row.id);
-    const oldStarted = String(row.started_at);
-    const oldExpires = String(row.expires_at);
-
-    // Calculate same duration as original subscription
-    const startMs = new Date(oldStarted).getTime();
-    const expiresMs = new Date(oldExpires).getTime();
-    const durationMs = expiresMs - startMs;
-    if (durationMs <= 0) continue;
-
-    const plan = getBillingPlan(planId);
-    if (!plan || !plan.is_active) {
-      // Plan no longer active, expire instead
-      continue;
-    }
-
-    // Check if user has sufficient balance for paid plans
-    if (plan.monthly_cost_usd > 0) {
-      const balance = getUserBalance(userId);
-      if (balance.balance_usd < plan.monthly_cost_usd) {
-        // Insufficient balance, expire instead
-        logBillingAudit('subscription_expired', userId, null, {
-          planId,
-          planName: plan.name,
-          reason: 'insufficient_balance_for_renewal',
-          balance: balance.balance_usd,
-          required: plan.monthly_cost_usd,
-        });
-        continue;
-      }
-    }
-
-    // Wrap the entire renewal in a transaction for atomicity
-    const renewTx = db.transaction(() => {
-      // Deduct subscription cost (if paid plan)
-      if (plan.monthly_cost_usd > 0) {
-        adjustUserBalance(
-          userId,
-          -plan.monthly_cost_usd,
-          'deduction',
-          `自动续费: ${plan.name}`,
-          'subscription',
-          oldId,
-          null,
-          null,
-          {
-            source: 'subscription_renewal',
-            operatorType: 'system',
-            notes: `自动续费扣款: ${plan.name}`,
-          },
-        );
-      }
-
-      // Expire old subscription
-      db.prepare(
-        "UPDATE user_subscriptions SET status = 'expired' WHERE id = ?",
-      ).run(oldId);
-
-      // Create new subscription with same duration
-      const newNow = new Date();
-      const newExpires = new Date(newNow.getTime() + durationMs).toISOString();
-      const newSub = {
-        id: `sub_${userId}_${Date.now()}_renew`,
-        user_id: userId,
-        plan_id: planId,
-        status: 'active',
-        started_at: newNow.toISOString(),
-        expires_at: newExpires,
-        cancelled_at: null,
-        trial_ends_at: null,
-        notes: '自动续费',
-        auto_renew: 1,
-        created_at: newNow.toISOString(),
-      };
-
-      db.prepare(
-        `INSERT INTO user_subscriptions (id, user_id, plan_id, status, started_at, expires_at, cancelled_at, trial_ends_at, notes, auto_renew, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        newSub.id,
-        newSub.user_id,
-        newSub.plan_id,
-        newSub.status,
-        newSub.started_at,
-        newSub.expires_at,
-        newSub.cancelled_at,
-        newSub.trial_ends_at,
-        newSub.notes,
-        newSub.auto_renew,
-        newSub.created_at,
-      );
-
-      logBillingAudit('subscription_assigned', userId, null, {
-        planId,
-        planName: plan.name,
-        autoRenew: true,
-        renewedFrom: oldId,
-      });
-    });
-
-    try {
-      renewTx();
-      renewed++;
-    } catch (err) {
-      logBillingAudit('subscription_expired', userId, null, {
-        planId,
-        planName: plan.name,
-        reason: 'renewal_transaction_failed',
-        error: String(err),
-      });
-    }
-  }
-
-  // Phase 2: Expire remaining (non-auto-renew or failed renewal)
-  const result = db
-    .prepare(
-      "UPDATE user_subscriptions SET status = 'expired' WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?",
-    )
-    .run(now);
-  return result.changes + renewed;
-}
-
-export function updateSubscriptionAutoRenew(
-  userId: string,
-  autoRenew: boolean,
-): boolean {
-  const result = db
-    .prepare(
-      "UPDATE user_subscriptions SET auto_renew = ? WHERE user_id = ? AND status = 'active'",
-    )
-    .run(autoRenew ? 1 : 0, userId);
-  return result.changes > 0;
-}
-
-function mapSubscriptionRow(row: Record<string, unknown>): UserSubscription {
-  return {
-    id: String(row.id),
-    user_id: String(row.user_id),
-    plan_id: String(row.plan_id),
-    status: String(row.status) as UserSubscription['status'],
-    started_at: String(row.started_at),
-    expires_at: typeof row.expires_at === 'string' ? row.expires_at : null,
-    cancelled_at:
-      typeof row.cancelled_at === 'string' ? row.cancelled_at : null,
-    trial_ends_at:
-      typeof row.trial_ends_at === 'string' ? row.trial_ends_at : null,
-    notes: typeof row.notes === 'string' ? row.notes : null,
-    auto_renew: !!(row.auto_renew as number),
-    created_at: String(row.created_at),
-  };
-}
-
-// --- User Balances ---
-
-export function getUserBalance(userId: string): UserBalance {
-  const row = db
-    .prepare('SELECT * FROM user_balances WHERE user_id = ?')
-    .get(userId) as Record<string, unknown> | undefined;
-  if (!row) {
-    // Auto-init balance
-    const now = new Date().toISOString();
-    db.prepare(
-      'INSERT OR IGNORE INTO user_balances (user_id, balance_usd, total_deposited_usd, total_consumed_usd, updated_at) VALUES (?, 0, 0, 0, ?)',
-    ).run(userId, now);
-    return {
-      user_id: userId,
-      balance_usd: 0,
-      total_deposited_usd: 0,
-      total_consumed_usd: 0,
-      updated_at: now,
-    };
-  }
-  return {
-    user_id: String(row.user_id),
-    balance_usd: Number(row.balance_usd) || 0,
-    total_deposited_usd: Number(row.total_deposited_usd) || 0,
-    total_consumed_usd: Number(row.total_consumed_usd) || 0,
-    updated_at: String(row.updated_at),
-  };
-}
-
-export function adjustUserBalance(
-  userId: string,
-  amount: number,
-  type: BalanceTransactionType,
-  description: string | null,
-  referenceType: BalanceReferenceType | null,
-  referenceId: string | null,
-  actorId: string | null,
-  idempotencyKey?: string | null,
-  options?: {
-    source?: BalanceTransactionSource;
-    operatorType?: BalanceOperatorType;
-    notes?: string | null;
-    allowNegative?: boolean;
-  },
-): BalanceTransaction {
-  const source = options?.source ?? 'system_adjustment';
-  const operatorType = options?.operatorType ?? 'system';
-  const notes = options?.notes ?? description ?? null;
-  const allowNegative = options?.allowNegative ?? false;
-
-  // Idempotency check: if key already used, return the existing transaction
-  if (idempotencyKey) {
-    const existing = db
-      .prepare('SELECT * FROM balance_transactions WHERE idempotency_key = ?')
-      .get(idempotencyKey) as Record<string, unknown> | undefined;
-    if (existing) {
-      return {
-        id: Number(existing.id),
-        user_id: String(existing.user_id),
-        type: String(existing.type) as BalanceTransactionType,
-        amount_usd: Number(existing.amount_usd),
-        balance_after: Number(existing.balance_after),
-        description:
-          typeof existing.description === 'string'
-            ? existing.description
-            : null,
-        reference_type:
-          typeof existing.reference_type === 'string'
-            ? (existing.reference_type as BalanceReferenceType)
-            : null,
-        reference_id:
-          typeof existing.reference_id === 'string'
-            ? existing.reference_id
-            : null,
-        actor_id:
-          typeof existing.actor_id === 'string' ? existing.actor_id : null,
-        source:
-          typeof existing.source === 'string'
-            ? (existing.source as BalanceTransactionSource)
-            : 'system_adjustment',
-        operator_type:
-          typeof existing.operator_type === 'string'
-            ? (existing.operator_type as BalanceOperatorType)
-            : 'system',
-        notes: typeof existing.notes === 'string' ? existing.notes : null,
-        idempotency_key:
-          typeof existing.idempotency_key === 'string'
-            ? existing.idempotency_key
-            : null,
-        created_at: String(existing.created_at),
-      };
-    }
-  }
-
-  const now = new Date().toISOString();
-
-  // Wrap read-check-update-record in a transaction for atomicity
-  const txFn = db.transaction(() => {
-    // Ensure balance row exists
-    db.prepare(
-      'INSERT OR IGNORE INTO user_balances (user_id, balance_usd, total_deposited_usd, total_consumed_usd, updated_at) VALUES (?, 0, 0, 0, ?)',
-    ).run(userId, now);
-
-    const currentRow = db
-      .prepare('SELECT balance_usd FROM user_balances WHERE user_id = ?')
-      .get(userId) as { balance_usd: number };
-    const currentBalance = Number(currentRow.balance_usd);
-    const nextBalance = currentBalance + amount;
-    if (!allowNegative && nextBalance < 0) {
-      throw new Error(
-        `Balance cannot be negative: current=${currentBalance.toFixed(2)} next=${nextBalance.toFixed(2)}`,
-      );
-    }
-
-    // Update balance
-    if (amount > 0) {
-      db.prepare(
-        'UPDATE user_balances SET balance_usd = balance_usd + ?, total_deposited_usd = total_deposited_usd + ?, updated_at = ? WHERE user_id = ?',
-      ).run(amount, amount, now, userId);
-    } else {
-      db.prepare(
-        'UPDATE user_balances SET balance_usd = balance_usd + ?, total_consumed_usd = total_consumed_usd + ?, updated_at = ? WHERE user_id = ?',
-      ).run(amount, Math.abs(amount), now, userId);
-    }
-
-    // Read new balance within the same transaction
-    const newRow = db
-      .prepare('SELECT balance_usd FROM user_balances WHERE user_id = ?')
-      .get(userId) as { balance_usd: number };
-    const balanceAfter = Number(newRow.balance_usd);
-
-    // Record transaction
-    const result = db
-      .prepare(
-        `INSERT INTO balance_transactions (
-        user_id, type, amount_usd, balance_after, description, reference_type,
-        reference_id, actor_id, source, operator_type, notes, created_at, idempotency_key
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        userId,
-        type,
-        amount,
-        balanceAfter,
-        description,
-        referenceType,
-        referenceId,
-        actorId,
-        source,
-        operatorType,
-        notes,
-        now,
-        idempotencyKey ?? null,
-      );
-
-    return {
-      id: Number(result.lastInsertRowid),
-      balanceAfter,
-    };
-  });
-
-  const { id: txId, balanceAfter } = txFn();
-
-  return {
-    id: txId,
-    user_id: userId,
-    type,
-    amount_usd: amount,
-    balance_after: balanceAfter,
-    description,
-    reference_type: referenceType,
-    reference_id: referenceId,
-    actor_id: actorId,
-    source,
-    operator_type: operatorType,
-    notes,
-    idempotency_key: idempotencyKey ?? null,
-    created_at: now,
-  };
-}
-
-export function getBalanceTransactions(
-  userId: string,
-  limit = 50,
-  offset = 0,
-): { transactions: BalanceTransaction[]; total: number } {
-  const total = (
-    db
-      .prepare(
-        'SELECT COUNT(*) as cnt FROM balance_transactions WHERE user_id = ?',
-      )
-      .get(userId) as { cnt: number }
-  ).cnt;
-
-  const rows = db
-    .prepare(
-      'SELECT * FROM balance_transactions WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?',
-    )
-    .all(userId, limit, offset) as Record<string, unknown>[];
-
-  return {
-    transactions: rows.map((r) => ({
-      id: Number(r.id),
-      user_id: String(r.user_id),
-      type: String(r.type) as BalanceTransactionType,
-      amount_usd: Number(r.amount_usd),
-      balance_after: Number(r.balance_after),
-      description: typeof r.description === 'string' ? r.description : null,
-      reference_type:
-        typeof r.reference_type === 'string'
-          ? (r.reference_type as BalanceReferenceType)
-          : null,
-      reference_id: typeof r.reference_id === 'string' ? r.reference_id : null,
-      actor_id: typeof r.actor_id === 'string' ? r.actor_id : null,
-      source:
-        typeof r.source === 'string'
-          ? (r.source as BalanceTransactionSource)
-          : 'system_adjustment',
-      operator_type:
-        typeof r.operator_type === 'string'
-          ? (r.operator_type as BalanceOperatorType)
-          : 'system',
-      notes: typeof r.notes === 'string' ? r.notes : null,
-      idempotency_key:
-        typeof r.idempotency_key === 'string' ? r.idempotency_key : null,
-      created_at: String(r.created_at),
-    })),
-    total,
-  };
-}
-
-// --- Monthly Usage ---
-
-function mapMonthlyUsageRow(row: Record<string, unknown>): MonthlyUsage {
-  return {
-    user_id: String(row.user_id),
-    month: String(row.month),
-    total_input_tokens: Number(row.total_input_tokens) || 0,
-    total_output_tokens: Number(row.total_output_tokens) || 0,
-    total_cost_usd: Number(row.total_cost_usd) || 0,
-    message_count: Number(row.message_count) || 0,
-    updated_at: String(row.updated_at),
-  };
-}
-
-export function getMonthlyUsage(
-  userId: string,
-  month: string,
-): MonthlyUsage | undefined {
-  const row = db
-    .prepare('SELECT * FROM monthly_usage WHERE user_id = ? AND month = ?')
-    .get(userId, month) as Record<string, unknown> | undefined;
-  if (!row) return undefined;
-  return mapMonthlyUsageRow(row);
-}
-
-export function incrementMonthlyUsage(
-  userId: string,
-  month: string,
-  inputTokens: number,
-  outputTokens: number,
-  costUsd: number,
-): void {
-  const now = new Date().toISOString();
-  db.prepare(
-    `INSERT INTO monthly_usage (user_id, month, total_input_tokens, total_output_tokens, total_cost_usd, message_count, updated_at)
-     VALUES (?, ?, ?, ?, ?, 1, ?)
-     ON CONFLICT(user_id, month) DO UPDATE SET
-       total_input_tokens = total_input_tokens + excluded.total_input_tokens,
-       total_output_tokens = total_output_tokens + excluded.total_output_tokens,
-       total_cost_usd = total_cost_usd + excluded.total_cost_usd,
-       message_count = message_count + 1,
-       updated_at = excluded.updated_at`,
-  ).run(userId, month, inputTokens, outputTokens, costUsd, now);
-}
-
-export function getUserMonthlyUsageHistory(
-  userId: string,
-  months = 6,
-): MonthlyUsage[] {
-  return (
-    db
-      .prepare(
-        'SELECT * FROM monthly_usage WHERE user_id = ? ORDER BY month DESC LIMIT ?',
-      )
-      .all(userId, months) as Record<string, unknown>[]
-  ).map(mapMonthlyUsageRow);
-}
-
-// --- Redeem Codes ---
-
-export function getRedeemCode(code: string): RedeemCode | undefined {
-  const row = db
-    .prepare('SELECT * FROM redeem_codes WHERE code = ?')
-    .get(code) as Record<string, unknown> | undefined;
-  if (!row) return undefined;
-  return mapRedeemCodeRow(row);
-}
-
-export function getAllRedeemCodes(): RedeemCode[] {
-  return (
-    db
-      .prepare('SELECT * FROM redeem_codes ORDER BY created_at DESC')
-      .all() as Record<string, unknown>[]
-  ).map(mapRedeemCodeRow);
-}
-
-export function createRedeemCode(code: RedeemCode): void {
-  db.prepare(
-    `INSERT INTO redeem_codes (code, type, value_usd, plan_id, duration_days, max_uses, used_count, expires_at, created_by, notes, batch_id, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    code.code,
-    code.type,
-    code.value_usd,
-    code.plan_id,
-    code.duration_days,
-    code.max_uses,
-    code.used_count,
-    code.expires_at,
-    code.created_by,
-    code.notes,
-    code.batch_id,
-    code.created_at,
-  );
-}
-
-export function incrementRedeemCodeUsage(code: string, userId: string): void {
-  const now = new Date().toISOString();
-  db.prepare(
-    'UPDATE redeem_codes SET used_count = used_count + 1 WHERE code = ?',
-  ).run(code);
-  db.prepare(
-    'INSERT INTO redeem_code_usage (code, user_id, redeemed_at) VALUES (?, ?, ?)',
-  ).run(code, userId, now);
-}
-
-export function deleteRedeemCode(code: string): boolean {
-  const result = db
-    .prepare('DELETE FROM redeem_codes WHERE code = ?')
-    .run(code);
-  return result.changes > 0;
-}
-
-export function hasUserRedeemedCode(userId: string, code: string): boolean {
-  const row = db
-    .prepare(
-      'SELECT COUNT(*) as cnt FROM redeem_code_usage WHERE user_id = ? AND code = ?',
-    )
-    .get(userId, code) as { cnt: number };
-  return row.cnt > 0;
-}
-
-function mapRedeemCodeRow(row: Record<string, unknown>): RedeemCode {
-  return {
-    code: String(row.code),
-    type: String(row.type) as RedeemCode['type'],
-    value_usd: row.value_usd != null ? Number(row.value_usd) : null,
-    plan_id: typeof row.plan_id === 'string' ? row.plan_id : null,
-    duration_days: row.duration_days != null ? Number(row.duration_days) : null,
-    max_uses: Number(row.max_uses) || 1,
-    used_count: Number(row.used_count) || 0,
-    expires_at: typeof row.expires_at === 'string' ? row.expires_at : null,
-    created_by: String(row.created_by),
-    notes: typeof row.notes === 'string' ? row.notes : null,
-    batch_id: typeof row.batch_id === 'string' ? row.batch_id : null,
-    created_at: String(row.created_at),
-  };
-}
-
-// --- Billing Audit Log ---
-
-export function logBillingAudit(
-  eventType: BillingAuditEventType,
-  userId: string,
-  actorId: string | null,
-  details: Record<string, unknown> | null,
-): void {
-  db.prepare(
-    'INSERT INTO billing_audit_log (event_type, user_id, actor_id, details, created_at) VALUES (?, ?, ?, ?, ?)',
-  ).run(
-    eventType,
-    userId,
-    actorId,
-    details ? JSON.stringify(details) : null,
-    new Date().toISOString(),
-  );
-}
-
-export function getBillingAuditLog(
-  limit = 50,
-  offset = 0,
-  userId?: string,
-  eventType?: string,
-): { logs: BillingAuditLog[]; total: number } {
-  const conditions: string[] = [];
-  const params: unknown[] = [];
-  if (userId) {
-    conditions.push('user_id = ?');
-    params.push(userId);
-  }
-  if (eventType) {
-    conditions.push('event_type = ?');
-    params.push(eventType);
-  }
-  const where =
-    conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-
-  const total = (
-    db
-      .prepare(`SELECT COUNT(*) as cnt FROM billing_audit_log ${where}`)
-      .get(...params) as { cnt: number }
-  ).cnt;
-
-  const rows = db
-    .prepare(
-      `SELECT * FROM billing_audit_log ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-    )
-    .all(...params, limit, offset) as Record<string, unknown>[];
-
-  return {
-    logs: rows.map((r) => ({
-      id: Number(r.id),
-      event_type: String(r.event_type) as BillingAuditEventType,
-      user_id: String(r.user_id),
-      actor_id: typeof r.actor_id === 'string' ? r.actor_id : null,
-      details:
-        typeof r.details === 'string'
-          ? (JSON.parse(r.details) as Record<string, unknown>)
-          : null,
-      created_at: String(r.created_at),
-    })),
-    total,
-  };
-}
-
-// --- Billing summary helpers ---
-
-export function getUserGroupCount(userId: string): number {
-  const row = db
-    .prepare(
-      "SELECT COUNT(DISTINCT rg.folder) as cnt FROM registered_groups rg WHERE rg.created_by = ? AND rg.jid LIKE 'web:%'",
-    )
-    .get(userId) as { cnt: number };
-  return row.cnt;
-}
-
-export function getAllUserBillingOverview(): Array<{
-  user_id: string;
-  username: string;
-  display_name: string;
-  role: string;
-  plan_id: string | null;
-  plan_name: string | null;
-  balance_usd: number;
-  current_month_cost: number;
-}> {
-  const month = new Date().toISOString().slice(0, 7);
-  return db
-    .prepare(
-      `SELECT u.id as user_id, u.username, u.display_name, u.role,
-              s.plan_id, p.name as plan_name,
-              COALESCE(b.balance_usd, 0) as balance_usd,
-              COALESCE(mu.total_cost_usd, 0) as current_month_cost
-       FROM users u
-       LEFT JOIN user_subscriptions s ON s.user_id = u.id AND s.status = 'active'
-       LEFT JOIN billing_plans p ON p.id = s.plan_id
-       LEFT JOIN user_balances b ON b.user_id = u.id
-       LEFT JOIN monthly_usage mu ON mu.user_id = u.id AND mu.month = ?
-       WHERE u.status != 'deleted'
-       ORDER BY u.created_at ASC`,
-    )
-    .all(month) as Array<{
-    user_id: string;
-    username: string;
-    display_name: string;
-    role: string;
-    plan_id: string | null;
-    plan_name: string | null;
-    balance_usd: number;
-    current_month_cost: number;
-  }>;
-}
-
-export function getRevenueStats(): {
-  totalDeposited: number;
-  totalConsumed: number;
-  activeSubscriptions: number;
-  currentMonthRevenue: number;
-} {
-  const month = new Date().toISOString().slice(0, 7);
-  const deposited = (
-    db
-      .prepare(
-        'SELECT COALESCE(SUM(total_deposited_usd), 0) as total FROM user_balances',
-      )
-      .get() as { total: number }
-  ).total;
-  const consumed = (
-    db
-      .prepare(
-        'SELECT COALESCE(SUM(total_consumed_usd), 0) as total FROM user_balances',
-      )
-      .get() as { total: number }
-  ).total;
-  const activeSubs = (
-    db
-      .prepare(
-        "SELECT COUNT(*) as cnt FROM user_subscriptions WHERE status = 'active'",
-      )
-      .get() as { cnt: number }
-  ).cnt;
-  const monthRevenue = (
-    db
-      .prepare(
-        'SELECT COALESCE(SUM(total_cost_usd), 0) as total FROM monthly_usage WHERE month = ?',
-      )
-      .get(month) as { total: number }
-  ).total;
-  return {
-    totalDeposited: deposited,
-    totalConsumed: consumed,
-    activeSubscriptions: activeSubs,
-    currentMonthRevenue: monthRevenue,
-  };
-}
-
-// --- Daily Usage ---
-
-function mapDailyUsageRow(row: Record<string, unknown>): DailyUsage {
-  return {
-    user_id: String(row.user_id),
-    date: String(row.date),
-    total_input_tokens: Number(row.total_input_tokens) || 0,
-    total_output_tokens: Number(row.total_output_tokens) || 0,
-    total_cost_usd: Number(row.total_cost_usd) || 0,
-    message_count: Number(row.message_count) || 0,
-  };
-}
-
-export function incrementDailyUsage(
-  userId: string,
-  date: string,
-  inputTokens: number,
-  outputTokens: number,
-  costUsd: number,
-): void {
-  db.prepare(
-    `INSERT INTO daily_usage (user_id, date, total_input_tokens, total_output_tokens, total_cost_usd, message_count)
-     VALUES (?, ?, ?, ?, ?, 1)
-     ON CONFLICT(user_id, date) DO UPDATE SET
-       total_input_tokens = total_input_tokens + excluded.total_input_tokens,
-       total_output_tokens = total_output_tokens + excluded.total_output_tokens,
-       total_cost_usd = total_cost_usd + excluded.total_cost_usd,
-       message_count = message_count + 1`,
-  ).run(userId, date, inputTokens, outputTokens, costUsd);
-}
-
-export function getDailyUsage(
-  userId: string,
-  date: string,
-): DailyUsage | undefined {
-  const row = db
-    .prepare('SELECT * FROM daily_usage WHERE user_id = ? AND date = ?')
-    .get(userId, date) as Record<string, unknown> | undefined;
-  if (!row) return undefined;
-  return mapDailyUsageRow(row);
-}
-
-export function getWeeklyUsageSummary(userId: string): {
-  totalCost: number;
-  totalTokens: number;
-} {
-  // Align to calendar week (Monday–Sunday) to match checkQuota() reset logic
-  const now = new Date();
-  const dayOfWeek = now.getDay(); // 0=Sun, 1=Mon, ...
-  const daysSinceMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
-  const monday = new Date(now);
-  monday.setDate(now.getDate() - daysSinceMonday);
-  const startDate = monday.toISOString().slice(0, 10);
-
-  const row = db
-    .prepare(
-      `SELECT COALESCE(SUM(total_cost_usd), 0) as totalCost,
-              COALESCE(SUM(total_input_tokens + total_output_tokens), 0) as totalTokens
-       FROM daily_usage WHERE user_id = ? AND date >= ?`,
-    )
-    .get(userId, startDate) as { totalCost: number; totalTokens: number };
-  return { totalCost: row.totalCost, totalTokens: row.totalTokens };
-}
-
-export function getUserDailyUsageHistory(
-  userId: string,
-  days = 14,
-): DailyUsage[] {
-  return (
-    db
-      .prepare(
-        'SELECT * FROM daily_usage WHERE user_id = ? ORDER BY date DESC LIMIT ?',
-      )
-      .all(userId, days) as Record<string, unknown>[]
-  ).map(mapDailyUsageRow);
-}
-
-export function getDailyUsageSumForMonth(
-  userId: string,
-  month: string,
-): {
-  totalInputTokens: number;
-  totalOutputTokens: number;
-  totalCost: number;
-  messageCount: number;
-} {
-  const startDate = `${month}-01`;
-  // End date: first day of next month
-  const [y, m] = month.split('-').map(Number);
-  const nextMonth =
-    m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
-  const endDate = `${nextMonth}-01`;
-
-  const row = db
-    .prepare(
-      `SELECT COALESCE(SUM(total_input_tokens), 0) as totalInputTokens,
-              COALESCE(SUM(total_output_tokens), 0) as totalOutputTokens,
-              COALESCE(SUM(total_cost_usd), 0) as totalCost,
-              COALESCE(SUM(message_count), 0) as messageCount
-       FROM daily_usage WHERE user_id = ? AND date >= ? AND date < ?`,
-    )
-    .get(userId, startDate, endDate) as {
-    totalInputTokens: number;
-    totalOutputTokens: number;
-    totalCost: number;
-    messageCount: number;
-  };
-  return row;
-}
-
-export function correctMonthlyUsage(
-  userId: string,
-  month: string,
-  inputTokens: number,
-  outputTokens: number,
-  costUsd: number,
-  messageCount: number,
-): void {
-  const now = new Date().toISOString();
-  db.prepare(
-    `INSERT INTO monthly_usage (user_id, month, total_input_tokens, total_output_tokens, total_cost_usd, message_count, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(user_id, month) DO UPDATE SET
-       total_input_tokens = excluded.total_input_tokens,
-       total_output_tokens = excluded.total_output_tokens,
-       total_cost_usd = excluded.total_cost_usd,
-       message_count = excluded.message_count,
-       updated_at = excluded.updated_at`,
-  ).run(userId, month, inputTokens, outputTokens, costUsd, messageCount, now);
-}
-
-export function getSubscriptionHistory(
-  userId: string,
-): (UserSubscription & { plan_name: string })[] {
-  return (
-    db
-      .prepare(
-        `SELECT s.*, p.name as plan_name FROM user_subscriptions s
-         JOIN billing_plans p ON s.plan_id = p.id
-         WHERE s.user_id = ?
-         ORDER BY s.created_at DESC`,
-      )
-      .all(userId) as Record<string, unknown>[]
-  ).map((row) => ({
-    ...mapSubscriptionRow(row),
-    plan_name: String(row.plan_name),
-  }));
-}
-
-export function getRedeemCodeUsageDetails(
-  code: string,
-): Array<{ user_id: string; username: string; redeemed_at: string }> {
-  return db
-    .prepare(
-      `SELECT rcu.user_id, u.username, rcu.redeemed_at
-       FROM redeem_code_usage rcu
-       LEFT JOIN users u ON u.id = rcu.user_id
-       WHERE rcu.code = ?
-       ORDER BY rcu.redeemed_at DESC`,
-    )
-    .all(code) as Array<{
-    user_id: string;
-    username: string;
-    redeemed_at: string;
-  }>;
-}
-
-export function getDashboardStats(): {
-  activeUsers: number;
-  totalUsers: number;
-  planDistribution: Array<{ plan_name: string; count: number }>;
-  todayCost: number;
-  monthCost: number;
-  activeSubscriptions: number;
-} {
-  const today = new Date().toISOString().slice(0, 10);
-  const month = new Date().toISOString().slice(0, 7);
-
-  const totalUsers = (
-    db
-      .prepare("SELECT COUNT(*) as cnt FROM users WHERE status != 'deleted'")
-      .get() as { cnt: number }
-  ).cnt;
-
-  const activeUsers = (
-    db
-      .prepare(
-        'SELECT COUNT(DISTINCT user_id) as cnt FROM daily_usage WHERE date = ?',
-      )
-      .get(today) as { cnt: number }
-  ).cnt;
-
-  const planDistribution = db
-    .prepare(
-      `SELECT COALESCE(p.name, '无套餐') as plan_name, COUNT(*) as count
-       FROM users u
-       LEFT JOIN user_subscriptions s ON s.user_id = u.id AND s.status = 'active'
-       LEFT JOIN billing_plans p ON p.id = s.plan_id
-       WHERE u.status != 'deleted'
-       GROUP BY p.name
-       ORDER BY count DESC`,
-    )
-    .all() as Array<{ plan_name: string; count: number }>;
-
-  const todayCost = (
-    db
-      .prepare(
-        'SELECT COALESCE(SUM(total_cost_usd), 0) as total FROM daily_usage WHERE date = ?',
-      )
-      .get(today) as { total: number }
-  ).total;
-
-  const monthCost = (
-    db
-      .prepare(
-        'SELECT COALESCE(SUM(total_cost_usd), 0) as total FROM monthly_usage WHERE month = ?',
-      )
-      .get(month) as { total: number }
-  ).total;
-
-  const activeSubscriptions = (
-    db
-      .prepare(
-        "SELECT COUNT(*) as cnt FROM user_subscriptions WHERE status = 'active'",
-      )
-      .get() as { cnt: number }
-  ).cnt;
-
-  return {
-    activeUsers,
-    totalUsers,
-    planDistribution,
-    todayCost,
-    monthCost,
-    activeSubscriptions,
-  };
-}
-
-export function getRevenueTrend(
-  months = 6,
-): Array<{ month: string; revenue: number; users: number }> {
-  return db
-    .prepare(
-      `SELECT month, SUM(total_cost_usd) as revenue, COUNT(DISTINCT user_id) as users
-       FROM monthly_usage
-       GROUP BY month
-       ORDER BY month DESC
-       LIMIT ?`,
-    )
-    .all(months) as Array<{ month: string; revenue: number; users: number }>;
-}
-
-export function batchAssignPlan(
-  userIds: string[],
-  planId: string,
-  actorId: string,
-  durationDays?: number,
-): number {
-  const plan = getBillingPlan(planId);
-  if (!plan) throw new Error(`Plan not found: ${planId}`);
-
-  const now = new Date();
-  const expiresAt = durationDays
-    ? new Date(now.getTime() + durationDays * 24 * 60 * 60 * 1000).toISOString()
-    : null;
-
-  let count = 0;
-  const txn = db.transaction(() => {
-    for (const userId of userIds) {
-      // Cancel existing
-      db.prepare(
-        "UPDATE user_subscriptions SET status = 'cancelled', cancelled_at = ? WHERE user_id = ? AND status = 'active'",
-      ).run(now.toISOString(), userId);
-
-      const subId = `sub_${userId}_${Date.now()}_${count}`;
-      db.prepare(
-        `INSERT INTO user_subscriptions (id, user_id, plan_id, status, started_at, expires_at, auto_renew, created_at)
-         VALUES (?, ?, ?, 'active', ?, ?, 0, ?)`,
-      ).run(
-        subId,
-        userId,
-        planId,
-        now.toISOString(),
-        expiresAt,
-        now.toISOString(),
-      );
-
-      db.prepare('UPDATE users SET subscription_plan_id = ? WHERE id = ?').run(
-        planId,
-        userId,
-      );
-
-      logBillingAudit('subscription_assigned', userId, actorId, {
-        planId,
-        planName: plan.name,
-        durationDays: durationDays ?? null,
-        batch: true,
-      });
-      count++;
-    }
-  });
-  txn();
-  return count;
-}
-
-export function getPlanSubscriberCount(planId: string): number {
-  const row = db
-    .prepare(
-      "SELECT COUNT(*) as cnt FROM user_subscriptions WHERE plan_id = ? AND status = 'active'",
-    )
-    .get(planId) as { cnt: number };
-  return row.cnt;
-}
-
-export function getAllPlanSubscriberCounts(): Record<string, number> {
-  const rows = db
-    .prepare(
-      "SELECT plan_id, COUNT(*) as cnt FROM user_subscriptions WHERE status = 'active' GROUP BY plan_id",
-    )
-    .all() as Array<{ plan_id: string; cnt: number }>;
-  const result: Record<string, number> = {};
-  for (const row of rows) {
-    result[row.plan_id] = row.cnt;
-  }
-  return result;
-}
-
-/**
- * Atomically increment redeem code usage with optimistic locking.
- * Returns true if the increment succeeded (used_count < max_uses).
- */
-export function tryIncrementRedeemCodeUsage(
-  code: string,
-  userId: string,
-): boolean {
-  const now = new Date().toISOString();
-  return db.transaction(() => {
-    const result = db
-      .prepare(
-        'UPDATE redeem_codes SET used_count = used_count + 1 WHERE code = ? AND used_count < max_uses',
-      )
-      .run(code);
-    if (result.changes === 0) return false;
-    db.prepare(
-      'INSERT INTO redeem_code_usage (code, user_id, redeemed_at) VALUES (?, ?, ?)',
-    ).run(code, userId, now);
-    return true;
-  })();
 }
 
 // ───────────────── Turns ─────────────────

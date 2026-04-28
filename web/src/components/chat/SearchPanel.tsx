@@ -21,7 +21,7 @@ interface SearchResponse {
 }
 
 interface SearchPanelProps {
-  groupJid: string;
+  sessionId: string;
 }
 
 const TIME_RANGES = [
@@ -48,7 +48,7 @@ function buildExcerpt(content: string, query: string): { before: string; match: 
   return { before, match, after };
 }
 
-export function SearchPanel({ groupJid }: SearchPanelProps) {
+export function SearchPanel({ sessionId }: SearchPanelProps) {
   const loadMessagesAroundTimestamp = useChatStore((s) => s.loadMessagesAroundTimestamp);
   const [query, setQuery] = useState('');
   const [days, setDays] = useState(7);
@@ -86,7 +86,7 @@ export function SearchPanel({ groupJid }: SearchPanelProps) {
         const params = new URLSearchParams({ q, limit: '50', offset: String(offset) });
         if (daysFilter > 0) params.set('days', String(daysFilter));
         const data = await api.get<SearchResponse>(
-          `/api/groups/${encodeURIComponent(groupJid)}/messages/search?${params}`,
+          `/api/sessions/${encodeURIComponent(sessionId)}/messages/search?${params}`,
         );
 
         if (isLoadMore) {
@@ -104,7 +104,7 @@ export function SearchPanel({ groupJid }: SearchPanelProps) {
         setLoadingMore(false);
       }
     },
-    [groupJid],
+    [sessionId],
   );
 
   const handleInputChange = useCallback(
@@ -243,7 +243,7 @@ export function SearchPanel({ groupJid }: SearchPanelProps) {
             {results.map((result) => (
               <div
                 key={result.id}
-                onClick={() => loadMessagesAroundTimestamp(groupJid, result.timestamp, result.id)}
+                onClick={() => loadMessagesAroundTimestamp(sessionId, result.timestamp, result.id)}
                 className="grid items-center px-3 py-2 hover:bg-accent/50 transition-colors cursor-pointer border-b border-border/50"
                 style={{ gridTemplateColumns: '3.5rem 6rem 1fr' }}
               >

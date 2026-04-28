@@ -45,6 +45,15 @@ export function SystemInfo({ status }: SystemInfoProps) {
           </div>
         )}
 
+        {status.activeRuntimes !== undefined && (
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-slate-500">活跃 Runtime</span>
+            <span className="text-foreground font-medium">
+              {status.activeRuntimes}
+            </span>
+          </div>
+        )}
+
         <div className="flex items-center justify-between text-sm">
           <span className="text-slate-500">飞书连接</span>
           <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-600">

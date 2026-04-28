@@ -7,10 +7,10 @@ interface TaskInlineCardProps {
   toolUseId: string;
   description: string;
   startTime: number;
-  groupJid: string;
+  sessionId: string;
 }
 
-export function TaskInlineCard({ toolUseId, description, startTime, groupJid }: TaskInlineCardProps) {
+export function TaskInlineCard({ toolUseId, description, startTime, sessionId }: TaskInlineCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const taskInfo = useChatStore(s => s.sdkTasks[toolUseId]);
@@ -156,7 +156,7 @@ export function TaskInlineCard({ toolUseId, description, startTime, groupJid }: 
                   content={streaming.partialText.length > 3000
                     ? '...' + streaming.partialText.slice(-2500)
                     : streaming.partialText}
-                  groupJid={groupJid}
+                  sessionId={sessionId}
                   variant="chat"
                 />
               </div>

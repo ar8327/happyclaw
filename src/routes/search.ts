@@ -7,6 +7,8 @@ import {
   getAllRegisteredGroups,
   searchMessages,
   countSearchResults,
+  getSessionRecord,
+  listAgentsByJid,
 } from '../db.js';
 
 const searchRoutes = new Hono<{ Variables: Variables }>();
@@ -37,28 +39,58 @@ searchRoutes.get('/messages', authMiddleware, (c) => {
 
   // Collect all JIDs the user can access
   const allGroups = getAllRegisteredGroups();
-  const accessibleJids: string[] = [];
+  const accessibleJids = new Set<string>();
   const groupInfoMap = new Map<
     string,
-    { folder: string; name?: string }
+    {
+      folder: string;
+      name?: string;
+      session_id: string;
+      session_folder: string;
+      session_name: string;
+    }
   >();
 
   for (const [jid, group] of Object.entries(allGroups)) {
     if (canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid })) {
-      accessibleJids.push(jid);
+      accessibleJids.add(jid);
+      const sessionId = `main:${group.folder}`;
+      const session = getSessionRecord(sessionId);
       groupInfoMap.set(jid, {
         folder: group.folder,
         name: group.name,
+        session_id: session?.id || sessionId,
+        session_folder: group.folder,
+        session_name: session?.name || group.name || group.folder,
       });
+
+      if (!jid.startsWith('web:')) continue;
+
+      for (const agent of listAgentsByJid(jid)) {
+        if (agent.kind !== 'conversation') continue;
+        const workerSessionId = `worker:${agent.id}`;
+        const workerSession = getSessionRecord(workerSessionId);
+        const workerJid = `${jid}#agent:${agent.id}`;
+        accessibleJids.add(workerJid);
+        groupInfoMap.set(workerJid, {
+          folder: group.folder,
+          name: `${group.name} / ${agent.name}`,
+          session_id: workerSession?.id || workerSessionId,
+          session_folder: group.folder,
+          session_name: workerSession?.name || agent.name,
+        });
+      }
     }
   }
 
-  if (accessibleJids.length === 0) {
+  const searchableJids = Array.from(accessibleJids);
+
+  if (searchableJids.length === 0) {
     return c.json({ results: [], total: 0, hasMore: false });
   }
 
-  const results = searchMessages(accessibleJids, q, limit, offset, sinceTs);
-  const total = countSearchResults(accessibleJids, q, sinceTs);
+  const results = searchMessages(searchableJids, q, limit, offset, sinceTs);
+  const total = countSearchResults(searchableJids, q, sinceTs);
   const hasMore = offset + results.length < total;
 
   // Enrich results with group info
@@ -66,7 +98,9 @@ searchRoutes.get('/messages', authMiddleware, (c) => {
     const info = groupInfoMap.get(r.chat_jid);
     return {
       ...r,
-      group_folder: info?.folder,
+      session_id: info?.session_id,
+      session_folder: info?.session_folder,
+      session_name: info?.session_name,
       group_name: info?.name,
     };
   });

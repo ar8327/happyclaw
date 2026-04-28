@@ -32,7 +32,7 @@ import { Badge } from '../shared/Badge';
 import { FileUploadZone } from './FileUploadZone';
 
 interface FilePanelProps {
-  groupJid: string;
+  sessionId: string;
   onClose?: () => void;
 }
 
@@ -101,11 +101,11 @@ function formatSize(bytes: number): string {
 // ─── Image Preview Overlay ──────────────────────────────────────
 
 function ImagePreview({
-  groupJid,
+  sessionId,
   file,
   onClose,
 }: {
-  groupJid: string;
+  sessionId: string;
   file: FileEntry;
   onClose: () => void;
 }) {
@@ -117,7 +117,7 @@ function ImagePreview({
     return () => window.removeEventListener('keydown', handleEsc);
   }, [onClose]);
 
-  const previewUrl = withBasePath(`/api/groups/${encodeURIComponent(groupJid)}/files/preview/${toBase64Url(file.path)}`);
+  const previewUrl = withBasePath(`/api/sessions/${encodeURIComponent(sessionId)}/files/preview/${toBase64Url(file.path)}`);
 
   return createPortal(
     <div
@@ -148,11 +148,11 @@ function ImagePreview({
 // ─── Text Editor Overlay ────────────────────────────────────────
 
 function TextEditor({
-  groupJid,
+  sessionId,
   file,
   onClose,
 }: {
-  groupJid: string;
+  sessionId: string;
   file: FileEntry;
   onClose: () => void;
 }) {
@@ -185,19 +185,19 @@ function TextEditor({
     let cancelled = false;
     (async () => {
       setLoading(true);
-      const text = await getFileContent(groupJid, file.path);
+      const text = await getFileContent(sessionId, file.path);
       if (!cancelled && text !== null) {
         setContent(text);
       }
       if (!cancelled) setLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [groupJid, file.path, getFileContent]);
+  }, [sessionId, file.path, getFileContent]);
 
   const handleSave_ = async () => {
     if (!dirty || saving) return;
     setSaving(true);
-    const ok = await saveFileContent(groupJid, file.path, content);
+    const ok = await saveFileContent(sessionId, file.path, content);
     setSaving(false);
     if (ok) setDirty(false);
   };
@@ -271,7 +271,7 @@ function TextEditor({
 
 // ─── Main FilePanel ─────────────────────────────────────────────
 
-export function FilePanel({ groupJid, onClose }: FilePanelProps) {
+export function FilePanel({ sessionId, onClose }: FilePanelProps) {
   const { files, currentPath, loading, loadFiles, deleteFile, createDirectory, navigateTo } =
     useFileStore();
 
@@ -293,35 +293,35 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
   const [previewFile, setPreviewFile] = useState<FileEntry | null>(null);
   const [editFile, setEditFile] = useState<FileEntry | null>(null);
 
-  const isStreaming = useChatStore((s) => !!s.streaming[groupJid]);
+  const isStreaming = useChatStore((s) => !!s.streaming[sessionId]);
   const canOpenLocalFolder = useAuthStore((s) => s.user?.role === 'admin');
   const prevStreamingRef = useRef(false);
 
-  const fileList = files[groupJid] || [];
-  const currentDir = currentPath[groupJid] || '';
+  const fileList = files[sessionId] || [];
+  const currentDir = currentPath[sessionId] || '';
 
   useEffect(() => {
-    if (groupJid) {
-      loadFiles(groupJid);
+    if (sessionId) {
+      loadFiles(sessionId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupJid]);
+  }, [sessionId]);
 
   // Agent 运行期间定时刷新文件列表；结束时做最终刷新
   useEffect(() => {
     if (isStreaming) {
       prevStreamingRef.current = true;
       const timer = setInterval(() => {
-        loadFiles(groupJid, currentDir);
+        loadFiles(sessionId, currentDir);
       }, 5000);
       return () => clearInterval(timer);
     }
     // streaming 刚结束 → 最终刷新
     if (prevStreamingRef.current) {
       prevStreamingRef.current = false;
-      loadFiles(groupJid, currentDir);
+      loadFiles(sessionId, currentDir);
     }
-  }, [isStreaming, groupJid, currentDir, loadFiles]);
+  }, [isStreaming, sessionId, currentDir, loadFiles]);
 
   const sortedFiles = useMemo(() => {
     return [...fileList].sort((a, b) => {
@@ -337,15 +337,15 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
 
   const handleNavigate = (index: number) => {
     if (index === -1) {
-      navigateTo(groupJid, '');
+      navigateTo(sessionId, '');
     } else {
-      navigateTo(groupJid, breadcrumbs.slice(0, index + 1).join('/'));
+      navigateTo(sessionId, breadcrumbs.slice(0, index + 1).join('/'));
     }
   };
 
   const handleItemClick = useCallback((item: FileEntry) => {
     if (item.type === 'directory') {
-      navigateTo(groupJid, item.path);
+      navigateTo(sessionId, item.path);
       return;
     }
 
@@ -362,11 +362,11 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
       setEditFile(item);
       return;
     }
-  }, [groupJid, navigateTo]);
+  }, [sessionId, navigateTo]);
 
   const handleDownload = (item: FileEntry) => {
     const encoded = toBase64Url(item.path);
-    const url = withBasePath(`/api/groups/${encodeURIComponent(groupJid)}/files/download/${encoded}`);
+    const url = withBasePath(`/api/sessions/${encodeURIComponent(sessionId)}/files/download/${encoded}`);
     const a = document.createElement('a');
     a.href = url;
     a.download = item.name;
@@ -383,7 +383,7 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
   const handleDeleteConfirm = async () => {
     setDeleteLoading(true);
     try {
-      const ok = await deleteFile(groupJid, deleteModal.path);
+      const ok = await deleteFile(sessionId, deleteModal.path);
       if (ok) {
         setDeleteModal({ open: false, path: '', name: '', isDir: false });
       }
@@ -393,14 +393,14 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
   };
 
   const handleRefresh = () => {
-    loadFiles(groupJid, currentDir);
+    loadFiles(sessionId, currentDir);
   };
 
   const handleOpenLocalFolder = async () => {
     setOpenDirLoading(true);
     setOpenDirError(null);
     try {
-      await api.post(`/api/groups/${encodeURIComponent(groupJid)}/files/open-directory`, {
+      await api.post(`/api/sessions/${encodeURIComponent(sessionId)}/files/open-directory`, {
         path: currentDir,
       });
     } catch (err) {
@@ -426,7 +426,7 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
     if (!name) return;
     setCreateDirLoading(true);
     try {
-      await createDirectory(groupJid, currentDir, name);
+      await createDirectory(sessionId, currentDir, name);
       setCreateDirModal(false);
     } finally {
       setCreateDirLoading(false);
@@ -625,7 +625,7 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
           <FolderPlus className="w-4 h-4" />
           新建文件夹
         </Button>
-        <FileUploadZone groupJid={groupJid} />
+        <FileUploadZone sessionId={sessionId} />
       </div>
 
       {/* Create Directory Dialog */}
@@ -677,7 +677,7 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
       {/* Image Preview Overlay */}
       {previewFile && (
         <ImagePreview
-          groupJid={groupJid}
+          sessionId={sessionId}
           file={previewFile}
           onClose={() => setPreviewFile(null)}
         />
@@ -686,7 +686,7 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
       {/* Text Editor Overlay */}
       {editFile && (
         <TextEditor
-          groupJid={groupJid}
+          sessionId={sessionId}
           file={editFile}
           onClose={() => setEditFile(null)}
         />

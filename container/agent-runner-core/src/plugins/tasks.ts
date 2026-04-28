@@ -160,7 +160,10 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
             const allTasks = JSON.parse(fs.readFileSync(tasksFile, 'utf-8'));
             const tasks = hasCrossGroupAccess
               ? allTasks
-              : allTasks.filter((t: { groupFolder: string }) => t.groupFolder === ctx.groupFolder);
+              : allTasks.filter(
+                (t: { workspaceFolder?: string; groupFolder?: string }) =>
+                  (t.workspaceFolder || t.groupFolder) === ctx.groupFolder,
+              );
             if (tasks.length === 0) {
               return { content: 'No scheduled tasks found.' };
             }

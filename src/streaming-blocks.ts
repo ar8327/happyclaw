@@ -38,6 +38,23 @@ export interface StreamingBlock {
 const MAX_BLOCKS = 200;
 const MAX_TEXT_LENGTH = 2000;
 
+function describeLifecycleEvent(event: StreamEvent): string | null {
+  switch (event.phase) {
+    case 'compact_started':
+      return event.trigger === 'synthetic_threshold'
+        ? '开始 synthetic compact'
+        : '开始 compact';
+    case 'compact_completed':
+      return 'compact 完成';
+    case 'archive_started':
+      return '开始 archive';
+    case 'archive_completed':
+      return 'archive 完成';
+    default:
+      return null;
+  }
+}
+
 // ── Accumulator ──
 
 interface ActiveToolEntry {
@@ -158,6 +175,22 @@ export class StreamingBlockAccumulator {
             type: 'status',
             timestamp: Date.now(),
             statusText: event.statusText,
+          });
+        }
+        break;
+      }
+
+      case 'lifecycle': {
+        this.finalizeTextBlock();
+        this.finalizeThinkingBlock();
+        const lifecycleText = describeLifecycleEvent(event);
+        this.systemStatus = lifecycleText;
+        if (lifecycleText) {
+          this.pushBlock({
+            id: crypto.randomUUID(),
+            type: 'status',
+            timestamp: Date.now(),
+            statusText: lifecycleText,
           });
         }
         break;

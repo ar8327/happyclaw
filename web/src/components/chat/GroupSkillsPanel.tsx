@@ -21,19 +21,19 @@ interface Skill {
 }
 
 interface GroupSkillsPanelProps {
-  groupJid: string;
+  sessionId: string;
   onClose?: () => void;
 }
 
-export function GroupSkillsPanel({ groupJid }: GroupSkillsPanelProps) {
-  const group = useChatStore(s => s.groups[groupJid]);
+export function GroupSkillsPanel({ sessionId }: GroupSkillsPanelProps) {
+  const session = useChatStore(s => s.groups[sessionId]);
   const [allSkills, setAllSkills] = useState<Skill[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string> | null>(null); // null = 全部选中
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
-  const [activationMode, setActivationMode] = useState(group?.activation_mode ?? 'auto');
+  const [activationMode, setActivationMode] = useState(session?.activation_mode ?? 'auto');
   const [savingMode, setSavingMode] = useState(false);
 
   // 加载可用 skills
@@ -49,34 +49,34 @@ export function GroupSkillsPanel({ groupJid }: GroupSkillsPanelProps) {
 
   // 同步 activation_mode
   useEffect(() => {
-    if (group?.activation_mode) setActivationMode(group.activation_mode);
-  }, [group?.activation_mode]);
+    if (session?.activation_mode) setActivationMode(session.activation_mode);
+  }, [session?.activation_mode]);
 
   const handleActivationModeChange = async (mode: string) => {
     setActivationMode(mode as typeof activationMode);
     setSavingMode(true);
     try {
-      await api.patch(`/api/groups/${encodeURIComponent(groupJid)}`, { activation_mode: mode });
+      await api.patch(`/api/sessions/${encodeURIComponent(sessionId)}`, { activation_mode: mode });
       useChatStore.setState(s => {
-        const g = s.groups[groupJid];
+        const g = s.groups[sessionId];
         if (!g) return s;
-        return { ...s, groups: { ...s.groups, [groupJid]: { ...g, activation_mode: mode as typeof activationMode } } };
+        return { ...s, groups: { ...s.groups, [sessionId]: { ...g, activation_mode: mode as typeof activationMode } } };
       });
     } catch { /* ignore */ }
     finally { setSavingMode(false); }
   };
 
-  // 从群组数据初始化选中状态
+  // 从会话数据初始化选中状态
   useEffect(() => {
-    if (!group) return;
-    const ss = group.selected_skills;
+    if (!session) return;
+    const ss = session.selected_skills;
     if (ss === null || ss === undefined) {
       setSelectedIds(null); // 全部选中
     } else {
       setSelectedIds(new Set(ss));
     }
     setDirty(false);
-  }, [group?.selected_skills]);
+  }, [session?.selected_skills]);
 
   const allSelected = selectedIds === null;
 
@@ -118,14 +118,14 @@ export function GroupSkillsPanel({ groupJid }: GroupSkillsPanelProps) {
     setSaving(true);
     try {
       const payload = allSelected ? null : Array.from(selectedIds!);
-      await api.patch(`/api/groups/${encodeURIComponent(groupJid)}`, { selected_skills: payload });
+      await api.patch(`/api/sessions/${encodeURIComponent(sessionId)}`, { selected_skills: payload });
       // 更新本地 store
       useChatStore.setState(s => {
-        const g = s.groups[groupJid];
+        const g = s.groups[sessionId];
         if (!g) return s;
         return {
           ...s,
-          groups: { ...s.groups, [groupJid]: { ...g, selected_skills: payload } },
+          groups: { ...s.groups, [sessionId]: { ...g, selected_skills: payload } },
         };
       });
       setDirty(false);
@@ -194,6 +194,9 @@ export function GroupSkillsPanel({ groupJid }: GroupSkillsPanelProps) {
         <p className="text-[11px] text-muted-foreground mt-1">
           {ACTIVATION_MODES.find(m => m.value === activationMode)?.desc}
         </p>
+        <p className="text-[11px] text-muted-foreground mt-1">
+          这里修改的是当前会话的默认响应模式，已绑定到该会话的 IM 渠道会同步更新；单独改某个渠道时，以绑定页里的配置为准。
+        </p>
       </div>
 
       <div className="flex-1 overflow-y-auto">
@@ -233,7 +236,7 @@ export function GroupSkillsPanel({ groupJid }: GroupSkillsPanelProps) {
 
       <div className="px-4 py-2 border-t border-border">
         <p className="text-[11px] text-muted-foreground">
-          更改将在下次容器启动时生效
+          更改将在下次 Runtime 启动时生效
         </p>
       </div>
     </div>

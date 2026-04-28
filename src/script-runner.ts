@@ -28,10 +28,11 @@ const MAX_BUFFER = 1024 * 1024; // 1MB
 
 export async function runScript(
   command: string,
-  groupFolder: string,
+  workspaceFolder: string,
+  cwdOverride?: string,
 ): Promise<ScriptRunResult> {
   const { scriptTimeout } = getSystemSettings();
-  const cwd = path.join(GROUPS_DIR, groupFolder);
+  const cwd = cwdOverride?.trim() || path.join(GROUPS_DIR, workspaceFolder);
   const startTime = Date.now();
 
   activeScriptCount++;
@@ -50,7 +51,8 @@ export async function runScript(
             TZ:
               process.env.TZ ||
               Intl.DateTimeFormat().resolvedOptions().timeZone,
-            GROUP_FOLDER: groupFolder,
+            WORKSPACE_FOLDER: workspaceFolder,
+            GROUP_FOLDER: workspaceFolder,
             HOME: cwd,
           },
           shell: '/bin/sh',
@@ -62,7 +64,7 @@ export async function runScript(
 
           if (timedOut) {
             logger.warn(
-              { command: command.slice(0, 100), groupFolder, durationMs },
+              { command: command.slice(0, 100), workspaceFolder, durationMs },
               'Script timed out',
             );
           }
@@ -81,7 +83,7 @@ export async function runScript(
     activeScriptCount--;
     const durationMs = Date.now() - startTime;
     logger.error(
-      { command: command.slice(0, 100), groupFolder, err },
+      { command: command.slice(0, 100), workspaceFolder, err },
       'Script exec() threw synchronously',
     );
     return {

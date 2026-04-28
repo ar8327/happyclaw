@@ -21,7 +21,7 @@ export function ImGeneralCard({ setNotice, setError }: ImGeneralCardProps) {
   const loadConfig = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await api.get<ImGeneralConfig>('/api/config/user-im/general');
+      const data = await api.get<ImGeneralConfig>('/api/config/im/general');
       setConfig(data);
     } catch {
       // Default config if endpoint fails
@@ -65,7 +65,7 @@ export function ImGeneralCard({ setNotice, setError }: ImGeneralCardProps) {
             setNotice(null);
             setError(null);
             try {
-              const data = await api.put<ImGeneralConfig>('/api/config/user-im/general', {
+              const data = await api.put<ImGeneralConfig>('/api/config/im/general', {
                 autoUnbindOnSendFailure: v,
               });
               setConfig(data);

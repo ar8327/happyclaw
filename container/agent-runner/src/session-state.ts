@@ -6,6 +6,69 @@ type PermissionMode = string;
 /** Channels not seen for 24 hours are considered stale */
 const IM_CHANNEL_TTL_MS = 24 * 60 * 60 * 1000;
 const INTERRUPT_GRACE_WINDOW_MS = 10_000;
+const HOST_RUNTIME_STATE_KEY = '__hostRuntime';
+
+function parsePendingRoutingRecentImChannels(
+  value: unknown,
+): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const channels = Array.from(
+    new Set(
+      value.filter(
+        (channel): channel is string =>
+          typeof channel === 'string' && channel.trim().length > 0,
+      ),
+    ),
+  );
+  return channels.length > 0 ? channels : [];
+}
+
+function splitHostRuntimeState(
+  providerState: Record<string, unknown> | undefined,
+): {
+  providerState: Record<string, unknown> | undefined;
+  pendingRoutingRecentImChannels: string[] | null;
+} {
+  if (!providerState) {
+    return {
+      providerState: undefined,
+      pendingRoutingRecentImChannels: null,
+    };
+  }
+  const hostState =
+    providerState[HOST_RUNTIME_STATE_KEY]
+      && typeof providerState[HOST_RUNTIME_STATE_KEY] === 'object'
+      && !Array.isArray(providerState[HOST_RUNTIME_STATE_KEY])
+      ? providerState[HOST_RUNTIME_STATE_KEY] as Record<string, unknown>
+      : null;
+  const pendingRoutingRecentImChannels = parsePendingRoutingRecentImChannels(
+    hostState?.pendingRoutingRecentImChannels,
+  );
+  const { [HOST_RUNTIME_STATE_KEY]: _hostState, ...providerStateWithoutHost } =
+    providerState;
+  return {
+    providerState:
+      Object.keys(providerStateWithoutHost).length > 0
+        ? providerStateWithoutHost
+        : undefined,
+    pendingRoutingRecentImChannels,
+  };
+}
+
+function mergeHostRuntimeState(
+  providerState: Record<string, unknown> | undefined,
+  pendingRoutingRecentImChannels: string[] | null,
+): Record<string, unknown> | undefined {
+  const merged: Record<string, unknown> = providerState
+    ? { ...providerState }
+    : {};
+  if (pendingRoutingRecentImChannels !== null) {
+    merged[HOST_RUNTIME_STATE_KEY] = {
+      pendingRoutingRecentImChannels,
+    };
+  }
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
 
 /**
  * Explicit session state — replaces 5 module-level variables that were
@@ -16,6 +79,9 @@ export class SessionState {
   recentImChannels = new Set<string>();
   imChannelLastSeen = new Map<string, number>();
   private imPersistTimer: ReturnType<typeof setTimeout> | null = null;
+  private providerState?: Record<string, unknown>;
+  private lastMessageCursor: string | null = null;
+  private pendingRoutingRecentImChannels: string[] | null = null;
 
   /** Load persisted IM channels from disk (with TTL filtering) */
   loadImChannels(channelsFile: string): void {
@@ -41,6 +107,52 @@ export class SessionState {
       if (pruned) this.persistImChannels(channelsFile);
     } catch {
       // Ignore corrupt file
+    }
+  }
+
+  hydrate(snapshot?: {
+    providerState?: Record<string, unknown>;
+    recentImChannels?: string[];
+    imChannelLastSeen?: Record<string, number>;
+    currentPermissionMode?: string | null;
+    lastMessageCursor?: string | null;
+  }): void {
+    if (!snapshot) return;
+    if (
+      snapshot.providerState
+      && typeof snapshot.providerState === 'object'
+      && !Array.isArray(snapshot.providerState)
+    ) {
+      const parsed = splitHostRuntimeState({
+        ...snapshot.providerState,
+      });
+      this.providerState = parsed.providerState;
+      this.pendingRoutingRecentImChannels =
+        parsed.pendingRoutingRecentImChannels;
+    }
+    if (Array.isArray(snapshot.recentImChannels)) {
+      for (const channel of snapshot.recentImChannels) {
+        if (typeof channel !== 'string' || !channel) continue;
+        this.recentImChannels.add(channel);
+      }
+    }
+    if (snapshot.imChannelLastSeen) {
+      for (const [channel, lastSeen] of Object.entries(snapshot.imChannelLastSeen)) {
+        if (!channel || typeof lastSeen !== 'number' || !Number.isFinite(lastSeen)) {
+          continue;
+        }
+        this.recentImChannels.add(channel);
+        this.imChannelLastSeen.set(channel, lastSeen);
+      }
+    }
+    if (typeof snapshot.currentPermissionMode === 'string' && snapshot.currentPermissionMode) {
+      this.currentPermissionMode = snapshot.currentPermissionMode;
+    }
+    if ('lastMessageCursor' in snapshot) {
+      this.lastMessageCursor =
+        typeof snapshot.lastMessageCursor === 'string'
+          ? snapshot.lastMessageCursor
+          : null;
     }
   }
 
@@ -106,5 +218,92 @@ export class SessionState {
 
   isWithinInterruptGraceWindow(): boolean {
     return this.lastInterruptRequestedAt > 0 && Date.now() - this.lastInterruptRequestedAt <= INTERRUPT_GRACE_WINDOW_MS;
+  }
+
+  applyRuntimeSnapshot(snapshot?: {
+    providerState?: Record<string, unknown>;
+    lastMessageCursor?: string | null;
+  }): void {
+    if (!snapshot) return;
+    if (Object.prototype.hasOwnProperty.call(snapshot, 'providerState')) {
+      if (
+        snapshot.providerState
+        && typeof snapshot.providerState === 'object'
+        && !Array.isArray(snapshot.providerState)
+      ) {
+        const parsed = splitHostRuntimeState({
+          ...snapshot.providerState,
+        });
+        this.providerState = parsed.providerState;
+        this.pendingRoutingRecentImChannels =
+          parsed.pendingRoutingRecentImChannels;
+      } else {
+        this.providerState = undefined;
+        this.pendingRoutingRecentImChannels = null;
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(snapshot, 'lastMessageCursor')) {
+      this.lastMessageCursor =
+        typeof snapshot.lastMessageCursor === 'string'
+          ? snapshot.lastMessageCursor
+          : null;
+    }
+  }
+
+  getProviderState<T extends Record<string, unknown>>(): T | undefined {
+    return this.providerState as T | undefined;
+  }
+
+  setPendingRoutingRecentImChannels(channels: string[] | null): void {
+    this.pendingRoutingRecentImChannels =
+      channels === null
+        ? null
+        : parsePendingRoutingRecentImChannels(channels) || [];
+  }
+
+  takePendingRoutingRecentImChannels(): string[] | null {
+    const channels = this.pendingRoutingRecentImChannels;
+    this.pendingRoutingRecentImChannels = null;
+    return channels ? [...channels] : channels;
+  }
+
+  getLastMessageCursor(): string | null {
+    return this.lastMessageCursor;
+  }
+
+  snapshot(overrides?: {
+    providerSessionId?: string;
+    resumeAnchor?: string;
+    providerState?: Record<string, unknown>;
+    lastMessageCursor?: string | null;
+  }): {
+    providerSessionId?: string;
+    resumeAnchor?: string;
+    providerState?: Record<string, unknown>;
+    recentImChannels: string[];
+    imChannelLastSeen: Record<string, number>;
+    currentPermissionMode: string;
+    lastMessageCursor?: string | null;
+  } {
+    const hasProviderStateOverride =
+      overrides && Object.prototype.hasOwnProperty.call(overrides, 'providerState');
+    const hasLastMessageCursorOverride =
+      overrides && Object.prototype.hasOwnProperty.call(overrides, 'lastMessageCursor');
+    return {
+      providerSessionId: overrides?.providerSessionId,
+      resumeAnchor: overrides?.resumeAnchor,
+      providerState: mergeHostRuntimeState(
+        hasProviderStateOverride
+          ? overrides?.providerState
+          : this.providerState,
+        this.pendingRoutingRecentImChannels,
+      ),
+      recentImChannels: [...this.recentImChannels],
+      imChannelLastSeen: Object.fromEntries(this.imChannelLastSeen.entries()),
+      currentPermissionMode: this.currentPermissionMode,
+      lastMessageCursor: hasLastMessageCursorOverride
+        ? overrides?.lastMessageCursor
+        : this.lastMessageCursor,
+    };
   }
 }

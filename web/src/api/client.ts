@@ -1,4 +1,4 @@
-import { replaceInApp, stripBasePath, withBasePath } from '../utils/url';
+import { replaceInApp, withBasePath } from '../utils/url';
 
 const REQUEST_TIMEOUT_MS = 8000;
 
@@ -41,20 +41,12 @@ export async function apiFetch<T>(path: string, options?: RequestInit & { timeou
   }
 
   if (res.status === 401) {
-    // Avoid redirect loop if already on the login page
-    const currentPath = stripBasePath(window.location.pathname);
-    if (!currentPath.startsWith('/login')) {
-      replaceInApp('/login');
-    }
     throw new Error('Unauthorized');
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     if (res.status === 403 && body.code === 'PASSWORD_CHANGE_REQUIRED') {
-      const currentPath = stripBasePath(window.location.pathname);
-      if (!currentPath.startsWith('/settings')) {
-        replaceInApp('/settings');
-      }
+      replaceInApp('/settings');
     }
     throw { status: res.status, message: body.error || res.statusText, body } as ApiError;
   }

@@ -8,6 +8,8 @@ interface TaskDetailProps {
 export function TaskDetail({ task }: TaskDetailProps) {
   const { logs, loadLogs } = useTasksStore();
   const taskLogs = logs[task.id] || [];
+  const sessionLabel =
+    task.session_name || task.session_folder || task.session_id || task.chat_jid;
 
   useEffect(() => {
     loadLogs(task.id);
@@ -66,6 +68,13 @@ export function TaskDetail({ task }: TaskDetailProps) {
           <div className="text-xs text-slate-500 mb-1">执行方式</div>
           <div className="text-sm text-foreground">
             {task.execution_type === 'script' ? '脚本' : 'Agent'}
+          </div>
+        </div>
+
+        <div>
+          <div className="text-xs text-slate-500 mb-1">会话</div>
+          <div className="text-sm text-foreground">
+            {sessionLabel}
           </div>
         </div>
 

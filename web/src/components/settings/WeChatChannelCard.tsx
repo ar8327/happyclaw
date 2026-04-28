@@ -31,7 +31,7 @@ export function WeChatChannelCard({ setNotice, setError }: WeChatChannelCardProp
   const loadConfig = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await api.get<UserWeChatConfig>('/api/config/user-im/wechat');
+      const data = await api.get<UserWeChatConfig>('/api/config/im/wechat');
       setConfig(data);
     } catch {
       setConfig(null);
@@ -49,7 +49,7 @@ export function WeChatChannelCard({ setNotice, setError }: WeChatChannelCardProp
     setNotice(null);
     setError(null);
     try {
-      const data = await api.put<UserWeChatConfig>('/api/config/user-im/wechat', { enabled: newEnabled });
+      const data = await api.put<UserWeChatConfig>('/api/config/im/wechat', { enabled: newEnabled });
       setConfig(data);
       setNotice(`微信渠道已${newEnabled ? '启用' : '停用'}`);
     } catch (err) {
@@ -64,7 +64,7 @@ export function WeChatChannelCard({ setNotice, setError }: WeChatChannelCardProp
     setError(null);
     setNotice(null);
     try {
-      await api.post('/api/config/user-im/wechat/disconnect');
+      await api.post('/api/config/im/wechat/disconnect');
       await loadConfig();
       setNotice('已退出微信登录');
     } catch (err) {

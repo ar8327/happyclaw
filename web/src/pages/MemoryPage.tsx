@@ -5,6 +5,8 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import { useMediaQuery } from '@/hooks/useMediaQuery';
+import { RuntimeEnvPanel } from '../components/chat/RuntimeEnvPanel';
+import { useCodexModels, type CodexModelOption } from '@/hooks/useCodexModels';
 
 interface MemorySource {
   path: string;
@@ -31,6 +33,41 @@ interface MemorySearchHit {
   hits: number;
   snippet: string;
 }
+
+interface MemoryRunnerOption {
+  id: string;
+  label: string;
+  can_serve_memory: boolean;
+  degradation_reasons: string[];
+}
+
+interface MemorySessionConfig {
+  id: string;
+  name: string;
+  runner_id: string;
+  runner_profile_id: string | null;
+  model: string | null;
+  thinking_effort: 'low' | 'medium' | 'high' | null;
+  owner_key: string | null;
+  cwd: string;
+  primary_session_folder: string | null;
+  owned_session_folders: string[];
+  owned_session_count: number;
+}
+
+interface RunnerProfileOption {
+  id: string;
+  runner_id: string;
+  name: string;
+  is_default: boolean;
+}
+
+const CLAUDE_MODEL_OPTIONS: CodexModelOption[] = [
+  { value: '__default__', label: '默认' },
+  { value: 'opus', label: 'Opus' },
+  { value: 'sonnet', label: 'Sonnet' },
+  { value: 'haiku', label: 'Haiku' },
+];
 
 function getErrorMessage(err: unknown, fallback: string): string {
   if (typeof err === 'object' && err !== null && 'message' in err) {
@@ -85,9 +122,15 @@ export function MemoryPage() {
     hasActiveSession: boolean;
     wrapupInProgress: boolean;
     globalSleepInProgress: boolean;
+    ownedSessionFolders: string[];
   } | null>(null);
   const [triggeringWrapup, setTriggeringWrapup] = useState(false);
   const [triggeringGlobalSleep, setTriggeringGlobalSleep] = useState(false);
+  const [memoryConfig, setMemoryConfig] = useState<MemorySessionConfig | null>(null);
+  const [memoryRunners, setMemoryRunners] = useState<MemoryRunnerOption[]>([]);
+  const [runnerProfiles, setRunnerProfiles] = useState<RunnerProfileOption[]>([]);
+  const [loadingMemoryConfig, setLoadingMemoryConfig] = useState(false);
+  const [savingMemoryConfig, setSavingMemoryConfig] = useState(false);
 
   const [showTimeouts, setShowTimeouts] = useState(false);
   const [timeoutValues, setTimeoutValues] = useState<{
@@ -100,8 +143,26 @@ export function MemoryPage() {
 
   const isMobile = useMediaQuery('(max-width: 1023px)');
   const [showContent, setShowContent] = useState(false);
+  const memoryRunnerId = memoryConfig?.runner_id || '';
+  const memoryUsesCodex = memoryRunnerId === 'codex';
+  const { models: codexModelOptions, loading: codexModelsLoading } = useCodexModels(memoryUsesCodex);
 
   const dirty = useMemo(() => content !== initialContent, [content, initialContent]);
+  const memoryRuntimeSession = useMemo(
+    () =>
+      memoryConfig
+        ? {
+            id: memoryConfig.id,
+            name: memoryConfig.name,
+            runner_id: memoryConfig.runner_id,
+            runner_profile_id: memoryConfig.runner_profile_id,
+            model: memoryConfig.model,
+            thinking_effort: memoryConfig.thinking_effort,
+            cwd: memoryConfig.cwd,
+          }
+        : null,
+    [memoryConfig],
+  );
 
   const filteredSources = useMemo(() => {
     const text = keyword.trim().toLowerCase();
@@ -190,10 +251,28 @@ export function MemoryPage() {
         hasActiveSession: boolean;
         wrapupInProgress: boolean;
         globalSleepInProgress: boolean;
+        ownedSessionFolders: string[];
       }>('/api/memory/status');
       setMemoryStatus(data);
     } catch {
       setMemoryStatus(null);
+    }
+  }, []);
+
+  const loadMemoryConfig = useCallback(async () => {
+    setLoadingMemoryConfig(true);
+    try {
+      const data = await api.get<{
+        session: MemorySessionConfig | null;
+        runners: MemoryRunnerOption[];
+      }>('/api/memory/config');
+      setMemoryConfig(data.session);
+      setMemoryRunners(data.runners);
+    } catch {
+      setMemoryConfig(null);
+      setMemoryRunners([]);
+    } finally {
+      setLoadingMemoryConfig(false);
     }
   }, []);
 
@@ -202,8 +281,8 @@ export function MemoryPage() {
     setError(null);
     setNotice(null);
     try {
-      await api.post<{ success: boolean; message: string }>('/api/memory/trigger-wrapup');
-      setNotice('会话整理已触发');
+      const result = await api.post<{ success: boolean; message: string }>('/api/memory/trigger-wrapup');
+      setNotice(result.message);
       await loadMemoryStatus();
     } catch (err) {
       setError(getErrorMessage(err, '触发会话整理失败'));
@@ -238,6 +317,32 @@ export function MemoryPage() {
       await loadMemoryStatus();
     } catch (err) {
       setError(getErrorMessage(err, '停止会话失败'));
+    }
+  };
+
+  const handleSaveMemoryConfig = async () => {
+    if (!memoryConfig) return;
+    setSavingMemoryConfig(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const data = await api.put<{
+        session: MemorySessionConfig | null;
+        runners: MemoryRunnerOption[];
+      }>('/api/memory/config', {
+        name: memoryConfig.name,
+        runner_id: memoryConfig.runner_id,
+        runner_profile_id: memoryConfig.runner_profile_id,
+        model: memoryConfig.model,
+        thinking_effort: memoryConfig.thinking_effort,
+      });
+      setMemoryConfig(data.session);
+      setMemoryRunners(data.runners);
+      setNotice('Memory Runner 配置已保存');
+    } catch (err) {
+      setError(getErrorMessage(err, '保存 Memory Runner 配置失败'));
+    } finally {
+      setSavingMemoryConfig(false);
     }
   };
 
@@ -288,7 +393,29 @@ export function MemoryPage() {
   useEffect(() => {
     loadSources();
     loadMemoryStatus();
-  }, [loadSources, loadMemoryStatus]);
+    loadMemoryConfig();
+  }, [loadSources, loadMemoryStatus, loadMemoryConfig]);
+
+  useEffect(() => {
+    if (!memoryConfig) {
+      setRunnerProfiles([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .get<{ profiles: RunnerProfileOption[] }>(
+        `/api/sessions/runner-profiles?${new URLSearchParams({ runner_id: memoryConfig.runner_id })}`,
+      )
+      .then((data) => {
+        if (!cancelled) setRunnerProfiles(data.profiles);
+      })
+      .catch(() => {
+        if (!cancelled) setRunnerProfiles([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [memoryConfig?.runner_id]);
 
   useEffect(() => {
     const q = keyword.trim();
@@ -369,6 +496,21 @@ export function MemoryPage() {
   const updatedText = fileMeta?.updatedAt
     ? new Date(fileMeta.updatedAt).toLocaleString('zh-CN')
     : '未记录';
+  const selectedRunner = memoryRunners.find((runner) => runner.id === memoryConfig?.runner_id) || null;
+  const memoryModelOptions = useMemo(() => {
+    const baseOptions = memoryUsesCodex ? codexModelOptions : CLAUDE_MODEL_OPTIONS;
+    const currentModel = memoryConfig?.model || null;
+    if (
+      currentModel &&
+      !baseOptions.some((option) => option.value === currentModel)
+    ) {
+      return [
+        ...baseOptions,
+        { value: currentModel, label: `当前配置 ${currentModel}` },
+      ];
+    }
+    return baseOptions;
+  }, [codexModelOptions, memoryConfig?.model, memoryUsesCodex]);
 
   return (
     <div className="min-h-full bg-background p-4 lg:p-8">
@@ -387,6 +529,169 @@ export function MemoryPage() {
           </div>
 
           <div className="mt-3 pt-3 border-t border-border space-y-3">
+              <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-3">
+                <div>
+                  <div className="text-sm font-medium text-foreground">Memory Session</div>
+                  <div className="text-xs text-slate-500 mt-0.5">
+                    这里控制记忆整理使用的 runner、模型和推理强度。
+                  </div>
+                </div>
+
+                {loadingMemoryConfig ? (
+                  <div className="flex items-center justify-center py-4 text-slate-500">
+                    <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                    加载配置中...
+                  </div>
+                ) : memoryConfig ? (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-medium text-slate-600 mb-1">
+                          Runner
+                        </label>
+                        <select
+                          value={memoryConfig.runner_id}
+                          onChange={(e) => setMemoryConfig((prev) => prev ? {
+                            ...prev,
+                            runner_id: e.target.value,
+                            runner_profile_id: null,
+                            model: null,
+                          } : prev)}
+                          className="w-full h-9 rounded-md border border-border bg-background px-3 text-sm"
+                        >
+                          {memoryRunners.map((runner) => (
+                            <option
+                              key={runner.id}
+                              value={runner.id}
+                              disabled={!runner.can_serve_memory}
+                            >
+                              {runner.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-slate-600 mb-1">
+                          Thinking
+                        </label>
+                        <select
+                          value={memoryConfig.thinking_effort || ''}
+                          onChange={(e) => setMemoryConfig((prev) => prev ? {
+                            ...prev,
+                            thinking_effort: e.target.value ? e.target.value as 'low' | 'medium' | 'high' : null,
+                          } : prev)}
+                          className="w-full h-9 rounded-md border border-border bg-background px-3 text-sm"
+                        >
+                          <option value="">默认</option>
+                          <option value="low">low</option>
+                          <option value="medium">medium</option>
+                          <option value="high">high</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 mb-1">
+                        Runner Profile
+                      </label>
+                      <select
+                        value={memoryConfig.runner_profile_id || ''}
+                        onChange={(e) => setMemoryConfig((prev) => prev ? {
+                          ...prev,
+                          runner_profile_id: e.target.value || null,
+                        } : prev)}
+                        className="w-full h-9 rounded-md border border-border bg-background px-3 text-sm"
+                      >
+                        <option value="">默认</option>
+                        {memoryConfig.runner_profile_id &&
+                          !runnerProfiles.some((profile) => profile.id === memoryConfig.runner_profile_id) && (
+                            <option value={memoryConfig.runner_profile_id}>
+                              当前配置 {memoryConfig.runner_profile_id}
+                            </option>
+                          )}
+                        {runnerProfiles.map((profile) => (
+                          <option key={profile.id} value={profile.id}>
+                            {profile.name}{profile.is_default ? ' · 默认' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-3">
+                      <div>
+                        <label className="block text-xs font-medium text-slate-600 mb-1">
+                          模型
+                        </label>
+                        <select
+                          value={memoryConfig.model || '__default__'}
+                          onChange={(e) => setMemoryConfig((prev) => prev ? {
+                            ...prev,
+                            model: e.target.value === '__default__' ? null : e.target.value,
+                          } : prev)}
+                          disabled={memoryUsesCodex && codexModelsLoading}
+                          className="w-full h-9 rounded-md border border-border bg-background px-3 text-sm"
+                        >
+                          {memoryModelOptions.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                        {memoryUsesCodex && codexModelsLoading && (
+                          <div className="mt-1 text-xs text-slate-500">正在加载 Codex 模型列表...</div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="text-xs text-slate-500 space-y-1">
+                      <div>会话 ID: {memoryConfig.id}</div>
+                      <div>工作目录: {memoryConfig.cwd}</div>
+                      <div>主会话目录: {memoryConfig.primary_session_folder || '未解析'}</div>
+                      <div>
+                        管理范围: {memoryConfig.owned_session_count} 个会话
+                        {memoryConfig.owned_session_folders.length > 0
+                          ? ` · ${memoryConfig.owned_session_folders.join('、')}`
+                          : ''}
+                      </div>
+                    </div>
+
+                    {selectedRunner && selectedRunner.degradation_reasons.length > 0 && (
+                      <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 space-y-1">
+                        <div className="text-xs font-medium text-amber-700">兼容性提示</div>
+                        {selectedRunner.degradation_reasons.map((reason) => (
+                          <div key={reason} className="text-xs text-amber-700">
+                            {reason}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="flex items-center gap-2">
+                      <Button size="sm" onClick={handleSaveMemoryConfig} disabled={savingMemoryConfig}>
+                        {savingMemoryConfig && <Loader2 className="size-3.5 animate-spin" />}
+                        保存 Memory 配置
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-xs text-red-600">未找到记忆会话配置</div>
+                )}
+              </div>
+
+              {memoryConfig && (
+                <div className="rounded-lg border border-border overflow-hidden">
+                  <RuntimeEnvPanel
+                    sessionId={memoryConfig.id}
+                    session={memoryRuntimeSession}
+                    onSessionReload={loadMemoryConfig}
+                    title="Memory 执行配置"
+                    hideSessionFields
+                    hideCodexCompact
+                    hostCommandDescription="Memory 运行仍然直接依赖宿主机上的 Claude 或 Codex 命令配置。认证、Base URL、API Key 和自定义环境变量都需要由宿主机自己提供。上面的表单是在配置 memory runner，本身不会把 Memory 变成一个可恢复会话。"
+                  />
+                </div>
+              )}
+
               <div className="text-sm font-medium text-foreground">AI 记忆系统</div>
               <div className="text-xs text-slate-500 mt-0.5">
                 使用 Memory Agent 自动整理和检索记忆
@@ -414,6 +719,11 @@ export function MemoryPage() {
                           {memoryStatus.pendingWrapupsCount} 个
                         </div>
                       </div>
+                      {memoryStatus.ownedSessionFolders.length > 0 && (
+                        <div className="text-[11px] text-slate-500">
+                          当前会检查这些会话: {memoryStatus.ownedSessionFolders.join('、')}
+                        </div>
+                      )}
                       <div className="flex items-center gap-2 pt-0.5">
                         <Button
                           variant="outline"

@@ -2,11 +2,9 @@ import { useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 
 import { useAuthStore } from '../../stores/auth';
-import { useBillingStore, type BillingPlan } from '../../stores/billing';
 import { api } from '../../api/client';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
-import { ToggleSwitch } from '@/components/ui/toggle-switch';
 import type { SettingsNotification, SystemSettings } from './types';
 import { getErrorMessage } from './types';
 
@@ -28,9 +26,9 @@ interface FieldConfig {
 
 const fields: FieldConfig[] = [
   {
-    key: 'containerTimeout',
-    label: '容器最大运行时间',
-    description: '单个容器/进程的最长运行时间',
+    key: 'runtimeTimeout',
+    label: '运行时最大执行时间',
+    description: '单个 Agent 运行的最长执行时间',
     unit: '分钟',
     toDisplay: (v) => Math.round(v / 60000),
     toStored: (v) => v * 60000,
@@ -40,8 +38,8 @@ const fields: FieldConfig[] = [
   },
   {
     key: 'idleTimeout',
-    label: '容器空闲超时',
-    description: '最后一次输出后无新消息则关闭容器',
+    label: '运行时空闲超时',
+    description: '最后一次输出后无新消息则回收运行时',
     unit: '分钟',
     toDisplay: (v) => Math.round(v / 60000),
     toStored: (v) => v * 60000,
@@ -50,9 +48,9 @@ const fields: FieldConfig[] = [
     step: 1,
   },
   {
-    key: 'containerMaxOutputSize',
+    key: 'runtimeMaxOutputSize',
     label: '单次输出上限',
-    description: '单次容器运行的最大输出大小',
+    description: '单次 Agent 运行的最大输出大小',
     unit: 'MB',
     toDisplay: (v) => Math.round(v / 1048576),
     toStored: (v) => v * 1048576,
@@ -61,47 +59,14 @@ const fields: FieldConfig[] = [
     step: 1,
   },
   {
-    key: 'maxConcurrentContainers',
-    label: '最大并发容器数',
-    description: '同时运行的 Docker 容器数量上限',
+    key: 'maxConcurrentRuntimes',
+    label: '最大并发运行时数',
+    description: '同时运行的 Agent runtime 数量上限',
     unit: '个',
     toDisplay: (v) => v,
     toStored: (v) => v,
     min: 1,
     max: 100,
-    step: 1,
-  },
-  {
-    key: 'maxConcurrentHostProcesses',
-    label: '最大并发宿主机进程数',
-    description: '同时运行的宿主机模式进程数量上限',
-    unit: '个',
-    toDisplay: (v) => v,
-    toStored: (v) => v,
-    min: 1,
-    max: 50,
-    step: 1,
-  },
-  {
-    key: 'maxLoginAttempts',
-    label: '登录失败锁定次数',
-    description: '连续失败该次数后锁定账户',
-    unit: '次',
-    toDisplay: (v) => v,
-    toStored: (v) => v,
-    min: 1,
-    max: 100,
-    step: 1,
-  },
-  {
-    key: 'loginLockoutMinutes',
-    label: '锁定时间',
-    description: '账户被锁定后的等待时间',
-    unit: '分钟',
-    toDisplay: (v) => v,
-    toStored: (v) => v,
-    min: 1,
-    max: 1440,
     step: 1,
   },
   {
@@ -125,6 +90,39 @@ const fields: FieldConfig[] = [
     min: 5,
     max: 600,
     step: 5,
+  },
+  {
+    key: 'queryActivityTimeoutMs',
+    label: 'Query 活动 watchdog',
+    description: '单轮 query 在无新事件时的超时阈值',
+    unit: '秒',
+    toDisplay: (v) => Math.round(v / 1000),
+    toStored: (v) => v * 1000,
+    min: 30,
+    max: 3600,
+    step: 5,
+  },
+  {
+    key: 'toolCallHardTimeoutMs',
+    label: '工具硬超时',
+    description: '单个工具调用允许持续的最长时间',
+    unit: '秒',
+    toDisplay: (v) => Math.round(v / 1000),
+    toStored: (v) => v * 1000,
+    min: 60,
+    max: 7200,
+    step: 10,
+  },
+  {
+    key: 'codexArchiveThreshold',
+    label: 'Codex 归档阈值',
+    description: 'Codex synthetic archive 触发所需的累计 token 数',
+    unit: 'tokens',
+    toDisplay: (v) => v,
+    toStored: (v) => v,
+    min: 10000,
+    max: 2000000,
+    step: 10000,
   },
   {
     key: 'turnBatchWindowMs',
@@ -166,19 +164,12 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
 
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [displayValues, setDisplayValues] = useState<Record<string, number>>({});
-  const [billingEnabled, setBillingEnabled] = useState(false);
-  const [billingMinStartBalanceUsd, setBillingMinStartBalanceUsd] = useState(0.01);
-  const [billingCurrency, setBillingCurrency] = useState('USD');
-  const [billingCurrencyRate, setBillingCurrencyRate] = useState(1);
+  const [feishuApiDomain, setFeishuApiDomain] = useState('');
+  const [feishuDocDomain, setFeishuDocDomain] = useState('');
   const [webPublicUrl, setWebPublicUrl] = useState('');
   const [defaultClaudeModel, setDefaultClaudeModel] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-
-  const loadBillingStatus = useBillingStore((s) => s.loadBillingStatus);
-  const { plans, loadPlans, updatePlan } = useBillingStore();
-  const [defaultPlanId, setDefaultPlanId] = useState('');
-  const [settingDefault, setSettingDefault] = useState(false);
   const canManage = hasPermission('manage_system_config');
 
   useEffect(() => {
@@ -192,10 +183,8 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
           display[f.key] = f.toDisplay(data[f.key] as number);
         }
         setDisplayValues(display);
-        setBillingEnabled(data.billingEnabled ?? false);
-        setBillingMinStartBalanceUsd(data.billingMinStartBalanceUsd ?? 0.01);
-        setBillingCurrency(data.billingCurrency ?? 'USD');
-        setBillingCurrencyRate(data.billingCurrencyRate ?? 1);
+        setFeishuApiDomain(data.feishuApiDomain ?? '');
+        setFeishuDocDomain(data.feishuDocDomain ?? '');
         setWebPublicUrl(data.webPublicUrl ?? '');
         setDefaultClaudeModel(data.defaultClaudeModel ?? '');
       } catch (err) {
@@ -206,44 +195,14 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
     })();
   }, [setError]);
 
-  // Load plans when billing is enabled (for default plan picker)
-  useEffect(() => {
-    if (billingEnabled) {
-      loadPlans();
-    }
-  }, [billingEnabled, loadPlans]);
-
-  // Sync default plan ID from loaded plans
-  useEffect(() => {
-    const def = plans.find((p: BillingPlan) => p.is_default);
-    setDefaultPlanId(def?.id ?? '');
-  }, [plans]);
-
-  const handleSetDefaultPlan = async (planId: string) => {
-    if (!planId || planId === defaultPlanId) return;
-    setSettingDefault(true);
-    try {
-      await updatePlan(planId, { is_default: true });
-      setDefaultPlanId(planId);
-      setNotice('默认套餐已更新');
-    } catch (err) {
-      setError(getErrorMessage(err, '设置默认套餐失败'));
-    } finally {
-      setSettingDefault(false);
-    }
-  };
-
   const handleSave = async () => {
     setSaving(true);
     setError(null);
     setNotice(null);
     try {
       const payload: Partial<SystemSettings> = {
-        billingEnabled,
-        billingMode: 'wallet_first',
-        billingMinStartBalanceUsd,
-        billingCurrency,
-        billingCurrencyRate,
+        feishuApiDomain,
+        feishuDocDomain,
         webPublicUrl,
         defaultClaudeModel,
       };
@@ -260,15 +219,11 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
         display[f.key] = f.toDisplay(data[f.key] as number);
       }
       setDisplayValues(display);
-      setBillingEnabled(data.billingEnabled ?? false);
-      setBillingMinStartBalanceUsd(data.billingMinStartBalanceUsd ?? 0.01);
-      setBillingCurrency(data.billingCurrency ?? 'USD');
-      setBillingCurrencyRate(data.billingCurrencyRate ?? 1);
+      setFeishuApiDomain(data.feishuApiDomain ?? '');
+      setFeishuDocDomain(data.feishuDocDomain ?? '');
       setWebPublicUrl(data.webPublicUrl ?? '');
       setDefaultClaudeModel(data.defaultClaudeModel ?? '');
-      // 刷新计费状态，更新导航栏可见性
-      loadBillingStatus();
-      setNotice('系统参数已保存，新参数将对后续启动的容器/进程生效');
+      setNotice('系统参数已保存，新参数将对后续启动的 runtime 生效');
     } catch (err) {
       setError(getErrorMessage(err, '保存系统参数失败'));
     } finally {
@@ -293,7 +248,7 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
   return (
     <div className="space-y-6">
       <p className="text-sm text-slate-500">
-        调整容器运行参数和安全限制。修改后无需重启，新参数对后续创建的容器/进程立即生效。
+        调整 runtime、任务与 Web 参数。修改后无需重启，新参数对后续运行立即生效。
       </p>
 
       <div className="space-y-5">
@@ -327,121 +282,41 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
         ))}
       </div>
 
-      {/* 计费设置 */}
+      {/* 飞书设置 */}
       <div className="border-t border-border pt-6 space-y-5">
-        <h3 className="text-sm font-semibold text-foreground">计费系统</h3>
-
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex-1">
-            <label className="block text-sm font-medium text-foreground">启用计费</label>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              开启后普通用户必须先有余额才能使用，管理员可在后台进行充扣和套餐分配
-            </p>
-          </div>
-          <ToggleSwitch
-            checked={billingEnabled}
-            onChange={setBillingEnabled}
-            aria-label="启用计费系统"
+        <h3 className="text-sm font-semibold text-foreground">飞书设置</h3>
+        <div>
+          <label className="block text-sm font-medium text-foreground mb-1">
+            飞书 API 域名
+          </label>
+          <Input
+            type="text"
+            value={feishuApiDomain}
+            onChange={(e) => setFeishuApiDomain(e.target.value)}
+            placeholder="open.feishu.cn"
+            maxLength={100}
+            className="max-w-md font-mono"
           />
+          <p className="text-xs text-muted-foreground mt-1">
+            OAuth、机器人 API 等请求使用的基础域名。只填域名，不要带协议。
+          </p>
         </div>
-
-        {billingEnabled && (
-          <>
-          <div>
-              <label className="block text-sm font-medium text-foreground mb-1">
-                计费模式
-              </label>
-              <div className="rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
-                钱包优先（固定）
-              </div>
-              <p className="text-xs text-muted-foreground mt-1">
-                普通用户必须先有余额才能使用，套餐只决定费率和资源上限。
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-foreground mb-1">
-                最低起用余额
-              </label>
-              <Input
-                type="number"
-                value={billingMinStartBalanceUsd}
-                onChange={(e) => setBillingMinStartBalanceUsd(Number(e.target.value) || 0)}
-                min={0}
-                step={0.01}
-                className="max-w-32"
-              />
-              <p className="text-xs text-muted-foreground mt-1">
-                普通用户余额低于该值时，消息和任务都会被阻断。
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-foreground mb-1">
-                显示货币符号
-              </label>
-              <Input
-                type="text"
-                value={billingCurrency}
-                onChange={(e) => setBillingCurrency(e.target.value)}
-                className="max-w-32"
-                placeholder="USD"
-              />
-              <p className="text-xs text-muted-foreground mt-1">
-                前端显示的货币符号（如 USD、CNY、EUR）
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-foreground mb-1">
-                汇率乘数
-              </label>
-              <Input
-                type="number"
-                value={billingCurrencyRate}
-                onChange={(e) => {
-                  const val = parseFloat(e.target.value);
-                  setBillingCurrencyRate(Number.isFinite(val) ? val : 1);
-                }}
-                min={0.01}
-                max={1000}
-                step={0.01}
-                className="max-w-32"
-              />
-              <p className="text-xs text-muted-foreground mt-1">
-                将 USD 转为显示货币的乘数（如 CNY 约 7.2）
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-foreground mb-1">
-                默认套餐
-              </label>
-              <select
-                value={defaultPlanId}
-                onChange={(e) => handleSetDefaultPlan(e.target.value)}
-                disabled={settingDefault || plans.filter((p: BillingPlan) => p.is_active).length === 0}
-                className="h-9 px-3 text-sm border border-zinc-300 dark:border-zinc-600 rounded-md bg-transparent max-w-64"
-              >
-                <option value="" disabled>
-                  {plans.filter((p: BillingPlan) => p.is_active).length === 0
-                    ? '请先创建可用套餐'
-                    : '请选择默认套餐'}
-                </option>
-                {plans
-                  .filter((p: BillingPlan) => p.is_active)
-                  .map((p: BillingPlan) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}{p.is_default ? ' (当前默认)' : ''}
-                    </option>
-                  ))}
-              </select>
-              <p className="text-xs text-muted-foreground mt-1">
-                新用户注册时自动分配的套餐
-              </p>
-            </div>
-          </>
-        )}
+        <div>
+          <label className="block text-sm font-medium text-foreground mb-1">
+            飞书文档域名
+          </label>
+          <Input
+            type="text"
+            value={feishuDocDomain}
+            onChange={(e) => setFeishuDocDomain(e.target.value)}
+            placeholder="bytedance.larkoffice.com"
+            maxLength={100}
+            className="max-w-md font-mono"
+          />
+          <p className="text-xs text-muted-foreground mt-1">
+            文档链接与卡片跳转拼接使用的域名。只填域名，不要带协议。
+          </p>
+        </div>
       </div>
 
       {/* Web 设置 */}

@@ -1,3 +1,4 @@
+import './fetch-globals.js';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
@@ -36,13 +37,12 @@ import { authMiddleware } from './middleware/auth.js';
 
 // Route modules
 import authRoutes from './routes/auth.js';
-import groupRoutes from './routes/groups.js';
+import sessionRoutes from './routes/sessions.js';
 import memoryRoutes from './routes/memory.js';
 import configRoutes, { injectConfigDeps } from './routes/config.js';
 import tasksRoutes from './routes/tasks.js';
-import adminRoutes from './routes/admin.js';
 import fileRoutes from './routes/files.js';
-import monitorRoutes, { injectMonitorDeps } from './routes/monitor.js';
+import monitorRoutes from './routes/monitor.js';
 import skillsRoutes from './routes/skills.js';
 import browseRoutes from './routes/browse.js';
 import agentRoutes from './routes/agents.js';
@@ -53,28 +53,17 @@ import agentDefinitionsRoutes from './routes/agent-definitions.js';
 import memoryAgentInternalRoutes from './routes/memory-agent.js';
 import feishuApiRoutes, { injectFeishuApiDeps } from './routes/feishu-api.js';
 import searchRoutes from './routes/search.js';
-import { usage as usageRoutes } from './routes/usage.js';
-import billingRoutes from './routes/billing.js';
-import {
-  checkBillingAccess,
-  formatBillingAccessDeniedMessage,
-} from './billing.js';
+import { getSystemSettings } from './runtime-config.js';
 
 // Database and types (only for handleWebUserMessage and broadcast)
 import {
   ensureChatExists,
   getRegisteredGroup,
   getJidsByFolder,
-  getSessionWithUser,
+  getSessionRecord,
   storeMessageDirect,
-  deleteUserSession,
-  updateSessionLastActive,
-  getGroupMembers,
   getAgent,
-  isGroupShared,
-  getUserById,
 } from './db.js';
-import { isSessionExpired } from './auth.js';
 import type {
   NewMessage,
   WsMessageOut,
@@ -83,7 +72,7 @@ import type {
   StreamEvent,
   UserRole,
 } from './types.js';
-import { WEB_PORT, SESSION_COOKIE_NAME, ASSISTANT_NAME } from './config.js';
+import { WEB_PORT, SESSION_COOKIE_NAME, GROUPS_DIR } from './config.js';
 import { logger } from './logger.js';
 import { analyzeIntent } from './intent-analyzer.js';
 import { executeSessionReset } from './commands.js';
@@ -91,6 +80,17 @@ import {
   normalizeImageAttachments,
   toAgentImages,
 } from './message-attachments.js';
+import path from 'node:path';
+import {
+  getLocalWorkbenchAuthUser,
+  getLocalWorkbenchSessionId,
+  getLocalWorkbenchUserPublic,
+} from './local-user.js';
+import { restoreNativeFetchGlobals } from './fetch-globals.js';
+import {
+  buildWorkerConversationJid,
+  buildWorkerSessionId,
+} from './worker-session.js';
 
 // --- App Setup ---
 
@@ -98,6 +98,29 @@ const app = new Hono<{ Variables: Variables }>();
 const terminalManager = new TerminalManager();
 const wsTerminals = new Map<WebSocket, string>(); // ws → groupJid
 const terminalOwners = new Map<string, WebSocket>(); // groupJid → ws
+const wsTerminalClientJids = new Map<WebSocket, string>(); // ws → client-facing jid
+
+function resolveRouteGroup(
+  id: string,
+): { accessJid: string; group: NonNullable<ReturnType<typeof getRegisteredGroup>> } | null {
+  const direct = getRegisteredGroup(id);
+  if (direct) return { accessJid: id, group: direct };
+
+  const session = getSessionRecord(id);
+  if (!session) return null;
+
+  const folder = session.id.startsWith('main:')
+    ? session.id.slice('main:'.length)
+    : session.parent_session_id?.startsWith('main:')
+      ? session.parent_session_id.slice('main:'.length)
+      : null;
+  if (!folder) return null;
+
+  const accessJid = getJidsByFolder(folder).find((jid) => jid.startsWith('web:'));
+  if (!accessJid) return null;
+  const group = getRegisteredGroup(accessJid);
+  return group ? { accessJid, group } : null;
+}
 
 function normalizeTerminalSize(
   value: unknown,
@@ -115,6 +138,7 @@ function normalizeTerminalSize(
 function releaseTerminalOwnership(ws: WebSocket, groupJid: string): void {
   if (wsTerminals.get(ws) === groupJid) {
     wsTerminals.delete(ws);
+    wsTerminalClientJids.delete(ws);
   }
   if (terminalOwners.get(groupJid) === ws) {
     terminalOwners.delete(groupJid);
@@ -149,6 +173,10 @@ function isAllowedOrigin(origin: string | undefined): string | null {
 
 app.use(
   '/api/*',
+  async (_c, next) => {
+    restoreNativeFetchGlobals();
+    await next();
+  },
   cors({
     origin: (origin) => isAllowedOrigin(origin),
     credentials: true,
@@ -162,23 +190,20 @@ let deps: WebDeps | null = null;
 // --- Route Mounting ---
 
 app.route('/api/auth', authRoutes);
-app.route('/api/groups', groupRoutes);
-app.route('/api/groups', fileRoutes); // File routes also under /api/groups
+app.route('/api/sessions', fileRoutes);
 app.route('/api/memory', memoryRoutes);
 app.route('/api/config', configRoutes);
 app.route('/api/tasks', tasksRoutes);
 app.route('/api/skills', skillsRoutes);
-app.route('/api/admin', adminRoutes);
 app.route('/api/browse', browseRoutes);
 app.route('/api/mcp-servers', mcpServersRoutes);
-app.route('/api/groups', agentRoutes); // Agent routes under /api/groups/:jid/agents
+app.route('/api/sessions', agentRoutes);
 app.route('/api/logs', logsRoutes);
-app.route('/api/groups', turnsRoutes); // Turn routes under /api/groups/:jid/turns
+app.route('/api/sessions', turnsRoutes);
+app.route('/api/sessions', sessionRoutes);
 app.route('/api/agent-definitions', agentDefinitionsRoutes);
 app.route('/api', monitorRoutes);
 app.route('/api/search', searchRoutes);
-app.route('/api/usage', usageRoutes);
-app.route('/api/billing', billingRoutes);
 app.route('/api/internal/memory', memoryAgentInternalRoutes);
 app.route('/api/internal/feishu', feishuApiRoutes);
 
@@ -196,21 +221,22 @@ app.post('/api/messages', authMiddleware, async (c) => {
   }
 
   const { chatJid, content, attachments } = validation.data;
-  const group = getRegisteredGroup(chatJid);
-  if (!group) return c.json({ error: 'Group not found' }, 404);
+  const resolved = resolveRouteGroup(chatJid);
+  if (!resolved) return c.json({ error: 'Session not found' }, 404);
+  const { accessJid, group } = resolved;
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup(authUser, group)) {
+  if (!canAccessGroup(authUser, { ...group, jid: accessJid })) {
     return c.json({ error: 'Access denied' }, 403);
   }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
+      { error: 'Insufficient permissions for local runtime workspace access' },
       403,
     );
   }
 
   const result = await handleWebUserMessage(
-    chatJid,
+    accessJid,
     content.trim(),
     attachments,
     authUser.id,
@@ -250,7 +276,7 @@ async function handleWebUserMessage(
   if (!group) {
     // Group may exist in DB but not in memory cache (created via setup/registration after loadState)
     const dbGroup = getRegisteredGroup(chatJid);
-    if (!dbGroup) return { ok: false, status: 404, error: 'Group not found' };
+    if (!dbGroup) return { ok: false, status: 404, error: 'Session not found' };
     group = dbGroup;
   }
 
@@ -292,40 +318,7 @@ async function handleWebUserMessage(
     attachments: attachmentsStr,
   });
 
-  if (group.created_by) {
-    const owner = getUserById(group.created_by);
-    if (owner && owner.role !== 'admin') {
-      const accessResult = checkBillingAccess(group.created_by, owner.role);
-      if (!accessResult.allowed) {
-        const sysMsg = formatBillingAccessDeniedMessage(accessResult);
-        const sysMsgId = `sys_quota_${Date.now()}`;
-        const sysTimestamp = new Date().toISOString();
-        storeMessageDirect(
-          sysMsgId,
-          chatJid,
-          '__billing__',
-          ASSISTANT_NAME,
-          sysMsg,
-          sysTimestamp,
-          true,
-        );
-        broadcastNewMessage(chatJid, {
-          id: sysMsgId,
-          chat_jid: chatJid,
-          sender: '__billing__',
-          sender_name: ASSISTANT_NAME,
-          content: sysMsg,
-          timestamp: sysTimestamp,
-          is_from_me: true,
-        });
-        deps.setLastAgentTimestamp(chatJid, { rowid: msgRowid });
-        deps.advanceGlobalCursor({ rowid: msgRowid });
-        return { ok: true, messageId, timestamp };
-      }
-    }
-  }
-
-  const shared = !group.is_home && isGroupShared(group.folder);
+  const shared = false;
   const formatted = deps.formatMessages(
     [
       {
@@ -340,9 +333,9 @@ async function handleWebUserMessage(
     shared,
   );
 
-  // IPC-inject the message into the running agent process.  For home groups,
-  // the reply route is dynamically updated via activeRouteUpdaters so we no
-  // longer need to kill and restart the process (#99).
+  // IPC-inject the message into the running agent process. For Session-backed
+  // web workspaces, the reply route is updated dynamically via
+  // activeRouteUpdaters so we no longer need to kill and restart the process.
   let pipedToActive = false;
   const images = toAgentImages(normalizedAttachments);
   const intent = analyzeIntent(content);
@@ -352,18 +345,20 @@ async function handleWebUserMessage(
     images,
     intent,
     () => {
-      // IPC write succeeded — update reply route for home groups.
+      // IPC write succeeded — update the reply route for Session-backed web workspaces.
       // Web messages have no IM source, so clear the IM route.
     },
   );
   if (sendResult === 'sent') {
     pipedToActive = true;
+    deps.trackIpcDelivery?.(chatJid);
   } else if (sendResult === 'interrupted_stop') {
     // Stop intent: cursor updated, no enqueue needed
     pipedToActive = true;
   } else if (sendResult === 'interrupted_correction') {
     // Correction intent: IPC message written, agent handles it after interrupt
     pipedToActive = true;
+    deps.trackIpcDelivery?.(chatJid);
   } else {
     deps.queue.enqueueMessageCheck(chatJid);
   }
@@ -398,7 +393,8 @@ async function handleAgentConversationMessage(
     return;
   }
 
-  const virtualChatJid = `${chatJid}#agent:${agentId}`;
+  const virtualChatJid = buildWorkerConversationJid(chatJid, agentId);
+  const workerSessionId = buildWorkerSessionId(agentId);
 
   // Store message with virtual chat_jid
   const messageId = crypto.randomUUID();
@@ -464,7 +460,7 @@ async function handleAgentConversationMessage(
   const agentIntent = analyzeIntent(content);
   const agentImages = toAgentImages(normalizedAttachments);
   const agentSendResult = deps.queue.sendMessage(
-    virtualChatJid,
+    workerSessionId,
     formatted,
     agentImages,
     agentIntent,
@@ -473,10 +469,15 @@ async function handleAgentConversationMessage(
     // No running process — start one via processAgentConversation
     if (deps.processAgentConversation) {
       const taskId = `agent-conv:${agentId}:${Date.now()}`;
-      deps.queue.enqueueTask(virtualChatJid, taskId, async () => {
+      deps.queue.enqueueTask(workerSessionId, taskId, async () => {
         await deps!.processAgentConversation!(chatJid, agentId);
       });
     }
+  } else if (
+    agentSendResult === 'sent' ||
+    agentSendResult === 'interrupted_correction'
+  ) {
+    deps.trackIpcDelivery?.(workerSessionId);
   }
   // 'sent', 'interrupted_stop', 'interrupted_correction' need no further action —
   // for correction, the IPC message was written and the agent handles it after interrupt
@@ -541,41 +542,9 @@ function setupWebSocket(server: any): WebSocketServer {
       return;
     }
 
-    // Verify session cookie
     const cookies = parseCookie(request.headers.cookie);
-    const token = cookies[SESSION_COOKIE_NAME];
-    if (!token) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-
-    const session = getSessionWithUser(token);
-    if (!session) {
-      lastActiveCache.delete(token);
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-    if (isSessionExpired(session.expires_at)) {
-      deleteUserSession(token);
-      lastActiveCache.delete(token);
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-    if (session.status !== 'active') {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-    if (session.must_change_password) {
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-
-    request.__happyclawSessionId = token;
+    request.__happyclawSessionId =
+      cookies[SESSION_COOKIE_NAME] || getLocalWorkbenchSessionId();
 
     wss.handleUpgrade(request, socket, head, (ws) => {
       wss.emit('connection', ws, request);
@@ -584,12 +553,12 @@ function setupWebSocket(server: any): WebSocketServer {
 
   wss.on('connection', (ws, request: any) => {
     const sessionId = request?.__happyclawSessionId as string | undefined;
+    const localUser = getLocalWorkbenchAuthUser();
     logger.info('WebSocket client connected');
-    const connSession = sessionId ? getSessionWithUser(sessionId) : undefined;
     wsClients.set(ws, {
-      sessionId: sessionId || '',
-      userId: connSession?.user_id || '',
-      role: (connSession?.role || 'member') as UserRole,
+      sessionId: sessionId || getLocalWorkbenchSessionId(),
+      userId: localUser.id,
+      role: localUser.role as UserRole,
     });
 
     const cleanupTerminalForWs = () => {
@@ -603,35 +572,12 @@ function setupWebSocket(server: any): WebSocketServer {
       if (!deps) return;
 
       try {
-        if (!sessionId) {
-          ws.close(1008, 'Unauthorized');
-          return;
-        }
-
-        const session = getSessionWithUser(sessionId);
-        if (
-          !session ||
-          isSessionExpired(session.expires_at) ||
-          session.status !== 'active' ||
-          session.must_change_password
-        ) {
-          if (session && isSessionExpired(session.expires_at)) {
-            deleteUserSession(sessionId);
-          }
-          lastActiveCache.delete(sessionId);
-          ws.close(1008, 'Unauthorized');
-          return;
-        }
-
+        const session = getLocalWorkbenchUserPublic();
         const now = Date.now();
-        const lastUpdate = lastActiveCache.get(sessionId) || 0;
+        const stableSessionId = sessionId || getLocalWorkbenchSessionId();
+        const lastUpdate = lastActiveCache.get(stableSessionId) || 0;
         if (now - lastUpdate > LAST_ACTIVE_DEBOUNCE_MS) {
-          lastActiveCache.set(sessionId, now);
-          try {
-            updateSessionLastActive(sessionId);
-          } catch {
-            /* best effort */
-          }
+          lastActiveCache.set(stableSessionId, now);
         }
 
         const msg: WsMessageIn = JSON.parse(data.toString());
@@ -648,39 +594,36 @@ function setupWebSocket(server: any): WebSocketServer {
           const { chatJid, content, attachments } = wsValidation.data;
           const agentId = (msg as { agentId?: string }).agentId;
 
-          // 群组访问权限检查
-          const targetGroup = getRegisteredGroup(chatJid);
-          if (targetGroup) {
-            if (
-              !canAccessGroup(
-                { id: session.user_id, role: session.role },
-                targetGroup,
-              )
-            ) {
-              logger.warn(
-                { chatJid, userId: session.user_id },
-                'WebSocket send_message blocked: access denied',
-              );
-              return;
-            }
-            if (isHostExecutionGroup(targetGroup)) {
-              if (session.role !== 'admin') {
-                logger.warn(
-                  { chatJid, userId: session.user_id },
-                  'WebSocket send_message blocked: host mode requires admin',
-                );
-                return;
-              }
-            }
+          const resolved = resolveRouteGroup(chatJid);
+          if (!resolved) {
+            logger.warn(
+              { chatJid, userId: session.id },
+              'WebSocket send_message blocked: target not found',
+            );
+            return;
+          }
+          const { accessJid, group: targetGroup } = resolved;
+
+          if (
+            !canAccessGroup(
+              { id: session.id, role: session.role },
+              { ...targetGroup, jid: accessJid },
+            )
+          ) {
+            logger.warn(
+              { chatJid: accessJid, userId: session.id },
+              'WebSocket send_message blocked: access denied',
+            );
+            return;
           }
 
           // Route to agent conversation handler if agentId is present
           if (agentId && deps) {
             await handleAgentConversationMessage(
-              chatJid,
+              accessJid,
               agentId,
               content.trim(),
-              session.user_id,
+              session.id,
               session.display_name || session.username,
               attachments,
             );
@@ -689,57 +632,53 @@ function setupWebSocket(server: any): WebSocketServer {
 
           // ── /clear command: reset session without entering message pipeline ──
           if (content.trim() === '/clear' && deps) {
-            const targetGroup = getRegisteredGroup(chatJid);
-            if (targetGroup) {
-              try {
-                // Export transcripts before reset (for memory system)
-                await deps
-                  .triggerSessionWrapup?.(targetGroup.folder)
-                  .catch((err) => {
-                    logger.warn(
-                      { chatJid, err },
-                      'Pre-clear transcript export failed (non-blocking)',
-                    );
-                  });
-                await executeSessionReset(chatJid, targetGroup.folder, {
-                  queue: deps.queue,
-                  sessions: deps.getSessions(),
-                  broadcast: broadcastNewMessage,
-                  setLastAgentTimestamp: deps.setLastAgentTimestamp,
+            try {
+              await deps
+                .triggerSessionWrapup?.(targetGroup.folder)
+                .catch((err) => {
+                  logger.warn(
+                    { chatJid: accessJid, err },
+                    'Pre-clear transcript export failed (non-blocking)',
+                  );
                 });
-              } catch (err) {
-                logger.error({ chatJid, err }, '/clear command failed');
-                const errId = crypto.randomUUID();
-                const errTs = new Date().toISOString();
-                ensureChatExists(chatJid);
-                storeMessageDirect(
-                  errId,
-                  chatJid,
-                  '__system__',
-                  'system',
-                  'system_error:清除上下文失败，请稍后重试',
-                  errTs,
-                  true,
-                );
-                broadcastNewMessage(chatJid, {
-                  id: errId,
-                  chat_jid: chatJid,
-                  sender: '__system__',
-                  sender_name: 'system',
-                  content: 'system_error:清除上下文失败，请稍后重试',
-                  timestamp: errTs,
-                  is_from_me: true,
-                });
-              }
+              await executeSessionReset(accessJid, targetGroup.folder, {
+                queue: deps.queue,
+                sessions: deps.getSessions(),
+                broadcast: broadcastNewMessage,
+                setLastAgentTimestamp: deps.setLastAgentTimestamp,
+              });
+            } catch (err) {
+              logger.error({ chatJid: accessJid, err }, '/clear command failed');
+              const errId = crypto.randomUUID();
+              const errTs = new Date().toISOString();
+              ensureChatExists(accessJid);
+              storeMessageDirect(
+                errId,
+                accessJid,
+                '__system__',
+                'system',
+                'system_error:清除上下文失败，请稍后重试',
+                errTs,
+                true,
+              );
+              broadcastNewMessage(accessJid, {
+                id: errId,
+                chat_jid: accessJid,
+                sender: '__system__',
+                sender_name: 'system',
+                content: 'system_error:清除上下文失败，请稍后重试',
+                timestamp: errTs,
+                is_from_me: true,
+              });
             }
             return;
           }
 
           const result = await handleWebUserMessage(
-            chatJid,
+            accessJid,
             content.trim(),
             attachments,
-            session.user_id,
+            session.id,
             session.display_name || session.username,
           );
           if (!result.ok) {
@@ -773,8 +712,8 @@ function setupWebSocket(server: any): WebSocketServer {
               );
               return;
             }
-            const group = deps.getRegisteredGroups()[chatJid];
-            if (!group) {
+            const resolved = resolveRouteGroup(chatJid);
+            if (!resolved) {
               ws.send(
                 JSON.stringify({
                   type: 'terminal_error',
@@ -784,11 +723,12 @@ function setupWebSocket(server: any): WebSocketServer {
               );
               return;
             }
+            const { accessJid, group } = resolved;
             // Permission: user must be able to access the group
-            const groupWithJid = { ...group, jid: chatJid };
+            const groupWithJid = { ...group, jid: accessJid };
             if (
               !canAccessGroup(
-                { id: session.user_id, role: session.role },
+                { id: session.id, role: session.role },
                 groupWithJid,
               )
             ) {
@@ -801,36 +741,18 @@ function setupWebSocket(server: any): WebSocketServer {
               );
               return;
             }
-            if ((group.executionMode || 'container') === 'host') {
-              ws.send(
-                JSON.stringify({
-                  type: 'terminal_error',
-                  chatJid,
-                  error: '宿主机模式不支持终端',
-                }),
-              );
-              return;
-            }
-            // 查找活跃的容器
-            const status = deps.queue.getStatus();
-            const groupStatus = status.groups.find((g) => g.jid === chatJid);
+            const workingDirectory = group.customCwd
+              ? path.resolve(group.customCwd)
+              : path.join(GROUPS_DIR, group.folder);
+            const status = deps.queue.getRuntimeStatus();
+            const groupStatus = status.groups.find((g) => g.jid === accessJid);
             if (!groupStatus || !groupStatus.active) {
-              deps.ensureTerminalContainerStarted(chatJid);
+              deps.ensureTerminalRuntimeStarted(accessJid);
               ws.send(
                 JSON.stringify({
                   type: 'terminal_error',
                   chatJid,
-                  error: '工作区启动中，请稍后重试',
-                }),
-              );
-              return;
-            }
-            if (!groupStatus.containerName) {
-              ws.send(
-                JSON.stringify({
-                  type: 'terminal_error',
-                  chatJid,
-                  error: '工作区启动中，请稍后重试',
+                  error: '工作区 Runtime 启动中，请稍后重试',
                 }),
               );
               return;
@@ -839,21 +761,23 @@ function setupWebSocket(server: any): WebSocketServer {
             const rows = normalizeTerminalSize(msg.rows, 24, 8, 120);
             // 停止该 ws 之前的终端
             const prevJid = wsTerminals.get(ws);
-            if (prevJid && prevJid !== chatJid) {
+            if (prevJid && prevJid !== accessJid) {
               terminalManager.stop(prevJid);
               releaseTerminalOwnership(ws, prevJid);
             }
 
             // 若该 group 已被其它 ws 占用，先释放旧 owner，防止后续 close 误杀新会话
-            const existingOwner = terminalOwners.get(chatJid);
+            const existingOwner = terminalOwners.get(accessJid);
             if (existingOwner && existingOwner !== ws) {
-              terminalManager.stop(chatJid);
-              releaseTerminalOwnership(existingOwner, chatJid);
+              const existingClientJid =
+                wsTerminalClientJids.get(existingOwner) || accessJid;
+              terminalManager.stop(accessJid);
+              releaseTerminalOwnership(existingOwner, accessJid);
               if (existingOwner.readyState === WebSocket.OPEN) {
                 existingOwner.send(
                   JSON.stringify({
                     type: 'terminal_stopped',
-                    chatJid,
+                    chatJid: existingClientJid,
                     reason: '终端被其他连接接管',
                   }),
                 );
@@ -861,8 +785,8 @@ function setupWebSocket(server: any): WebSocketServer {
             }
 
             terminalManager.start(
-              chatJid,
-              groupStatus.containerName,
+              accessJid,
+              workingDirectory,
               cols,
               rows,
               (data) => {
@@ -873,8 +797,8 @@ function setupWebSocket(server: any): WebSocketServer {
                 }
               },
               (_exitCode, _signal) => {
-                if (terminalOwners.get(chatJid) === ws) {
-                  releaseTerminalOwnership(ws, chatJid);
+                if (terminalOwners.get(accessJid) === ws) {
+                  releaseTerminalOwnership(ws, accessJid);
                 }
                 if (ws.readyState === WebSocket.OPEN) {
                   ws.send(
@@ -887,8 +811,9 @@ function setupWebSocket(server: any): WebSocketServer {
                 }
               },
             );
-            wsTerminals.set(ws, chatJid);
-            terminalOwners.set(chatJid, ws);
+            wsTerminals.set(ws, accessJid);
+            wsTerminalClientJids.set(ws, chatJid);
+            terminalOwners.set(accessJid, ws);
             ws.send(JSON.stringify({ type: 'terminal_started', chatJid }));
           } catch (err) {
             logger.error(
@@ -919,10 +844,22 @@ function setupWebSocket(server: any): WebSocketServer {
             );
             return;
           }
+          const resolved = resolveRouteGroup(inputValidation.data.chatJid);
+          if (!resolved) {
+            ws.send(
+              JSON.stringify({
+                type: 'terminal_error',
+                chatJid: inputValidation.data.chatJid,
+                error: '终端会话已失效',
+              }),
+            );
+            return;
+          }
+          const accessJid = resolved.accessJid;
           const ownerJid = wsTerminals.get(ws);
           if (
-            ownerJid !== inputValidation.data.chatJid ||
-            terminalOwners.get(inputValidation.data.chatJid) !== ws
+            ownerJid !== accessJid ||
+            terminalOwners.get(accessJid) !== ws
           ) {
             ws.send(
               JSON.stringify({
@@ -934,7 +871,7 @@ function setupWebSocket(server: any): WebSocketServer {
             return;
           }
           terminalManager.write(
-            inputValidation.data.chatJid,
+            accessJid,
             inputValidation.data.data,
           );
         } else if (msg.type === 'terminal_resize') {
@@ -949,10 +886,22 @@ function setupWebSocket(server: any): WebSocketServer {
             );
             return;
           }
+          const resolved = resolveRouteGroup(resizeValidation.data.chatJid);
+          if (!resolved) {
+            ws.send(
+              JSON.stringify({
+                type: 'terminal_error',
+                chatJid: resizeValidation.data.chatJid,
+                error: '终端会话已失效',
+              }),
+            );
+            return;
+          }
+          const accessJid = resolved.accessJid;
           const ownerJid = wsTerminals.get(ws);
           if (
-            ownerJid !== resizeValidation.data.chatJid ||
-            terminalOwners.get(resizeValidation.data.chatJid) !== ws
+            ownerJid !== accessJid ||
+            terminalOwners.get(accessJid) !== ws
           ) {
             ws.send(
               JSON.stringify({
@@ -975,21 +924,24 @@ function setupWebSocket(server: any): WebSocketServer {
             8,
             120,
           );
-          terminalManager.resize(resizeValidation.data.chatJid, cols, rows);
+          terminalManager.resize(accessJid, cols, rows);
         } else if (msg.type === 'terminal_stop') {
           const stopValidation = TerminalStopSchema.safeParse(msg);
           if (!stopValidation.success) {
             return;
           }
+          const resolved = resolveRouteGroup(stopValidation.data.chatJid);
+          if (!resolved) return;
+          const accessJid = resolved.accessJid;
           const ownerJid = wsTerminals.get(ws);
           if (
-            ownerJid !== stopValidation.data.chatJid ||
-            terminalOwners.get(stopValidation.data.chatJid) !== ws
+            ownerJid !== accessJid ||
+            terminalOwners.get(accessJid) !== ws
           ) {
             return;
           }
-          terminalManager.stop(stopValidation.data.chatJid);
-          releaseTerminalOwnership(ws, stopValidation.data.chatJid);
+          terminalManager.stop(accessJid);
+          releaseTerminalOwnership(ws, accessJid);
           ws.send(
             JSON.stringify({
               type: 'terminal_stopped',
@@ -1042,51 +994,21 @@ function safeBroadcast(
   allowedUserIds?: Set<string> | null,
 ): void {
   const data = JSON.stringify(msg);
+  const localUser = getLocalWorkbenchAuthUser();
   for (const [client, clientInfo] of wsClients) {
     if (client.readyState !== WebSocket.OPEN) {
       wsClients.delete(client);
       continue;
     }
 
-    if (!clientInfo.sessionId) {
-      wsClients.delete(client);
-      try {
-        client.close(1008, 'Unauthorized');
-      } catch {
-        /* ignore */
-      }
+    if (adminOnly && localUser.role !== 'admin') {
       continue;
     }
 
-    const session = getSessionWithUser(clientInfo.sessionId);
-    const expired = !!session && isSessionExpired(session.expires_at);
-    const invalid =
-      !session ||
-      expired ||
-      session.status !== 'active' ||
-      session.must_change_password;
-    if (invalid) {
-      if (expired) {
-        deleteUserSession(clientInfo.sessionId);
-      }
-      lastActiveCache.delete(clientInfo.sessionId);
-      wsClients.delete(client);
-      try {
-        client.close(1008, 'Unauthorized');
-      } catch {
-        /* ignore */
-      }
-      continue;
-    }
-
-    if (adminOnly && session.role !== 'admin') {
-      continue;
-    }
-
-    // Group isolation: only allowed users (owner + shared members) can see this group's events
+    // Single-user isolation: only the local operator can see this group's events
     // allowedUserIds === null means ownership unresolvable → default-deny (admin-only)
     if (allowedUserIds !== undefined) {
-      if (allowedUserIds === null || !allowedUserIds.has(session.user_id)) {
+      if (allowedUserIds === null || !allowedUserIds.has(clientInfo.userId)) {
         continue;
       }
     }
@@ -1101,11 +1023,10 @@ function safeBroadcast(
 
 /**
  * Get the set of user IDs allowed to receive broadcasts for a group.
- * Includes the owner and all shared members. Admin is NOT automatically included
- * — they must be the owner or a shared member to receive broadcasts.
+ * In single-user mode this is always the local operator.
  *
  * Returns:
- * - Set<string>: allowed user IDs (owner + shared members)
+ * - Set<string>: allowed user IDs
  * - null: ownership unresolvable → default-deny (admin-only)
  */
 const allowedUserIdsCache = new Map<
@@ -1131,7 +1052,7 @@ function getGroupAllowedUserIds(chatJid: string): Set<string> | null {
 export function invalidateAllowedUserCache(chatJid: string): void {
   allowedUserIdsCache.delete(chatJid);
   // Also clear cache for sibling JIDs sharing the same folder,
-  // since membership is per-folder, not per-JID.
+  // so all aliases of the same session stay consistent.
   const group = getRegisteredGroup(chatJid);
   if (group) {
     const siblingJids = getJidsByFolder(group.folder);
@@ -1142,47 +1063,11 @@ export function invalidateAllowedUserCache(chatJid: string): void {
 }
 
 function computeGroupAllowedUserIds(chatJid: string): Set<string> | null {
-  const group = getRegisteredGroup(chatJid);
-  if (!group) return null; // Unknown group → deny by default
-
-  const allowed = new Set<string>();
-
-  // Add owner
-  let ownerId: string | null = group.created_by ?? null;
-
-  // Legacy fallback: IM group without created_by, resolve by sibling home group.
-  if (!ownerId && !chatJid.startsWith('web:')) {
-    const siblingJids = getJidsByFolder(group.folder);
-    for (const siblingJid of siblingJids) {
-      if (!siblingJid.startsWith('web:')) continue;
-      const siblingGroup = getRegisteredGroup(siblingJid);
-      if (siblingGroup?.is_home && siblingGroup.created_by) {
-        ownerId = siblingGroup.created_by;
-        break;
-      }
-    }
-  }
-
-  if (!ownerId) {
-    if (group.is_home) return null;
-    if (group.folder === 'main') return null;
-    return null; // Unresolvable → deny by default
-  }
-
-  allowed.add(ownerId);
-
-  // For non-home groups, include shared members
-  if (!group.is_home) {
-    const members = getGroupMembers(group.folder);
-    for (const m of members) {
-      allowed.add(m.user_id);
-    }
-  }
-
-  return allowed;
+  void chatJid;
+  return new Set([getLocalWorkbenchAuthUser().id]);
 }
 
-/** Check if a chatJid belongs to a host-mode group (for broadcast filtering) */
+/** Legacy helper kept for broadcast filtering compatibility. */
 function isHostGroupJid(chatJid: string): boolean {
   const group = getRegisteredGroup(chatJid);
   return !!group && isHostExecutionGroup(group);
@@ -1190,15 +1075,15 @@ function isHostGroupJid(chatJid: string): boolean {
 
 /**
  * Normalize chatJid for WebSocket broadcasts.
- * IM groups (Feishu/Telegram) that share a folder with an is_home group are mapped
- * to that home group's web JID so the frontend can match all home-session events.
+ * IM channels that share a folder are mapped to that folder's web session JID
+ * so the frontend sees a single event stream per Session workspace.
  */
 function normalizeHomeJid(chatJid: string): string {
   if (chatJid.startsWith('web:')) return chatJid;
   const group = getRegisteredGroup(chatJid);
   if (!group) return chatJid;
 
-  // Find the web: JID that shares this folder (typically the is_home group)
+  // Find the web: JID that represents this folder in the Session UI.
   const jids = getJidsByFolder(group.folder);
   for (const jid of jids) {
     if (jid.startsWith('web:')) {
@@ -1287,20 +1172,6 @@ export function broadcastTurnEvent(chatJid: string, event: StreamEvent): void {
   safeBroadcast(msg, isHostGroupJid(chatJid), allowedUserIds);
 }
 
-export function broadcastBillingUpdate(
-  userId: string,
-  usage: import('./types.js').BillingAccessResult,
-): void {
-  const msg: WsMessageOut = {
-    type: 'billing_update',
-    userId,
-    usage,
-  };
-  // Send only to the specific user
-  const allowedUserIds = new Set([userId]);
-  safeBroadcast(msg, false, allowedUserIds);
-}
-
 export function broadcastAgentStatus(
   chatJid: string,
   agentId: string,
@@ -1327,29 +1198,17 @@ export function broadcastAgentStatus(
   safeBroadcast(msg, isHostGroupJid(chatJid), allowedUserIds);
 }
 
-export function broadcastDockerBuildLog(line: string): void {
-  safeBroadcast({ type: 'docker_build_log', line }, true);
-}
-
-export function broadcastDockerBuildComplete(
-  success: boolean,
-  error?: string,
-): void {
-  safeBroadcast({ type: 'docker_build_complete', success, error }, true);
-}
-
 function broadcastStatus(): void {
   if (!deps) return;
 
-  const queueStatus = deps.queue.getStatus();
+  const queueStatus = deps.queue.getRuntimeStatus();
   // Broadcast aggregate system metrics only to admin users.
   // Non-admin users get per-user filtered metrics via REST /api/status.
   safeBroadcast(
     {
       type: 'status_update',
-      activeContainers: queueStatus.activeContainerCount,
-      activeHostProcesses: queueStatus.activeHostProcessCount,
-      activeTotal: queueStatus.activeCount,
+      activeRuntimes: queueStatus.activeCount,
+      maxConcurrentRuntimes: getSystemSettings().maxConcurrentRuntimes,
       queueLength: queueStatus.waitingCount,
     },
     /* adminOnly */ true,
@@ -1366,15 +1225,16 @@ export function startWebServer(webDeps: WebDeps): void {
   deps = webDeps;
   setWebDeps(webDeps);
   injectConfigDeps(webDeps);
-  injectMonitorDeps({
-    broadcastDockerBuildLog,
-    broadcastDockerBuildComplete,
-  });
+  restoreNativeFetchGlobals();
 
   httpServer = serve(
     {
       fetch: app.fetch,
       port: WEB_PORT,
+      // Node 25 + @hono/node-server's Response shim can corrupt JSON bodies
+      // on the wire even though app.fetch() stays correct. Keep the native
+      // Request/Response objects for the HTTP server path.
+      overrideGlobalObjects: false,
     },
     (info) => {
       logger.info({ port: info.port }, 'Web server started');
@@ -1384,7 +1244,7 @@ export function startWebServer(webDeps: WebDeps): void {
   wss = setupWebSocket(httpServer);
 
   // Register container exit callback for terminal cleanup
-  webDeps.queue.addOnContainerExitListener((groupJid: string) => {
+  webDeps.queue.addOnRuntimeExitListener((groupJid: string) => {
     if (terminalManager.has(groupJid)) {
       const ownerWs = terminalOwners.get(groupJid);
       terminalManager.stop(groupJid);

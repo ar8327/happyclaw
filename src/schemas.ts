@@ -23,8 +23,9 @@ const CRON_REGEX = /^(\S+\s+){4,5}\S+$/;
 
 export const TaskCreateSchema = z
   .object({
-    group_folder: z.string().min(1),
-    chat_jid: z.string().min(1),
+    session_id: z.string().min(1).optional(),
+    group_folder: z.string().min(1).optional(),
+    chat_jid: z.string().min(1).optional(),
     prompt: z.string().optional().default(''),
     schedule_type: z.enum(['cron', 'interval', 'once']),
     schedule_value: z.string().min(1),
@@ -35,6 +36,13 @@ export const TaskCreateSchema = z
     notify_channels: z.array(z.enum(['feishu', 'telegram', 'qq', 'wechat'])).nullable().optional(),
   })
   .superRefine((data, ctx) => {
+    if (!data.session_id && !(data.group_folder?.trim() && data.chat_jid?.trim())) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['session_id'],
+        message: '必须提供 session_id，或同时提供 group_folder 与 chat_jid',
+      });
+    }
     const execType = data.execution_type || 'agent';
     if (execType === 'agent' && !data.prompt?.trim()) {
       ctx.addIssue({
@@ -109,9 +117,8 @@ export const MessageCreateSchema = z
     }
   });
 
-export const GroupCreateSchema = z.object({
+export const SessionCreateSchema = z.object({
   name: z.string().min(1).max(MAX_GROUP_NAME_LEN),
-  execution_mode: z.enum(['container', 'host']).optional(),
   custom_cwd: z
     .string()
     .optional()
@@ -126,10 +133,6 @@ export const GroupCreateSchema = z.object({
     .transform((val) => (val && val.trim() ? val.trim() : undefined)),
 });
 
-export const GroupMemberAddSchema = z.object({
-  user_id: z.string().min(1),
-});
-
 export const MemoryFileSchema = z.object({
   path: z.string().min(1),
   content: z.string(),
@@ -139,113 +142,24 @@ export const MemoryGlobalSchema = z.object({
   content: z.string(),
 });
 
-export const ClaudeConfigSchema = z.object({
-  anthropicBaseUrl: z.string(),
-  happyclawModel: z.string().max(128).optional(),
-});
-
-export const ClaudeThirdPartyProfileCreateSchema = z.object({
-  name: z.string().min(1).max(64),
-  anthropicBaseUrl: z.string().max(2000),
-  anthropicAuthToken: z.string().max(2000),
-  happyclawModel: z.string().max(128).optional(),
-  customEnv: z.record(z.string().max(256), z.string().max(4096)).optional(),
-});
-
-export const ClaudeThirdPartyProfilePatchSchema = z
-  .object({
-    name: z.string().min(1).max(64).optional(),
-    anthropicBaseUrl: z.string().max(2000).optional(),
-    happyclawModel: z.string().max(128).optional(),
-    customEnv: z.record(z.string().max(256), z.string().max(4096)).optional(),
-  })
-  .refine(
-    (data) =>
-      typeof data.name === 'string' ||
-      typeof data.anthropicBaseUrl === 'string' ||
-      typeof data.happyclawModel === 'string' ||
-      data.customEnv !== undefined,
-    { message: 'At least one profile field must be provided' },
-  );
-
-export const ClaudeThirdPartyProfileSecretsSchema = z
-  .object({
-    anthropicAuthToken: z.string().max(2000).optional(),
-    clearAnthropicAuthToken: z.boolean().optional(),
-  })
-  .refine(
-    (data) =>
-      typeof data.anthropicAuthToken === 'string' ||
-      data.clearAnthropicAuthToken === true,
-    { message: 'At least one secret field must be provided' },
-  );
-
-export const GroupPatchSchema = z.object({
-  name: z.string().min(1).max(MAX_GROUP_NAME_LEN).optional(),
-  selected_skills: z
-    .array(
-      z
-        .string()
-        .max(128)
-        .regex(
-          /^[\w\-]+$/,
-          'Skill ID must be alphanumeric with hyphens/underscores',
-        ),
-    )
-    .max(200)
-    .nullable()
-    .optional(),
-  is_pinned: z.boolean().optional(),
-  activation_mode: z
-    .enum(['auto', 'always', 'when_mentioned', 'disabled'])
-    .optional(),
-  llm_provider: z.enum(['claude', 'openai']).optional(),
-  model: z.string().max(128).nullable().optional(),
-  thinking_effort: z.enum(['low', 'medium', 'high']).nullable().optional(),
-  context_compression: z.enum(['off', 'auto', 'manual']).optional(),
-  knowledge_extraction: z.boolean().optional(),
-});
-
-export const LoginSchema = z.object({
-  username: z.string().min(1),
-  password: z.string().min(1),
-});
-
-export const RegisterSchema = z.object({
-  username: z.string().min(3).max(32),
-  password: z.string().min(8).max(128),
-  display_name: z.string().max(64).optional(),
-  invite_code: z.string().min(1).optional(),
-});
-
-export const RegistrationConfigSchema = z.object({
-  allowRegistration: z.boolean(),
-  requireInviteCode: z.boolean(),
-});
-
 export const SystemSettingsSchema = z.object({
-  containerTimeout: z.number().int().min(60000).max(86400000).optional(),
+  runtimeTimeout: z.number().int().min(60000).max(86400000).optional(),
   idleTimeout: z.number().int().min(60000).max(86400000).optional(),
-  containerMaxOutputSize: z
+  runtimeMaxOutputSize: z
     .number()
     .int()
     .min(1048576)
     .max(104857600)
     .optional(),
-  maxConcurrentContainers: z.number().int().min(1).max(100).optional(),
-  maxConcurrentHostProcesses: z.number().int().min(1).max(50).optional(),
-  maxLoginAttempts: z.number().int().min(1).max(100).optional(),
-  loginLockoutMinutes: z.number().int().min(1).max(1440).optional(),
+  maxConcurrentRuntimes: z.number().int().min(1).max(100).optional(),
   maxConcurrentScripts: z.number().int().min(1).max(50).optional(),
   scriptTimeout: z.number().int().min(5000).max(600000).optional(),
-  billingEnabled: z.boolean().optional(),
-  billingMode: z.literal('wallet_first').optional(),
-  billingMinStartBalanceUsd: z.number().min(0).max(1000000).optional(),
-  billingCurrency: z.string().min(1).max(10).optional(),
-  billingCurrencyRate: z.number().min(0.0001).max(1000000).optional(),
+  queryActivityTimeoutMs: z.number().int().min(30000).max(3600000).optional(),
+  toolCallHardTimeoutMs: z.number().int().min(60000).max(7200000).optional(),
   memoryQueryTimeout: z.number().int().min(10000).max(600000).optional(),
   memoryGlobalSleepTimeout: z.number().int().min(60000).max(3600000).optional(),
   memorySendTimeout: z.number().int().min(30000).max(3600000).optional(),
+  codexArchiveThreshold: z.number().int().min(10000).max(2000000).optional(),
   turnBatchWindowMs: z.number().int().min(1000).max(60000).optional(),
   turnMaxBatchMs: z.number().int().min(5000).max(300000).optional(),
   traceRetentionDays: z.number().int().min(1).max(90).optional(),
@@ -330,7 +244,7 @@ export const AdminPatchUserSchema = z.object({
 export const InviteCreateSchema = z.object({
   role: z.enum(['admin', 'member']).optional(),
   permission_template: z
-    .enum(['admin_full', 'member_basic', 'ops_manager', 'user_admin'])
+    .enum(['admin_full', 'ops_manager'])
     .optional(),
   permissions: z
     .array(PermissionValueSchema)
@@ -339,48 +253,6 @@ export const InviteCreateSchema = z.object({
   max_uses: z.number().int().min(0).max(1000).optional(),
   expires_in_hours: z.number().int().min(1).max(8760).optional(),
 });
-
-export const ClaudeOAuthCredentialsSchema = z.object({
-  accessToken: z.string().min(1),
-  refreshToken: z.string().min(1),
-  expiresAt: z.number(),
-  scopes: z.array(z.string()).default([]),
-});
-
-export const ClaudeSecretsSchema = z
-  .object({
-    anthropicAuthToken: z.string().optional(),
-    clearAnthropicAuthToken: z.boolean().optional(),
-    anthropicApiKey: z.string().optional(),
-    clearAnthropicApiKey: z.boolean().optional(),
-    claudeCodeOauthToken: z.string().optional(),
-    clearClaudeCodeOauthToken: z.boolean().optional(),
-    claudeOAuthCredentials: ClaudeOAuthCredentialsSchema.optional(),
-    clearClaudeOAuthCredentials: z.boolean().optional(),
-  })
-  .refine(
-    (data) => {
-      const hasAnthropicAuthToken =
-        typeof data.anthropicAuthToken === 'string' ||
-        data.clearAnthropicAuthToken === true;
-      const hasAnthropicApiKey =
-        typeof data.anthropicApiKey === 'string' ||
-        data.clearAnthropicApiKey === true;
-      const hasClaudeCodeOauthToken =
-        typeof data.claudeCodeOauthToken === 'string' ||
-        data.clearClaudeCodeOauthToken === true;
-      const hasClaudeOAuthCredentials =
-        data.claudeOAuthCredentials !== undefined ||
-        data.clearClaudeOAuthCredentials === true;
-      return (
-        hasAnthropicAuthToken ||
-        hasAnthropicApiKey ||
-        hasClaudeCodeOauthToken ||
-        hasClaudeOAuthCredentials
-      );
-    },
-    { message: 'At least one secret field must be provided' },
-  );
 
 export const FeishuConfigSchema = z
   .object({
@@ -442,24 +314,6 @@ export const ImGeneralConfigSchema = z.object({
   autoUnbindOnSendFailure: z.boolean(),
 });
 
-export const ClaudeCustomEnvSchema = z.object({
-  customEnv: z.record(z.string().max(256), z.string().max(4096)),
-});
-
-export const ContainerEnvSchema = z.object({
-  anthropicBaseUrl: z.string().max(2000).optional(),
-  anthropicAuthToken: z.string().max(2000).optional(),
-  anthropicApiKey: z.string().max(2000).optional(),
-  claudeCodeOauthToken: z.string().max(2000).optional(),
-  happyclawModel: z.string().max(128).optional(),
-  customEnv: z
-    .record(z.string().max(256), z.string().max(4096))
-    .optional()
-    .refine((env) => !env || Object.keys(env).length <= 50, {
-      message: 'customEnv must have at most 50 entries',
-    }),
-});
-
 // Terminal WebSocket message schemas
 export const TerminalStartSchema = z.object({
   chatJid: z.string().min(1),
@@ -480,108 +334,6 @@ export const TerminalResizeSchema = z.object({
 
 export const TerminalStopSchema = z.object({
   chatJid: z.string().min(1),
-});
-
-// --- Billing schemas ---
-
-export const BillingPlanCreateSchema = z.object({
-  id: z
-    .string()
-    .min(1)
-    .max(64)
-    .regex(/^[\w-]+$/, 'ID must be alphanumeric with hyphens/underscores'),
-  name: z.string().min(1).max(64),
-  description: z.string().max(500).nullable().optional(),
-  tier: z.number().int().min(0).max(100).optional(),
-  monthly_cost_usd: z.number().min(0).optional(),
-  monthly_token_quota: z.number().int().min(0).nullable().optional(),
-  monthly_cost_quota: z.number().min(0).nullable().optional(),
-  daily_cost_quota: z.number().min(0).nullable().optional(),
-  weekly_cost_quota: z.number().min(0).nullable().optional(),
-  daily_token_quota: z.number().int().min(0).nullable().optional(),
-  weekly_token_quota: z.number().int().min(0).nullable().optional(),
-  rate_multiplier: z.number().min(0.01).max(100).optional(),
-  trial_days: z.number().int().min(1).max(365).nullable().optional(),
-  sort_order: z.number().int().min(0).max(9999).optional(),
-  display_price: z.string().max(64).nullable().optional(),
-  highlight: z.boolean().optional(),
-  max_groups: z.number().int().min(0).nullable().optional(),
-  max_concurrent_containers: z.number().int().min(0).nullable().optional(),
-  max_im_channels: z.number().int().min(0).nullable().optional(),
-  max_mcp_servers: z.number().int().min(0).nullable().optional(),
-  max_storage_mb: z.number().int().min(0).nullable().optional(),
-  allow_overage: z.boolean().optional(),
-  features: z.array(z.string().max(64)).max(50).optional(),
-  is_default: z.boolean().optional(),
-  is_active: z.boolean().optional(),
-});
-
-export const BillingPlanPatchSchema = BillingPlanCreateSchema.omit({
-  id: true,
-}).partial();
-
-export const AssignPlanSchema = z.object({
-  plan_id: z.string().min(1),
-  duration_days: z.number().int().min(1).max(3650).optional(),
-});
-
-export const AdjustBalanceSchema = z.object({
-  amount_usd: z.number().refine((v) => v !== 0, 'Amount cannot be zero'),
-  description: z.string().min(1).max(500),
-  idempotency_key: z.string().min(1).max(64).optional(),
-});
-
-export const BatchAssignPlanSchema = z.object({
-  user_ids: z.array(z.string().min(1)).min(1).max(100),
-  plan_id: z.string().min(1),
-  duration_days: z.number().int().min(1).max(3650).optional(),
-});
-
-export const RedeemCodeCreateSchema = z
-  .object({
-    type: z.enum(['balance', 'subscription', 'trial']),
-    value_usd: z.number().min(0.01).optional(),
-    plan_id: z.string().min(1).optional(),
-    duration_days: z.number().int().min(1).max(3650).optional(),
-    max_uses: z.number().int().min(1).max(10000).optional(),
-    count: z.number().int().min(1).max(100).optional(), // 批量生成数量
-    prefix: z
-      .string()
-      .max(16)
-      .regex(/^[\w-]*$/)
-      .optional(), // 兑换码前缀
-    expires_in_hours: z.number().int().min(1).max(87600).optional(),
-    notes: z.string().max(500).optional(),
-  })
-  .superRefine((data, ctx) => {
-    if (data.type === 'balance' && (!data.value_usd || data.value_usd <= 0)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['value_usd'],
-        message: 'Balance type requires a positive value_usd',
-      });
-    }
-    if (data.type === 'subscription' && !data.plan_id) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['plan_id'],
-        message: 'Subscription type requires a plan_id',
-      });
-    }
-    if (
-      data.type === 'trial' &&
-      (!data.duration_days || data.duration_days <= 0)
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['duration_days'],
-        message: 'Trial type requires a positive duration_days',
-      });
-    }
-  });
-
-export const RedeemCodeSchema = z.object({
-  code: z.string().min(1).max(64),
 });
 
 // Memory types
@@ -612,46 +364,10 @@ export interface MemorySearchHit extends MemorySource {
 
 export const UserIMPreferencesSchema = z.object({
   autoCreateWorkspaceForGroups: z.boolean().optional(),
-  autoCreateExecutionMode: z.enum(['host', 'container']).optional(),
+  autoCreateExecutionMode: z.literal('local').optional(),
 });
 
 export const WeChatConfigSchema = z.object({
   enabled: z.boolean().optional(),
   clearBotToken: z.boolean().optional(),
-});
-
-// ─── Codex Provider ─────────────────────────────────────────────
-
-export const CodexModeSchema = z.object({
-  mode: z.enum(['cli', 'api_key']),
-});
-
-export const CodexProfileCreateSchema = z.object({
-  name: z.string().min(1).max(64),
-  openaiApiKey: z.string().min(1).max(2000),
-  baseUrl: z.string().max(2000).optional(),
-  defaultModel: z.string().max(128).optional(),
-  customEnv: z
-    .record(z.string().max(256), z.string().max(4096))
-    .optional()
-    .refine((env) => !env || Object.keys(env).length <= 50, {
-      message: 'customEnv must have at most 50 entries',
-    }),
-});
-
-export const CodexProfilePatchSchema = z.object({
-  name: z.string().min(1).max(64).optional(),
-  baseUrl: z.string().max(2000).optional(),
-  defaultModel: z.string().max(128).optional(),
-  customEnv: z
-    .record(z.string().max(256), z.string().max(4096))
-    .optional()
-    .refine((env) => !env || Object.keys(env).length <= 50, {
-      message: 'customEnv must have at most 50 entries',
-    }),
-});
-
-export const CodexProfileSecretsSchema = z.object({
-  openaiApiKey: z.string().max(2000).optional(),
-  clearOpenaiApiKey: z.boolean().optional(),
 });
