@@ -68,6 +68,62 @@ function resolveAdditionalDirectories(defaultDirs: string[]): string[] {
   }
 }
 
+interface CodexTokenUsage {
+  input_tokens?: unknown;
+  cached_input_tokens?: unknown;
+  output_tokens?: unknown;
+}
+
+interface CodexTokenCountEvent {
+  type?: string;
+  payload?: {
+    type?: string;
+    info?: {
+      last_token_usage?: CodexTokenUsage;
+    } | null;
+  };
+}
+
+function numberOrZero(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function usageFromCodexTokenCount(event: ThreadEvent): UsageInfo | null {
+  const tokenEvent = event as unknown as CodexTokenCountEvent;
+  if (
+    tokenEvent.type !== 'event_msg' ||
+    tokenEvent.payload?.type !== 'token_count'
+  ) {
+    return null;
+  }
+
+  const last = tokenEvent.payload.info?.last_token_usage;
+  if (!last) return null;
+
+  return {
+    inputTokens: numberOrZero(last.input_tokens),
+    outputTokens: numberOrZero(last.output_tokens),
+    cacheReadInputTokens: numberOrZero(last.cached_input_tokens),
+    cacheCreationInputTokens: 0,
+    costUSD: 0,
+    durationMs: 0,
+    numTurns: 1,
+  };
+}
+
+function usageFromCodexTurnCompleted(event: ThreadEvent): UsageInfo | null {
+  if (event.type !== 'turn.completed') return null;
+  return {
+    inputTokens: event.usage.input_tokens,
+    outputTokens: event.usage.output_tokens,
+    cacheReadInputTokens: event.usage.cached_input_tokens,
+    cacheCreationInputTokens: 0,
+    costUSD: 0,
+    durationMs: 0,
+    numTurns: 1,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // CodexRunner
 // ---------------------------------------------------------------------------
@@ -224,6 +280,7 @@ export class CodexRunner implements AgentRunner {
 
     // Run turn and convert events
     let usage: UsageInfo | undefined;
+    let fallbackUsage: UsageInfo | undefined;
     let finalText: string | null = null;
     let threadId: string | null = null;
     this.activeToolCalls.clear();
@@ -231,6 +288,12 @@ export class CodexRunner implements AgentRunner {
     try {
       for await (const event of this.session.runTurn(composedPrompt, imagePaths)) {
         this.trackActivityEvent(event);
+
+        const tokenCountUsage = usageFromCodexTokenCount(event);
+        if (tokenCountUsage) {
+          usage = tokenCountUsage;
+        }
+
         // Convert to StreamEvents
         const streamEvents = convertThreadEvent(event);
         for (const se of streamEvents) {
@@ -250,17 +313,9 @@ export class CodexRunner implements AgentRunner {
           finalText = event.item.text;
         }
 
-        // Extract usage from turn.completed
-        if (event.type === 'turn.completed') {
-          usage = {
-            inputTokens: event.usage.input_tokens,
-            outputTokens: event.usage.output_tokens,
-            cacheReadInputTokens: event.usage.cached_input_tokens,
-            cacheCreationInputTokens: 0,
-            costUSD: 0,
-            durationMs: 0,
-            numTurns: 1,
-          };
+        const turnCompletedUsage = usageFromCodexTurnCompleted(event);
+        if (turnCompletedUsage) {
+          fallbackUsage = turnCompletedUsage;
         }
 
         // Handle errors
@@ -287,6 +342,11 @@ export class CodexRunner implements AgentRunner {
         log(`Codex turn error: ${msg}`);
         throw err;
       }
+    }
+
+    usage = usage || fallbackUsage;
+    if (usage) {
+      yield { kind: 'stream_event', event: { eventType: 'usage', usage } };
     }
 
     // Emit result
