@@ -28,6 +28,7 @@ import {
   getSupportedRunnerIds,
 } from './runners/index.js';
 import type { RunnerManifest } from './runners/types.js';
+import type { RunnerDescriptor, UserMcpSource } from './runner-descriptor.types.js';
 
 type ContainerInputWire = Omit<ContainerInput, 'groupFolder'> & {
   groupFolder?: string;
@@ -91,29 +92,101 @@ async function readStdin(): Promise<string> {
 // User MCP servers loader
 // ---------------------------------------------------------------------------
 
-function loadUserMcpServers(): Record<string, unknown> {
-  const candidateFiles = [
-    process.env.HAPPYCLAW_WORKSPACE_SESSION
-      ? path.join(process.env.HAPPYCLAW_WORKSPACE_SESSION, '.claude', 'settings.json')
-      : null,
-    process.env.CLAUDE_CONFIG_DIR
-      ? path.join(process.env.CLAUDE_CONFIG_DIR, 'settings.json')
-      : null,
-  ].filter((value): value is string => !!value);
+function readMcpServersFromJsonFile(filePath: string): Record<string, unknown> {
+  try {
+    if (!fs.existsSync(filePath)) return {};
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    const servers =
+      parsed?.mcpServers && typeof parsed.mcpServers === 'object'
+        ? parsed.mcpServers
+        : parsed?.servers && typeof parsed.servers === 'object'
+          ? parsed.servers
+          : null;
+    return servers && !Array.isArray(servers)
+      ? servers as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
 
-  for (const settingsFile of candidateFiles) {
-    try {
-      if (fs.existsSync(settingsFile)) {
-        const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
-        if (settings.mcpServers && typeof settings.mcpServers === 'object') {
-          return settings.mcpServers;
-        }
-      }
-    } catch {
-      /* ignore parse errors */
-    }
+function readMcpServersFromEnv(name: string): Record<string, unknown> {
+  const raw = process.env[name];
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function readProfileMcpServers(input: ContainerInput): Record<string, unknown> {
+  const value = input.runnerConfig?.config?.mcpServers;
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function loadMcpServersFromSource(
+  source: UserMcpSource,
+  input: ContainerInput,
+): Record<string, unknown> {
+  if (source === 'happyclaw') {
+    return readMcpServersFromEnv('HAPPYCLAW_USER_MCP_SERVERS');
+  }
+  if (source === 'profile') {
+    return readProfileMcpServers(input);
+  }
+  if (source === 'claude_settings') {
+    const candidateFiles = [
+      process.env.HAPPYCLAW_WORKSPACE_SESSION
+        ? path.join(process.env.HAPPYCLAW_WORKSPACE_SESSION, '.claude', 'settings.json')
+        : null,
+      process.env.CLAUDE_CONFIG_DIR
+        ? path.join(process.env.CLAUDE_CONFIG_DIR, 'settings.json')
+        : null,
+    ].filter((value): value is string => !!value);
+    return Object.assign({}, ...candidateFiles.map(readMcpServersFromJsonFile));
+  }
+  if (source === 'codex_config') {
+    const candidateFiles = [
+      process.env.CODEX_CONFIG_DIR
+        ? path.join(process.env.CODEX_CONFIG_DIR, 'config.json')
+        : null,
+      process.env.HAPPYCLAW_WORKSPACE_SESSION
+        ? path.join(process.env.HAPPYCLAW_WORKSPACE_SESSION, '.codex', 'config.json')
+        : null,
+    ].filter((value): value is string => !!value);
+    return Object.assign({}, ...candidateFiles.map(readMcpServersFromJsonFile));
   }
   return {};
+}
+
+function loadUserMcpServers(
+  descriptor: RunnerDescriptor,
+  input: ContainerInput,
+): Record<string, unknown> {
+  if (
+    descriptor.toolContract.mode === 'none' ||
+    !descriptor.toolContract.supportsUserMcp
+  ) {
+    return {};
+  }
+  const sources = descriptor.toolContract.userMcpSources || [];
+  return Object.assign(
+    {},
+    ...sources.map((source) => loadMcpServersFromSource(source, input)),
+  );
+}
+
+function createUserMcpServerLoader(
+  descriptor: RunnerDescriptor,
+  input: ContainerInput,
+): () => Record<string, unknown> {
+  return () => loadUserMcpServers(descriptor, input);
 }
 
 function resolveRunnerManifest(input: ContainerInput): RunnerManifest {
@@ -262,7 +335,10 @@ async function main(): Promise<void> {
     globalDir: WORKSPACE_GLOBAL,
     memoryDir: WORKSPACE_MEMORY,
     thinkingEffort: THINKING_EFFORT,
-    loadUserMcpServers,
+    loadUserMcpServers: createUserMcpServerLoader(
+      runnerManifest.descriptor,
+      containerInput,
+    ),
     skillsDir: WORKSPACE_SKILLS,
     disableSyntheticArchive: DISABLE_SYNTHETIC_ARCHIVE,
   });

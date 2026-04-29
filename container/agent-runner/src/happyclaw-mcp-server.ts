@@ -2,8 +2,8 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { z } from 'zod';
 import { createContextManager } from './context-manager-factory.js';
+import { convertJsonSchemaToZod } from './mcp-schema.js';
 
 const WORKSPACE_GROUP = process.env.HAPPYCLAW_WORKSPACE_GROUP || '/workspace/group';
 const WORKSPACE_GLOBAL = process.env.HAPPYCLAW_WORKSPACE_GLOBAL || '/workspace/global';
@@ -32,21 +32,6 @@ function createMcpContextManager() {
     userId: USER_ID || undefined,
     skillsDirs,
   });
-}
-
-function convertJsonSchemaToZod(schema: Record<string, unknown>): z.ZodObject<Record<string, z.ZodTypeAny>> {
-  const shape: Record<string, z.ZodTypeAny> = {};
-  const properties = schema.properties as Record<string, unknown> | undefined;
-  const required = schema.required as string[] | undefined;
-
-  if (properties) {
-    for (const [key] of Object.entries(properties)) {
-      const isRequired = required?.includes(key);
-      shape[key] = isRequired ? z.any() : z.any().optional();
-    }
-  }
-
-  return z.object(shape);
 }
 
 async function main(): Promise<void> {

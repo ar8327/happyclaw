@@ -687,6 +687,7 @@ export async function runHostAgent(
   if (ownerId) {
     hostEnv['HAPPYCLAW_SKILLS_DIR'] = path.join(DATA_DIR, 'skills', ownerId);
   }
+  hostEnv['HAPPYCLAW_USER_MCP_SERVERS'] = JSON.stringify(hostMcpServers);
   if (executionProfile?.profileId) {
     hostEnv['HAPPYCLAW_RUNTIME_PROFILE_ID'] = executionProfile.profileId;
   }
