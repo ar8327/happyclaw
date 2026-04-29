@@ -1605,7 +1605,7 @@ const GLOBAL_SLEEP_CHECK_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
  *
  * Conditions per user:
  *   1. lastGlobalSleep > 6 hours ago (or never)
- *   2. No active sessions for this user
+ *   2. No busy or queued primary sessions for this user
  *   3. Has pending wrapups (session_wrapup triggered since last global_sleep)
  */
 export function runMemoryGlobalSleepIfNeeded(deps: GlobalSleepDeps): void {
@@ -1617,12 +1617,14 @@ export function runMemoryGlobalSleepIfNeeded(deps: GlobalSleepDeps): void {
 
   logger.info('Memory global_sleep: checking eligible users');
 
-  // Build set of active group JIDs for quick lookup
+  // Build set of runtime folders that are actually busy or have queued work.
+  // A long-lived idle runtime process should not block global_sleep.
   const queueStatus = deps.queue.getRuntimeStatus();
-  const activeRuntimeFolders = new Set(
+  const blockedRuntimeFolders = new Set(
     queueStatus.groups
-      .filter((g) => g.active && g.groupFolder)
-      .map((g) => g.groupFolder as string),
+      .filter((g) => g.busy || g.pendingMessages || g.pendingTasks > 0)
+      .map((g) => g.groupFolder || g.sessionKey)
+      .filter((folder): folder is string => !!folder),
   );
 
   const memoryOwners = new Set(
@@ -1643,12 +1645,12 @@ export function runMemoryGlobalSleepIfNeeded(deps: GlobalSleepDeps): void {
       if (hoursSince < 6) continue;
     }
 
-    // 3. No active sessions for this user's explicit session folders
+    // 3. No busy or queued work for this user's explicit session folders
     const ownedFolders = new Set(listOwnedPrimaryFolders(ownerKey));
-    const hasActiveSession = Array.from(activeRuntimeFolders).some((folder) =>
+    const hasBusySession = Array.from(blockedRuntimeFolders).some((folder) =>
       ownedFolders.has(folder),
     );
-    if (hasActiveSession) continue;
+    if (hasBusySession) continue;
 
     // 4. Has pending wrapups
     const pendingWrapups = (state.pendingWrapups || []) as string[];

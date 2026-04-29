@@ -124,6 +124,53 @@ function usageFromCodexTurnCompleted(event: ThreadEvent): UsageInfo | null {
   };
 }
 
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function readUsageSnapshot(value: unknown): UsageInfo | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const usage = value as Record<string, unknown>;
+  if (
+    !isFiniteNumber(usage.inputTokens) ||
+    !isFiniteNumber(usage.outputTokens) ||
+    !isFiniteNumber(usage.cacheReadInputTokens)
+  ) {
+    return null;
+  }
+  return {
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    cacheReadInputTokens: usage.cacheReadInputTokens,
+    cacheCreationInputTokens: isFiniteNumber(usage.cacheCreationInputTokens)
+      ? usage.cacheCreationInputTokens
+      : 0,
+    costUSD: isFiniteNumber(usage.costUSD) ? usage.costUSD : 0,
+    durationMs: isFiniteNumber(usage.durationMs) ? usage.durationMs : 0,
+    numTurns: isFiniteNumber(usage.numTurns) ? usage.numTurns : 1,
+  };
+}
+
+function subtractUsage(current: UsageInfo, previous: UsageInfo): UsageInfo {
+  const delta = (now: number, before: number): number =>
+    now >= before ? now - before : now;
+  return {
+    inputTokens: delta(current.inputTokens, previous.inputTokens),
+    outputTokens: delta(current.outputTokens, previous.outputTokens),
+    cacheReadInputTokens: delta(
+      current.cacheReadInputTokens,
+      previous.cacheReadInputTokens,
+    ),
+    cacheCreationInputTokens: delta(
+      current.cacheCreationInputTokens,
+      previous.cacheCreationInputTokens,
+    ),
+    costUSD: 0,
+    durationMs: current.durationMs,
+    numTurns: 1,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // CodexRunner
 // ---------------------------------------------------------------------------
@@ -140,6 +187,7 @@ export class CodexRunner implements AgentRunner {
   private tmpDir!: string;
   private archiveMgr = new CodexArchiveManager();
   private startFreshOnNextTurn = false;
+  private providerCumulativeUsage: UsageInfo | null = null;
   private activeToolCalls = new Map<string, number>();
   private readonly opts: CodexRunnerOptions;
 
@@ -153,15 +201,31 @@ export class CodexRunner implements AgentRunner {
     const persistedState = this.opts.state.getProviderState<{
       startFreshOnNextTurn?: unknown;
       archiveState?: {
+        lastInputTokens?: unknown;
+        lastOutputTokens?: unknown;
+        lastCacheReadInputTokens?: unknown;
         cumulativeInputTokens?: unknown;
         cumulativeOutputTokens?: unknown;
         turnCount?: unknown;
         conversationLines?: unknown;
       };
+      providerCumulativeUsage?: unknown;
+      activeThreadId?: unknown;
     }>();
     if (!this.opts.disableSyntheticArchive) {
       this.startFreshOnNextTurn = persistedState?.startFreshOnNextTurn === true;
       this.archiveMgr.hydrate(persistedState?.archiveState);
+      this.providerCumulativeUsage = readUsageSnapshot(
+        persistedState?.providerCumulativeUsage,
+      );
+      if (!this.providerCumulativeUsage && persistedState?.activeThreadId) {
+        this.providerCumulativeUsage = readUsageSnapshot({
+          inputTokens: persistedState.archiveState?.lastInputTokens,
+          outputTokens: persistedState.archiveState?.lastOutputTokens,
+          cacheReadInputTokens:
+            persistedState.archiveState?.lastCacheReadInputTokens,
+        });
+      }
     }
 
     // Create temp directory for instructions file and images
@@ -251,6 +315,13 @@ export class CodexRunner implements AgentRunner {
     ].filter(Boolean).join('\n');
   }
 
+  private normalizeProviderUsage(cumulativeUsage: UsageInfo): UsageInfo {
+    const previous = this.providerCumulativeUsage;
+    this.providerCumulativeUsage = cumulativeUsage;
+    if (!previous) return cumulativeUsage;
+    return subtractUsage(cumulativeUsage, previous);
+  }
+
   async *runQuery(config: QueryConfig): AsyncGenerator<NormalizedMessage, QueryResult> {
     const { opts } = this;
     const { log } = opts;
@@ -276,6 +347,9 @@ export class CodexRunner implements AgentRunner {
 
     // Start or resume thread
     this.session.startOrResume(resumeTarget);
+    if (!resumeTarget) {
+      this.providerCumulativeUsage = null;
+    }
     this.startFreshOnNextTurn = false;
 
     // Run turn and convert events
@@ -315,7 +389,7 @@ export class CodexRunner implements AgentRunner {
 
         const turnCompletedUsage = usageFromCodexTurnCompleted(event);
         if (turnCompletedUsage) {
-          fallbackUsage = turnCompletedUsage;
+          fallbackUsage = this.normalizeProviderUsage(turnCompletedUsage);
         }
 
         // Handle errors
@@ -372,6 +446,7 @@ export class CodexRunner implements AgentRunner {
       if (archiveResult?.success) {
         this.session.resetThread();
         this.startFreshOnNextTurn = true;
+        this.providerCumulativeUsage = null;
         yield this.buildCompactCompletedMessage();
       } else {
         log(
@@ -447,6 +522,9 @@ export class CodexRunner implements AgentRunner {
     if (!this.opts.disableSyntheticArchive) {
       providerState.startFreshOnNextTurn = this.startFreshOnNextTurn;
       providerState.archiveState = this.archiveMgr.snapshot();
+      if (this.providerCumulativeUsage) {
+        providerState.providerCumulativeUsage = this.providerCumulativeUsage;
+      }
     }
     return {
       providerState,

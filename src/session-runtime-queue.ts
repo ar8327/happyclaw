@@ -32,6 +32,7 @@ const BASE_RETRY_MS = 5000;
 
 interface GroupState {
   active: boolean;
+  busy: boolean;
   pendingMessages: boolean;
   pendingTasks: QueuedTask[];
   process: ChildProcess | null;
@@ -70,6 +71,7 @@ export class SessionRuntimeQueue {
     if (!state) {
       state = {
         active: false,
+        busy: false,
         pendingMessages: false,
         pendingTasks: [],
         process: null,
@@ -280,6 +282,18 @@ export class SessionRuntimeQueue {
     state.agentId = agentId || null;
   }
 
+  markRuntimeBusy(groupJid: string): void {
+    const state = this.resolveActiveState(groupJid);
+    if (!state) return;
+    state.busy = true;
+  }
+
+  markRuntimeIdle(groupJid: string): void {
+    const state = this.resolveActiveState(groupJid);
+    if (!state) return;
+    state.busy = false;
+  }
+
   /**
    * Resolve IPC input directory for a group state.
    * Sub-agents use a nested path: data/ipc/{folder}/agents/{agentId}/input/
@@ -353,6 +367,7 @@ export class SessionRuntimeQueue {
         }),
       );
       fs.renameSync(tempPath, filepath);
+      state.busy = true;
       onInjected?.();
       return intent === 'correction' ? 'interrupted_correction' : 'sent';
     } catch {
@@ -651,6 +666,7 @@ export class SessionRuntimeQueue {
   ): Promise<void> {
     const state = this.getGroup(groupJid);
     state.active = true;
+    state.busy = true;
     state.pendingMessages = false;
     // Pre-set groupFolder so resolveActiveState() works immediately,
     // before registerProcess() is called after the agent process spawns.
@@ -687,6 +703,7 @@ export class SessionRuntimeQueue {
       this.scheduleRetry(groupJid, state);
     } finally {
       state.active = false;
+      state.busy = false;
       state.process = null;
       state.runtimeIdentifier = null;
       state.runtimeLabel = null;
@@ -711,6 +728,7 @@ export class SessionRuntimeQueue {
   private async runTask(groupJid: string, task: QueuedTask): Promise<void> {
     const state = this.getGroup(groupJid);
     state.active = true;
+    state.busy = true;
     state.groupFolder = this.getSerializationKey(groupJid);
     this.waitingGroups.delete(groupJid);
     this.activeCount++;
@@ -729,6 +747,7 @@ export class SessionRuntimeQueue {
       logger.error({ groupJid, taskId: task.id, err }, 'Error running task');
     } finally {
       state.active = false;
+      state.busy = false;
       state.process = null;
       state.runtimeIdentifier = null;
       state.runtimeLabel = null;
@@ -860,6 +879,7 @@ export class SessionRuntimeQueue {
     groups: Array<{
       jid: string;
       active: boolean;
+      busy: boolean;
       pendingMessages: boolean;
       pendingTasks: number;
       runtimeIdentifier: string | null;
@@ -872,6 +892,7 @@ export class SessionRuntimeQueue {
     const groups: Array<{
       jid: string;
       active: boolean;
+      busy: boolean;
       pendingMessages: boolean;
       pendingTasks: number;
       runtimeIdentifier: string | null;
@@ -885,6 +906,7 @@ export class SessionRuntimeQueue {
       groups.push({
         jid,
         active: state.active,
+        busy: state.busy,
         pendingMessages: state.pendingMessages,
         pendingTasks: state.pendingTasks.length,
         runtimeIdentifier: state.runtimeIdentifier,
