@@ -183,6 +183,42 @@ function normalizeRunnerId(
   return fallback;
 }
 
+function parseRunnerProfileConfigJson(
+  runnerId: string,
+  rawConfigJson: string,
+): { configJson?: string; error?: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawConfigJson);
+  } catch {
+    return { error: 'config_json 必须是合法 JSON' };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { error: 'config_json 必须是 JSON object' };
+  }
+  const descriptor = getRunnerDescriptor(runnerId);
+  const properties =
+    descriptor?.profileSchema &&
+    typeof descriptor.profileSchema.properties === 'object' &&
+    !Array.isArray(descriptor.profileSchema.properties)
+      ? descriptor.profileSchema.properties as Record<string, unknown>
+      : {};
+  for (const [key, schema] of Object.entries(properties)) {
+    const value = (parsed as Record<string, unknown>)[key];
+    if (value === undefined || value === null) continue;
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) continue;
+    const expectedType = (schema as Record<string, unknown>).type;
+    if (typeof expectedType === 'string' && typeof value !== expectedType) {
+      return { error: `${key} 必须是 ${expectedType}` };
+    }
+    const allowed = (schema as Record<string, unknown>).enum;
+    if (Array.isArray(allowed) && !allowed.includes(value)) {
+      return { error: `${key} 不在允许范围内` };
+    }
+  }
+  return { configJson: JSON.stringify(parsed) };
+}
+
 function normalizeSelectedSkills(
   raw: unknown,
 ): string[] | null | undefined {
@@ -933,12 +969,12 @@ sessionRoutes.post('/runner-profiles', authMiddleware, async (c) => {
   }
   let configJson = '{}';
   if (typeof body.config_json === 'string' && body.config_json.trim()) {
-    try {
-      JSON.parse(body.config_json);
-      configJson = body.config_json.trim();
-    } catch {
-      return c.json({ error: 'config_json 必须是合法 JSON' }, 400);
-    }
+    const parsedConfig = parseRunnerProfileConfigJson(
+      runnerId,
+      body.config_json.trim(),
+    );
+    if (parsedConfig.error) return c.json({ error: parsedConfig.error }, 400);
+    configJson = parsedConfig.configJson || '{}';
   }
   const now = new Date().toISOString();
   const profile: RunnerProfileRecord = {
@@ -972,12 +1008,9 @@ sessionRoutes.patch('/runner-profiles/:id', authMiddleware, async (c) => {
   let nextConfigJson = existing.config_json;
   if (typeof body.config_json === 'string') {
     const trimmed = body.config_json.trim() || '{}';
-    try {
-      JSON.parse(trimmed);
-      nextConfigJson = trimmed;
-    } catch {
-      return c.json({ error: 'config_json 必须是合法 JSON' }, 400);
-    }
+    const parsedConfig = parseRunnerProfileConfigJson(runnerId, trimmed);
+    if (parsedConfig.error) return c.json({ error: parsedConfig.error }, 400);
+    nextConfigJson = parsedConfig.configJson || '{}';
   }
 
   saveRunnerProfile({

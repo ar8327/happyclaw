@@ -30,7 +30,11 @@ import {
 import type { ClaudeProviderConfig } from './runtime-config.js';
 import { resolveGroupMcpServers } from './mcp-utils.js';
 import { getInternalToken } from './routes/memory-agent.js';
-import { RegisteredGroup, StreamEvent } from './types.js';
+import {
+  RegisteredGroup,
+  RunnerProfileRecord,
+  StreamEvent,
+} from './types.js';
 import {
   attachStderrHandler,
   attachStdoutHandler,
@@ -42,7 +46,12 @@ import {
   writeRunLog,
   type CloseHandlerContext,
 } from './agent-output-parser.js';
-import { getPrimarySessionForOwner, getSessionRecord } from './db.js';
+import {
+  getPrimarySessionForOwner,
+  getRunnerProfile,
+  getSessionRecord,
+  listRunnerProfiles,
+} from './db.js';
 
 /**
  * Required env flags for settings.json — 每次 Runtime 启动时强制写入，不可被用户覆盖。
@@ -127,8 +136,16 @@ export interface RuntimeExecutionProfile {
   disableSyntheticArchive?: boolean;
 }
 
+export interface RunnerResolvedConfig {
+  profileId?: string;
+  model?: string;
+  thinkingEffort?: 'low' | 'medium' | 'high';
+  config: Record<string, unknown>;
+}
+
 export interface ContainerInput extends RuntimeInput {
   runnerId: string;
+  runnerConfig?: RunnerResolvedConfig;
   groupFolder?: string;
   declaredIpcCapabilities?: {
     midQueryPush: boolean;
@@ -266,6 +283,47 @@ function resolvePrimarySessionFolderForOwner(ownerKey: string | null): string | 
   const primary = getPrimarySessionForOwner(ownerKey);
   if (!primary?.id.startsWith('main:')) return null;
   return primary.id.slice('main:'.length);
+}
+
+function parseRunnerProfileConfig(
+  profile: RunnerProfileRecord | undefined,
+): Record<string, unknown> {
+  if (!profile) return {};
+  try {
+    const parsed = JSON.parse(profile.config_json);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      logger.warn(
+        { profileId: profile.id, runnerId: profile.runner_id },
+        'Ignoring non-object runner profile config',
+      );
+      return {};
+    }
+    return parsed as Record<string, unknown>;
+  } catch (err) {
+    logger.warn(
+      { profileId: profile.id, runnerId: profile.runner_id, err },
+      'Ignoring invalid runner profile config',
+    );
+    return {};
+  }
+}
+
+function stringConfigValue(
+  config: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const value = config[key];
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function thinkingEffortConfigValue(
+  value: unknown,
+): 'low' | 'medium' | 'high' | undefined {
+  return value === 'low' || value === 'medium' || value === 'high'
+    ? value
+    : undefined;
 }
 
 export async function runHostAgent(
@@ -493,9 +551,36 @@ export async function runHostAgent(
   const settings = getSystemSettings();
 
   const storedRunnerId = sessionRecord?.runner_id || getDefaultRunnerId();
-  const effectiveModel = sessionRecord?.model ?? group.model;
-  const effectiveThinkingEffort =
+  const runnerDescriptor = getRunnerDescriptor(storedRunnerId);
+  const defaultProfile = listRunnerProfiles(storedRunnerId).find(
+    (profile) => profile.is_default,
+  );
+  const selectedProfile =
+    sessionRecord?.runner_profile_id
+      ? getRunnerProfile(sessionRecord.runner_profile_id)
+      : undefined;
+  const activeProfile =
+    selectedProfile?.runner_id === storedRunnerId
+      ? selectedProfile
+      : defaultProfile;
+  const runnerProfileConfig = {
+    ...(runnerDescriptor?.defaultProfileFactory?.() || {}),
+    ...parseRunnerProfileConfig(defaultProfile),
+    ...parseRunnerProfileConfig(
+      activeProfile?.id === defaultProfile?.id ? undefined : activeProfile,
+    ),
+  };
+  const profileModel = stringConfigValue(runnerProfileConfig, 'model');
+  const profileThinkingEffort = thinkingEffortConfigValue(
+    runnerProfileConfig.thinkingEffort,
+  );
+  const explicitModel = sessionRecord?.model ?? group.model;
+  const explicitThinkingEffort =
     sessionRecord?.thinking_effort ?? group.thinking_effort;
+  const effectiveModel =
+    explicitModel ?? profileModel ?? runnerDescriptor?.defaultModel;
+  const effectiveThinkingEffort =
+    explicitThinkingEffort ?? profileThinkingEffort;
   const inferredModelRunner = inferRunnerIdFromModel(effectiveModel);
   const effectiveRunnerId =
     effectiveModel && inferredModelRunner && inferredModelRunner !== storedRunnerId
@@ -551,6 +636,12 @@ export async function runHostAgent(
   if (effectiveThinkingEffort) {
     hostEnv['HAPPYCLAW_THINKING_EFFORT'] = effectiveThinkingEffort;
   }
+  const runnerConfig: RunnerResolvedConfig = {
+    profileId: activeProfile?.id,
+    model: effectiveModel,
+    thinkingEffort: effectiveThinkingEffort,
+    config: runnerProfileConfig,
+  };
 
   const localClaudeCredentials = importLocalClaudeCredentials();
   if (localClaudeCredentials) {
@@ -775,15 +866,16 @@ export async function runHostAgent(
       logger.error({ group: group.name, err }, 'Local runtime stdin write failed');
       killProcessTree(proc);
     });
-    const runnerDescriptor = getRunnerDescriptor(effectiveRunnerId);
+    const declaredRunnerDescriptor = getRunnerDescriptor(effectiveRunnerId);
     const containerInput: ContainerInput = {
       ...input,
       runnerId: effectiveRunnerId,
+      runnerConfig,
       groupFolder: input.workspaceFolder,
-      declaredIpcCapabilities: runnerDescriptor
+      declaredIpcCapabilities: declaredRunnerDescriptor
         ? {
-            midQueryPush: runnerDescriptor.capabilities.midQueryPush,
-            runtimeModeSwitch: runnerDescriptor.capabilities.runtimeModeSwitch,
+            midQueryPush: declaredRunnerDescriptor.capabilities.midQueryPush,
+            runtimeModeSwitch: declaredRunnerDescriptor.capabilities.runtimeModeSwitch,
           }
         : undefined,
     };

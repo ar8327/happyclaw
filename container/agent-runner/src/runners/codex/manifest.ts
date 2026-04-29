@@ -1,6 +1,15 @@
 import { CodexRunner } from '../../providers/codex/codex-runner.js';
 import type { RunnerManifest } from '../types.js';
 
+function configuredModel(ctxModel?: string): string {
+  return (
+    ctxModel ||
+    process.env.HAPPYCLAW_CODEX_MODEL ||
+    process.env.OPENAI_MODEL ||
+    'gpt-5.4'
+  );
+}
+
 export const codexManifest: RunnerManifest = {
   descriptor: {
     id: 'codex',
@@ -56,9 +65,9 @@ export const codexManifest: RunnerManifest = {
   createRunner: (ctx) =>
     new CodexRunner({
       ...ctx,
-      model:
-        process.env.HAPPYCLAW_CODEX_MODEL ||
-        process.env.OPENAI_MODEL ||
-        'gpt-5.4',
+      model: configuredModel(ctx.containerInput.runnerConfig?.model),
+      thinkingEffort:
+        ctx.containerInput.runnerConfig?.thinkingEffort ||
+        ctx.thinkingEffort,
     }),
 };

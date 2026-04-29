@@ -8,9 +8,17 @@
 export type { StreamEventType, StreamEvent } from './stream-event.types.js';
 import type { StreamEvent } from './stream-event.types.js';
 
+export interface RunnerResolvedConfig {
+  profileId?: string;
+  model?: string;
+  thinkingEffort?: 'low' | 'medium' | 'high';
+  config: Record<string, unknown>;
+}
+
 export interface ContainerInput {
   prompt: string;
   runnerId: string;
+  runnerConfig?: RunnerResolvedConfig;
   declaredIpcCapabilities?: {
     midQueryPush: boolean;
     runtimeModeSwitch: boolean;

@@ -1,6 +1,15 @@
 import { ClaudeRunner } from '../../providers/claude/claude-runner.js';
 import type { RunnerManifest } from '../types.js';
 
+function configuredModel(ctxModel?: string): string {
+  return (
+    ctxModel ||
+    process.env.HAPPYCLAW_MODEL ||
+    process.env.ANTHROPIC_MODEL ||
+    'opus'
+  );
+}
+
 export const claudeManifest: RunnerManifest = {
   descriptor: {
     id: 'claude',
@@ -55,7 +64,9 @@ export const claudeManifest: RunnerManifest = {
   createRunner: (ctx) =>
     new ClaudeRunner({
       ...ctx,
-      model:
-        process.env.HAPPYCLAW_MODEL || process.env.ANTHROPIC_MODEL || 'opus',
+      model: configuredModel(ctx.containerInput.runnerConfig?.model),
+      thinkingEffort:
+        ctx.containerInput.runnerConfig?.thinkingEffort ||
+        ctx.thinkingEffort,
     }),
 };
