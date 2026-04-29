@@ -272,7 +272,7 @@ async function main(): Promise<void> {
   await runQueryLoop({
     runner,
     buildSystemPrompt: createSystemPromptBuilder({
-      runnerId,
+      descriptor: runnerManifest.descriptor,
       containerInput,
       state,
       workspaceIpc: WORKSPACE_IPC,
