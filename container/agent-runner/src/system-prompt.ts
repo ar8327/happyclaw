@@ -6,10 +6,8 @@ import { createContextManager } from './context-manager-factory.js';
 import type { SessionState } from './session-state.js';
 import type { ContainerInput } from './types.js';
 
-type SupportedRunnerId = 'claude' | 'codex';
-
 export function createSystemPromptBuilder(params: {
-  runnerId: SupportedRunnerId;
+  runnerId: string;
   containerInput: ContainerInput;
   state: SessionState;
   workspaceIpc: string;

@@ -22,9 +22,12 @@ import {
 } from './ipc-handler.js';
 import { runQueryLoop } from './query-loop.js';
 import { createSystemPromptBuilder } from './system-prompt.js';
-import { ClaudeRunner } from './providers/claude/claude-runner.js';
-import { CodexRunner } from './providers/codex/codex-runner.js';
 import type { AgentRunner } from './runner-interface.js';
+import {
+  getRunnerManifest,
+  getSupportedRunnerIds,
+} from './runners/index.js';
+import type { RunnerManifest } from './runners/types.js';
 
 type ContainerInputWire = Omit<ContainerInput, 'groupFolder'> & {
   groupFolder?: string;
@@ -40,7 +43,6 @@ const WORKSPACE_MEMORY = process.env.HAPPYCLAW_WORKSPACE_MEMORY || '/workspace/m
 const WORKSPACE_IPC = process.env.HAPPYCLAW_WORKSPACE_IPC || '/workspace/ipc';
 const WORKSPACE_SKILLS = process.env.HAPPYCLAW_SKILLS_DIR || '/workspace/user-skills';
 
-const CLAUDE_MODEL = process.env.HAPPYCLAW_MODEL || process.env.ANTHROPIC_MODEL || 'opus';
 const THINKING_EFFORT = process.env.HAPPYCLAW_THINKING_EFFORT || undefined;
 
 function isEnabledEnv(value: string | undefined): boolean {
@@ -114,55 +116,17 @@ function loadUserMcpServers(): Record<string, unknown> {
   return {};
 }
 
-// ---------------------------------------------------------------------------
-// Runner selection
-// ---------------------------------------------------------------------------
-
-type SupportedRunnerId = 'claude' | 'codex';
-
-type RunnerFactoryContext = {
-  containerInput: ContainerInput;
-  state: SessionState;
-  ipcPaths: typeof ipcPaths;
-  log: typeof log;
-  writeOutput: typeof writeOutput;
-  imChannelsFile: string;
-  groupDir: string;
-  globalDir: string;
-  memoryDir: string;
-  thinkingEffort?: string;
-  loadUserMcpServers: typeof loadUserMcpServers;
-  skillsDir: string;
-  disableSyntheticArchive: boolean;
-};
-
-const RUNNER_FACTORIES: Record<
-  SupportedRunnerId,
-  (ctx: RunnerFactoryContext) => AgentRunner
-> = {
-  claude: (ctx) =>
-    new ClaudeRunner({
-      ...ctx,
-      model: CLAUDE_MODEL,
-    }),
-  codex: (ctx) =>
-    new CodexRunner({
-      ...ctx,
-      model:
-        process.env.HAPPYCLAW_CODEX_MODEL || process.env.OPENAI_MODEL || 'gpt-5.4',
-    }),
-};
-
-function resolveRunnerId(input: ContainerInput): SupportedRunnerId {
+function resolveRunnerManifest(input: ContainerInput): RunnerManifest {
   const runnerId = input.runnerId?.trim().toLowerCase();
   if (!runnerId) {
     throw new Error('Missing runnerId in ContainerInput');
   }
-  if (runnerId in RUNNER_FACTORIES) {
-    return runnerId as SupportedRunnerId;
+  const manifest = getRunnerManifest(runnerId);
+  if (manifest) {
+    return manifest;
   }
   throw new Error(
-    `Unsupported runnerId "${input.runnerId}". Supported runners: ${Object.keys(RUNNER_FACTORIES).join(', ')}`,
+    `Unsupported runnerId "${input.runnerId}". Supported runners: ${getSupportedRunnerIds().join(', ')}`,
   );
 }
 
@@ -200,7 +164,7 @@ function buildInitialSessionSnapshot(
 }
 
 function validateDeclaredIpcCapabilities(
-  runnerId: SupportedRunnerId,
+  runnerId: string,
   input: ContainerInput,
   runner: AgentRunner,
 ): void {
@@ -255,7 +219,8 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const runnerId = resolveRunnerId(containerInput);
+  const runnerManifest = resolveRunnerManifest(containerInput);
+  const runnerId = runnerManifest.descriptor.id;
   const sessionRecordId = buildSessionRecordId(containerInput);
   log(`Runner: ${runnerId}`);
 
@@ -286,7 +251,7 @@ async function main(): Promise<void> {
     }
   }
 
-  const runner = RUNNER_FACTORIES[runnerId]({
+  const runner = runnerManifest.createRunner({
     containerInput,
     state,
     ipcPaths,
