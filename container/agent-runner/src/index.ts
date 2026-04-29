@@ -266,6 +266,32 @@ function validateDeclaredIpcCapabilities(
   }
 }
 
+function validateDeclaredRunnerDescriptor(
+  manifest: RunnerManifest,
+  input: ContainerInput,
+): void {
+  const declared = input.declaredRunnerDescriptor;
+  if (!declared) return;
+  const actual = manifest.descriptor;
+  const keys = [
+    'id',
+    'capabilities',
+    'lifecycle',
+    'promptContract',
+    'runtimeContract',
+    'toolContract',
+    'compatibility',
+  ] as const;
+  const mismatches = keys.filter((key) =>
+    JSON.stringify(declared[key]) !== JSON.stringify(actual[key]),
+  );
+  if (mismatches.length > 0) {
+    throw new Error(
+      `Runner "${actual.id}" descriptor mismatch: ${mismatches.join(', ')}`,
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -296,6 +322,7 @@ async function main(): Promise<void> {
   const runnerId = runnerManifest.descriptor.id;
   const sessionRecordId = buildSessionRecordId(containerInput);
   log(`Runner: ${runnerId}`);
+  validateDeclaredRunnerDescriptor(runnerManifest, containerInput);
 
   // Initialize session state
   state.loadImChannels(IM_CHANNELS_FILE);

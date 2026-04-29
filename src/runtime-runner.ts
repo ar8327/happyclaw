@@ -32,6 +32,7 @@ import { resolveGroupMcpServers } from './mcp-utils.js';
 import { getInternalToken } from './routes/memory-agent.js';
 import {
   RegisteredGroup,
+  RunnerDescriptor,
   RunnerProfileRecord,
   StreamEvent,
 } from './types.js';
@@ -146,6 +147,7 @@ export interface RunnerResolvedConfig {
 export interface ContainerInput extends RuntimeInput {
   runnerId: string;
   runnerConfig?: RunnerResolvedConfig;
+  declaredRunnerDescriptor?: RunnerDescriptor;
   groupFolder?: string;
   declaredIpcCapabilities?: {
     midQueryPush: boolean;
@@ -872,6 +874,7 @@ export async function runHostAgent(
       ...input,
       runnerId: effectiveRunnerId,
       runnerConfig,
+      declaredRunnerDescriptor,
       groupFolder: input.workspaceFolder,
       declaredIpcCapabilities: declaredRunnerDescriptor
         ? {

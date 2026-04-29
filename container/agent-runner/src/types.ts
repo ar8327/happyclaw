@@ -7,6 +7,7 @@
 // Streaming event types (canonical source: shared/stream-event.ts)
 export type { StreamEventType, StreamEvent } from './stream-event.types.js';
 import type { StreamEvent } from './stream-event.types.js';
+import type { RunnerDescriptor } from './runner-descriptor.types.js';
 
 export interface RunnerResolvedConfig {
   profileId?: string;
@@ -19,6 +20,7 @@ export interface ContainerInput {
   prompt: string;
   runnerId: string;
   runnerConfig?: RunnerResolvedConfig;
+  declaredRunnerDescriptor?: RunnerDescriptor;
   declaredIpcCapabilities?: {
     midQueryPush: boolean;
     runtimeModeSwitch: boolean;
