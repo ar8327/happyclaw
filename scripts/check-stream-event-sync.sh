@@ -35,6 +35,12 @@ check_sync "$ROOT/shared/image-detector.ts" \
   "$ROOT/src/image-detector.ts" \
   "$ROOT/container/agent-runner/src/image-detector.ts"
 
+# Runner descriptor
+check_sync "$ROOT/shared/runner-descriptor.ts" \
+  "$ROOT/src/runner-descriptor.types.ts" \
+  "$ROOT/container/agent-runner/src/runner-descriptor.types.ts" \
+  "$ROOT/web/src/runner-descriptor.types.ts"
+
 if [ "$FAIL" -eq 0 ]; then
   echo "All shared type copies are in sync."
 else

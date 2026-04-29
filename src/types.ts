@@ -1,4 +1,35 @@
 import type { StreamEvent } from './stream-event.types.js';
+import type { RunnerId } from './runner-descriptor.types.js';
+export type {
+  ArchivalTrigger,
+  BeforeToolExecutionGuardMode,
+  ContextShrinkTriggerMode,
+  CustomToolsMode,
+  DynamicContextReloadMode,
+  HookStreamingMode,
+  InterruptStrength,
+  McpTransport,
+  PostCompactRepairMode,
+  PromptMode,
+  ResumeStrength,
+  RunnerCapabilities,
+  RunnerCompatibility,
+  RunnerDescriptor,
+  RunnerHealth,
+  RunnerId,
+  RunnerLifecycleCapabilities,
+  RunnerModel,
+  RunnerPromptContract,
+  RunnerRuntimeContract,
+  RunnerToolContract,
+  SkillsMode,
+  SubAgentMode,
+  ToolInjectionMode,
+  ToolStreamingMode,
+  TurnBoundaryMode,
+  UsageQuality,
+  UserMcpSource,
+} from './runner-descriptor.types.js';
 
 export interface AdditionalMount {
   hostPath: string; // Absolute path on host (supports ~ for home)
@@ -201,31 +232,6 @@ export interface SubAgent {
 
 export type SessionKind = 'main' | 'workspace' | 'worker' | 'memory';
 export type SessionBindingMode = 'direct' | 'source_only' | 'mirror';
-export type RunnerId = string;
-export type ResumeStrength = 'none' | 'weak' | 'strong';
-export type InterruptStrength = 'none' | 'weak' | 'strong';
-export type UsageQuality = 'none' | 'approx' | 'exact';
-export type ToolStreamingMode = 'none' | 'coarse' | 'fine';
-export type SubAgentMode = 'native' | 'tool-only' | 'none';
-export type CustomToolsMode = 'native' | 'mcp' | 'none';
-export type SkillsMode = 'native' | 'tool-loader';
-export type McpTransport = 'stdio' | 'http' | 'sse';
-export type TurnBoundaryMode = 'native' | 'simulated';
-export type ArchivalTrigger =
-  | 'pre_compact'
-  | 'turn_threshold'
-  | 'cleanup_only'
-  | 'external';
-export type ContextShrinkTriggerMode = 'native_event' | 'synthetic' | 'none';
-export type BeforeToolExecutionGuardMode =
-  | 'native_hook'
-  | 'tool_wrapper'
-  | 'sandbox_only'
-  | 'none';
-export type HookStreamingMode = 'none' | 'begin_end' | 'progress';
-export type PostCompactRepairMode = 'native' | 'synthetic' | 'none';
-export type PromptMode = 'append' | 'full_prompt' | 'instructions_file';
-export type DynamicContextReloadMode = 'none' | 'turn' | 'mid_turn';
 
 export interface SessionRecord {
   id: string;
@@ -300,51 +306,6 @@ export interface RunnerProfileRecord {
   is_default: boolean;
   created_at: string;
   updated_at: string;
-}
-
-export interface RunnerCapabilities {
-  sessionResume: ResumeStrength;
-  interrupt: InterruptStrength;
-  imageInput: boolean;
-  usage: UsageQuality;
-  midQueryPush: boolean;
-  runtimeModeSwitch: boolean;
-  toolStreaming: ToolStreamingMode;
-  backgroundTasks: boolean;
-  subAgent: SubAgentMode;
-  customTools: CustomToolsMode;
-  mcpTransport: McpTransport[];
-  skills: SkillsMode[];
-}
-
-export interface RunnerLifecycleCapabilities {
-  turnBoundary: TurnBoundaryMode;
-  archivalTrigger: ArchivalTrigger[];
-  contextShrinkTrigger: ContextShrinkTriggerMode;
-  beforeToolExecutionGuard: BeforeToolExecutionGuardMode;
-  hookStreaming: HookStreamingMode;
-  postCompactRepair: PostCompactRepairMode;
-}
-
-export interface RunnerPromptContract {
-  mode: PromptMode;
-  dynamicContextReload: DynamicContextReloadMode;
-}
-
-export interface RunnerCompatibility {
-  chat: 'full' | 'degraded' | 'unsupported';
-  im: 'full' | 'degraded' | 'unsupported';
-  observability: 'full' | 'degraded' | 'unsupported';
-}
-
-export interface RunnerDescriptor {
-  id: RunnerId;
-  label: string;
-  capabilities: RunnerCapabilities;
-  lifecycle: RunnerLifecycleCapabilities;
-  promptContract: RunnerPromptContract;
-  compatibility: RunnerCompatibility;
-  defaultProfileFactory?: () => object;
 }
 
 // WebSocket message types

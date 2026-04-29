@@ -26,3 +26,14 @@ TARGETS_ID=(
 for target in "${TARGETS_ID[@]}"; do
   cp "$SRC_ID" "$target"
 done
+
+# --- Runner descriptor (3 targets) ---
+SRC_RD="$ROOT/shared/runner-descriptor.ts"
+TARGETS_RD=(
+  "$ROOT/src/runner-descriptor.types.ts"
+  "$ROOT/container/agent-runner/src/runner-descriptor.types.ts"
+  "$ROOT/web/src/runner-descriptor.types.ts"
+)
+for target in "${TARGETS_RD[@]}"; do
+  cp "$SRC_RD" "$target"
+done

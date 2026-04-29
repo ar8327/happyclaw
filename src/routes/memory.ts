@@ -148,6 +148,8 @@ function serializeMemoryConfig(user: AuthUser) {
     runners: listRunnerDescriptors().map((descriptor) => ({
       id: descriptor.id,
       label: descriptor.label,
+      description: descriptor.description,
+      tool_contract: descriptor.toolContract,
       can_serve_memory: canServeAsMemoryRunner(descriptor),
       degradation_reasons: explainMemoryRunnerDegradation(descriptor),
     })),

@@ -1,11 +1,12 @@
 import type { RunnerDescriptor } from './types.js';
 
-const CLAUDE_MODEL_ALIASES = new Set(['opus', 'sonnet', 'haiku']);
-
 export const RUNNER_REGISTRY: Record<RunnerDescriptor['id'], RunnerDescriptor> = {
   claude: {
     id: 'claude',
     label: 'Claude',
+    description: 'Claude Code CLI runner with native turn streaming and MCP tools.',
+    defaultModel: 'opus',
+    modelPatterns: ['^(opus|sonnet|haiku)$', '^claude-'],
     capabilities: {
       sessionResume: 'strong',
       interrupt: 'strong',
@@ -19,6 +20,8 @@ export const RUNNER_REGISTRY: Record<RunnerDescriptor['id'], RunnerDescriptor> =
       customTools: 'mcp',
       mcpTransport: ['stdio'],
       skills: ['native', 'tool-loader'],
+      ephemeralSession: true,
+      filesystemAccess: true,
     },
     lifecycle: {
       turnBoundary: 'native',
@@ -32,6 +35,37 @@ export const RUNNER_REGISTRY: Record<RunnerDescriptor['id'], RunnerDescriptor> =
       mode: 'append',
       dynamicContextReload: 'turn',
     },
+    runtimeContract: {
+      requiredCommands: ['claude'],
+      auth: 'external_cli',
+    },
+    toolContract: {
+      mode: 'mcp_stdio',
+      supportsUserMcp: true,
+      userMcpSources: ['happyclaw', 'claude_settings', 'profile'],
+      builtinServerName: 'happyclaw',
+    },
+    profileSchema: {
+      type: 'object',
+      properties: {
+        model: {
+          type: 'string',
+          title: '模型',
+          description: '覆盖 Claude Code 使用的模型别名或完整模型名',
+        },
+        thinkingEffort: {
+          type: 'string',
+          enum: ['low', 'medium', 'high'],
+          title: '推理强度',
+        },
+        command: {
+          type: 'string',
+          title: '命令路径',
+          description: '默认使用 PATH 中的 claude',
+        },
+      },
+      additionalProperties: true,
+    },
     compatibility: {
       chat: 'full',
       im: 'full',
@@ -41,6 +75,9 @@ export const RUNNER_REGISTRY: Record<RunnerDescriptor['id'], RunnerDescriptor> =
   codex: {
     id: 'codex',
     label: 'Codex',
+    description: 'Codex CLI runner with instruction-file prompt injection.',
+    defaultModel: 'gpt-5.4',
+    modelPatterns: ['^gpt-[a-z0-9._-]+$', '^o[1-9](?:$|[-._])'],
     capabilities: {
       sessionResume: 'weak',
       interrupt: 'weak',
@@ -54,6 +91,8 @@ export const RUNNER_REGISTRY: Record<RunnerDescriptor['id'], RunnerDescriptor> =
       customTools: 'mcp',
       mcpTransport: ['stdio'],
       skills: ['tool-loader'],
+      ephemeralSession: true,
+      filesystemAccess: true,
     },
     lifecycle: {
       turnBoundary: 'native',
@@ -66,6 +105,38 @@ export const RUNNER_REGISTRY: Record<RunnerDescriptor['id'], RunnerDescriptor> =
     promptContract: {
       mode: 'instructions_file',
       dynamicContextReload: 'turn',
+    },
+    runtimeContract: {
+      requiredNodePackages: ['@openai/codex-sdk'],
+      requiredCommands: ['codex'],
+      auth: 'external_cli',
+    },
+    toolContract: {
+      mode: 'mcp_stdio',
+      supportsUserMcp: true,
+      userMcpSources: ['happyclaw', 'codex_config', 'profile'],
+      builtinServerName: 'happyclaw',
+    },
+    profileSchema: {
+      type: 'object',
+      properties: {
+        model: {
+          type: 'string',
+          title: '模型',
+          description: '覆盖 Codex CLI 使用的模型',
+        },
+        thinkingEffort: {
+          type: 'string',
+          enum: ['low', 'medium', 'high'],
+          title: '推理强度',
+        },
+        command: {
+          type: 'string',
+          title: '命令路径',
+          description: '默认使用 PATH 中的 codex',
+        },
+      },
+      additionalProperties: true,
     },
     compatibility: {
       chat: 'full',
@@ -97,16 +168,18 @@ export function inferRunnerIdFromModel(
   const normalized = model?.trim().toLowerCase();
   if (!normalized) return null;
 
-  if (CLAUDE_MODEL_ALIASES.has(normalized) || normalized.startsWith('claude-')) {
-    return 'claude';
-  }
-
-  if (/^gpt-[a-z0-9._-]+$/i.test(normalized)) {
-    return 'codex';
-  }
-
-  if (/^o[1-9](?:$|[-._])/.test(normalized)) {
-    return 'codex';
+  for (const descriptor of listRunnerDescriptors()) {
+    for (const pattern of descriptor.modelPatterns || []) {
+      try {
+        if (new RegExp(pattern, 'i').test(normalized)) {
+          return descriptor.id;
+        }
+      } catch {
+        if (normalized === pattern.toLowerCase()) {
+          return descriptor.id;
+        }
+      }
+    }
   }
 
   return null;
@@ -122,6 +195,9 @@ export function isModelCompatibleWithRunner(
 
 export function canServeAsMemoryRunner(descriptor: RunnerDescriptor): boolean {
   if (descriptor.capabilities.customTools === 'none') return false;
+  if (!descriptor.capabilities.ephemeralSession) return false;
+  if (!descriptor.capabilities.filesystemAccess) return false;
+  if (descriptor.toolContract.mode === 'none') return false;
   return (
     descriptor.lifecycle.turnBoundary === 'native' ||
     descriptor.lifecycle.turnBoundary === 'simulated'
