@@ -14,6 +14,8 @@ import path from 'path';
 import { spawn, spawnSync } from 'child_process';
 import { Codex, type ModelReasoningEffort } from '@openai/codex-sdk';
 import type { ContextPlugin, PluginContext, ToolDefinition, ToolResult } from 'happyclaw-agent-runner-core';
+import { listRunnerManifests } from '../runners/index.js';
+import type { OneShotInvoker } from '../runners/types.js';
 
 const INVOKE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -67,7 +69,18 @@ function detectProviders(): { claude: ProviderInfo; codex: ProviderInfo } {
   };
 }
 
-function buildDescription(providers: ReturnType<typeof detectProviders>): string {
+function listAvailableOneShotInvokers(cwd: string): OneShotInvoker[] {
+  return listRunnerManifests()
+    .map((manifest) =>
+      manifest.createOneShotInvoker?.({
+        env: process.env,
+        cwd,
+      }) || null,
+    )
+    .filter((invoker): invoker is OneShotInvoker => !!invoker);
+}
+
+function buildRegistryDescription(invokers: OneShotInvoker[]): string {
   const lines = [
     'Call another AI agent to perform a one-shot task synchronously.',
     '',
@@ -77,7 +90,7 @@ function buildDescription(providers: ReturnType<typeof detectProviders>): string
   ];
 
   // When-to-use guidance (only when both providers available)
-  if (providers.claude.available && providers.codex.available) {
+  if (invokers.length > 1) {
     lines.push(
       'When to choose a provider:',
       '• Use Codex (OpenAI GPT) for fast, focused code generation or edits',
@@ -89,15 +102,12 @@ function buildDescription(providers: ReturnType<typeof detectProviders>): string
 
   lines.push('Available providers:');
 
-  if (providers.claude.available) {
-    const p = providers.claude;
-    lines.push(`• provider="claude" — ${p.label}. Models: ${p.models.join(', ')}. Default: ${p.defaultModel}`);
+  for (const invoker of invokers) {
+    lines.push(
+      `• provider="${invoker.runnerId}" — ${invoker.label}. Models: ${(invoker.models || []).join(', ') || 'unspecified'}. Default: ${invoker.defaultModel || 'provider default'}`,
+    );
   }
-  if (providers.codex.available) {
-    const p = providers.codex;
-    lines.push(`• provider="codex" — OpenAI GPT models. Default: ${p.defaultModel}`);
-  }
-  if (!providers.claude.available && !providers.codex.available) {
+  if (invokers.length === 0) {
     lines.push('• (none — no credentials configured)');
   }
 
@@ -333,11 +343,8 @@ export class InvokeAgentPlugin implements ContextPlugin {
 
   getTools(ctx: PluginContext): ToolDefinition[] {
     const cwd = ctx.workspaceGroup;
-    const providers = detectProviders();
-    const availableProviders = [
-      ...(providers.claude.available ? ['claude'] : []),
-      ...(providers.codex.available ? ['codex'] : []),
-    ];
+    const invokers = listAvailableOneShotInvokers(cwd);
+    const availableProviders = invokers.map((invoker) => invoker.runnerId);
 
     // No providers available — don't expose the tool
     if (availableProviders.length === 0) return [];
@@ -345,7 +352,7 @@ export class InvokeAgentPlugin implements ContextPlugin {
     return [
       {
         name: 'invoke_agent',
-        description: buildDescription(providers),
+        description: buildRegistryDescription(invokers),
         parameters: {
           type: 'object' as const,
           properties: {
@@ -360,7 +367,7 @@ export class InvokeAgentPlugin implements ContextPlugin {
             },
             model: {
               type: 'string',
-              description: `Model override. ${providers.claude.available ? `Claude: ${providers.claude.models.join('/')} (default ${providers.claude.defaultModel})` : ''}${providers.claude.available && providers.codex.available ? '. ' : ''}${providers.codex.available ? `Codex: default ${providers.codex.defaultModel}` : ''}`,
+              description: `Model override. ${invokers.map((invoker) => `${invoker.label}: default ${invoker.defaultModel || 'provider default'}`).join('. ')}`,
             },
             max_turns: {
               type: 'number',
@@ -384,24 +391,18 @@ export class InvokeAgentPlugin implements ContextPlugin {
           }
 
           try {
-            let result: string;
-
-            if (provider === 'codex') {
-              if (!providers.codex.available) {
-                return { content: 'Codex provider not available (no API key or CLI auth found).', isError: true };
-              }
-              const model = (args.model as string) || providers.codex.defaultModel;
-              result = await invokeCodex(prompt, model, cwd, effort);
-            } else if (provider === 'claude') {
-              if (!providers.claude.available) {
-                return { content: 'Claude provider not available (no API key).', isError: true };
-              }
-              const model = (args.model as string) || providers.claude.defaultModel;
-              const maxTurns = (args.max_turns as number) || 10;
-              result = await invokeClaude(prompt, model, cwd, maxTurns, effort);
-            } else {
+            const invoker = invokers.find((item) => item.runnerId === provider);
+            if (!invoker) {
               return { content: `Unknown provider "${provider}". Use ${availableProviders.map(p => `"${p}"`).join(' or ')}.`, isError: true };
             }
+            const result = await invoker.invoke({
+              prompt,
+              cwd,
+              model: args.model as string | undefined,
+              thinkingEffort: effort,
+              timeoutMs: INVOKE_TIMEOUT_MS,
+              maxTurns: (args.max_turns as number) || 10,
+            });
 
             return { content: result || '(sub-agent returned empty response)' };
           } catch (err) {

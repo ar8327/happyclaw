@@ -1,5 +1,9 @@
 import { ClaudeRunner } from '../../providers/claude/claude-runner.js';
 import type { RunnerManifest } from '../types.js';
+import {
+  hasClaudeOneShotAuth,
+  invokeClaudeOneShot,
+} from '../one-shot-invokers.js';
 
 function configuredModel(ctxModel?: string): string {
   return (
@@ -69,4 +73,18 @@ export const claudeManifest: RunnerManifest = {
         ctx.containerInput.runnerConfig?.thinkingEffort ||
         ctx.thinkingEffort,
     }),
+  createOneShotInvoker: (ctx) =>
+    hasClaudeOneShotAuth(ctx.env)
+      ? {
+          runnerId: 'claude',
+          label: 'Claude',
+          defaultModel: ctx.env.HAPPYCLAW_MODEL || 'sonnet',
+          models: ['haiku', 'sonnet', 'opus'],
+          invoke: (input) =>
+            invokeClaudeOneShot({
+              ...input,
+              model: input.model || ctx.env.HAPPYCLAW_MODEL || 'sonnet',
+            }),
+        }
+      : null,
 };

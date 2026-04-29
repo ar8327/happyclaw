@@ -25,9 +25,27 @@ export type RunnerHealthContext = {
   cwd: string;
 };
 
+export type OneShotInvokeInput = {
+  prompt: string;
+  cwd: string;
+  model?: string;
+  thinkingEffort?: string;
+  timeoutMs: number;
+  maxTurns?: number;
+};
+
+export interface OneShotInvoker {
+  runnerId: string;
+  label: string;
+  defaultModel?: string;
+  models?: string[];
+  invoke(input: OneShotInvokeInput): Promise<string>;
+}
+
 export interface RunnerManifest {
   descriptor: RunnerDescriptor;
   createRunner(ctx: RunnerFactoryContext): AgentRunner;
   healthCheck?(ctx: RunnerHealthContext): Promise<RunnerHealth>;
   listModels?(ctx: RunnerHealthContext): Promise<RunnerModel[]>;
+  createOneShotInvoker?(ctx: RunnerHealthContext): OneShotInvoker | null;
 }

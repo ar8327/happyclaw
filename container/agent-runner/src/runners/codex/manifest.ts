@@ -1,5 +1,9 @@
 import { CodexRunner } from '../../providers/codex/codex-runner.js';
 import type { RunnerManifest } from '../types.js';
+import {
+  hasCodexOneShotAuth,
+  invokeCodexOneShot,
+} from '../one-shot-invokers.js';
 
 function configuredModel(ctxModel?: string): string {
   return (
@@ -70,4 +74,23 @@ export const codexManifest: RunnerManifest = {
         ctx.containerInput.runnerConfig?.thinkingEffort ||
         ctx.thinkingEffort,
     }),
+  createOneShotInvoker: (ctx) => {
+    const defaultModel =
+      ctx.env.HAPPYCLAW_CODEX_MODEL ||
+      ctx.env.OPENAI_MODEL ||
+      'gpt-5.4';
+    return hasCodexOneShotAuth(ctx.env)
+      ? {
+          runnerId: 'codex',
+          label: 'Codex',
+          defaultModel,
+          models: [defaultModel],
+          invoke: (input) =>
+            invokeCodexOneShot({
+              ...input,
+              model: input.model || defaultModel,
+            }),
+        }
+      : null;
+  },
 };
