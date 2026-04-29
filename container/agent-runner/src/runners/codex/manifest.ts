@@ -1,4 +1,3 @@
-import { CodexRunner } from '../../providers/codex/codex-runner.js';
 import type { RunnerManifest } from '../types.js';
 import {
   hasCodexOneShotAuth,
@@ -66,19 +65,19 @@ export const codexManifest: RunnerManifest = {
       observability: 'degraded',
     },
   },
-  createRunner: (ctx) =>
-    new CodexRunner({
+  createRunner: async (ctx) => {
+    const { CodexRunner } =
+      await import('../../providers/codex/codex-runner.js');
+    return new CodexRunner({
       ...ctx,
       model: configuredModel(ctx.containerInput.runnerConfig?.model),
       thinkingEffort:
-        ctx.containerInput.runnerConfig?.thinkingEffort ||
-        ctx.thinkingEffort,
-    }),
+        ctx.containerInput.runnerConfig?.thinkingEffort || ctx.thinkingEffort,
+    });
+  },
   createOneShotInvoker: (ctx) => {
     const defaultModel =
-      ctx.env.HAPPYCLAW_CODEX_MODEL ||
-      ctx.env.OPENAI_MODEL ||
-      'gpt-5.4';
+      ctx.env.HAPPYCLAW_CODEX_MODEL || ctx.env.OPENAI_MODEL || 'gpt-5.4';
     return hasCodexOneShotAuth(ctx.env)
       ? {
           runnerId: 'codex',

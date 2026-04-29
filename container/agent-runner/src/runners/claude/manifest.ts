@@ -1,4 +1,3 @@
-import { ClaudeRunner } from '../../providers/claude/claude-runner.js';
 import type { RunnerManifest } from '../types.js';
 import {
   hasClaudeOneShotAuth,
@@ -18,7 +17,8 @@ export const claudeManifest: RunnerManifest = {
   descriptor: {
     id: 'claude',
     label: 'Claude',
-    description: 'Claude Code CLI runner with native turn streaming and MCP tools.',
+    description:
+      'Claude Code CLI runner with native turn streaming and MCP tools.',
     defaultModel: 'opus',
     modelPatterns: ['^(opus|sonnet|haiku)$', '^claude-'],
     capabilities: {
@@ -65,14 +65,16 @@ export const claudeManifest: RunnerManifest = {
       observability: 'full',
     },
   },
-  createRunner: (ctx) =>
-    new ClaudeRunner({
+  createRunner: async (ctx) => {
+    const { ClaudeRunner } =
+      await import('../../providers/claude/claude-runner.js');
+    return new ClaudeRunner({
       ...ctx,
       model: configuredModel(ctx.containerInput.runnerConfig?.model),
       thinkingEffort:
-        ctx.containerInput.runnerConfig?.thinkingEffort ||
-        ctx.thinkingEffort,
-    }),
+        ctx.containerInput.runnerConfig?.thinkingEffort || ctx.thinkingEffort,
+    });
+  },
   createOneShotInvoker: (ctx) =>
     hasClaudeOneShotAuth(ctx.env)
       ? {

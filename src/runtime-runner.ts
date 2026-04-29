@@ -2,11 +2,7 @@
  * Session runtime launcher for happyclaw.
  * Unified local runtime launcher for happyclaw sessions.
  */
-import {
-  ChildProcess,
-  execFileSync,
-  spawn,
-} from 'child_process';
+import { ChildProcess, execFileSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -17,9 +13,7 @@ import {
   getRunnerDescriptor,
   inferRunnerIdFromModel,
 } from './runner-registry.js';
-import {
-  loadMountAllowlist,
-} from './mount-security.js';
+import { loadMountAllowlist } from './mount-security.js';
 import {
   getSystemSettings,
   detectLocalClaudeCode,
@@ -196,8 +190,8 @@ export function writeTasksSnapshot(
   const filteredTasks = isAdminHome
     ? tasks
     : tasks.filter(
-      (t) => (t.workspaceFolder || t.groupFolder) === workspaceFolder,
-    );
+        (t) => (t.workspaceFolder || t.groupFolder) === workspaceFolder,
+      );
 
   const tasksFile = path.join(groupIpcDir, 'current_tasks.json');
   // 删除后重建：容器创建的文件归属 node(1000) 用户，宿主机进程无法覆写
@@ -280,7 +274,9 @@ export function killProcessTree(
  * Run agent directly as a local subprocess.
  * This is the unified runtime path for sessions after dual-mode removal.
  */
-function resolvePrimarySessionFolderForOwner(ownerKey: string | null): string | null {
+function resolvePrimarySessionFolderForOwner(
+  ownerKey: string | null,
+): string | null {
   if (!ownerKey) return null;
   const primary = getPrimarySessionForOwner(ownerKey);
   if (!primary?.id.startsWith('main:')) return null;
@@ -424,13 +420,13 @@ export async function runHostAgent(
 
   const stableSessionId =
     input.sessionRecordId ||
-    (input.agentId ? `worker:${input.agentId}` : `main:${input.workspaceFolder}`);
+    (input.agentId
+      ? `worker:${input.agentId}`
+      : `main:${input.workspaceFolder}`);
   const sessionRecord = getSessionRecord(stableSessionId);
   const folderSession = getSessionRecord(`main:${input.workspaceFolder}`);
   const sessionOwnerKey =
-    sessionRecord?.owner_key ||
-    folderSession?.owner_key ||
-    null;
+    sessionRecord?.owner_key || folderSession?.owner_key || null;
   if (!sessionOwnerKey) {
     return localRuntimeSetupError(
       `Session ${stableSessionId} 缺少 owner_key，无法初始化本地 Runtime`,
@@ -440,11 +436,7 @@ export async function runHostAgent(
     ownerPrimarySessionFolder ||
     resolvePrimarySessionFolderForOwner(sessionOwnerKey) ||
     group.folder;
-  const runtimeMemoryDir = path.join(
-    DATA_DIR,
-    'memory',
-    sessionOwnerKey,
-  );
+  const runtimeMemoryDir = path.join(DATA_DIR, 'memory', sessionOwnerKey);
 
   fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
   fs.mkdirSync(runtimeMemoryDir, { recursive: true });
@@ -557,10 +549,9 @@ export async function runHostAgent(
   const defaultProfile = listRunnerProfiles(storedRunnerId).find(
     (profile) => profile.is_default,
   );
-  const selectedProfile =
-    sessionRecord?.runner_profile_id
-      ? getRunnerProfile(sessionRecord.runner_profile_id)
-      : undefined;
+  const selectedProfile = sessionRecord?.runner_profile_id
+    ? getRunnerProfile(sessionRecord.runner_profile_id)
+    : undefined;
   const activeProfile =
     selectedProfile?.runner_id === storedRunnerId
       ? selectedProfile
@@ -585,9 +576,12 @@ export async function runHostAgent(
     explicitThinkingEffort ?? profileThinkingEffort;
   const inferredModelRunner = inferRunnerIdFromModel(effectiveModel);
   const effectiveRunnerId =
-    effectiveModel && inferredModelRunner && inferredModelRunner !== storedRunnerId
+    effectiveModel &&
+    inferredModelRunner &&
+    inferredModelRunner !== storedRunnerId
       ? inferredModelRunner
       : storedRunnerId;
+  const effectiveRunnerDescriptor = getRunnerDescriptor(effectiveRunnerId);
   if (effectiveRunnerId !== storedRunnerId) {
     logger.warn(
       {
@@ -606,7 +600,11 @@ export async function runHostAgent(
     (!inferredModelRunner || inferredModelRunner === 'claude')
   ) {
     hostEnv['HAPPYCLAW_MODEL'] = effectiveModel;
-  } else if (effectiveRunnerId === 'claude' && effectiveModel && inferredModelRunner) {
+  } else if (
+    effectiveRunnerId === 'claude' &&
+    effectiveModel &&
+    inferredModelRunner
+  ) {
     logger.warn(
       { group: group.name, runnerId: effectiveRunnerId, model: effectiveModel },
       'Ignoring incompatible model override for local runtime',
@@ -614,7 +612,10 @@ export async function runHostAgent(
   }
 
   if (effectiveRunnerId === 'codex') {
-    if (effectiveModel && (!inferredModelRunner || inferredModelRunner === 'codex')) {
+    if (
+      effectiveModel &&
+      (!inferredModelRunner || inferredModelRunner === 'codex')
+    ) {
       hostEnv['HAPPYCLAW_CODEX_MODEL'] = effectiveModel;
     }
   }
@@ -673,7 +674,9 @@ export async function runHostAgent(
       );
       try {
         writeCredentialsFile(homeClaudeDir, localClaudeConfig);
-      } catch { /* non-critical */ }
+      } catch {
+        /* non-critical */
+      }
     }
   }
 
@@ -718,7 +721,11 @@ export async function runHostAgent(
   if (executionProfile?.disableSyntheticArchive) {
     hostEnv['HAPPYCLAW_DISABLE_SYNTHETIC_ARCHIVE'] = '1';
   }
-  hostEnv['HAPPYCLAW_PROJECT_SKILLS_DIR'] = path.join(process.cwd(), 'container', 'skills');
+  hostEnv['HAPPYCLAW_PROJECT_SKILLS_DIR'] = path.join(
+    process.cwd(),
+    'container',
+    'skills',
+  );
   hostEnv['CLAUDE_CONFIG_DIR'] = groupSessionsDir;
   hostEnv['HAPPYCLAW_WORKSPACE_SESSION'] = path.dirname(groupSessionsDir);
   // Cross-provider invoke_agent: share home session dir for fresh OAuth tokens
@@ -739,9 +746,7 @@ export async function runHostAgent(
   hostEnv['HAPPYCLAW_CODEX_ARCHIVE_THRESHOLD'] = String(
     settings.codexArchiveThreshold,
   );
-  hostEnv['HAPPYCLAW_MEMORY_SEND_TIMEOUT'] = String(
-    settings.memorySendTimeout,
-  );
+  hostEnv['HAPPYCLAW_MEMORY_SEND_TIMEOUT'] = String(settings.memorySendTimeout);
 
   // Memory Agent env vars
   if (ownerId) {
@@ -762,7 +767,10 @@ export async function runHostAgent(
 
   // Agent-browser isolation: each workspace gets its own browser session + profile
   hostEnv['AGENT_BROWSER_SESSION'] = group.folder;
-  hostEnv['AGENT_BROWSER_PROFILE'] = path.join(groupDir, '.agent-browser-profile');
+  hostEnv['AGENT_BROWSER_PROFILE'] = path.join(
+    groupDir,
+    '.agent-browser-profile',
+  );
 
   // 让 SDK 捕获 CLI 的 stderr 输出，便于排查启动失败
   hostEnv['DEBUG_CLAUDE_AGENT_SDK'] = '1';
@@ -774,14 +782,18 @@ export async function runHostAgent(
 
   // 6. 编译检查
   const projectRoot = process.cwd();
-  // runner_id='codex' uses the Codex provider path
-
   const runnerSubdir = 'agent-runner';
   const agentRunnerRoot = path.join(projectRoot, 'container', runnerSubdir);
   const agentRunnerNodeModules = path.join(agentRunnerRoot, 'node_modules');
   const agentRunnerDist = path.join(agentRunnerRoot, 'dist', 'index.js');
 
-  const requiredDeps = ['@modelcontextprotocol/sdk', '@openai/codex-sdk'];
+  const requiredDeps = Array.from(
+    new Set([
+      '@modelcontextprotocol/sdk',
+      ...(effectiveRunnerDescriptor?.runtimeContract.requiredNodePackages ||
+        []),
+    ]),
+  );
   const installHint = `npm --prefix container/${runnerSubdir} install`;
   const buildHint = `npm --prefix container/${runnerSubdir} run build`;
 
@@ -795,10 +807,10 @@ export async function runHostAgent(
   });
   if (missingDeps.length > 0) {
     const missing = missingDeps.join(', ');
-      logger.error(
-        { group: group.name, missingDeps },
-        'Local runtime preflight failed: dependencies missing',
-      );
+    logger.error(
+      { group: group.name, missingDeps },
+      'Local runtime preflight failed: dependencies missing',
+    );
     return localRuntimeSetupError(
       `缺少 ${runnerSubdir} 依赖（${missing}）。请先执行：${installHint}`,
     );
@@ -866,10 +878,13 @@ export async function runHostAgent(
 
     // 8. stdin 输入
     proc.stdin.on('error', (err) => {
-      logger.error({ group: group.name, err }, 'Local runtime stdin write failed');
+      logger.error(
+        { group: group.name, err },
+        'Local runtime stdin write failed',
+      );
       killProcessTree(proc);
     });
-    const declaredRunnerDescriptor = getRunnerDescriptor(effectiveRunnerId);
+    const declaredRunnerDescriptor = effectiveRunnerDescriptor;
     const containerInput: ContainerInput = {
       ...input,
       runnerId: effectiveRunnerId,
@@ -879,7 +894,8 @@ export async function runHostAgent(
       declaredIpcCapabilities: declaredRunnerDescriptor
         ? {
             midQueryPush: declaredRunnerDescriptor.capabilities.midQueryPush,
-            runtimeModeSwitch: declaredRunnerDescriptor.capabilities.runtimeModeSwitch,
+            runtimeModeSwitch:
+              declaredRunnerDescriptor.capabilities.runtimeModeSwitch,
           }
         : undefined,
     };

@@ -1,7 +1,11 @@
 import type { AgentRunner } from '../runner-interface.js';
 import type { SessionState } from '../session-state.js';
 import type { ContainerInput, ContainerOutput } from '../types.js';
-import type { RunnerDescriptor, RunnerHealth, RunnerModel } from '../runner-descriptor.types.js';
+import type {
+  RunnerDescriptor,
+  RunnerHealth,
+  RunnerModel,
+} from '../runner-descriptor.types.js';
 import type { IpcPaths } from '../ipc-handler.js';
 
 export type RunnerFactoryContext = {
@@ -44,7 +48,7 @@ export interface OneShotInvoker {
 
 export interface RunnerManifest {
   descriptor: RunnerDescriptor;
-  createRunner(ctx: RunnerFactoryContext): AgentRunner;
+  createRunner(ctx: RunnerFactoryContext): AgentRunner | Promise<AgentRunner>;
   healthCheck?(ctx: RunnerHealthContext): Promise<RunnerHealth>;
   listModels?(ctx: RunnerHealthContext): Promise<RunnerModel[]>;
   createOneShotInvoker?(ctx: RunnerHealthContext): OneShotInvoker | null;
