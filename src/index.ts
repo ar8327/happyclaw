@@ -2564,6 +2564,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           return;
         }
 
+        if (
+          result.status === 'success' ||
+          result.status === 'error' ||
+          result.status === 'closed' ||
+          result.status === 'drained'
+        ) {
+          queue.markRuntimeIdle(chatJid);
+        }
+
         // Streaming output callback — called for each agent result
         if (result.result) {
           const raw =
