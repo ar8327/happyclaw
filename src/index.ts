@@ -370,32 +370,17 @@ function getRuntimeBootstrapState(
     runtimeState?.provider_state_json,
     {},
   );
-  const hasCodexActiveThreadState = Object.prototype.hasOwnProperty.call(
-    providerState,
-    'activeThreadId',
-  );
-  const activeThreadId =
-    typeof providerState.activeThreadId === 'string'
-      ? providerState.activeThreadId
-      : undefined;
-  const shouldStartFresh =
-    providerState.startFreshOnNextTurn === true ||
-    (hasCodexActiveThreadState && providerState.activeThreadId == null);
-  const providerSessionId = shouldStartFresh
-    ? undefined
-    : activeThreadId ||
-      runtimeState?.provider_session_id ||
-      getSession(groupFolder, agentId) ||
-      undefined;
+  const providerSessionId =
+    runtimeState?.provider_session_id ||
+    getSession(groupFolder, agentId) ||
+    undefined;
   if (!runtimeState) {
     return { providerSessionId };
   }
 
   return {
     providerSessionId,
-    resumeAnchor: shouldStartFresh
-      ? undefined
-      : activeThreadId || runtimeState.resume_anchor || undefined,
+    resumeAnchor: runtimeState.resume_anchor || undefined,
     bootstrapState: {
       providerState,
       recentImChannels: parseRuntimeStateJson<string[]>(

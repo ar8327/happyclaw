@@ -100,6 +100,10 @@ export interface IpcCapabilities {
 export interface RuntimePersistenceSnapshot {
   providerState?: Record<string, unknown>;
   lastMessageCursor?: string | null;
+  sessionControl?: {
+    clearProviderSession?: boolean;
+    clearResumeAnchor?: boolean;
+  };
 }
 
 // ─── Runner 接口 ────────────────────────────────────────

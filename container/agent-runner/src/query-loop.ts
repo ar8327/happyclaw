@@ -349,11 +349,15 @@ function emitRuntimeState(
 }
 
 function shouldClearProviderSession(runner: AgentRunner): boolean {
-  const providerState = runner.getRuntimePersistenceSnapshot?.().providerState;
-  if (!providerState || typeof providerState !== 'object') return false;
-  if (providerState.startFreshOnNextTurn !== true) return false;
-  return Object.prototype.hasOwnProperty.call(providerState, 'activeThreadId')
-    && providerState.activeThreadId == null;
+  return runner.getRuntimePersistenceSnapshot?.()
+    ?.sessionControl
+    ?.clearProviderSession === true;
+}
+
+function shouldClearResumeAnchor(runner: AgentRunner): boolean {
+  return runner.getRuntimePersistenceSnapshot?.()
+    ?.sessionControl
+    ?.clearResumeAnchor === true;
 }
 
 export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
@@ -448,6 +452,7 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
     } else {
       if (result.newSessionId) sessionId = result.newSessionId;
       if (result.resumeAnchor) resumeAnchor = result.resumeAnchor;
+      if (shouldClearResumeAnchor(runner)) resumeAnchor = undefined;
     }
     emitRuntimeState(writeOutput, runner, state, {
       providerSessionId: sessionId,

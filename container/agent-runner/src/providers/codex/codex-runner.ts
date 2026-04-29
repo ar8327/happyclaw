@@ -529,6 +529,12 @@ export class CodexRunner implements AgentRunner {
     return {
       providerState,
       lastMessageCursor: currentThreadId,
+      sessionControl: this.startFreshOnNextTurn
+        ? {
+            clearProviderSession: true,
+            clearResumeAnchor: true,
+          }
+        : undefined,
     };
   }
 
