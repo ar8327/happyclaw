@@ -9,10 +9,11 @@ import { Textarea } from '@/components/ui/textarea';
 interface RunnerInfo {
   id: string;
   label: string;
+  description?: string;
+  default_model?: string;
   can_serve_memory: boolean;
   compatibility: {
     chat: string;
-    memory: string;
     im: string;
     observability: string;
   };
@@ -32,7 +33,21 @@ interface RunnerInfo {
     mode: string;
     dynamicContextReload: string;
   };
+  tool_contract?: {
+    mode: string;
+    supportsUserMcp: boolean;
+  };
+  profile_schema?: Record<string, unknown> | null;
   degradation_reasons: string[];
+}
+
+interface RunnerHealth {
+  runnerId: string;
+  available: boolean;
+  commandDetected?: boolean;
+  authenticated?: boolean;
+  version?: string;
+  missingReasons?: string[];
 }
 
 interface RunnerProfileItem {
@@ -55,6 +70,8 @@ const EMPTY_PROFILE_FORM = {
 export function RunnersPage() {
   const [runners, setRunners] = useState<RunnerInfo[]>([]);
   const [profiles, setProfiles] = useState<RunnerProfileItem[]>([]);
+  const [healthByRunner, setHealthByRunner] = useState<Record<string, RunnerHealth>>({});
+  const [profileSchema, setProfileSchema] = useState<Record<string, unknown> | null>(null);
   const [selectedRunnerId, setSelectedRunnerId] = useState<string>('');
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
   const [profileForm, setProfileForm] = useState(EMPTY_PROFILE_FORM);
@@ -65,13 +82,28 @@ export function RunnersPage() {
   const [notice, setNotice] = useState<string | null>(null);
 
   const loadRunners = async () => {
-    const data = await api.get<{ runners: RunnerInfo[] }>('/api/sessions/runners');
+    const data = await api.get<{ runners: RunnerInfo[] }>('/api/runners');
     setRunners(data.runners);
     setSelectedRunnerId((prev) =>
       data.runners.some((runner) => runner.id === prev)
         ? prev
         : (data.runners[0]?.id || ''),
     );
+    const healthEntries = await Promise.all(
+      data.runners.map(async (runner) => {
+        try {
+          const healthData = await api.get<{ health: RunnerHealth }>(
+            `/api/runners/${encodeURIComponent(runner.id)}/health`,
+          );
+          return [runner.id, healthData.health] as const;
+        } catch {
+          return [runner.id, null] as const;
+        }
+      }),
+    );
+    setHealthByRunner(Object.fromEntries(
+      healthEntries.filter((entry): entry is readonly [string, RunnerHealth] => !!entry[1]),
+    ));
   };
 
   const loadProfiles = async (runnerId: string) => {
@@ -118,6 +150,11 @@ export function RunnersPage() {
     loadProfiles(selectedRunnerId).catch((err) => {
       setError(err instanceof Error ? err.message : '加载 runner profile 失败');
     });
+    api.get<{ schema: Record<string, unknown> | null }>(
+      `/api/runners/${encodeURIComponent(selectedRunnerId)}/profile-schema`,
+    )
+      .then((data) => setProfileSchema(data.schema))
+      .catch(() => setProfileSchema(null));
   }, [selectedRunnerId]);
 
   const selectedRunner = useMemo(
@@ -238,14 +275,24 @@ export function RunnersPage() {
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
               {runners.map((runner) => (
                 <div key={runner.id} className="bg-card rounded-xl border border-border p-5 space-y-4">
+                  {(() => {
+                    const health = healthByRunner[runner.id];
+                    return (
+                      <>
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-lg font-semibold text-foreground">{runner.label}</div>
                       <div className="text-xs font-mono text-slate-500 mt-1">{runner.id}</div>
+                      {runner.description && (
+                        <div className="text-xs text-slate-500 mt-2">{runner.description}</div>
+                      )}
                     </div>
                     <div className="text-right text-xs text-slate-500 space-y-1">
                       <div>chat: {runner.compatibility.chat}</div>
                       <div>IM: {runner.compatibility.im}</div>
+                      <div className={health?.available ? 'text-green-600' : 'text-amber-600'}>
+                        {health ? (health.available ? '可用' : '不可用') : '检测中'}
+                      </div>
                     </div>
                   </div>
 
@@ -275,10 +322,24 @@ export function RunnersPage() {
                     <div>上下文收缩: {runner.lifecycle.contextShrinkTrigger}</div>
                     <div>Hook 可观测性: {runner.lifecycle.hookStreaming}</div>
                     <div>Prompt 模式: {runner.prompt_contract.mode}</div>
+                    <div>工具注入: {runner.tool_contract?.mode || 'unknown'}</div>
+                    <div>默认模型: {runner.default_model || '未声明'}</div>
                     <div>上下文刷新: {runner.prompt_contract.dynamicContextReload}</div>
                     <div>中途注入: {runner.capabilities.midQueryPush ? '支持' : '不支持'}</div>
                     <div>后台任务: {runner.capabilities.backgroundTasks ? '支持' : '不支持'}</div>
+                    {health?.version && <div>版本: {health.version}</div>}
                   </div>
+
+                  {health && !health.available && health.missingReasons && health.missingReasons.length > 0 && (
+                    <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 space-y-1">
+                      <div className="text-xs font-medium text-red-700">健康检查</div>
+                      {health.missingReasons.map((reason) => (
+                        <div key={reason} className="text-xs text-red-700">
+                          {reason}
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
                   {runner.degradation_reasons.length > 0 && (
                     <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 space-y-1">
@@ -290,6 +351,9 @@ export function RunnersPage() {
                       ))}
                     </div>
                   )}
+                      </>
+                    );
+                  })()}
                 </div>
               ))}
             </div>
@@ -381,6 +445,11 @@ export function RunnersPage() {
                   <div className="text-sm text-slate-500 mt-0.5">
                     `config_json` 只放 runner 行为配置，不放应用代管凭据。
                   </div>
+                  {profileSchema && (
+                    <pre className="mt-3 max-h-40 overflow-auto rounded-lg bg-muted/40 p-3 text-xs text-slate-600">
+                      {JSON.stringify(profileSchema, null, 2)}
+                    </pre>
+                  )}
                 </div>
 
                 <div className="space-y-3">
