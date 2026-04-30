@@ -33,6 +33,7 @@ import {
   getRunnerDescriptor,
   listRunnerDescriptors,
 } from '../runner-registry.js';
+import { modelsForDescriptor } from '../runners/descriptor-manifest.js';
 
 import type { SessionRuntimeManager } from '../session-runtime-manager.js';
 
@@ -106,8 +107,7 @@ function listOwnedActiveRuntimeJids(
     new Set(
       queue
         .getRuntimeStatus()
-        .groups
-        .filter(
+        .groups.filter(
           (runtime) =>
             runtime.active &&
             typeof runtime.groupFolder === 'string' &&
@@ -150,7 +150,7 @@ function serializeMemoryConfig(user: AuthUser) {
       label: descriptor.label,
       description: descriptor.description,
       default_model: descriptor.defaultModel,
-      models: descriptor.models || [],
+      models: modelsForDescriptor(descriptor),
       tool_contract: descriptor.toolContract,
       can_serve_memory: canServeAsMemoryRunner(descriptor),
       degradation_reasons: explainMemoryRunnerDegradation(descriptor),
@@ -801,7 +801,8 @@ memoryRoutes.get('/status', authMiddleware, (c) => {
     pendingWrapupsCount: pendingWrapups.length,
     ownedSessionFolders: ownedFolders,
     canTriggerWrapup:
-      (ownedFolders.length > 0 || !!primaryFolder) && !activeWrapups.has(user.id),
+      (ownedFolders.length > 0 || !!primaryFolder) &&
+      !activeWrapups.has(user.id),
     canTriggerGlobalSleep:
       pendingWrapups.length > 0 &&
       !activeGlobalSleeps.has(user.id) &&
@@ -924,10 +925,7 @@ memoryRoutes.post('/trigger-wrapup', authMiddleware, async (c) => {
     }
 
     if (failures.length > 0) {
-      return c.json(
-        { error: `会话整理部分失败: ${failures.join('；')}` },
-        500,
-      );
+      return c.json({ error: `会话整理部分失败: ${failures.join('；')}` }, 500);
     }
     if (touchedFolders === 0) {
       return c.json({

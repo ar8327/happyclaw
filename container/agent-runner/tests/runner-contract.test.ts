@@ -454,6 +454,15 @@ function assertCodexModelCacheCatalogWorks(): void {
   }
 }
 
+function assertMemoryRouteUsesDynamicRunnerModels(): void {
+  const memoryRoute = fs.readFileSync(
+    path.resolve('src/routes/memory.ts'),
+    'utf-8',
+  );
+  assert.equal(memoryRoute.includes('modelsForDescriptor'), true);
+  assert.equal(memoryRoute.includes('models: descriptor.models || []'), false);
+}
+
 async function assertFakeRunnerContract(): Promise<void> {
   const { messages, result } = await collectRun();
   const eventTypes = messages
@@ -553,6 +562,7 @@ assertRunnerProfileSchemaValidation();
 assertInvokeAgentIsRegistryDriven();
 assertDescriptorAuthProbeWorks();
 assertCodexModelCacheCatalogWorks();
+assertMemoryRouteUsesDynamicRunnerModels();
 await assertFakeRunnerContract();
 await assertBaseCliRunnerRecoverableError();
 await assertBaseCliRunnerGenericError();
