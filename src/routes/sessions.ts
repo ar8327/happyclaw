@@ -68,6 +68,7 @@ import {
   inferRunnerIdFromModel,
   listRunnerDescriptors,
 } from '../runner-registry.js';
+import { serializeRunnerDescriptor } from '../runner-catalog.js';
 import { compressContext, isCompressing } from '../context-compressor.js';
 import { DATA_DIR, GROUPS_DIR } from '../config.js';
 import { getSystemSettings } from '../runtime-config.js';
@@ -78,6 +79,7 @@ import {
   loadMountAllowlist,
   matchesBlockedPattern,
 } from '../mount-security.js';
+import { validateRunnerProfileConfig } from '../runner-profile-schema.js';
 import { initializeWorkspaceFromLocalDirectory } from '../workspace-init.js';
 import {
   buildWorkerConversationJid,
@@ -87,6 +89,7 @@ import {
 import type {
   AuthUser,
   RegisteredGroup,
+  RunnerDescriptor,
   RunnerProfileRecord,
   SessionRecord,
 } from '../types.js';
@@ -159,7 +162,10 @@ function getSessionById(id: string): SessionRecord | undefined {
   return getSessionRecord(id) || getSessionRecord(resolveSessionRouteAlias(id));
 }
 
-function resolveSessionOrThrow(user: AuthUser, id: string): SessionRecord | null {
+function resolveSessionOrThrow(
+  user: AuthUser,
+  id: string,
+): SessionRecord | null {
   const session = getSessionById(id);
   if (!session) return null;
   return canAccessSession(user, session) ? session : null;
@@ -183,9 +189,33 @@ function normalizeRunnerId(
   return fallback;
 }
 
-function normalizeSelectedSkills(
-  raw: unknown,
-): string[] | null | undefined {
+function parseRunnerProfileConfigJson(
+  runnerId: string,
+  rawConfigJson: string,
+): { configJson?: string; error?: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawConfigJson);
+  } catch {
+    return { error: 'config_json 必须是合法 JSON' };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { error: 'config_json 必须是 JSON object' };
+  }
+  const descriptor = getRunnerDescriptor(runnerId);
+  const validation = validateRunnerProfileConfig(
+    descriptor?.profileSchema,
+    parsed,
+  );
+  if (!validation.ok) {
+    return {
+      error: validation.errors[0] || 'config_json 不符合 profile_schema',
+    };
+  }
+  return { configJson: JSON.stringify(parsed) };
+}
+
+function normalizeSelectedSkills(raw: unknown): string[] | null | undefined {
   if (raw === undefined) return undefined;
   if (raw === null) return null;
   if (!Array.isArray(raw)) {
@@ -224,7 +254,10 @@ function normalizeActivationMode(
 
 function resolveBackingGroupForSession(
   session: SessionRecord,
-): { backingJid: string; backingGroup: NonNullable<ReturnType<typeof getRegisteredGroup>> } | null {
+): {
+  backingJid: string;
+  backingGroup: NonNullable<ReturnType<typeof getRegisteredGroup>>;
+} | null {
   const backingJid = resolveBackingJid(session);
   if (!backingJid) return null;
   const backingGroup = getRegisteredGroup(backingJid);
@@ -310,9 +343,7 @@ function validateRunnerProfile(
   return runnerProfileId;
 }
 
-function normalizeSessionCwd(
-  requestedCwd: string,
-): string {
+function normalizeSessionCwd(requestedCwd: string): string {
   if (!path.isAbsolute(requestedCwd)) {
     throw new Error('cwd 必须是绝对路径');
   }
@@ -331,10 +362,10 @@ function normalizeSessionCwd(
   if (allowlist?.allowedRoots?.length) {
     const allowedRoot = findAllowedRoot(realPath, allowlist.allowedRoots);
     if (!allowedRoot) {
-      const allowedPaths = allowlist.allowedRoots.map((root) => root.path).join(', ');
-      throw new Error(
-        `cwd 不在允许目录内。允许根目录: ${allowedPaths}`,
-      );
+      const allowedPaths = allowlist.allowedRoots
+        .map((root) => root.path)
+        .join(', ');
+      throw new Error(`cwd 不在允许目录内。允许根目录: ${allowedPaths}`);
     }
     const blockedMatch = matchesBlockedPattern(
       realPath,
@@ -409,7 +440,9 @@ function buildUpdatedImGroupForSessionBinding(
     options.activationMode !== undefined
       ? options.activationMode
       : targetSession
-        ? (imGroup.activation_mode === 'disabled' ? 'auto' : imGroup.activation_mode)
+        ? imGroup.activation_mode === 'disabled'
+          ? 'auto'
+          : imGroup.activation_mode
         : 'disabled';
   const updated: RegisteredGroup = {
     ...imGroup,
@@ -444,12 +477,14 @@ function isImplicitDefaultSessionBinding(
   imGroup: RegisteredGroup,
   binding: ReturnType<typeof getSessionBinding> | undefined,
 ): boolean {
-  return !!binding
-    && binding.session_id === `main:${imGroup.folder}`
-    && binding.binding_mode === 'source_only'
-    && binding.reply_policy === 'source_only'
-    && binding.activation_mode === 'auto'
-    && binding.require_mention !== true;
+  return (
+    !!binding &&
+    binding.session_id === `main:${imGroup.folder}` &&
+    binding.binding_mode === 'source_only' &&
+    binding.reply_policy === 'source_only' &&
+    binding.activation_mode === 'auto' &&
+    binding.require_mention !== true
+  );
 }
 
 function getExplicitSessionBinding(
@@ -457,7 +492,9 @@ function getExplicitSessionBinding(
   imGroup: RegisteredGroup,
 ): ReturnType<typeof getSessionBinding> | undefined {
   const binding = getSessionBinding(channelJid);
-  return isImplicitDefaultSessionBinding(imGroup, binding) ? undefined : binding;
+  return isImplicitDefaultSessionBinding(imGroup, binding)
+    ? undefined
+    : binding;
 }
 
 function syncExplicitSessionBinding(
@@ -472,17 +509,19 @@ function syncExplicitSessionBinding(
 ): void {
   const now = new Date().toISOString();
   const current = getSessionBinding(channelJid);
-  const nextReplyPolicy = options.replyPolicy ?? imGroup.reply_policy ?? 'source_only';
-  const nextActivationMode = options.activationMode ?? imGroup.activation_mode ?? 'auto';
+  const nextReplyPolicy =
+    options.replyPolicy ?? imGroup.reply_policy ?? 'source_only';
+  const nextActivationMode =
+    options.activationMode ?? imGroup.activation_mode ?? 'auto';
   const nextRequireMention =
     options.requireMention !== undefined
       ? options.requireMention
       : imGroup.require_mention === true;
   const defaultSessionId = `main:${imGroup.folder}`;
   const isDefaultPolicy =
-    nextReplyPolicy === 'source_only'
-    && nextActivationMode === 'auto'
-    && !nextRequireMention;
+    nextReplyPolicy === 'source_only' &&
+    nextActivationMode === 'auto' &&
+    !nextRequireMention;
 
   if (!sessionId || (sessionId === defaultSessionId && isDefaultPolicy)) {
     deleteSessionBinding(channelJid);
@@ -513,7 +552,10 @@ function buildSessionPayload(
   session: SessionRecord,
   bindings: ReturnType<typeof listSessionBindings>,
   latestMessages: Map<string, { content: string; timestamp: string }>,
-  chatsByJid: Map<string, { jid: string; name?: string | null; last_message_time?: string | null }>,
+  chatsByJid: Map<
+    string,
+    { jid: string; name?: string | null; last_message_time?: string | null }
+  >,
 ) {
   const isMemorySession = session.kind === 'memory';
   const sessionBindings = bindings.filter(
@@ -525,7 +567,8 @@ function buildSessionPayload(
   for (const jid of relevantJids) {
     const latest = latestMessages.get(jid);
     const chatMeta = chatsByJid.get(jid);
-    const candidateTs = latest?.timestamp || chatMeta?.last_message_time || undefined;
+    const candidateTs =
+      latest?.timestamp || chatMeta?.last_message_time || undefined;
     if (!candidateTs) continue;
     if (!latestAt || candidateTs > latestAt) {
       latestAt = candidateTs;
@@ -540,12 +583,15 @@ function buildSessionPayload(
       ? inferredRunnerId
       : session.runner_id;
   const descriptor = getRunnerDescriptor(effectiveRunnerId);
-  const summary = backingJid ? getContextSummary(getFolderForSession(session), backingJid) : null;
+  const summary = backingJid
+    ? getContextSummary(getFolderForSession(session), backingJid)
+    : null;
   const backingGroup = backingJid ? getRegisteredGroup(backingJid) : undefined;
   const uniformActivationMode =
     sessionBindings.length > 0 &&
     sessionBindings.every(
-      (binding) => binding.activation_mode === sessionBindings[0].activation_mode,
+      (binding) =>
+        binding.activation_mode === sessionBindings[0].activation_mode,
     )
       ? sessionBindings[0].activation_mode
       : null;
@@ -567,46 +613,52 @@ function buildSessionPayload(
     owner_key: session.owner_key,
     runner_id: effectiveRunnerId,
     runner_profile_id:
-      effectiveRunnerId === session.runner_id ? session.runner_profile_id : null,
+      effectiveRunnerId === session.runner_id
+        ? session.runner_profile_id
+        : null,
     model: session.model,
     thinking_effort: session.thinking_effort,
-    context_compression: isMemorySession ? undefined : session.context_compression,
+    context_compression: isMemorySession
+      ? undefined
+      : session.context_compression,
     binding_count: isMemorySession ? undefined : sessionBindings.length,
-    binding_summary:
-      isMemorySession
-        ? undefined
-        : sessionBindings.length > 0
-          ? sessionBindings
-              .map((binding) => binding.display_name || binding.channel_jid)
-              .slice(0, 3)
-              .join('、')
-          : '无渠道绑定',
-    bound_channels:
-      isMemorySession
-        ? undefined
-        : sessionBindings.map((binding) => binding.channel_jid),
+    binding_summary: isMemorySession
+      ? undefined
+      : sessionBindings.length > 0
+        ? sessionBindings
+            .map((binding) => binding.display_name || binding.channel_jid)
+            .slice(0, 3)
+            .join('、')
+        : '无渠道绑定',
+    bound_channels: isMemorySession
+      ? undefined
+      : sessionBindings.map((binding) => binding.channel_jid),
     lastMessage,
     lastMessageTime: latestAt,
     runner_label: descriptor?.label || effectiveRunnerId,
     compatibility: descriptor?.compatibility || null,
-    degradation_reasons:
-      descriptor
-        ? session.kind === 'memory'
-          ? explainMemoryRunnerDegradation(descriptor)
-          : explainRunnerDegradation(descriptor)
-        : [],
+    degradation_reasons: descriptor
+      ? session.kind === 'memory'
+        ? explainMemoryRunnerDegradation(descriptor)
+        : explainRunnerDegradation(descriptor)
+      : [],
     has_summary: !!summary,
     summary_created_at: summary?.created_at ?? null,
-    codex_compact:
-      effectiveRunnerId === 'codex' && session.kind !== 'memory'
-        ? buildCodexCompactPayload(session, summary?.created_at ?? null)
+    context_archive:
+      descriptor?.runtimeStateViews?.contextArchive && session.kind !== 'memory'
+        ? buildContextArchivePayload(
+            session,
+            descriptor,
+            summary?.created_at ?? null,
+          )
         : null,
     pinned_at: session.is_pinned ? session.updated_at : undefined,
-    selected_skills: isMemorySession ? undefined : (backingGroup?.selected_skills ?? null),
-    activation_mode:
-      isMemorySession
-        ? undefined
-        : (uniformActivationMode || backingGroup?.activation_mode || 'auto'),
+    selected_skills: isMemorySession
+      ? undefined
+      : (backingGroup?.selected_skills ?? null),
+    activation_mode: isMemorySession
+      ? undefined
+      : uniformActivationMode || backingGroup?.activation_mode || 'auto',
   };
 }
 
@@ -622,7 +674,10 @@ function canAccessSession(user: AuthUser, session: SessionRecord): boolean {
     const worker = getWorkerSessionRecord(session.id);
     if (!worker) return false;
     const sourceGroup = getRegisteredGroup(worker.source_chat_jid);
-    return !!sourceGroup && canAccessGroup(user, { ...sourceGroup, jid: worker.source_chat_jid });
+    return (
+      !!sourceGroup &&
+      canAccessGroup(user, { ...sourceGroup, jid: worker.source_chat_jid })
+    );
   }
 
   const backingJid = resolveBackingJid(session);
@@ -643,14 +698,19 @@ function getRelevantChatJids(
     const worker = getWorkerSessionRecord(session.id);
     const agentId = extractAgentIdFromWorkerSessionId(session.id) || '';
     const chats = worker
-      ? [buildWorkerConversationJid(worker.source_chat_jid, agentId), ...sessionBindings]
+      ? [
+          buildWorkerConversationJid(worker.source_chat_jid, agentId),
+          ...sessionBindings,
+        ]
       : sessionBindings;
     return Array.from(new Set(chats));
   }
 
   if (session.id.startsWith('main:')) {
     const folder = session.id.slice('main:'.length);
-    return Array.from(new Set([...getJidsByFolder(folder), ...sessionBindings]));
+    return Array.from(
+      new Set([...getJidsByFolder(folder), ...sessionBindings]),
+    );
   }
 
   return sessionBindings;
@@ -668,7 +728,10 @@ function getWorkerRuntimeJids(parentSessionId: string): string[] {
   return Array.from(new Set(queueJids));
 }
 
-function parseSessionStateJson<T>(value: string | null | undefined, fallback: T): T {
+function parseSessionStateJson<T>(
+  value: string | null | undefined,
+  fallback: T,
+): T {
   if (!value) return fallback;
   try {
     return JSON.parse(value) as T;
@@ -685,31 +748,64 @@ function parseOptionalIsoString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value : null;
 }
 
-function buildCodexCompactPayload(
+function readProviderStatePath(
+  value: Record<string, unknown> | undefined,
+  pathExpression: string | undefined,
+): unknown {
+  if (!value || !pathExpression) return undefined;
+  return pathExpression.split('.').reduce<unknown>((current, segment) => {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) {
+      return undefined;
+    }
+    return (current as Record<string, unknown>)[segment];
+  }, value);
+}
+
+function resolveContextArchiveThreshold(descriptor: RunnerDescriptor): number {
+  const thresholdSetting =
+    descriptor.runtimeStateViews?.contextArchive?.tokenThresholdSetting;
+  if (thresholdSetting === 'codexArchiveThreshold') {
+    return Math.max(1, getSystemSettings().codexArchiveThreshold);
+  }
+  return 1;
+}
+
+function buildContextArchivePayload(
   session: SessionRecord,
+  descriptor: RunnerDescriptor,
   summaryCreatedAt: string | null,
 ): Record<string, unknown> | null {
+  const archiveView = descriptor.runtimeStateViews?.contextArchive;
+  if (!archiveView) return null;
   const runtimeState = getSessionRuntimeState(session.id);
-  const providerState = parseSessionStateJson<Record<string, unknown> | undefined>(
-    runtimeState?.provider_state_json,
-    undefined,
+  const providerState = parseSessionStateJson<
+    Record<string, unknown> | undefined
+  >(runtimeState?.provider_state_json, undefined);
+  const rawArchiveState = readProviderStatePath(
+    providerState,
+    archiveView.statePath,
   );
-  const archiveState =
-    providerState?.archiveState
-    && typeof providerState.archiveState === 'object'
-    && !Array.isArray(providerState.archiveState)
-      ? providerState.archiveState as Record<string, unknown>
+  const archiveSnapshot =
+    rawArchiveState &&
+    typeof rawArchiveState === 'object' &&
+    !Array.isArray(rawArchiveState)
+      ? (rawArchiveState as Record<string, unknown>)
       : undefined;
   const inputTokens =
-    parseFiniteNumber(archiveState?.lastInputTokens) ||
-    parseFiniteNumber(archiveState?.cumulativeInputTokens);
+    parseFiniteNumber(archiveSnapshot?.lastInputTokens) ||
+    parseFiniteNumber(archiveSnapshot?.cumulativeInputTokens);
   const outputTokens =
-    parseFiniteNumber(archiveState?.lastOutputTokens) ||
-    parseFiniteNumber(archiveState?.cumulativeOutputTokens);
-  const thresholdTokens = Math.max(1, getSystemSettings().codexArchiveThreshold);
+    parseFiniteNumber(archiveSnapshot?.lastOutputTokens) ||
+    parseFiniteNumber(archiveSnapshot?.cumulativeOutputTokens);
+  const thresholdTokens = resolveContextArchiveThreshold(descriptor);
   const currentTokens =
-    parseFiniteNumber(archiveState?.lastContextWindowTokens) ||
+    parseFiniteNumber(archiveSnapshot?.lastContextWindowTokens) ||
     inputTokens + outputTokens;
+  const pendingFreshSession =
+    readProviderStatePath(
+      providerState,
+      archiveView.pendingFreshSessionPath,
+    ) === true;
 
   return {
     current_tokens: currentTokens,
@@ -718,12 +814,12 @@ function buildCodexCompactPayload(
     threshold_tokens: thresholdTokens,
     remaining_tokens: Math.max(0, thresholdTokens - currentTokens),
     progress: Math.min(1, currentTokens / thresholdTokens),
-    turn_count: parseFiniteNumber(archiveState?.turnCount),
-    start_fresh_on_next_turn: providerState?.startFreshOnNextTurn === true,
+    turn_count: parseFiniteNumber(archiveSnapshot?.turnCount),
+    pending_fresh_session: pendingFreshSession,
     last_compacted_at:
-      parseOptionalIsoString(archiveState?.lastCompactedAt)
-      || summaryCreatedAt
-      || null,
+      parseOptionalIsoString(archiveSnapshot?.lastCompactedAt) ||
+      summaryCreatedAt ||
+      null,
     state_updated_at: runtimeState?.updated_at || null,
   };
 }
@@ -772,7 +868,9 @@ function buildBindingTargets(user: AuthUser) {
     if (session.kind === 'worker') {
       const worker = getWorkerSessionRecord(session.id);
       if (!worker || worker.kind !== 'conversation') continue;
-      const parent = sessions.find((item) => item.id === session.parent_session_id);
+      const parent = sessions.find(
+        (item) => item.id === session.parent_session_id,
+      );
       const parentBackingJid =
         (parent && resolveBackingJid(parent)) || resolveBackingJid(session);
       if (!parentBackingJid) continue;
@@ -802,7 +900,8 @@ function buildBindingTargets(user: AuthUser) {
   }
 
   targets.sort((a, b) => {
-    if (a.groupName !== b.groupName) return a.groupName.localeCompare(b.groupName);
+    if (a.groupName !== b.groupName)
+      return a.groupName.localeCompare(b.groupName);
     if (a.type !== b.type) return a.type === 'main' ? -1 : 1;
     return (a.agentName || '').localeCompare(b.agentName || '');
   });
@@ -821,7 +920,10 @@ sessionRoutes.put('/bindings/:channelJid', authMiddleware, async (c) => {
   if (!imGroup) return c.json({ error: 'IM group not found' }, 404);
   if (channelJid.startsWith('web:')) {
     return c.json(
-      { error: 'Session bindings only support IM channels, not web session JIDs' },
+      {
+        error:
+          'Session bindings only support IM channels, not web session JIDs',
+      },
       400,
     );
   }
@@ -829,7 +931,10 @@ sessionRoutes.put('/bindings/:channelJid', authMiddleware, async (c) => {
     return c.json({ error: 'Forbidden' }, 403);
   }
 
-  const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+  const body = (await c.req.json().catch(() => ({}))) as Record<
+    string,
+    unknown
+  >;
   const replyPolicy =
     body.reply_policy === 'mirror'
       ? 'mirror'
@@ -856,11 +961,15 @@ sessionRoutes.put('/bindings/:channelJid', authMiddleware, async (c) => {
   }
 
   try {
-    const updated = buildUpdatedImGroupForSessionBinding(imGroup, targetSession, {
-      replyPolicy,
-      activationMode,
-      requireMention,
-    });
+    const updated = buildUpdatedImGroupForSessionBinding(
+      imGroup,
+      targetSession,
+      {
+        replyPolicy,
+        activationMode,
+        requireMention,
+      },
+    );
     setRegisteredGroup(channelJid, updated);
     syncRegisteredGroupCache(channelJid, updated);
     const explicitSessionId = targetSession?.id || null;
@@ -875,31 +984,22 @@ sessionRoutes.put('/bindings/:channelJid', authMiddleware, async (c) => {
     });
   } catch (err) {
     return c.json(
-      { error: err instanceof Error ? err.message : 'Failed to update binding' },
+      {
+        error: err instanceof Error ? err.message : 'Failed to update binding',
+      },
       400,
     );
   }
 });
 
 sessionRoutes.get('/runners', authMiddleware, (c) => {
-  const runners = listRunnerDescriptors().map((descriptor) => ({
-    id: descriptor.id,
-    label: descriptor.label,
-    capabilities: descriptor.capabilities,
-    lifecycle: descriptor.lifecycle,
-    prompt_contract: descriptor.promptContract,
-    compatibility: descriptor.compatibility,
-    can_serve_memory: canServeAsMemoryRunner(descriptor),
-    degradation_reasons: explainRunnerDegradation(descriptor),
-  }));
+  const runners = listRunnerDescriptors().map(serializeRunnerDescriptor);
   return c.json({ runners });
 });
 
 sessionRoutes.get('/runner-profiles', authMiddleware, (c) => {
   const runnerId = normalizeRegisteredRunnerId(c.req.query('runner_id'));
-  const profiles = listRunnerProfiles(
-    runnerId || undefined,
-  ).map((profile) => ({
+  const profiles = listRunnerProfiles(runnerId || undefined).map((profile) => ({
     id: profile.id,
     runner_id: profile.runner_id,
     name: profile.name,
@@ -916,7 +1016,10 @@ sessionRoutes.post('/runner-profiles', authMiddleware, async (c) => {
   if (!canManageRunnerProfiles(user)) {
     return c.json({ error: 'Forbidden' }, 403);
   }
-  const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+  const body = (await c.req.json().catch(() => ({}))) as Record<
+    string,
+    unknown
+  >;
   const runnerId = normalizeRegisteredRunnerId(body.runner_id);
   if (!runnerId) {
     return c.json({ error: 'runner_id 必须是已注册 runner id' }, 400);
@@ -927,12 +1030,12 @@ sessionRoutes.post('/runner-profiles', authMiddleware, async (c) => {
   }
   let configJson = '{}';
   if (typeof body.config_json === 'string' && body.config_json.trim()) {
-    try {
-      JSON.parse(body.config_json);
-      configJson = body.config_json.trim();
-    } catch {
-      return c.json({ error: 'config_json 必须是合法 JSON' }, 400);
-    }
+    const parsedConfig = parseRunnerProfileConfigJson(
+      runnerId,
+      body.config_json.trim(),
+    );
+    if (parsedConfig.error) return c.json({ error: parsedConfig.error }, 400);
+    configJson = parsedConfig.configJson || '{}';
   }
   const now = new Date().toISOString();
   const profile: RunnerProfileRecord = {
@@ -957,8 +1060,12 @@ sessionRoutes.patch('/runner-profiles/:id', authMiddleware, async (c) => {
   const existing = getRunnerProfile(id);
   if (!existing) return c.json({ error: 'Profile not found' }, 404);
 
-  const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
-  const runnerId = normalizeRegisteredRunnerId(body.runner_id) || existing.runner_id;
+  const body = (await c.req.json().catch(() => ({}))) as Record<
+    string,
+    unknown
+  >;
+  const runnerId =
+    normalizeRegisteredRunnerId(body.runner_id) || existing.runner_id;
   const nextName =
     typeof body.name === 'string' && body.name.trim()
       ? body.name.trim().slice(0, 100)
@@ -966,12 +1073,9 @@ sessionRoutes.patch('/runner-profiles/:id', authMiddleware, async (c) => {
   let nextConfigJson = existing.config_json;
   if (typeof body.config_json === 'string') {
     const trimmed = body.config_json.trim() || '{}';
-    try {
-      JSON.parse(trimmed);
-      nextConfigJson = trimmed;
-    } catch {
-      return c.json({ error: 'config_json 必须是合法 JSON' }, 400);
-    }
+    const parsedConfig = parseRunnerProfileConfigJson(runnerId, trimmed);
+    if (parsedConfig.error) return c.json({ error: parsedConfig.error }, 400);
+    nextConfigJson = parsedConfig.configJson || '{}';
   }
 
   saveRunnerProfile({
@@ -979,7 +1083,12 @@ sessionRoutes.patch('/runner-profiles/:id', authMiddleware, async (c) => {
     runner_id: runnerId,
     name: nextName,
     config_json: nextConfigJson,
-    is_default: body.is_default === true ? true : body.is_default === false ? false : existing.is_default,
+    is_default:
+      body.is_default === true
+        ? true
+        : body.is_default === false
+          ? false
+          : existing.is_default,
     updated_at: new Date().toISOString(),
   });
   return c.json({ success: true, profile: getRunnerProfile(id) });
@@ -1031,8 +1140,7 @@ sessionRoutes.post('/', authMiddleware, async (c) => {
   ) {
     return c.json(
       {
-        error:
-          'llm_provider has been removed. Sessions must use runner_id.',
+        error: 'llm_provider has been removed. Sessions must use runner_id.',
       },
       400,
     );
@@ -1082,7 +1190,10 @@ sessionRoutes.post('/', authMiddleware, async (c) => {
       );
     }
     if (!path.isAbsolute(initSourcePath)) {
-      return c.json({ error: 'init_source_path must be an absolute path' }, 400);
+      return c.json(
+        { error: 'init_source_path must be an absolute path' },
+        400,
+      );
     }
     let realPath: string;
     try {
@@ -1104,7 +1215,9 @@ sessionRoutes.post('/', authMiddleware, async (c) => {
     if (allowlist?.allowedRoots?.length) {
       const allowedRoot = findAllowedRoot(realPath, allowlist.allowedRoots);
       if (!allowedRoot) {
-        const allowedPaths = allowlist.allowedRoots.map((root) => root.path).join(', ');
+        const allowedPaths = allowlist.allowedRoots
+          .map((root) => root.path)
+          .join(', ');
         return c.json(
           {
             error: `init_source_path must be under an allowed root. Allowed roots: ${allowedPaths}. Check config/mount-allowlist.json`,
@@ -1236,9 +1349,14 @@ sessionRoutes.get('/', authMiddleware, (c) => {
   const chatsByJid = new Map(getAllChats().map((chat) => [chat.jid, chat]));
 
   const allRelevantJids = Array.from(
-    new Set(sessions.flatMap((session) => getRelevantChatJids(session, bindings))),
+    new Set(
+      sessions.flatMap((session) => getRelevantChatJids(session, bindings)),
+    ),
   );
-  const latestMessages = new Map<string, { content: string; timestamp: string }>();
+  const latestMessages = new Map<
+    string,
+    { content: string; timestamp: string }
+  >();
   if (allRelevantJids.length > 0) {
     const rows = getMessagesPageMulti(
       allRelevantJids,
@@ -1280,9 +1398,16 @@ sessionRoutes.get('/:id', authMiddleware, (c) => {
   const bindings = listSessionBindings();
   const chatsByJid = new Map(getAllChats().map((chat) => [chat.jid, chat]));
   const relevantJids = getRelevantChatJids(session, bindings);
-  const latestMessages = new Map<string, { content: string; timestamp: string }>();
+  const latestMessages = new Map<
+    string,
+    { content: string; timestamp: string }
+  >();
   if (relevantJids.length > 0) {
-    const rows = getMessagesPageMulti(relevantJids, undefined, Math.max(relevantJids.length * 3, 30));
+    const rows = getMessagesPageMulti(
+      relevantJids,
+      undefined,
+      Math.max(relevantJids.length * 3, 30),
+    );
     for (const row of rows) {
       if (!latestMessages.has(row.chat_jid)) {
         latestMessages.set(row.chat_jid, {
@@ -1294,7 +1419,13 @@ sessionRoutes.get('/:id', authMiddleware, (c) => {
   }
 
   return c.json({
-    session: buildSessionPayload(user, session, bindings, latestMessages, chatsByJid),
+    session: buildSessionPayload(
+      user,
+      session,
+      bindings,
+      latestMessages,
+      chatsByJid,
+    ),
   });
 });
 
@@ -1310,12 +1441,14 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
     return c.json({ error: 'Worker session is read-only' }, 400);
   }
 
-  const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+  const body = (await c.req.json().catch(() => ({}))) as Record<
+    string,
+    unknown
+  >;
   if (Object.prototype.hasOwnProperty.call(body, 'llm_provider')) {
     return c.json(
       {
-        error:
-          'llm_provider has been removed. Sessions must use runner_id.',
+        error: 'llm_provider has been removed. Sessions must use runner_id.',
       },
       400,
     );
@@ -1347,10 +1480,21 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
   let nextRunnerId: SessionRecord['runner_id'];
   let nextRunnerProfileId: string | null;
   let nextSelectedSkills: string[] | null | undefined;
-  let nextActivationMode: 'auto' | 'always' | 'when_mentioned' | 'disabled' | undefined;
+  let nextActivationMode:
+    | 'auto'
+    | 'always'
+    | 'when_mentioned'
+    | 'disabled'
+    | undefined;
   let validatedRunnerProfileId: string | null;
-  const runnerProvided = Object.prototype.hasOwnProperty.call(body, 'runner_id');
-  const runnerProfileProvided = Object.prototype.hasOwnProperty.call(body, 'runner_profile_id');
+  const runnerProvided = Object.prototype.hasOwnProperty.call(
+    body,
+    'runner_id',
+  );
+  const runnerProfileProvided = Object.prototype.hasOwnProperty.call(
+    body,
+    'runner_profile_id',
+  );
   const nextModel =
     typeof body.model === 'string'
       ? body.model.trim() || null
@@ -1359,12 +1503,10 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
         : existing.model;
   const inferredRunnerId = inferRunnerIdFromModel(nextModel);
   try {
-    nextRunnerId = normalizeRunnerId(
-      body.runner_id,
-      existing.runner_id,
-    );
+    nextRunnerId = normalizeRunnerId(body.runner_id, existing.runner_id);
     nextRunnerProfileId =
-      typeof body.runner_profile_id === 'string' && body.runner_profile_id.trim()
+      typeof body.runner_profile_id === 'string' &&
+      body.runner_profile_id.trim()
         ? body.runner_profile_id.trim()
         : body.runner_profile_id === null
           ? null
@@ -1416,7 +1558,10 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
 
   if (existing.kind === 'memory') {
     if (requestedCwd !== undefined) {
-      return c.json({ error: 'Memory session does not support cwd override' }, 400);
+      return c.json(
+        { error: 'Memory session does not support cwd override' },
+        400,
+      );
     }
     if (body.context_compression !== undefined) {
       return c.json(
@@ -1425,10 +1570,16 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
       );
     }
     if (nextSelectedSkills !== undefined || nextActivationMode !== undefined) {
-      return c.json({ error: 'Memory session does not support binding policy fields' }, 400);
+      return c.json(
+        { error: 'Memory session does not support binding policy fields' },
+        400,
+      );
     }
     const memoryRunnerDescriptor = getRunnerDescriptor(nextRunnerId);
-    if (!memoryRunnerDescriptor || !canServeAsMemoryRunner(memoryRunnerDescriptor)) {
+    if (
+      !memoryRunnerDescriptor ||
+      !canServeAsMemoryRunner(memoryRunnerDescriptor)
+    ) {
       return c.json(
         { error: `Runner "${nextRunnerId}" cannot serve as memory runner` },
         400,
@@ -1454,7 +1605,10 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
       return c.json({ error: 'Session has no backing channel' }, 400);
     }
     const { backingJid, backingGroup } = resolvedBacking;
-    if (!backingGroup || !canModifyGroup(user, { ...backingGroup, jid: backingJid })) {
+    if (
+      !backingGroup ||
+      !canModifyGroup(user, { ...backingGroup, jid: backingJid })
+    ) {
       return c.json({ error: 'Forbidden' }, 403);
     }
     if (runnerChanged) {
@@ -1531,9 +1685,16 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
   const bindings = listSessionBindings();
   const chatsByJid = new Map(getAllChats().map((chat) => [chat.jid, chat]));
   const relevantJids = getRelevantChatJids(session, bindings);
-  const latestMessages = new Map<string, { content: string; timestamp: string }>();
+  const latestMessages = new Map<
+    string,
+    { content: string; timestamp: string }
+  >();
   if (relevantJids.length > 0) {
-    const rows = getMessagesPageMulti(relevantJids, undefined, Math.max(relevantJids.length * 3, 30));
+    const rows = getMessagesPageMulti(
+      relevantJids,
+      undefined,
+      Math.max(relevantJids.length * 3, 30),
+    );
     for (const row of rows) {
       if (!latestMessages.has(row.chat_jid)) {
         latestMessages.set(row.chat_jid, {
@@ -1546,7 +1707,13 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
 
   return c.json({
     success: true,
-    session: buildSessionPayload(user, session, bindings, latestMessages, chatsByJid),
+    session: buildSessionPayload(
+      user,
+      session,
+      bindings,
+      latestMessages,
+      chatsByJid,
+    ),
   });
 });
 
@@ -1618,7 +1785,9 @@ sessionRoutes.post('/:id/stop', authMiddleware, async (c) => {
     return c.json({ success: true });
   } catch (err) {
     return c.json(
-      { error: `Failed to stop runtime: ${err instanceof Error ? err.message : String(err)}` },
+      {
+        error: `Failed to stop runtime: ${err instanceof Error ? err.message : String(err)}`,
+      },
       500,
     );
   }
@@ -1678,7 +1847,10 @@ sessionRoutes.post('/:id/reset-session', authMiddleware, async (c) => {
 
   let agentId: string | undefined;
   try {
-    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const body = (await c.req.json().catch(() => ({}))) as Record<
+      string,
+      unknown
+    >;
     if (typeof body.agentId === 'string' && body.agentId.trim()) {
       agentId = body.agentId.trim();
     }
@@ -1709,7 +1881,9 @@ sessionRoutes.post('/:id/reset-session', authMiddleware, async (c) => {
     );
   } catch (err) {
     return c.json(
-      { error: `Failed to reset session: ${err instanceof Error ? err.message : String(err)}` },
+      {
+        error: `Failed to reset session: ${err instanceof Error ? err.message : String(err)}`,
+      },
       500,
     );
   }
@@ -1726,7 +1900,10 @@ sessionRoutes.post('/:id/clear-history', authMiddleware, async (c) => {
   const session = resolveSessionOrThrow(user, id);
   if (!session) return c.json({ error: 'Session not found' }, 404);
   if (session.kind !== 'main' && session.kind !== 'workspace') {
-    return c.json({ error: 'Only main/workspace sessions support clearing history' }, 400);
+    return c.json(
+      { error: 'Only main/workspace sessions support clearing history' },
+      400,
+    );
   }
 
   const resolvedBacking = resolveBackingGroupForSession(session);
@@ -1743,7 +1920,7 @@ sessionRoutes.post('/:id/clear-history', authMiddleware, async (c) => {
   try {
     await Promise.all(
       [...siblingJids, ...workerRuntimeJids].map((jid) =>
-        deps.queue.stopSession(jid, { force: true })
+        deps.queue.stopSession(jid, { force: true }),
       ),
     );
     clearWorkerArtifactsForFolder(backingGroup.folder);
@@ -1761,7 +1938,9 @@ sessionRoutes.post('/:id/clear-history', authMiddleware, async (c) => {
     }
   } catch (err) {
     return c.json(
-      { error: `Failed to clear history: ${err instanceof Error ? err.message : String(err)}` },
+      {
+        error: `Failed to clear history: ${err instanceof Error ? err.message : String(err)}`,
+      },
       500,
     );
   }
@@ -1834,9 +2013,8 @@ sessionRoutes.get('/:id/messages/search', authMiddleware, (c) => {
   const offset = Number.isFinite(offsetRaw) ? Math.max(0, offsetRaw) : 0;
   const daysRaw = parseInt(c.req.query('days') || '0', 10);
   const days = Number.isFinite(daysRaw) ? Math.max(0, daysRaw) : 0;
-  const sinceTs = days > 0
-    ? new Date(Date.now() - days * 86400000).toISOString()
-    : undefined;
+  const sinceTs =
+    days > 0 ? new Date(Date.now() - days * 86400000).toISOString() : undefined;
 
   const queryJids = getRelevantChatJids(session);
   const results = searchMessages(queryJids, q, limit, offset, sinceTs);
@@ -1880,7 +2058,10 @@ sessionRoutes.delete('/:id/messages/:messageId', authMiddleware, (c) => {
     return c.json({ error: 'Message not found' }, 404);
   }
   if (user.role !== 'admin') {
-    if (target.is_from_me === 1 || (target.sender && target.sender !== user.id)) {
+    if (
+      target.is_from_me === 1 ||
+      (target.sender && target.sender !== user.id)
+    ) {
       return c.json({ error: 'Permission denied' }, 403);
     }
   }
@@ -1899,7 +2080,10 @@ sessionRoutes.post('/:id/compress', authMiddleware, async (c) => {
   const session = resolveSessionOrThrow(user, id);
   if (!session) return c.json({ error: 'Session not found' }, 404);
   if (session.kind !== 'main' && session.kind !== 'workspace') {
-    return c.json({ error: 'Only main/workspace sessions support compression' }, 400);
+    return c.json(
+      { error: 'Only main/workspace sessions support compression' },
+      400,
+    );
   }
 
   const resolvedBacking = resolveBackingGroupForSession(session);
@@ -2021,7 +2205,7 @@ sessionRoutes.put('/:id/mode', authMiddleware, async (c) => {
   const session = resolveSessionOrThrow(user, id);
   if (!session) return c.json({ error: 'Session not found' }, 404);
 
-  const body = await c.req.json().catch(() => ({})) as { mode?: string };
+  const body = (await c.req.json().catch(() => ({}))) as { mode?: string };
   const mode = body.mode;
   if (mode !== 'bypassPermissions' && mode !== 'plan') {
     return c.json(
@@ -2036,7 +2220,10 @@ sessionRoutes.put('/:id/mode', authMiddleware, async (c) => {
     if (!worker || !agentId) {
       return c.json({ error: 'Worker session is malformed' }, 400);
     }
-    const applied = deps.queue.setPermissionMode(buildWorkerSessionId(agentId), mode);
+    const applied = deps.queue.setPermissionMode(
+      buildWorkerSessionId(agentId),
+      mode,
+    );
     if (applied) {
       persistPermissionModeSnapshot(session.id, mode);
     }
@@ -2068,7 +2255,10 @@ sessionRoutes.get('/:id/mcp', authMiddleware, (c) => {
   const session = resolveSessionOrThrow(user, id);
   if (!session) return c.json({ error: 'Session not found' }, 404);
   if (session.kind !== 'main' && session.kind !== 'workspace') {
-    return c.json({ error: 'Only main/workspace sessions support MCP config' }, 400);
+    return c.json(
+      { error: 'Only main/workspace sessions support MCP config' },
+      400,
+    );
   }
 
   const resolvedBacking = resolveBackingGroupForSession(session);
@@ -2088,7 +2278,10 @@ sessionRoutes.put('/:id/mcp', authMiddleware, async (c) => {
   const session = resolveSessionOrThrow(user, id);
   if (!session) return c.json({ error: 'Session not found' }, 404);
   if (session.kind !== 'main' && session.kind !== 'workspace') {
-    return c.json({ error: 'Only main/workspace sessions support MCP config' }, 400);
+    return c.json(
+      { error: 'Only main/workspace sessions support MCP config' },
+      400,
+    );
   }
 
   const resolvedBacking = resolveBackingGroupForSession(session);
@@ -2100,7 +2293,10 @@ sessionRoutes.put('/:id/mcp', authMiddleware, async (c) => {
     return c.json({ error: 'Session not found' }, 404);
   }
 
-  const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+  const body = (await c.req.json().catch(() => ({}))) as Record<
+    string,
+    unknown
+  >;
   const mcpMode = body.mcp_mode;
   const selectedMcps = body.selected_mcps;
 
@@ -2120,7 +2316,10 @@ sessionRoutes.put('/:id/mcp', authMiddleware, async (c) => {
 
   const updatedGroup: RegisteredGroup = {
     ...backingGroup,
-    mcp_mode: (mcpMode as RegisteredGroup['mcp_mode']) ?? backingGroup.mcp_mode ?? 'inherit',
+    mcp_mode:
+      (mcpMode as RegisteredGroup['mcp_mode']) ??
+      backingGroup.mcp_mode ??
+      'inherit',
     selected_mcps:
       selectedMcps !== undefined
         ? (selectedMcps as string[] | null)
@@ -2177,9 +2376,7 @@ sessionRoutes.delete('/:id', authMiddleware, async (c) => {
   }
 
   const user = c.get('user') as AuthUser;
-  if (
-    !canDeleteGroup(user, { ...backingGroup, jid: backingJid })
-  ) {
+  if (!canDeleteGroup(user, { ...backingGroup, jid: backingJid })) {
     return c.json({ error: 'Session not found' }, 404);
   }
 
@@ -2189,7 +2386,9 @@ sessionRoutes.delete('/:id', authMiddleware, async (c) => {
       .map((candidate) => candidate.id),
   );
   const blockingBindings = listSessionBindings().filter(
-    (binding) => binding.session_id === session.id || childSessionIds.has(binding.session_id),
+    (binding) =>
+      binding.session_id === session.id ||
+      childSessionIds.has(binding.session_id),
   );
   if (blockingBindings.length > 0) {
     return c.json(

@@ -88,8 +88,6 @@ export interface SystemSettings {
 }
 
 export type SettingsTab =
-  | 'claude'
-  | 'codex'
   | 'runners'
   | 'appearance'
   | 'system'
@@ -102,77 +100,6 @@ export type SettingsTab =
   | 'agent-definitions'
   | 'about'
   | 'bindings';
-
-// ─── Codex Provider Types ───────────────────────────────────────
-
-export interface CodexConfigPublic {
-  mode: 'cli' | 'api_key';
-  hasCliAuth: boolean;
-  cliAuthMode: string | null;
-  cliAuthAccountId: string | null;
-  cliAuthLastRefresh: string | null;
-  hasEnvApiKey: boolean;
-}
-
-export interface CodexProfileItem {
-  id: string;
-  name: string;
-  baseUrl: string;
-  defaultModel: string;
-  updatedAt: string | null;
-  hasOpenaiApiKey: boolean;
-  openaiApiKeyMasked: string | null;
-  customEnv: Record<string, string>;
-}
-
-export interface CodexProfilesResp {
-  activeProfileId: string;
-  profiles: CodexProfileItem[];
-}
-
-export interface CodexActivateResult {
-  success: boolean;
-  alreadyActive?: boolean;
-  activeProfileId: string;
-  profile: CodexProfileItem | null;
-  stoppedCount: number;
-  failedCount: number;
-  error?: string;
-}
-
-export interface LocalCodexCliStatus {
-  detected: boolean;
-  hasAuth: boolean;
-  authMode: string | null;
-  accountId: string | null;
-  lastRefresh: string | null;
-}
-
-// ─── Codex Rate Limits ─────────────────────────────────────
-
-export interface CodexRateLimitWindow {
-  usedPercent: number;
-  windowDurationMins: number;
-  resetsAt: number;
-}
-
-export interface CodexRateLimitCredits {
-  hasCredits: boolean;
-  unlimited: boolean;
-  balance: string;
-}
-
-export interface CodexRateLimitData {
-  limitId: string | null;
-  planType: string | null;
-  primary: CodexRateLimitWindow | null;
-  secondary: CodexRateLimitWindow | null;
-  credits: CodexRateLimitCredits | null;
-}
-
-export type CodexRateLimitsResponse =
-  | { available: true; rateLimits: CodexRateLimitData }
-  | { available: false; reason: string };
 
 export function getErrorMessage(err: unknown, fallback: string): string {
   if (typeof err === 'object' && err !== null && 'message' in err) {

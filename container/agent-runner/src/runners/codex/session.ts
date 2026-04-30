@@ -23,6 +23,8 @@ export interface CodexSessionConfig {
   mcpServerEnv?: Record<string, string>;
   /** Path to model instructions file. */
   modelInstructionsFile?: string;
+  /** Built-in AgentDock MCP server name. A happyclaw alias is kept for old prompts. */
+  builtinMcpServerName?: string;
   /** User-configured MCP servers from settings.json (stdio format only). */
   userMcpServers?: Record<string, unknown>;
 }
@@ -37,6 +39,16 @@ export class CodexSession {
   constructor(config: CodexSessionConfig, codexOptions?: CodexOptions) {
     this.config = config;
 
+    const builtinName = config.builtinMcpServerName || 'agentdock';
+    const builtinServer =
+      config.mcpServerPath
+        ? {
+            command: 'node',
+            args: [config.mcpServerPath],
+            env: config.mcpServerEnv || {},
+          }
+        : null;
+
     // Build Codex config with MCP server
     const codexConfig: CodexOptions = {
       ...codexOptions,
@@ -50,14 +62,13 @@ export class CodexSession {
               mcp_servers: {
                 // User MCP servers first (stdio only)
                 ...(config.userMcpServers || {}),
-                // Built-in happyclaw server overrides any user server with same name
-                ...(config.mcpServerPath
+                // Built-in AgentDock servers override any user servers with the same names.
+                ...(builtinServer
                   ? {
-                      happyclaw: {
-                        command: 'node',
-                        args: [config.mcpServerPath],
-                        env: config.mcpServerEnv || {},
-                      },
+                      [builtinName]: builtinServer,
+                      ...(builtinName === 'happyclaw'
+                        ? {}
+                        : { happyclaw: builtinServer }),
                     }
                   : {}),
               },

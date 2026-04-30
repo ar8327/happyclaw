@@ -4,8 +4,6 @@ import { Menu } from 'lucide-react';
 
 import { useAuthStore } from '../stores/auth';
 import { SettingsNav } from '../components/settings/SettingsNav';
-import { ClaudeProviderSection } from '../components/settings/ClaudeProviderSection';
-import { CodexProviderSection } from '../components/settings/CodexProviderSection';
 import { ProfileSection } from '../components/settings/ProfileSection';
 import { AboutSection } from '../components/settings/AboutSection';
 import { AppearanceSection } from '../components/settings/AppearanceSection';
@@ -20,8 +18,8 @@ import { BindingsSection } from '../components/settings/BindingsSection';
 import { AgentDefinitionsPage } from './AgentDefinitionsPage';
 import type { SettingsTab } from '../components/settings/types';
 
-const VALID_TABS: SettingsTab[] = ['claude', 'codex', 'runners', 'appearance', 'system', 'profile', 'channels', 'sessions', 'memory', 'skills', 'mcp-servers', 'agent-definitions', 'about', 'bindings'];
-const SYSTEM_TABS: SettingsTab[] = ['claude', 'codex', 'runners', 'appearance', 'system'];
+const VALID_TABS: SettingsTab[] = ['runners', 'appearance', 'system', 'profile', 'channels', 'sessions', 'memory', 'skills', 'mcp-servers', 'agent-definitions', 'about', 'bindings'];
+const SYSTEM_TABS: SettingsTab[] = ['runners', 'appearance', 'system'];
 const FULLPAGE_TABS: SettingsTab[] = ['sessions', 'memory', 'runners', 'skills', 'mcp-servers', 'agent-definitions', 'bindings'];
 
 export function SettingsPage() {
@@ -46,6 +44,8 @@ export function SettingsPage() {
         ? 'sessions'
         : rawParam === 'my-channels'
           ? 'channels'
+          : rawParam === 'claude' || rawParam === 'codex'
+            ? 'runners'
           : rawParam;
     if (normalized && (VALID_TABS as string[]).includes(normalized)) {
       const tab = normalized as SettingsTab;
@@ -69,8 +69,6 @@ export function SettingsPage() {
     tabs.push({ key: 'channels', label: '消息渠道' });
     if (canManageSystemConfig) {
       tabs.push({ key: 'runners', label: 'Runners' });
-      tabs.push({ key: 'claude', label: 'Claude' });
-      tabs.push({ key: 'codex', label: 'Codex' });
       tabs.push({ key: 'appearance', label: '外观' });
       tabs.push({ key: 'system', label: '系统' });
     }
@@ -96,8 +94,6 @@ export function SettingsPage() {
   }, [activeTab]);
 
   const sectionTitle: Record<SettingsTab, string> = {
-    claude: 'Claude 本机命令',
-    codex: 'Codex 本机命令',
     runners: 'Runner 注册表',
     appearance: '外观设置（全局默认）',
     system: '系统参数',
@@ -198,8 +194,6 @@ export function SettingsPage() {
               )}
 
               <div className="bg-card rounded-xl border border-border p-6">
-                {activeTab === 'claude' && <ClaudeProviderSection setNotice={setNotice} setError={setError} />}
-                {activeTab === 'codex' && <CodexProviderSection setNotice={setNotice} setError={setError} />}
                 {activeTab === 'appearance' && <AppearanceSection setNotice={setNotice} setError={setError} />}
                 {activeTab === 'system' && <SystemSettingsSection setNotice={setNotice} setError={setError} />}
                 {activeTab === 'profile' && <ProfileSection setNotice={setNotice} setError={setError} />}

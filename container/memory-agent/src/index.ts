@@ -1,8 +1,10 @@
+import './env-compat.js';
+
 /**
- * HappyClaw Memory Agent
+ * AgentDock Memory Agent
  *
  * A lightweight per-user memory management agent that runs as a child process
- * of the main HappyClaw server. Communicates via stdin/stdout JSON lines.
+ * of the main AgentDock server. Communicates via stdin/stdout JSON lines.
  *
  * Architecture:
  *   Uses a PERSISTENT query() with AsyncIterable<SDKUserMessage> prompt,

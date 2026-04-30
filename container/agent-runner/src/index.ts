@@ -1,19 +1,20 @@
 /**
- * HappyClaw Agent Runner — Entry Point
+ * AgentDock Agent Runner — Entry Point
  *
  * Thin entry: reads ContainerInput from stdin, resolves the runner,
  * initializes it, and starts the query loop.
  *
- * All provider logic lives in providers/claude/ (and future providers/codex/).
+ * Runner-specific logic lives in runners/{runnerId}/.
  * The generic query loop lives in query-loop.ts.
  */
 
+import './env-compat.js';
 import fs from 'fs';
 import path from 'path';
 import type { ContainerInput, ContainerOutput } from './types.js';
 export type { StreamEventType, StreamEvent } from './types.js';
 
-import { normalizeHomeFlags } from 'happyclaw-agent-runner-core';
+import { normalizeHomeFlags } from 'agentdock-agent-runner-core';
 import { SessionState } from './session-state.js';
 import {
   buildIpcPaths,
@@ -22,9 +23,13 @@ import {
 } from './ipc-handler.js';
 import { runQueryLoop } from './query-loop.js';
 import { createSystemPromptBuilder } from './system-prompt.js';
-import { ClaudeRunner } from './providers/claude/claude-runner.js';
-import { CodexRunner } from './providers/codex/codex-runner.js';
 import type { AgentRunner } from './runner-interface.js';
+import { getRunnerManifest, getSupportedRunnerIds } from './runners/index.js';
+import type { RunnerManifest } from './runners/types.js';
+import type {
+  RunnerDescriptor,
+  UserMcpSource,
+} from './runner-descriptor.types.js';
 
 type ContainerInputWire = Omit<ContainerInput, 'groupFolder'> & {
   groupFolder?: string;
@@ -34,22 +39,23 @@ type ContainerInputWire = Omit<ContainerInput, 'groupFolder'> & {
 // Environment
 // ---------------------------------------------------------------------------
 
-const WORKSPACE_GROUP = process.env.HAPPYCLAW_WORKSPACE_GROUP || '/workspace/group';
-const WORKSPACE_GLOBAL = process.env.HAPPYCLAW_WORKSPACE_GLOBAL || '/workspace/global';
-const WORKSPACE_MEMORY = process.env.HAPPYCLAW_WORKSPACE_MEMORY || '/workspace/memory';
+const WORKSPACE_GROUP =
+  process.env.HAPPYCLAW_WORKSPACE_GROUP || '/workspace/group';
+const WORKSPACE_GLOBAL =
+  process.env.HAPPYCLAW_WORKSPACE_GLOBAL || '/workspace/global';
+const WORKSPACE_MEMORY =
+  process.env.HAPPYCLAW_WORKSPACE_MEMORY || '/workspace/memory';
 const WORKSPACE_IPC = process.env.HAPPYCLAW_WORKSPACE_IPC || '/workspace/ipc';
-const WORKSPACE_SKILLS = process.env.HAPPYCLAW_SKILLS_DIR || '/workspace/user-skills';
+const WORKSPACE_SKILLS =
+  process.env.HAPPYCLAW_SKILLS_DIR || '/workspace/user-skills';
 
-const CLAUDE_MODEL = process.env.HAPPYCLAW_MODEL || process.env.ANTHROPIC_MODEL || 'opus';
 const THINKING_EFFORT = process.env.HAPPYCLAW_THINKING_EFFORT || undefined;
 
 function isEnabledEnv(value: string | undefined): boolean {
   return value === '1' || value === 'true';
 }
 
-const EPHEMERAL_SESSION = isEnabledEnv(
-  process.env.HAPPYCLAW_EPHEMERAL_SESSION,
-);
+const EPHEMERAL_SESSION = isEnabledEnv(process.env.HAPPYCLAW_EPHEMERAL_SESSION);
 const DISABLE_SYNTHETIC_ARCHIVE = isEnabledEnv(
   process.env.HAPPYCLAW_DISABLE_SYNTHETIC_ARCHIVE,
 );
@@ -68,7 +74,9 @@ const OUTPUT_END_MARKER = '---HAPPYCLAW_OUTPUT_END---';
 
 function writeOutput(output: ContainerOutput): void {
   const line = JSON.stringify(output);
-  process.stdout.write(`${OUTPUT_START_MARKER}\n${line}\n${OUTPUT_END_MARKER}\n`);
+  process.stdout.write(
+    `${OUTPUT_START_MARKER}\n${line}\n${OUTPUT_END_MARKER}\n`,
+  );
 }
 
 function log(message: string): void {
@@ -79,7 +87,9 @@ async function readStdin(): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = '';
     process.stdin.setEncoding('utf8');
-    process.stdin.on('data', chunk => { data += chunk; });
+    process.stdin.on('data', (chunk) => {
+      data += chunk;
+    });
     process.stdin.on('end', () => resolve(data));
     process.stdin.on('error', reject);
   });
@@ -89,80 +99,122 @@ async function readStdin(): Promise<string> {
 // User MCP servers loader
 // ---------------------------------------------------------------------------
 
-function loadUserMcpServers(): Record<string, unknown> {
-  const candidateFiles = [
-    process.env.HAPPYCLAW_WORKSPACE_SESSION
-      ? path.join(process.env.HAPPYCLAW_WORKSPACE_SESSION, '.claude', 'settings.json')
-      : null,
-    process.env.CLAUDE_CONFIG_DIR
-      ? path.join(process.env.CLAUDE_CONFIG_DIR, 'settings.json')
-      : null,
-  ].filter((value): value is string => !!value);
+function readMcpServersFromJsonFile(filePath: string): Record<string, unknown> {
+  try {
+    if (!fs.existsSync(filePath)) return {};
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    const servers =
+      parsed?.mcpServers && typeof parsed.mcpServers === 'object'
+        ? parsed.mcpServers
+        : parsed?.servers && typeof parsed.servers === 'object'
+          ? parsed.servers
+          : null;
+    return servers && !Array.isArray(servers)
+      ? (servers as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
 
-  for (const settingsFile of candidateFiles) {
-    try {
-      if (fs.existsSync(settingsFile)) {
-        const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
-        if (settings.mcpServers && typeof settings.mcpServers === 'object') {
-          return settings.mcpServers;
-        }
-      }
-    } catch {
-      /* ignore parse errors */
-    }
+function readMcpServersFromEnv(name: string): Record<string, unknown> {
+  const raw = process.env[name];
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function readProfileMcpServers(input: ContainerInput): Record<string, unknown> {
+  const value = input.runnerConfig?.config?.mcpServers;
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function loadMcpServersFromSource(
+  source: UserMcpSource,
+  input: ContainerInput,
+): Record<string, unknown> {
+  if (source === 'agentdock' || source === 'happyclaw') {
+    return readMcpServersFromEnv('HAPPYCLAW_USER_MCP_SERVERS');
+  }
+  if (source === 'profile') {
+    return readProfileMcpServers(input);
+  }
+  if (source === 'claude_settings') {
+    const candidateFiles = [
+      process.env.HAPPYCLAW_WORKSPACE_SESSION
+        ? path.join(
+            process.env.HAPPYCLAW_WORKSPACE_SESSION,
+            '.claude',
+            'settings.json',
+          )
+        : null,
+      process.env.CLAUDE_CONFIG_DIR
+        ? path.join(process.env.CLAUDE_CONFIG_DIR, 'settings.json')
+        : null,
+    ].filter((value): value is string => !!value);
+    return Object.assign({}, ...candidateFiles.map(readMcpServersFromJsonFile));
+  }
+  if (source === 'codex_config') {
+    const candidateFiles = [
+      process.env.CODEX_CONFIG_DIR
+        ? path.join(process.env.CODEX_CONFIG_DIR, 'config.json')
+        : null,
+      process.env.HAPPYCLAW_WORKSPACE_SESSION
+        ? path.join(
+            process.env.HAPPYCLAW_WORKSPACE_SESSION,
+            '.codex',
+            'config.json',
+          )
+        : null,
+    ].filter((value): value is string => !!value);
+    return Object.assign({}, ...candidateFiles.map(readMcpServersFromJsonFile));
   }
   return {};
 }
 
-// ---------------------------------------------------------------------------
-// Runner selection
-// ---------------------------------------------------------------------------
+function loadUserMcpServers(
+  descriptor: RunnerDescriptor,
+  input: ContainerInput,
+): Record<string, unknown> {
+  if (
+    descriptor.toolContract.mode === 'none' ||
+    !descriptor.toolContract.supportsUserMcp
+  ) {
+    return {};
+  }
+  const sources = descriptor.toolContract.userMcpSources || [];
+  return Object.assign(
+    {},
+    ...sources.map((source) => loadMcpServersFromSource(source, input)),
+  );
+}
 
-type SupportedRunnerId = 'claude' | 'codex';
+function createUserMcpServerLoader(
+  descriptor: RunnerDescriptor,
+  input: ContainerInput,
+): () => Record<string, unknown> {
+  return () => loadUserMcpServers(descriptor, input);
+}
 
-type RunnerFactoryContext = {
-  containerInput: ContainerInput;
-  state: SessionState;
-  ipcPaths: typeof ipcPaths;
-  log: typeof log;
-  writeOutput: typeof writeOutput;
-  imChannelsFile: string;
-  groupDir: string;
-  globalDir: string;
-  memoryDir: string;
-  thinkingEffort?: string;
-  loadUserMcpServers: typeof loadUserMcpServers;
-  skillsDir: string;
-  disableSyntheticArchive: boolean;
-};
-
-const RUNNER_FACTORIES: Record<
-  SupportedRunnerId,
-  (ctx: RunnerFactoryContext) => AgentRunner
-> = {
-  claude: (ctx) =>
-    new ClaudeRunner({
-      ...ctx,
-      model: CLAUDE_MODEL,
-    }),
-  codex: (ctx) =>
-    new CodexRunner({
-      ...ctx,
-      model:
-        process.env.HAPPYCLAW_CODEX_MODEL || process.env.OPENAI_MODEL || 'gpt-5.4',
-    }),
-};
-
-function resolveRunnerId(input: ContainerInput): SupportedRunnerId {
+function resolveRunnerManifest(input: ContainerInput): RunnerManifest {
   const runnerId = input.runnerId?.trim().toLowerCase();
   if (!runnerId) {
     throw new Error('Missing runnerId in ContainerInput');
   }
-  if (runnerId in RUNNER_FACTORIES) {
-    return runnerId as SupportedRunnerId;
+  const manifest = getRunnerManifest(runnerId);
+  if (manifest) {
+    return manifest;
   }
   throw new Error(
-    `Unsupported runnerId "${input.runnerId}". Supported runners: ${Object.keys(RUNNER_FACTORIES).join(', ')}`,
+    `Unsupported runnerId "${input.runnerId}". Supported runners: ${getSupportedRunnerIds().join(', ')}`,
   );
 }
 
@@ -170,7 +222,8 @@ function resolveWorkspaceFolder(input: {
   workspaceFolder?: string;
   groupFolder?: string;
 }): string {
-  const workspaceFolder = input.workspaceFolder?.trim() || input.groupFolder?.trim();
+  const workspaceFolder =
+    input.workspaceFolder?.trim() || input.groupFolder?.trim();
   if (!workspaceFolder) {
     throw new Error('Missing workspaceFolder in ContainerInput');
   }
@@ -200,7 +253,7 @@ function buildInitialSessionSnapshot(
 }
 
 function validateDeclaredIpcCapabilities(
-  runnerId: SupportedRunnerId,
+  runnerId: string,
   input: ContainerInput,
   runner: AgentRunner,
 ): void {
@@ -214,8 +267,8 @@ function validateDeclaredIpcCapabilities(
     );
   }
   if (
-    declared.runtimeModeSwitch
-    !== runner.ipcCapabilities.supportsRuntimeModeSwitch
+    declared.runtimeModeSwitch !==
+    runner.ipcCapabilities.supportsRuntimeModeSwitch
   ) {
     mismatches.push(
       `runtimeModeSwitch descriptor=${declared.runtimeModeSwitch} instance=${runner.ipcCapabilities.supportsRuntimeModeSwitch}`,
@@ -225,6 +278,34 @@ function validateDeclaredIpcCapabilities(
   if (mismatches.length > 0) {
     throw new Error(
       `Runner "${runnerId}" ipcCapabilities mismatch: ${mismatches.join('; ')}`,
+    );
+  }
+}
+
+function validateDeclaredRunnerDescriptor(
+  manifest: RunnerManifest,
+  input: ContainerInput,
+): void {
+  const declared = input.declaredRunnerDescriptor;
+  if (!declared) return;
+  const actual = manifest.descriptor;
+  const keys = [
+    'id',
+    'capabilities',
+    'lifecycle',
+    'promptContract',
+    'runtimeContract',
+    'toolContract',
+    'profileSchema',
+    'models',
+    'compatibility',
+  ] as const;
+  const mismatches = keys.filter(
+    (key) => JSON.stringify(declared[key]) !== JSON.stringify(actual[key]),
+  );
+  if (mismatches.length > 0) {
+    throw new Error(
+      `Runner "${actual.id}" descriptor mismatch: ${mismatches.join(', ')}`,
     );
   }
 }
@@ -250,14 +331,16 @@ async function main(): Promise<void> {
     writeOutput({
       status: 'error',
       result: null,
-      error: `Failed to parse input: ${err instanceof Error ? err.message : String(err)}`
+      error: `Failed to parse input: ${err instanceof Error ? err.message : String(err)}`,
     });
     process.exit(1);
   }
 
-  const runnerId = resolveRunnerId(containerInput);
+  const runnerManifest = resolveRunnerManifest(containerInput);
+  const runnerId = runnerManifest.descriptor.id;
   const sessionRecordId = buildSessionRecordId(containerInput);
   log(`Runner: ${runnerId}`);
+  validateDeclaredRunnerDescriptor(runnerManifest, containerInput);
 
   // Initialize session state
   state.loadImChannels(IM_CHANNELS_FILE);
@@ -265,9 +348,21 @@ async function main(): Promise<void> {
 
   // Clean up stale sentinels
   fs.mkdirSync(ipcPaths.inputDir, { recursive: true });
-  try { fs.unlinkSync(ipcPaths.closeSentinel); } catch { /* ignore */ }
-  try { fs.unlinkSync(ipcPaths.drainSentinel); } catch { /* ignore */ }
-  try { fs.unlinkSync(ipcPaths.interruptSentinel); } catch { /* ignore */ }
+  try {
+    fs.unlinkSync(ipcPaths.closeSentinel);
+  } catch {
+    /* ignore */
+  }
+  try {
+    fs.unlinkSync(ipcPaths.drainSentinel);
+  } catch {
+    /* ignore */
+  }
+  try {
+    fs.unlinkSync(ipcPaths.interruptSentinel);
+  } catch {
+    /* ignore */
+  }
 
   // Build initial prompt (drain any pending IPC messages)
   let prompt = containerInput.prompt;
@@ -278,7 +373,9 @@ async function main(): Promise<void> {
     log(`Initial mode change via IPC: ${pendingDrain.modeChange}`);
   }
   if (pendingDrain.messages.length > 0) {
-    log(`Draining ${pendingDrain.messages.length} pending IPC messages into initial prompt`);
+    log(
+      `Draining ${pendingDrain.messages.length} pending IPC messages into initial prompt`,
+    );
     prompt += '\n' + pendingDrain.messages.map((m) => m.text).join('\n');
     const pendingImages = pendingDrain.messages.flatMap((m) => m.images || []);
     if (pendingImages.length > 0) {
@@ -286,7 +383,7 @@ async function main(): Promise<void> {
     }
   }
 
-  const runner = RUNNER_FACTORIES[runnerId]({
+  const runner = await runnerManifest.createRunner({
     containerInput,
     state,
     ipcPaths,
@@ -297,7 +394,10 @@ async function main(): Promise<void> {
     globalDir: WORKSPACE_GLOBAL,
     memoryDir: WORKSPACE_MEMORY,
     thinkingEffort: THINKING_EFFORT,
-    loadUserMcpServers,
+    loadUserMcpServers: createUserMcpServerLoader(
+      runnerManifest.descriptor,
+      containerInput,
+    ),
     skillsDir: WORKSPACE_SKILLS,
     disableSyntheticArchive: DISABLE_SYNTHETIC_ARCHIVE,
   });
@@ -307,7 +407,7 @@ async function main(): Promise<void> {
   await runQueryLoop({
     runner,
     buildSystemPrompt: createSystemPromptBuilder({
-      runnerId,
+      descriptor: runnerManifest.descriptor,
       containerInput,
       state,
       workspaceIpc: WORKSPACE_IPC,
@@ -317,6 +417,7 @@ async function main(): Promise<void> {
       memoryDir: WORKSPACE_MEMORY,
       skillsDir: WORKSPACE_SKILLS,
     }),
+    promptContract: runnerManifest.descriptor.promptContract,
     initialPrompt: prompt,
     initialImages: promptImages,
     sessionRecordId,
@@ -335,12 +436,18 @@ async function main(): Promise<void> {
 // Process event handlers
 // ---------------------------------------------------------------------------
 
-(process.stdout as NodeJS.WriteStream & NodeJS.EventEmitter).on('error', (err: NodeJS.ErrnoException) => {
-  if (err.code === 'EPIPE') process.exit(0);
-});
-(process.stderr as NodeJS.WriteStream & NodeJS.EventEmitter).on('error', (err: NodeJS.ErrnoException) => {
-  if (err.code === 'EPIPE') process.exit(0);
-});
+(process.stdout as NodeJS.WriteStream & NodeJS.EventEmitter).on(
+  'error',
+  (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EPIPE') process.exit(0);
+  },
+);
+(process.stderr as NodeJS.WriteStream & NodeJS.EventEmitter).on(
+  'error',
+  (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EPIPE') process.exit(0);
+  },
+);
 
 process.on('SIGTERM', () => {
   log('Received SIGTERM, exiting gracefully');
@@ -362,7 +469,11 @@ process.on('uncaughtException', (err: unknown) => {
     process.exit(0);
   }
   console.error('Uncaught exception:', err);
-  writeOutput({ status: 'error', result: null, error: `Unexpected error: ${err}` });
+  writeOutput({
+    status: 'error',
+    result: null,
+    error: `Unexpected error: ${err}`,
+  });
   process.exit(1);
 });
 

@@ -9,10 +9,11 @@ import { Textarea } from '@/components/ui/textarea';
 interface RunnerInfo {
   id: string;
   label: string;
+  description?: string;
+  default_model?: string;
   can_serve_memory: boolean;
   compatibility: {
     chat: string;
-    memory: string;
     im: string;
     observability: string;
   };
@@ -32,7 +33,21 @@ interface RunnerInfo {
     mode: string;
     dynamicContextReload: string;
   };
+  tool_contract?: {
+    mode: string;
+    supportsUserMcp: boolean;
+  };
+  profile_schema?: Record<string, unknown> | null;
   degradation_reasons: string[];
+}
+
+interface RunnerHealth {
+  runnerId: string;
+  available: boolean;
+  commandDetected?: boolean;
+  authenticated?: boolean;
+  version?: string;
+  missingReasons?: string[];
 }
 
 interface RunnerProfileItem {
@@ -52,9 +67,58 @@ const EMPTY_PROFILE_FORM = {
   is_default: false,
 };
 
+interface JsonSchemaProperty {
+  type?: string | string[];
+  title?: string;
+  description?: string;
+  enum?: unknown[];
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function schemaType(property: JsonSchemaProperty): string {
+  return Array.isArray(property.type)
+    ? property.type[0] || 'string'
+    : property.type || 'string';
+}
+
+function schemaProperties(
+  schema: Record<string, unknown> | null,
+): Array<[string, JsonSchemaProperty]> {
+  if (!isRecord(schema?.properties)) return [];
+  return Object.entries(schema.properties)
+    .filter((entry): entry is [string, JsonSchemaProperty] =>
+      isRecord(entry[1]),
+    )
+    .map(([key, property]) => [key, property]);
+}
+
+function parseConfigObject(configJson: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(configJson || '{}');
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 export function RunnersPage() {
   const [runners, setRunners] = useState<RunnerInfo[]>([]);
   const [profiles, setProfiles] = useState<RunnerProfileItem[]>([]);
+  const [healthByRunner, setHealthByRunner] = useState<
+    Record<string, RunnerHealth>
+  >({});
+  const [profileSchema, setProfileSchema] = useState<Record<
+    string,
+    unknown
+  > | null>(null);
   const [selectedRunnerId, setSelectedRunnerId] = useState<string>('');
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
   const [profileForm, setProfileForm] = useState(EMPTY_PROFILE_FORM);
@@ -65,12 +129,31 @@ export function RunnersPage() {
   const [notice, setNotice] = useState<string | null>(null);
 
   const loadRunners = async () => {
-    const data = await api.get<{ runners: RunnerInfo[] }>('/api/sessions/runners');
+    const data = await api.get<{ runners: RunnerInfo[] }>('/api/runners');
     setRunners(data.runners);
     setSelectedRunnerId((prev) =>
       data.runners.some((runner) => runner.id === prev)
         ? prev
-        : (data.runners[0]?.id || ''),
+        : data.runners[0]?.id || '',
+    );
+    const healthEntries = await Promise.all(
+      data.runners.map(async (runner) => {
+        try {
+          const healthData = await api.get<{ health: RunnerHealth }>(
+            `/api/runners/${encodeURIComponent(runner.id)}/health`,
+          );
+          return [runner.id, healthData.health] as const;
+        } catch {
+          return [runner.id, null] as const;
+        }
+      }),
+    );
+    setHealthByRunner(
+      Object.fromEntries(
+        healthEntries.filter(
+          (entry): entry is readonly [string, RunnerHealth] => !!entry[1],
+        ),
+      ),
     );
   };
 
@@ -118,12 +201,52 @@ export function RunnersPage() {
     loadProfiles(selectedRunnerId).catch((err) => {
       setError(err instanceof Error ? err.message : '加载 runner profile 失败');
     });
+    api
+      .get<{ schema: Record<string, unknown> | null }>(
+        `/api/runners/${encodeURIComponent(selectedRunnerId)}/profile-schema`,
+      )
+      .then((data) => setProfileSchema(data.schema))
+      .catch(() => setProfileSchema(null));
   }, [selectedRunnerId]);
 
   const selectedRunner = useMemo(
     () => runners.find((runner) => runner.id === selectedRunnerId) || null,
     [runners, selectedRunnerId],
   );
+  const profileSchemaProperties = useMemo(
+    () => schemaProperties(profileSchema),
+    [profileSchema],
+  );
+  const parsedProfileConfig = useMemo(
+    () => parseConfigObject(profileForm.config_json),
+    [profileForm.config_json],
+  );
+
+  const updateProfileConfigField = (
+    key: string,
+    property: JsonSchemaProperty,
+    rawValue: string | boolean,
+  ) => {
+    setProfileForm((prev) => {
+      const current = parseConfigObject(prev.config_json) || {};
+      const next = { ...current };
+      const type = schemaType(property);
+      if (typeof rawValue === 'boolean') {
+        next[key] = rawValue;
+      } else if (rawValue === '') {
+        delete next[key];
+      } else if (type === 'number' || type === 'integer') {
+        const numeric = Number(rawValue);
+        if (Number.isFinite(numeric)) next[key] = numeric;
+      } else {
+        next[key] = rawValue;
+      }
+      return {
+        ...prev,
+        config_json: JSON.stringify(next, null, 2),
+      };
+    });
+  };
 
   const resetForm = () => {
     setEditingProfileId(null);
@@ -165,12 +288,15 @@ export function RunnersPage() {
     try {
       JSON.parse(profileForm.config_json || '{}');
       if (editingProfileId) {
-        await api.patch(`/api/sessions/runner-profiles/${encodeURIComponent(editingProfileId)}`, {
-          runner_id: selectedRunnerId,
-          name: profileForm.name.trim(),
-          config_json: profileForm.config_json || '{}',
-          is_default: profileForm.is_default,
-        });
+        await api.patch(
+          `/api/sessions/runner-profiles/${encodeURIComponent(editingProfileId)}`,
+          {
+            runner_id: selectedRunnerId,
+            name: profileForm.name.trim(),
+            config_json: profileForm.config_json || '{}',
+            is_default: profileForm.is_default,
+          },
+        );
         setNotice('Runner profile 已更新');
       } else {
         await api.post('/api/sessions/runner-profiles', {
@@ -195,7 +321,9 @@ export function RunnersPage() {
     setError(null);
     setNotice(null);
     try {
-      await api.delete(`/api/sessions/runner-profiles/${encodeURIComponent(profile.id)}`);
+      await api.delete(
+        `/api/sessions/runner-profiles/${encodeURIComponent(profile.id)}`,
+      );
       if (editingProfileId === profile.id) resetForm();
       await loadProfiles(selectedRunnerId);
       setNotice('Runner profile 已删除');
@@ -213,7 +341,9 @@ export function RunnersPage() {
               <Cpu className="w-5 h-5 text-primary" />
             </div>
             <div>
-              <h1 className="text-2xl font-bold text-foreground">Runner 注册表</h1>
+              <h1 className="text-2xl font-bold text-foreground">
+                Runner 注册表
+              </h1>
               <p className="text-sm text-slate-500 mt-0.5">
                 管理 runner 能力矩阵，以及 session 与 memory 可选的 profile。
               </p>
@@ -237,59 +367,149 @@ export function RunnersPage() {
           <>
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
               {runners.map((runner) => (
-                <div key={runner.id} className="bg-card rounded-xl border border-border p-5 space-y-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="text-lg font-semibold text-foreground">{runner.label}</div>
-                      <div className="text-xs font-mono text-slate-500 mt-1">{runner.id}</div>
-                    </div>
-                    <div className="text-right text-xs text-slate-500 space-y-1">
-                      <div>chat: {runner.compatibility.chat}</div>
-                      <div>IM: {runner.compatibility.im}</div>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2 text-xs">
-                    <div className="rounded-lg bg-muted/40 px-3 py-2">
-                      会话恢复
-                      <div className="mt-1 text-foreground font-medium">{runner.capabilities.sessionResume}</div>
-                    </div>
-                    <div className="rounded-lg bg-muted/40 px-3 py-2">
-                      中断能力
-                      <div className="mt-1 text-foreground font-medium">{runner.capabilities.interrupt}</div>
-                    </div>
-                    <div className="rounded-lg bg-muted/40 px-3 py-2">
-                      工具流
-                      <div className="mt-1 text-foreground font-medium">{runner.capabilities.toolStreaming}</div>
-                    </div>
-                    <div className="rounded-lg bg-muted/40 px-3 py-2">
-                      Memory Runner
-                      <div className="mt-1 text-foreground font-medium">
-                        {runner.can_serve_memory ? '支持' : '不支持'}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="text-xs text-slate-500 space-y-1">
-                    <div>归档触发: {runner.lifecycle.archivalTrigger.join(' / ') || 'none'}</div>
-                    <div>上下文收缩: {runner.lifecycle.contextShrinkTrigger}</div>
-                    <div>Hook 可观测性: {runner.lifecycle.hookStreaming}</div>
-                    <div>Prompt 模式: {runner.prompt_contract.mode}</div>
-                    <div>上下文刷新: {runner.prompt_contract.dynamicContextReload}</div>
-                    <div>中途注入: {runner.capabilities.midQueryPush ? '支持' : '不支持'}</div>
-                    <div>后台任务: {runner.capabilities.backgroundTasks ? '支持' : '不支持'}</div>
-                  </div>
-
-                  {runner.degradation_reasons.length > 0 && (
-                    <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 space-y-1">
-                      <div className="text-xs font-medium text-amber-700">退化说明</div>
-                      {runner.degradation_reasons.map((reason) => (
-                        <div key={reason} className="text-xs text-amber-700">
-                          {reason}
+                <div
+                  key={runner.id}
+                  className="bg-card rounded-xl border border-border p-5 space-y-4"
+                >
+                  {(() => {
+                    const health = healthByRunner[runner.id];
+                    return (
+                      <>
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="text-lg font-semibold text-foreground">
+                              {runner.label}
+                            </div>
+                            <div className="text-xs font-mono text-slate-500 mt-1">
+                              {runner.id}
+                            </div>
+                            {runner.description && (
+                              <div className="text-xs text-slate-500 mt-2">
+                                {runner.description}
+                              </div>
+                            )}
+                          </div>
+                          <div className="text-right text-xs text-slate-500 space-y-1">
+                            <div>chat: {runner.compatibility.chat}</div>
+                            <div>IM: {runner.compatibility.im}</div>
+                            <div
+                              className={
+                                health?.available
+                                  ? 'text-green-600'
+                                  : 'text-amber-600'
+                              }
+                            >
+                              {health
+                                ? health.available
+                                  ? '可用'
+                                  : '不可用'
+                                : '检测中'}
+                            </div>
+                          </div>
                         </div>
-                      ))}
-                    </div>
-                  )}
+
+                        <div className="grid grid-cols-2 gap-2 text-xs">
+                          <div className="rounded-lg bg-muted/40 px-3 py-2">
+                            会话恢复
+                            <div className="mt-1 text-foreground font-medium">
+                              {runner.capabilities.sessionResume}
+                            </div>
+                          </div>
+                          <div className="rounded-lg bg-muted/40 px-3 py-2">
+                            中断能力
+                            <div className="mt-1 text-foreground font-medium">
+                              {runner.capabilities.interrupt}
+                            </div>
+                          </div>
+                          <div className="rounded-lg bg-muted/40 px-3 py-2">
+                            工具流
+                            <div className="mt-1 text-foreground font-medium">
+                              {runner.capabilities.toolStreaming}
+                            </div>
+                          </div>
+                          <div className="rounded-lg bg-muted/40 px-3 py-2">
+                            Memory Runner
+                            <div className="mt-1 text-foreground font-medium">
+                              {runner.can_serve_memory ? '支持' : '不支持'}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="text-xs text-slate-500 space-y-1">
+                          <div>
+                            归档触发:{' '}
+                            {runner.lifecycle.archivalTrigger.join(' / ') ||
+                              'none'}
+                          </div>
+                          <div>
+                            上下文收缩: {runner.lifecycle.contextShrinkTrigger}
+                          </div>
+                          <div>
+                            Hook 可观测性: {runner.lifecycle.hookStreaming}
+                          </div>
+                          <div>Prompt 模式: {runner.prompt_contract.mode}</div>
+                          <div>
+                            工具注入: {runner.tool_contract?.mode || 'unknown'}
+                          </div>
+                          <div>
+                            默认模型: {runner.default_model || '未声明'}
+                          </div>
+                          <div>
+                            上下文刷新:{' '}
+                            {runner.prompt_contract.dynamicContextReload}
+                          </div>
+                          <div>
+                            中途注入:{' '}
+                            {runner.capabilities.midQueryPush
+                              ? '支持'
+                              : '不支持'}
+                          </div>
+                          <div>
+                            后台任务:{' '}
+                            {runner.capabilities.backgroundTasks
+                              ? '支持'
+                              : '不支持'}
+                          </div>
+                          {health?.version && <div>版本: {health.version}</div>}
+                        </div>
+
+                        {health &&
+                          !health.available &&
+                          health.missingReasons &&
+                          health.missingReasons.length > 0 && (
+                            <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 space-y-1">
+                              <div className="text-xs font-medium text-red-700">
+                                健康检查
+                              </div>
+                              {health.missingReasons.map((reason) => (
+                                <div
+                                  key={reason}
+                                  className="text-xs text-red-700"
+                                >
+                                  {reason}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                        {runner.degradation_reasons.length > 0 && (
+                          <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 space-y-1">
+                            <div className="text-xs font-medium text-amber-700">
+                              退化说明
+                            </div>
+                            {runner.degradation_reasons.map((reason) => (
+                              <div
+                                key={reason}
+                                className="text-xs text-amber-700"
+                              >
+                                {reason}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
               ))}
             </div>
@@ -298,7 +518,9 @@ export function RunnersPage() {
               <div className="bg-card rounded-xl border border-border p-5 space-y-4">
                 <div className="flex items-center justify-between gap-3">
                   <div>
-                    <div className="text-lg font-semibold text-foreground">Runner Profiles</div>
+                    <div className="text-lg font-semibold text-foreground">
+                      Runner Profiles
+                    </div>
                     <div className="text-sm text-slate-500 mt-0.5">
                       这些 profile 会出现在 session 与 memory 配置里。
                     </div>
@@ -355,14 +577,25 @@ export function RunnersPage() {
                               {profile.id}
                             </div>
                             <div className="text-xs text-slate-400 mt-1">
-                              更新于 {new Date(profile.updated_at).toLocaleString('zh-CN')}
+                              更新于{' '}
+                              {new Date(profile.updated_at).toLocaleString(
+                                'zh-CN',
+                              )}
                             </div>
                           </div>
                           <div className="flex items-center gap-2">
-                            <Button size="sm" variant="outline" onClick={() => startEdit(profile)}>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => startEdit(profile)}
+                            >
                               编辑
                             </Button>
-                            <Button size="sm" variant="outline" onClick={() => removeProfile(profile)}>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => removeProfile(profile)}
+                            >
                               <Trash2 className="w-4 h-4" />
                             </Button>
                           </div>
@@ -391,9 +624,16 @@ export function RunnersPage() {
                     <Input
                       value={profileForm.name}
                       onChange={(e) =>
-                        setProfileForm((prev) => ({ ...prev, name: e.target.value }))
+                        setProfileForm((prev) => ({
+                          ...prev,
+                          name: e.target.value,
+                        }))
                       }
-                      placeholder={selectedRunner ? `${selectedRunner.label} Profile` : 'Profile 名称'}
+                      placeholder={
+                        selectedRunner
+                          ? `${selectedRunner.label} Profile`
+                          : 'Profile 名称'
+                      }
                     />
                   </div>
 
@@ -402,12 +642,144 @@ export function RunnersPage() {
                       type="checkbox"
                       checked={profileForm.is_default}
                       onChange={(e) =>
-                        setProfileForm((prev) => ({ ...prev, is_default: e.target.checked }))
+                        setProfileForm((prev) => ({
+                          ...prev,
+                          is_default: e.target.checked,
+                        }))
                       }
                       className="w-4 h-4 rounded border-slate-300"
                     />
                     设为当前 runner 的默认 profile
                   </label>
+
+                  {profileSchemaProperties.length > 0 && (
+                    <div className="space-y-3 rounded-lg border border-border p-3">
+                      {profileSchemaProperties.map(([key, property]) => {
+                        const value = parsedProfileConfig?.[key];
+                        const type = schemaType(property);
+                        const label = property.title || key;
+                        const description =
+                          typeof property.description === 'string'
+                            ? property.description
+                            : '';
+                        if (Array.isArray(property.enum)) {
+                          return (
+                            <div key={key}>
+                              <label className="block text-xs font-medium text-slate-600 mb-1">
+                                {label}
+                              </label>
+                              <select
+                                value={typeof value === 'string' ? value : ''}
+                                onChange={(e) =>
+                                  updateProfileConfigField(
+                                    key,
+                                    property,
+                                    e.target.value,
+                                  )
+                                }
+                                className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm"
+                              >
+                                <option value="">未设置</option>
+                                {property.enum.map((option) => (
+                                  <option
+                                    key={String(option)}
+                                    value={String(option)}
+                                  >
+                                    {String(option)}
+                                  </option>
+                                ))}
+                              </select>
+                              {description && (
+                                <div className="mt-1 text-xs text-slate-400">
+                                  {description}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        }
+                        if (type === 'boolean') {
+                          return (
+                            <label
+                              key={key}
+                              className="flex items-center gap-2 text-sm text-slate-600"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={value === true}
+                                onChange={(e) =>
+                                  updateProfileConfigField(
+                                    key,
+                                    property,
+                                    e.target.checked,
+                                  )
+                                }
+                                className="w-4 h-4 rounded border-slate-300"
+                              />
+                              {label}
+                            </label>
+                          );
+                        }
+                        return (
+                          <div key={key}>
+                            <label className="block text-xs font-medium text-slate-600 mb-1">
+                              {label}
+                            </label>
+                            <Input
+                              type={
+                                type === 'number' || type === 'integer'
+                                  ? 'number'
+                                  : 'text'
+                              }
+                              min={
+                                typeof property.minimum === 'number'
+                                  ? property.minimum
+                                  : undefined
+                              }
+                              max={
+                                typeof property.maximum === 'number'
+                                  ? property.maximum
+                                  : undefined
+                              }
+                              minLength={
+                                typeof property.minLength === 'number'
+                                  ? property.minLength
+                                  : undefined
+                              }
+                              maxLength={
+                                typeof property.maxLength === 'number'
+                                  ? property.maxLength
+                                  : undefined
+                              }
+                              pattern={
+                                typeof property.pattern === 'string'
+                                  ? property.pattern
+                                  : undefined
+                              }
+                              value={
+                                typeof value === 'string' ||
+                                typeof value === 'number'
+                                  ? String(value)
+                                  : ''
+                              }
+                              onChange={(e) =>
+                                updateProfileConfigField(
+                                  key,
+                                  property,
+                                  e.target.value,
+                                )
+                              }
+                              placeholder={key}
+                            />
+                            {description && (
+                              <div className="mt-1 text-xs text-slate-400">
+                                {description}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
 
                   <div>
                     <label className="block text-xs font-medium text-slate-600 mb-1">
@@ -416,7 +788,10 @@ export function RunnersPage() {
                     <Textarea
                       value={profileForm.config_json}
                       onChange={(e) =>
-                        setProfileForm((prev) => ({ ...prev, config_json: e.target.value }))
+                        setProfileForm((prev) => ({
+                          ...prev,
+                          config_json: e.target.value,
+                        }))
                       }
                       className="min-h-[220px] font-mono text-xs"
                       placeholder="{}"
@@ -425,10 +800,19 @@ export function RunnersPage() {
 
                   <div className="flex items-center gap-2">
                     <Button size="sm" onClick={saveProfile} disabled={saving}>
-                      {saving ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
+                      {saving ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        <Save className="size-3.5" />
+                      )}
                       保存
                     </Button>
-                    <Button size="sm" variant="outline" onClick={resetForm} disabled={saving}>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={resetForm}
+                      disabled={saving}
+                    >
                       清空
                     </Button>
                   </div>

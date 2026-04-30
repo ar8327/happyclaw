@@ -6,7 +6,6 @@ import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import { useMediaQuery } from '@/hooks/useMediaQuery';
 import { RuntimeEnvPanel } from '../components/chat/RuntimeEnvPanel';
-import { useCodexModels, type CodexModelOption } from '@/hooks/useCodexModels';
 
 interface MemorySource {
   path: string;
@@ -37,6 +36,8 @@ interface MemorySearchHit {
 interface MemoryRunnerOption {
   id: string;
   label: string;
+  default_model?: string;
+  models?: Array<{ id: string; label?: string }>;
   can_serve_memory: boolean;
   degradation_reasons: string[];
 }
@@ -62,11 +63,8 @@ interface RunnerProfileOption {
   is_default: boolean;
 }
 
-const CLAUDE_MODEL_OPTIONS: CodexModelOption[] = [
+const DEFAULT_MODEL_OPTIONS = [
   { value: '__default__', label: '默认' },
-  { value: 'opus', label: 'Opus' },
-  { value: 'sonnet', label: 'Sonnet' },
-  { value: 'haiku', label: 'Haiku' },
 ];
 
 function getErrorMessage(err: unknown, fallback: string): string {
@@ -143,9 +141,6 @@ export function MemoryPage() {
 
   const isMobile = useMediaQuery('(max-width: 1023px)');
   const [showContent, setShowContent] = useState(false);
-  const memoryRunnerId = memoryConfig?.runner_id || '';
-  const memoryUsesCodex = memoryRunnerId === 'codex';
-  const { models: codexModelOptions, loading: codexModelsLoading } = useCodexModels(memoryUsesCodex);
 
   const dirty = useMemo(() => content !== initialContent, [content, initialContent]);
   const memoryRuntimeSession = useMemo(
@@ -498,7 +493,23 @@ export function MemoryPage() {
     : '未记录';
   const selectedRunner = memoryRunners.find((runner) => runner.id === memoryConfig?.runner_id) || null;
   const memoryModelOptions = useMemo(() => {
-    const baseOptions = memoryUsesCodex ? codexModelOptions : CLAUDE_MODEL_OPTIONS;
+    const baseOptions = selectedRunner?.models?.length
+      ? [
+          { value: '__default__', label: '默认' },
+          ...selectedRunner.models.map((item) => ({
+            value: item.id,
+            label: item.label || item.id,
+          })),
+        ]
+      : selectedRunner?.default_model
+        ? [
+            { value: '__default__', label: '默认' },
+            {
+              value: selectedRunner.default_model,
+              label: selectedRunner.default_model,
+            },
+          ]
+        : DEFAULT_MODEL_OPTIONS;
     const currentModel = memoryConfig?.model || null;
     if (
       currentModel &&
@@ -510,7 +521,7 @@ export function MemoryPage() {
       ];
     }
     return baseOptions;
-  }, [codexModelOptions, memoryConfig?.model, memoryUsesCodex]);
+  }, [memoryConfig?.model, selectedRunner]);
 
   return (
     <div className="min-h-full bg-background p-4 lg:p-8">
@@ -628,7 +639,6 @@ export function MemoryPage() {
                             ...prev,
                             model: e.target.value === '__default__' ? null : e.target.value,
                           } : prev)}
-                          disabled={memoryUsesCodex && codexModelsLoading}
                           className="w-full h-9 rounded-md border border-border bg-background px-3 text-sm"
                         >
                           {memoryModelOptions.map((option) => (
@@ -637,9 +647,6 @@ export function MemoryPage() {
                             </option>
                           ))}
                         </select>
-                        {memoryUsesCodex && codexModelsLoading && (
-                          <div className="mt-1 text-xs text-slate-500">正在加载 Codex 模型列表...</div>
-                        )}
                       </div>
                     </div>
 
@@ -687,7 +694,7 @@ export function MemoryPage() {
                     title="Memory 执行配置"
                     hideSessionFields
                     hideCodexCompact
-                    hostCommandDescription="Memory 运行仍然直接依赖宿主机上的 Claude 或 Codex 命令配置。认证、Base URL、API Key 和自定义环境变量都需要由宿主机自己提供。上面的表单是在配置 memory runner，本身不会把 Memory 变成一个可恢复会话。"
+                    hostCommandDescription="Memory 运行仍然直接依赖当前 Runner 声明的宿主机命令配置。认证、Base URL、API Key 和自定义环境变量都需要由宿主机自己提供。上面的表单是在配置 memory runner，本身不会把 Memory 变成一个可恢复会话。"
                   />
                 </div>
               )}

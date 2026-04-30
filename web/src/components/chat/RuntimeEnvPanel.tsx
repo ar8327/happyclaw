@@ -11,7 +11,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { useCodexModels } from '@/hooks/useCodexModels';
 import type { SessionInfo } from '../../types';
 
 interface RuntimeEnvPanelProps {
@@ -35,7 +34,7 @@ type RuntimeEnvSession = {
   model?: string | null;
   thinking_effort?: SessionInfo['thinking_effort'] | null;
   cwd?: string | null;
-  codex_compact?: SessionInfo['codex_compact'];
+  context_archive?: SessionInfo['context_archive'];
 };
 
 interface RunnerProfileOption {
@@ -69,6 +68,8 @@ interface RunnerLifecycle {
 interface RunnerOption {
   id: string;
   label: string;
+  default_model?: string;
+  models?: Array<{ id: string; label?: string }>;
   can_serve_memory: boolean;
   compatibility: RunnerCompatibility;
   capabilities: RunnerCapabilities;
@@ -136,11 +137,8 @@ function RunnerCapabilityCard({ runner }: { runner: RunnerOption | null }) {
   );
 }
 
-const CLAUDE_MODEL_OPTIONS = [
+const DEFAULT_MODEL_OPTIONS = [
   { value: '__default__', label: '默认' },
-  { value: 'opus', label: 'Opus' },
-  { value: 'sonnet', label: 'Sonnet' },
-  { value: 'haiku', label: 'Haiku' },
 ];
 
 const THINKING_EFFORT_OPTIONS = [
@@ -169,8 +167,6 @@ export function RuntimeEnvPanel({
   const currentRunnerId = session?.runner_id || runnerOptions[0]?.id || '';
   const selectedRunner =
     runnerOptions.find((runner) => runner.id === currentRunnerId) || null;
-  const isCodex = currentRunnerId === 'codex';
-  const { models: codexModelOptions, loading: codexModelsLoading } = useCodexModels(isCodex);
 
   const [model, setModel] = useState(session?.model || '__default__');
   const [thinkingEffort, setThinkingEffort] = useState(session?.thinking_effort || '__default__');
@@ -311,12 +307,28 @@ export function RuntimeEnvPanel({
     await patchSession({ cwd: nextCwd });
   }, [cwd, patchSession, session?.cwd]);
 
-  const modelOptions = isCodex ? codexModelOptions : CLAUDE_MODEL_OPTIONS;
-  const codexCompact = session?.codex_compact;
-  const compactProgressWidth = `${Math.max(0, Math.min(100, Math.round((codexCompact?.progress || 0) * 100)))}%`;
+  const modelOptions = selectedRunner?.models?.length
+    ? [
+        { value: '__default__', label: '默认' },
+        ...selectedRunner.models.map((item) => ({
+          value: item.id,
+          label: item.label || item.id,
+        })),
+      ]
+    : selectedRunner?.default_model
+      ? [
+          { value: '__default__', label: '默认' },
+          {
+            value: selectedRunner.default_model,
+            label: selectedRunner.default_model,
+          },
+        ]
+      : DEFAULT_MODEL_OPTIONS;
+  const contextArchive = session?.context_archive;
+  const archiveProgressWidth = `${Math.max(0, Math.min(100, Math.round((contextArchive?.progress || 0) * 100)))}%`;
   const resolvedHostCommandDescription =
     hostCommandDescription ||
-    'HappyClaw 不再管理 Claude 或 Codex 的连接配置。认证、Base URL、API Key、自定义环境变量都需要由宿主机自己提供。当前面板只保留 Session 级的 Runner、模型和工作目录设置。';
+    'AgentDock 不再管理 provider 连接配置。认证、Base URL、API Key、自定义环境变量都需要由宿主机自己提供。当前面板只保留 Session 级的 Runner、模型和工作目录设置。';
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -411,10 +423,9 @@ export function RuntimeEnvPanel({
               <Select
                 value={model}
                 onValueChange={handleModelChange}
-                disabled={isCodex && codexModelsLoading}
               >
                 <SelectTrigger className="text-xs h-8">
-                  <SelectValue placeholder={codexModelsLoading ? '加载模型列表...' : '默认'} />
+                  <SelectValue placeholder="默认" />
                 </SelectTrigger>
                 <SelectContent>
                   {modelOptions.map((opt) => (
@@ -463,50 +474,50 @@ export function RuntimeEnvPanel({
 
         {!hideSessionFields && <div className="border-t border-slate-100" />}
 
-        {!hideCodexCompact && isCodex && codexCompact && (
+        {!hideCodexCompact && contextArchive && (
           <>
             <div className="space-y-3">
-              <div className="text-xs font-medium text-slate-500 uppercase tracking-wide">Codex Compact</div>
+              <div className="text-xs font-medium text-slate-500 uppercase tracking-wide">Context Archive</div>
 
               <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 space-y-3">
                 <div className="flex items-center justify-between gap-3 text-xs">
                   <div className="font-medium text-slate-700">当前 context window</div>
                   <div className="font-mono text-slate-600">
-                    {formatNumber(codexCompact.current_tokens)} / {formatNumber(codexCompact.threshold_tokens)}
+                    {formatNumber(contextArchive.current_tokens)} / {formatNumber(contextArchive.threshold_tokens)}
                   </div>
                 </div>
 
                 <div className="h-2 rounded-full bg-slate-200 overflow-hidden">
                   <div
                     className="h-full rounded-full bg-sky-500 transition-[width] duration-300"
-                    style={{ width: compactProgressWidth }}
+                    style={{ width: archiveProgressWidth }}
                   />
                 </div>
 
                 <div className="grid grid-cols-2 gap-2 text-[11px]">
                   <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
-                    距下次 compact: <span className="font-medium text-slate-700">{formatNumber(codexCompact.remaining_tokens)}</span>
+                    距下次归档: <span className="font-medium text-slate-700">{formatNumber(contextArchive.remaining_tokens)}</span>
                   </div>
                   <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
-                    统计轮次: <span className="font-medium text-slate-700">{formatNumber(codexCompact.turn_count)}</span>
+                    统计轮次: <span className="font-medium text-slate-700">{formatNumber(contextArchive.turn_count)}</span>
                   </div>
                   <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
-                    输入 tokens: <span className="font-medium text-slate-700">{formatNumber(codexCompact.current_input_tokens)}</span>
+                    输入 tokens: <span className="font-medium text-slate-700">{formatNumber(contextArchive.current_input_tokens)}</span>
                   </div>
                   <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
-                    输出 tokens: <span className="font-medium text-slate-700">{formatNumber(codexCompact.current_output_tokens)}</span>
+                    输出 tokens: <span className="font-medium text-slate-700">{formatNumber(contextArchive.current_output_tokens)}</span>
                   </div>
                   <div className="rounded border border-slate-200 bg-white px-2 py-1.5 col-span-2">
-                    上次 synthetic compact: <span className="font-medium text-slate-700">{formatDateTime(codexCompact.last_compacted_at)}</span>
+                    上次归档: <span className="font-medium text-slate-700">{formatDateTime(contextArchive.last_compacted_at)}</span>
                   </div>
                   <div className="rounded border border-slate-200 bg-white px-2 py-1.5 col-span-2">
-                    状态更新时间: <span className="font-medium text-slate-700">{formatDateTime(codexCompact.state_updated_at)}</span>
+                    状态更新时间: <span className="font-medium text-slate-700">{formatDateTime(contextArchive.state_updated_at)}</span>
                   </div>
                 </div>
 
-                {codexCompact.start_fresh_on_next_turn && (
+                {contextArchive.pending_fresh_session && (
                   <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
-                    当前会话已经完成 synthetic compact，下一轮会重新开启线程。
+                    当前会话已经完成归档，下一轮会重新开启 provider 会话。
                   </div>
                 )}
               </div>
@@ -522,8 +533,7 @@ export function RuntimeEnvPanel({
             {resolvedHostCommandDescription}
           </div>
           <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 leading-6">
-            如果本机 <code className="rounded bg-white px-1.5 py-0.5 text-xs">claude</code> 或
-            <code className="rounded bg-white px-1.5 py-0.5 text-xs">codex</code> 命令没有先在宿主机跑通，切换 Runner 以后会直接启动失败。
+            如果当前 Runner 声明的宿主机命令没有先跑通，切换 Runner 以后会直接启动失败。
           </div>
         </div>
       </div>

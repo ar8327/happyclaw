@@ -1,5 +1,5 @@
 /**
- * I/O protocol helpers for HappyClaw agent runners.
+ * I/O protocol helpers for AgentDock agent runners.
  *
  * Handles stdin reading, stdout marker-wrapped output, and logging.
  */

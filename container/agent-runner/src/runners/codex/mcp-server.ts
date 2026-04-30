@@ -11,8 +11,8 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { z } from 'zod';
 import { createContextManager } from '../../context-manager-factory.js';
+import { convertJsonSchemaToZod } from '../../mcp-schema.js';
 
 // ---------------------------------------------------------------------------
 // Environment
@@ -55,23 +55,6 @@ function createMcpContextManager() {
 // Convert core ToolDefinition to MCP tool registration
 // ---------------------------------------------------------------------------
 
-function convertJsonSchemaToZod(schema: Record<string, unknown>): z.ZodObject<Record<string, z.ZodTypeAny>> {
-  // Simplified conversion: wrap all params as z.any() since the core tools
-  // handle their own validation. The MCP protocol just passes through.
-  const shape: Record<string, z.ZodTypeAny> = {};
-  const properties = schema.properties as Record<string, unknown> | undefined;
-  const required = schema.required as string[] | undefined;
-
-  if (properties) {
-    for (const [key, _prop] of Object.entries(properties)) {
-      const isRequired = required?.includes(key);
-      shape[key] = isRequired ? z.any() : z.any().optional();
-    }
-  }
-
-  return z.object(shape);
-}
-
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -81,7 +64,7 @@ async function main(): Promise<void> {
   const tools = ctxMgr.getActiveTools();
 
   const server = new McpServer({
-    name: 'happyclaw',
+    name: 'agentdock',
     version: '1.0.0',
   });
 

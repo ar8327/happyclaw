@@ -1,22 +1,22 @@
 <p align="center">
-  <img src="web/public/icons/logo-1024.png" alt="HappyClaw Logo" width="120" />
+  <img src="web/public/icons/logo-1024.png" alt="AgentDock Logo" width="120" />
 </p>
 
-<h1 align="center">HappyClaw (Fork)</h1>
+<h1 align="center">AgentDock</h1>
 
 <p align="center">
-  实验性 fork — 探索更好的记忆能力和 Agent 自主性
+  Self-hosted agent runtime with memory, tools, and multi-channel messaging.
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-teal.svg?style=for-the-badge" alt="License" /></a>
   <a href="https://nodejs.org"><img src="https://img.shields.io/badge/Node.js-%3E%3D20-339933?style=for-the-badge&logo=nodedotjs&logoColor=white" alt="Node.js" /></a>
   <img src="https://img.shields.io/badge/TypeScript-5.7-3178C6?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript" />
-  <a href="https://github.com/riba2534/happyclaw"><img src="https://img.shields.io/badge/Upstream-riba2534%2Fhappyclaw-teal?style=for-the-badge&logo=github" alt="Upstream" /></a>
+  <a href="https://github.com/riba2534/happyclaw"><img src="https://img.shields.io/badge/Origin-riba2534%2Fhappyclaw-teal?style=for-the-badge&logo=github" alt="Origin" /></a>
 </p>
 
 <p align="center">
-  <a href="#happyclaw-是什么">介绍</a> · <a href="#核心能力">核心能力</a> · <a href="#快速开始">快速开始</a> · <a href="#技术架构">技术架构</a> · <a href="#贡献">贡献</a>
+  <a href="#agentdock-是什么">介绍</a> · <a href="#核心能力">核心能力</a> · <a href="#快速开始">快速开始</a> · <a href="#技术架构">技术架构</a> · <a href="#贡献">贡献</a>
 </p>
 
 ---
@@ -49,9 +49,9 @@
 
 </details>
 
-## 这个 Fork 是什么
+## AgentDock 是什么
 
-本项目是 [HappyClaw](https://github.com/riba2534/happyclaw) 的实验性 fork，源自上游的自托管 AI Agent 系统，重点探索三个方向：
+AgentDock 源自 [HappyClaw](https://github.com/riba2534/happyclaw) 的实验性 fork，后续作为独立的自托管 agent runtime 演进，重点探索三个方向：
 
 1. **Memory Agent 系统** — 独立的记忆 Session 与 one-shot memory 执行链路，自动归档对话、构建索引、深度整理，替代上游的 inline MCP 记忆工具
 2. **显式消息路由** — Agent 的 stdout 仅显示在 Web 端，IM 消息必须通过 `send_message` MCP 工具显式发送，Agent 自主控制消息路由
@@ -217,14 +217,14 @@ Agent 在运行时可通过内置 MCP Server 与主进程通信：
 - Telegram Bot Token — 仅 Telegram 集成需要，通过 [@BotFather](https://t.me/BotFather) 获取
 - QQ Bot 凭据 — 仅 QQ 集成需要，前往 [QQ 开放平台](https://q.qq.com/qqbot/openclaw/index.html) 创建
 
-> 当前主线不再要求 Docker。HappyClaw 会在本地 runtime 中启动 Claude 或 Codex runner，并沿用兼容层保存少量旧字段。
+> 当前主线不再要求 Docker。AgentDock 会在本地 runtime 中启动 Claude 或 Codex runner，并沿用兼容层保存少量旧字段。
 
 ### 安装启动
 
 ```bash
-# 1. 克隆仓库（Fork）
-git clone https://github.com/ar8327/happyclaw.git
-cd happyclaw
+# 1. 克隆仓库
+git clone https://github.com/ar8327/agentdock.git
+cd agentdock
 
 # 2. 一键启动（首次自动安装依赖 + 编译）
 make start
@@ -253,7 +253,7 @@ make start
    - `im:message.group_msg`（接收群聊所有消息）— **敏感权限**，需管理员审批。如不开通，群聊中只有 @机器人 的消息才会被处理
    - `im:message.p2p_msg:readonly`（接收私聊消息）
 4. 发布应用版本并等待审批通过
-5. 在 HappyClaw Web 界面的「设置 → IM 通道 → 飞书」中填入 App ID 和 App Secret
+5. 在 AgentDock Web 界面的「设置 → IM 通道 → 飞书」中填入 App ID 和 App Secret
 
 当前配置入口仍位于个人设置页，但在单用户部署里它实际对应这一个本地操作者的飞书 Bot。
 
@@ -264,7 +264,7 @@ make start
 
 1. 在 Telegram 中搜索 [@BotFather](https://t.me/BotFather)，发送 `/newbot` 创建 Bot
 2. 记录返回的 Bot Token
-3. 在 HappyClaw Web 界面的「设置 → IM 通道 → Telegram」中填入 Bot Token
+3. 在 AgentDock Web 界面的「设置 → IM 通道 → Telegram」中填入 Bot Token
 4. **群聊使用**：如需在 Telegram 群中使用 Bot，需在 BotFather 中发送 `/mybots` → 选择 Bot → Bot Settings → Group Privacy → Turn off，否则 Bot 只能接收 `/` 命令消息
 
 
@@ -273,7 +273,7 @@ make start
 1. 前往 [QQ 开放平台](https://q.qq.com/qqbot/openclaw/index.html)，使用手机 QQ 扫码注册登录
 2. 创建机器人，设置名称和头像
 3. 在机器人管理页面获取 **App ID** 和 **App Secret**
-4. 在 HappyClaw Web 界面的「设置 → IM 通道 → QQ」中填入 App ID 和 App Secret
+4. 在 AgentDock Web 界面的「设置 → IM 通道 → QQ」中填入 App ID 和 App Secret
 5. **配对绑定**：在设置页生成配对码，然后在 QQ 中向 Bot 发送 `/pair <配对码>` 完成绑定
 
 > QQ Bot 使用官方 API v2 协议，支持 C2C 私聊和群聊 @Bot 消息。群聊中 Bot 仅接收 @Bot 的消息。
@@ -401,7 +401,7 @@ flowchart TD
 所有运行时数据统一在 `data/` 目录下，启动时自动创建，无需手动初始化。
 
 ```
-happyclaw/
+agentdock/
 ├── src/                          # 后端源码
 │   ├── index.ts                  #   入口：消息轮询、IPC 监听、Session 编排
 │   ├── web.ts                    #   Hono 应用、WebSocket、静态文件
@@ -434,13 +434,15 @@ happyclaw/
 │   │       ├── runner-interface.ts #   AgentRunner 契约与 QueryConfig
 │   │       ├── system-prompt.ts  #     共享 system prompt 构造
 │   │       ├── happyclaw-mcp-server.ts # 共用 MCP server 入口
-│   │       └── providers/        #     Claude / Codex provider 实现
+│   │       └── runners/          #     Runner manifest 与 Claude / Codex 实现
 │   ├── memory-agent/             #   历史实验实现，当前 Memory 主链路不再依赖
 │   │   └── src/index.ts          #     旧的持久 query 会话原型
 │   └── skills/                   #   项目级 Skills
 │
 ├── shared/                       # 跨项目共享类型定义
-│   └── stream-event.ts           #   StreamEvent 类型单一真相源
+│   ├── stream-event.ts           #   StreamEvent 类型单一真相源
+│   ├── runner-descriptor.ts      #   Runner 能力矩阵单一真相源
+│   └── runner-health.ts          #   Runner health/auth/model helper 单一真相源
 │
 ├── scripts/                      # 构建辅助脚本
 │   ├── sync-stream-event.sh      #   同步 shared/ 类型到各子项目
@@ -476,7 +478,7 @@ make typecheck        # TypeScript 全量类型检查
 make format           # 代码格式化（Prettier）
 make clean            # 清理构建产物
 make reset-init       # 重置为首装状态（清空数据库、配置、工作区、记忆、会话）
-make backup           # 备份运行时数据到 happyclaw-backup-{date}.tar.gz
+make backup           # 备份运行时数据到 agentdock-backup-{date}.tar.gz
 make restore          # 从备份恢复数据（make restore 或 make restore FILE=xxx.tar.gz）
 ```
 
@@ -519,7 +521,7 @@ cd web && npx vite --port 3001
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `WEB_PORT` | `3000` | Web 服务端口 |
-| `ASSISTANT_NAME` | `HappyClaw` | 助手显示名称 |
+| `ASSISTANT_NAME` | `AgentDock` | 助手显示名称 |
 | `RUNTIME_TIMEOUT` | `1800000`（30min） | 单个 runtime 的最长执行时间 |
 | `IDLE_TIMEOUT` | `1800000`（30min） | runtime 空闲回收时长 |
 | `RUNTIME_MAX_OUTPUT_SIZE` | `10485760` | 单次 runtime 输出大小上限 |

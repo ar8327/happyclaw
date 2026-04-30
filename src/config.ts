@@ -2,7 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 
-export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || 'HappyClaw';
+export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || 'AgentDock';
 export const POLL_INTERVAL = 1000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
@@ -21,7 +21,7 @@ export const GROUPS_DIR = path.join(DATA_DIR, 'groups');
 export const MAIN_GROUP_FOLDER = 'main';
 
 export const CONTAINER_IMAGE =
-  process.env.CONTAINER_IMAGE || 'happyclaw-agent:latest';
+  process.env.CONTAINER_IMAGE || 'agentdock-agent:latest';
 export const IPC_POLL_INTERVAL = 1000;
 
 // Timezone for scheduled tasks (cron expressions, etc.)

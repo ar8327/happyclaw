@@ -1,15 +1,58 @@
 import {
   normalizeHomeFlags,
-} from 'happyclaw-agent-runner-core';
+} from 'agentdock-agent-runner-core';
 
 import { createContextManager } from './context-manager-factory.js';
 import type { SessionState } from './session-state.js';
 import type { ContainerInput } from './types.js';
+import type { RunnerDescriptor } from './runner-descriptor.types.js';
 
-type SupportedRunnerId = 'claude' | 'codex';
+const HAPPYCLAW_PLUGIN_CAPABILITIES = [
+  'messaging',
+  'tasks',
+  'groups',
+  'skills',
+  'memory',
+  'invoke-agent',
+];
+
+function nativeCapabilitiesForRunner(
+  descriptor: RunnerDescriptor,
+): string[] | undefined {
+  const nativeCapabilities: string[] = [];
+  if (
+    descriptor.toolContract.mode === 'none' ||
+    descriptor.capabilities.customTools === 'none'
+  ) {
+    nativeCapabilities.push(...HAPPYCLAW_PLUGIN_CAPABILITIES);
+  }
+  if (descriptor.capabilities.skills.includes('native')) {
+    nativeCapabilities.push('skills');
+  }
+  return nativeCapabilities.length > 0
+    ? [...new Set(nativeCapabilities)]
+    : undefined;
+}
+
+function buildPromptForContract(
+  descriptor: RunnerDescriptor,
+  ctxMgr: ReturnType<typeof createContextManager>,
+): string {
+  switch (descriptor.promptContract.mode) {
+    case 'append':
+      return ctxMgr.buildAppendPrompt();
+    case 'full_prompt':
+    case 'instructions_file':
+    case 'system_stdin':
+    case 'env':
+      return ctxMgr.buildFullPrompt();
+    default:
+      return ctxMgr.buildFullPrompt();
+  }
+}
 
 export function createSystemPromptBuilder(params: {
-  runnerId: SupportedRunnerId;
+  descriptor: RunnerDescriptor;
   containerInput: ContainerInput;
   state: SessionState;
   workspaceIpc: string;
@@ -20,7 +63,7 @@ export function createSystemPromptBuilder(params: {
   skillsDir: string;
 }): (prompt: string) => string {
   const {
-    runnerId,
+    descriptor,
     containerInput,
     state,
     workspaceIpc,
@@ -46,7 +89,7 @@ export function createSystemPromptBuilder(params: {
       userId: containerInput.userId,
       skillsDirs: [projectSkillsDir, skillsDir].filter(Boolean),
     },
-    runnerId === 'claude' ? { nativeCapabilities: ['skills'] } : undefined,
+    { nativeCapabilities: nativeCapabilitiesForRunner(descriptor) },
   );
 
   return (prompt: string) => {
@@ -55,8 +98,6 @@ export function createSystemPromptBuilder(params: {
       recentImChannels: state.recentImChannels,
       contextSummary: containerInput.contextSummary,
     });
-    return runnerId === 'claude'
-      ? ctxMgr.buildAppendPrompt()
-      : ctxMgr.buildFullPrompt();
+    return buildPromptForContract(descriptor, ctxMgr);
   };
 }

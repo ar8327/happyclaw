@@ -5,7 +5,7 @@ export function AboutSection() {
     <div className="space-y-6">
       {/* 项目信息 */}
       <div>
-        <h2 className="text-lg font-semibold text-slate-900 mb-1">HappyClaw</h2>
+        <h2 className="text-lg font-semibold text-slate-900 mb-1">AgentDock</h2>
         <p className="text-sm text-slate-500">自托管个人 AI Agent 系统</p>
       </div>
 
@@ -14,12 +14,12 @@ export function AboutSection() {
         <div className="flex items-center gap-3">
           <Github className="w-4 h-4 text-slate-400 shrink-0" />
           <a
-            href="https://github.com/riba2534/happyclaw"
+            href="https://github.com/riba2534/agentdock"
             target="_blank"
             rel="noopener noreferrer"
             className="text-sm text-teal-600 hover:text-teal-700 inline-flex items-center gap-1"
           >
-            riba2534/happyclaw
+            riba2534/agentdock
             <ExternalLink className="w-3 h-3" />
           </a>
         </div>

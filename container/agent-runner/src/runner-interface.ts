@@ -6,6 +6,7 @@
  */
 
 import type { StreamEvent } from './types.js';
+import type { RunnerPromptContract } from './runner-descriptor.types.js';
 
 // ─── 归一化消息类型 ─────────────────────────────────────
 
@@ -47,6 +48,7 @@ export interface QueryConfig {
    * silently rebuild or cache provider-specific prompt content internally.
    */
   systemPrompt: string;
+  promptContract?: RunnerPromptContract;
   sessionId?: string;
   resumeAt?: string;
   images?: Array<{ data: string; mimeType?: string }>;
@@ -68,6 +70,7 @@ export interface QueryResult {
   contextOverflow?: boolean;
   unrecoverableTranscriptError?: boolean;
   sessionResumeFailed?: boolean;
+  genericError?: string;
 }
 
 // ─── 活性报告（用于 query-loop 的看门狗）───────────────
@@ -100,6 +103,10 @@ export interface IpcCapabilities {
 export interface RuntimePersistenceSnapshot {
   providerState?: Record<string, unknown>;
   lastMessageCursor?: string | null;
+  sessionControl?: {
+    clearProviderSession?: boolean;
+    clearResumeAnchor?: boolean;
+  };
 }
 
 // ─── Runner 接口 ────────────────────────────────────────

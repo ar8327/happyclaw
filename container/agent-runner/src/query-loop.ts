@@ -10,13 +10,14 @@
  */
 
 import fs from 'fs';
-import { buildChannelRoutingReminder } from 'happyclaw-agent-runner-core';
+import { buildChannelRoutingReminder } from 'agentdock-agent-runner-core';
 import type {
   AgentRunner,
   QueryConfig,
   QueryResult,
   NormalizedMessage,
 } from './runner-interface.js';
+import type { RunnerPromptContract } from './runner-descriptor.types.js';
 import type { ContainerOutput } from './types.js';
 import type { SessionState } from './session-state.js';
 import {
@@ -40,6 +41,7 @@ import {
 export interface QueryLoopConfig {
   runner: AgentRunner;
   buildSystemPrompt: (prompt: string) => string;
+  promptContract?: RunnerPromptContract;
   initialPrompt: string;
   initialImages?: Array<{ data: string; mimeType?: string }>;
   sessionRecordId: string;
@@ -206,6 +208,7 @@ async function consumeQueryStream(
   // Manual iteration to get generator return value
   let newSessionId: string | undefined;
   let resumeAnchor: string | undefined = config.resumeAt;
+  let genericError: string | undefined;
 
   let iterResult: IteratorResult<NormalizedMessage, QueryResult>;
   while (!(iterResult = await gen.next()).done) {
@@ -267,6 +270,13 @@ async function consumeQueryStream(
 
       case 'error':
         log(`Query error: ${msg.message} (${msg.errorType || 'generic'})`);
+        if (
+          !msg.recoverable &&
+          !msg.errorType &&
+          !genericError
+        ) {
+          genericError = msg.message;
+        }
         break;
     }
   }
@@ -279,6 +289,9 @@ async function consumeQueryStream(
   }
   if (resumeAnchor && !queryResult.resumeAnchor) {
     queryResult.resumeAnchor = resumeAnchor;
+  }
+  if (genericError && !queryResult.genericError) {
+    queryResult.genericError = genericError;
   }
   return queryResult;
 }
@@ -349,11 +362,15 @@ function emitRuntimeState(
 }
 
 function shouldClearProviderSession(runner: AgentRunner): boolean {
-  const providerState = runner.getRuntimePersistenceSnapshot?.().providerState;
-  if (!providerState || typeof providerState !== 'object') return false;
-  if (providerState.startFreshOnNextTurn !== true) return false;
-  return Object.prototype.hasOwnProperty.call(providerState, 'activeThreadId')
-    && providerState.activeThreadId == null;
+  return runner.getRuntimePersistenceSnapshot?.()
+    ?.sessionControl
+    ?.clearProviderSession === true;
+}
+
+function shouldClearResumeAnchor(runner: AgentRunner): boolean {
+  return runner.getRuntimePersistenceSnapshot?.()
+    ?.sessionControl
+    ?.clearResumeAnchor === true;
 }
 
 export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
@@ -414,6 +431,7 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
     const queryConfig: QueryConfig = {
       prompt: effectivePrompt,
       systemPrompt: config.buildSystemPrompt(prompt),
+      promptContract: config.promptContract,
       sessionId: config.ephemeralSession ? undefined : sessionId,
       resumeAt: config.ephemeralSession ? undefined : resumeAnchor,
       images,
@@ -448,6 +466,7 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
     } else {
       if (result.newSessionId) sessionId = result.newSessionId;
       if (result.resumeAnchor) resumeAnchor = result.resumeAnchor;
+      if (shouldClearResumeAnchor(runner)) resumeAnchor = undefined;
     }
     emitRuntimeState(writeOutput, runner, state, {
       providerSessionId: sessionId,
@@ -466,6 +485,21 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
       writeOutput({
         status: 'error', result: null,
         error: 'unrecoverable_transcript: 会话历史包含无法处理的数据，需要重置',
+        newSessionId: sessionId,
+      });
+      process.exit(1);
+    }
+    if (result.genericError) {
+      emitRuntimeState(writeOutput, runner, state, {
+        providerSessionId: undefined,
+        resumeAnchor: undefined,
+        providerState: undefined,
+        lastMessageCursor: null,
+      });
+      writeOutput({
+        status: 'error',
+        result: null,
+        error: result.genericError,
         newSessionId: sessionId,
       });
       process.exit(1);

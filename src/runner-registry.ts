@@ -1,82 +1,15 @@
-import type { RunnerDescriptor } from './types.js';
+import {
+  RUNNER_DESCRIPTORS,
+  type RunnerDescriptor,
+} from './runner-descriptor.types.js';
 
-const CLAUDE_MODEL_ALIASES = new Set(['opus', 'sonnet', 'haiku']);
-
-export const RUNNER_REGISTRY: Record<RunnerDescriptor['id'], RunnerDescriptor> = {
-  claude: {
-    id: 'claude',
-    label: 'Claude',
-    capabilities: {
-      sessionResume: 'strong',
-      interrupt: 'strong',
-      imageInput: true,
-      usage: 'exact',
-      midQueryPush: true,
-      runtimeModeSwitch: false,
-      toolStreaming: 'fine',
-      backgroundTasks: true,
-      subAgent: 'tool-only',
-      customTools: 'mcp',
-      mcpTransport: ['stdio'],
-      skills: ['native', 'tool-loader'],
-    },
-    lifecycle: {
-      turnBoundary: 'native',
-      archivalTrigger: ['pre_compact'],
-      contextShrinkTrigger: 'native_event',
-      beforeToolExecutionGuard: 'native_hook',
-      hookStreaming: 'progress',
-      postCompactRepair: 'native',
-    },
-    promptContract: {
-      mode: 'append',
-      dynamicContextReload: 'turn',
-    },
-    compatibility: {
-      chat: 'full',
-      im: 'full',
-      observability: 'full',
-    },
-  },
-  codex: {
-    id: 'codex',
-    label: 'Codex',
-    capabilities: {
-      sessionResume: 'weak',
-      interrupt: 'weak',
-      imageInput: true,
-      usage: 'approx',
-      midQueryPush: false,
-      runtimeModeSwitch: false,
-      toolStreaming: 'coarse',
-      backgroundTasks: false,
-      subAgent: 'tool-only',
-      customTools: 'mcp',
-      mcpTransport: ['stdio'],
-      skills: ['tool-loader'],
-    },
-    lifecycle: {
-      turnBoundary: 'native',
-      archivalTrigger: ['turn_threshold', 'cleanup_only'],
-      contextShrinkTrigger: 'synthetic',
-      beforeToolExecutionGuard: 'sandbox_only',
-      hookStreaming: 'none',
-      postCompactRepair: 'synthetic',
-    },
-    promptContract: {
-      mode: 'instructions_file',
-      dynamicContextReload: 'turn',
-    },
-    compatibility: {
-      chat: 'full',
-      im: 'degraded',
-      observability: 'degraded',
-    },
-  },
-};
+export const RUNNER_REGISTRY: Record<
+  RunnerDescriptor['id'],
+  RunnerDescriptor
+> = RUNNER_DESCRIPTORS;
 
 export function getRunnerDescriptor(id: string): RunnerDescriptor | undefined {
-  return RUNNER_REGISTRY[id as keyof typeof RUNNER_REGISTRY];
+  return RUNNER_REGISTRY[id];
 }
 
 export function listRunnerDescriptors(): RunnerDescriptor[] {
@@ -97,16 +30,18 @@ export function inferRunnerIdFromModel(
   const normalized = model?.trim().toLowerCase();
   if (!normalized) return null;
 
-  if (CLAUDE_MODEL_ALIASES.has(normalized) || normalized.startsWith('claude-')) {
-    return 'claude';
-  }
-
-  if (/^gpt-[a-z0-9._-]+$/i.test(normalized)) {
-    return 'codex';
-  }
-
-  if (/^o[1-9](?:$|[-._])/.test(normalized)) {
-    return 'codex';
+  for (const descriptor of listRunnerDescriptors()) {
+    for (const pattern of descriptor.modelPatterns || []) {
+      try {
+        if (new RegExp(pattern, 'i').test(normalized)) {
+          return descriptor.id;
+        }
+      } catch {
+        if (normalized === pattern.toLowerCase()) {
+          return descriptor.id;
+        }
+      }
+    }
   }
 
   return null;
@@ -122,6 +57,9 @@ export function isModelCompatibleWithRunner(
 
 export function canServeAsMemoryRunner(descriptor: RunnerDescriptor): boolean {
   if (descriptor.capabilities.customTools === 'none') return false;
+  if (!descriptor.capabilities.ephemeralSession) return false;
+  if (!descriptor.capabilities.filesystemAccess) return false;
+  if (descriptor.toolContract.mode === 'none') return false;
   return (
     descriptor.lifecycle.turnBoundary === 'native' ||
     descriptor.lifecycle.turnBoundary === 'simulated'
@@ -185,12 +123,15 @@ export function explainRunnerDegradation(
 export function explainMemoryRunnerDegradation(
   descriptor: RunnerDescriptor,
 ): string[] {
-  const reasons: string[] = [];
-  if (descriptor.capabilities.toolStreaming === 'coarse') {
-    reasons.push('工具流式事件只有粗粒度观测');
+  const reasons = explainRunnerDegradation(descriptor);
+  if (descriptor.capabilities.customTools !== 'mcp') {
+    reasons.push('Memory Agent 需要通过 MCP 工具访问记忆能力');
   }
-  if (descriptor.lifecycle.hookStreaming === 'none') {
-    reasons.push('前端无法看到 hook 生命周期事件');
+  if (!descriptor.capabilities.ephemeralSession) {
+    reasons.push('Memory Agent 需要支持临时会话');
   }
-  return reasons;
+  if (!descriptor.capabilities.filesystemAccess) {
+    reasons.push('Memory Agent 需要文件系统访问能力');
+  }
+  return [...new Set(reasons)];
 }

@@ -44,9 +44,10 @@ export default defineConfig(({ command }) => {
             navigateFallback: `${APP_BASE}index.html`,
           },
           manifest: {
-            name: 'HappyClaw',
-            short_name: 'HappyClaw',
-            description: 'Personal Claude Assistant',
+            name: 'AgentDock',
+            short_name: 'AgentDock',
+            description:
+              'Self-hosted agent runtime with memory, tools, and multi-channel messaging.',
             theme_color: '#0d9488',
             background_color: '#f8fafc',
             display: 'standalone',

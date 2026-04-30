@@ -3,8 +3,6 @@
  * enter the normal message pipeline.
  */
 import crypto from 'crypto';
-import fs from 'fs';
-import path from 'path';
 import {
   deleteSession,
   getJidsByFolder,
@@ -12,7 +10,6 @@ import {
   storeMessageDirect,
   ensureChatExists,
 } from './db.js';
-import { DATA_DIR } from './config.js';
 import { logger } from './logger.js';
 import type { NewMessage, MessageCursor } from './types.js';
 import {
@@ -20,6 +17,7 @@ import {
   buildWorkerSessionId,
   isWorkerSessionId,
 } from './worker-session.js';
+import { clearSessionRuntimeFiles } from './runner-runtime-files.js';
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -30,29 +28,6 @@ export interface CommandDeps {
   sessions: Record<string, string>;
   broadcast: (jid: string, msg: NewMessage & { is_from_me: boolean }) => void;
   setLastAgentTimestamp: (jid: string, cursor: MessageCursor) => void;
-}
-
-// ─── Session file cleanup for main and worker session state ─────────────
-
-function clearSessionFiles(folder: string, agentId?: string): void {
-  const claudeDir = agentId
-    ? path.join(DATA_DIR, 'sessions', folder, 'agents', agentId, '.claude')
-    : path.join(DATA_DIR, 'sessions', folder, '.claude');
-  if (!fs.existsSync(claudeDir)) return;
-
-  const keep = new Set(['settings.json']);
-  const entries = fs.readdirSync(claudeDir);
-  for (const entry of entries) {
-    if (keep.has(entry)) continue;
-    try {
-      fs.rmSync(path.join(claudeDir, entry), { recursive: true, force: true });
-    } catch (err) {
-      logger.warn(
-        { entry, folder, agentId, err },
-        'Failed to remove session file, skipping',
-      );
-    }
-  }
 }
 
 function getWorkerRuntimeJidsForFolder(folder: string): string[] {
@@ -92,8 +67,8 @@ export async function executeSessionReset(
     );
   }
 
-  // 2. Clear .claude/ session files (preserve settings.json)
-  clearSessionFiles(folder, agentId);
+  // 2. Clear runner runtime files while preserving local config/auth files.
+  clearSessionRuntimeFiles(folder, agentId);
 
   // 3. Delete session from DB (+ in-memory cache for main session)
   deleteSession(folder, agentId);

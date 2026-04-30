@@ -1,5 +1,5 @@
 {
-  "name": "happyclaw-web",
+  "name": "agentdock-web",
   "private": true,
   "version": "0.0.1",
   "type": "module",
@@ -48,7 +48,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/riba2534/happyclaw.git",
+    "url": "git+https://github.com/riba2534/agentdock.git",
     "directory": "web"
   },
   "author": "riba2534"

@@ -1,5 +1,5 @@
 /**
- * Shared types for HappyClaw Agent Runner.
+ * Shared types for AgentDock Agent Runner.
  *
  * These types are used across index.ts, stream-processor.ts, and mcp-tools.ts.
  */
@@ -7,10 +7,21 @@
 // Streaming event types (canonical source: shared/stream-event.ts)
 export type { StreamEventType, StreamEvent } from './stream-event.types.js';
 import type { StreamEvent } from './stream-event.types.js';
+import type { RunnerDescriptor } from './runner-descriptor.types.js';
+
+export interface RunnerResolvedConfig {
+  profileId?: string;
+  model?: string;
+  thinkingEffort?: 'low' | 'medium' | 'high';
+  command?: string;
+  config: Record<string, unknown>;
+}
 
 export interface ContainerInput {
   prompt: string;
   runnerId: string;
+  runnerConfig?: RunnerResolvedConfig;
+  declaredRunnerDescriptor?: RunnerDescriptor;
   declaredIpcCapabilities?: {
     midQueryPush: boolean;
     runtimeModeSwitch: boolean;
