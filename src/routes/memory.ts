@@ -149,6 +149,8 @@ function serializeMemoryConfig(user: AuthUser) {
       id: descriptor.id,
       label: descriptor.label,
       description: descriptor.description,
+      default_model: descriptor.defaultModel,
+      models: descriptor.models || [],
       tool_contract: descriptor.toolContract,
       can_serve_memory: canServeAsMemoryRunner(descriptor),
       degradation_reasons: explainMemoryRunnerDegradation(descriptor),

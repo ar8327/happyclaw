@@ -13,7 +13,7 @@ import {
   MemoryPlugin,
   SkillsPlugin,
   type PluginContext,
-} from 'happyclaw-agent-runner-core';
+} from 'agentdock-agent-runner-core';
 import { InvokeAgentPlugin } from './plugins/invoke-agent-plugin.js';
 
 // ─── Options ─────────────────────────────────────────────────

@@ -236,7 +236,7 @@ export async function updateContinuationSummaryFromTranscript(
       ? Array.from(previousSummaries.keys()).join('\n\n---\n\n')
       : '无';
 
-  const summaryPrompt = `你是 HappyClaw 的 continuation summary 生成器。你的输出会被注入到新的模型 thread 中，用于延续刚刚 compact 的对话。
+  const summaryPrompt = `你是 AgentDock 的 continuation summary 生成器。你的输出会被注入到新的模型 thread 中，用于延续刚刚 compact 的对话。
 
 目标：
 1. 保留下一轮继续对话必须知道的上下文，而不是写长期记忆索引

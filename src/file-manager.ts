@@ -23,7 +23,15 @@ export interface FileEntry {
 
 // 常量
 export const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
-const SYSTEM_PATHS = ['logs', 'CLAUDE.md', '.claude', 'conversations'];
+const SYSTEM_PATHS = [
+  'logs',
+  'AGENTS.md',
+  'CLAUDE.md',
+  '.Codex',
+  '.codex',
+  '.claude',
+  'conversations',
+];
 
 /**
  * 获取会话流的文件根目录

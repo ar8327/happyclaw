@@ -59,7 +59,9 @@ export function AddMcpServerDialog({ open, onClose, onAdd }: AddMcpServerDialogP
   const validate = (): string | null => {
     if (!id.trim()) return 'ID 不能为空';
     if (!ID_PATTERN.test(id.trim())) return 'ID 只能包含字母、数字、短横线和下划线，且不能以符号开头';
-    if (id.trim().toLowerCase() === 'happyclaw') return 'ID 不能为 happyclaw（系统保留）';
+    if (['agentdock', 'happyclaw'].includes(id.trim().toLowerCase())) {
+      return 'ID 不能为 agentdock 或 happyclaw（系统保留）';
+    }
     if (isHttpType) {
       if (!url.trim()) return 'URL 不能为空';
     } else {

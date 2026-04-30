@@ -1,8 +1,8 @@
 {
-  "name": "happyclaw-memory-agent",
+  "name": "agentdock-memory-agent",
   "version": "1.0.0",
   "type": "module",
-  "description": "Memory Agent for HappyClaw — per-user long-term memory management",
+  "description": "Memory Agent for AgentDock — per-user long-term memory management",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",

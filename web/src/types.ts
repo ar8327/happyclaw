@@ -24,7 +24,7 @@ export interface SessionInfo {
   bound_channels?: string[];
   backing_jid?: string | null;
   degradation_reasons?: string[];
-  codex_compact?: {
+  context_archive?: {
     current_tokens: number;
     current_input_tokens: number;
     current_output_tokens: number;
@@ -32,7 +32,7 @@ export interface SessionInfo {
     remaining_tokens: number;
     progress: number;
     turn_count: number;
-    start_fresh_on_next_turn: boolean;
+    pending_fresh_session: boolean;
     last_compacted_at: string | null;
     state_updated_at: string | null;
   } | null;

@@ -15,7 +15,7 @@ import os from 'os';
 import type { ThreadEvent, ThreadItem } from '@openai/codex-sdk';
 import {
   normalizeHomeFlags,
-} from 'happyclaw-agent-runner-core';
+} from 'agentdock-agent-runner-core';
 
 import type {
   AgentRunner,
@@ -30,10 +30,10 @@ import type {
 import type { ContainerInput, ContainerOutput } from '../../types.js';
 import type { SessionState } from '../../session-state.js';
 import type { IpcPaths } from '../../ipc-handler.js';
-import { CodexSession, type CodexSessionConfig } from './codex-session.js';
-import { convertThreadEvent } from './codex-event-adapter.js';
-import { saveImagesToTempFiles } from './codex-image-utils.js';
-import { CodexArchiveManager } from './codex-archive.js';
+import { CodexSession, type CodexSessionConfig } from './session.js';
+import { convertThreadEvent } from './event-adapter.js';
+import { saveImagesToTempFiles } from './image-utils.js';
+import { CodexArchiveManager } from './archive.js';
 
 // ---------------------------------------------------------------------------
 // Options
@@ -51,9 +51,11 @@ export interface CodexRunnerOptions {
   memoryDir: string;
   model: string;
   thinkingEffort?: string;
+  command?: string;
   loadUserMcpServers: () => Record<string, unknown>;
   skillsDir: string;
   disableSyntheticArchive?: boolean;
+  builtinMcpServerName?: string;
 }
 
 function resolveAdditionalDirectories(defaultDirs: string[]): string[] {
@@ -269,10 +271,12 @@ export class CodexRunner implements AgentRunner {
       mcpServerPath: this.mcpServerPath,
       mcpServerEnv: mcpEnv,
       modelInstructionsFile: this.instructionsFile,
+      builtinMcpServerName: this.opts.builtinMcpServerName,
       userMcpServers,
     };
 
     this.session = new CodexSession(sessionConfig, {
+      codexPathOverride: this.opts.command,
       apiKey: process.env.OPENAI_API_KEY,
     });
   }
@@ -304,7 +308,7 @@ export class CodexRunner implements AgentRunner {
   private buildResumeInstructions(): string {
     const activeChannels = this.opts.state.getActiveImChannels();
     return [
-      'Continue the existing HappyClaw conversation thread.',
+      'Continue the existing AgentDock conversation thread.',
       'Follow the system, workspace, memory, and routing instructions already established earlier in this thread.',
       'Focus on the latest user message. Do not repeat old replies.',
       'Your stdout is only visible in the Web UI. For IM channels, use send_message with the channel from the latest message source attribute.',

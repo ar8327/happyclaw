@@ -62,12 +62,9 @@ import {
   saveImGeneralConfig,
   getImWeChatConfig,
   saveImWeChatConfig,
-  detectLocalClaudeCode,
   getImPreferences,
   saveImPreferences,
-  detectLocalCodexCli,
 } from '../runtime-config.js';
-import { queryCodexRateLimits } from '../codex-app-server.js';
 import type { AuthUser, RegisteredGroup } from '../types.js';
 import { logger } from '../logger.js';
 import {
@@ -128,117 +125,6 @@ function destroyTelegramApiAgent(agent: HttpsAgent | ProxyAgent): void {
 }
 
 // --- Routes ---
-
-// GET /api/config/codex/models — 动态读取 Codex 支持的模型列表
-configRoutes.get('/codex/models', authMiddleware, async (c) => {
-  const os = await import('node:os');
-  const fs = await import('node:fs');
-  const path = await import('node:path');
-  const cacheFile = path.join(os.homedir(), '.codex', 'models_cache.json');
-
-  try {
-    if (!fs.existsSync(cacheFile)) {
-      return c.json({ models: [], source: 'fallback' });
-    }
-    const raw = JSON.parse(fs.readFileSync(cacheFile, 'utf-8'));
-    const models = (raw.models || [])
-      .filter((m: { visibility?: string }) => m.visibility === 'list')
-      .map((m: {
-        slug: string;
-        display_name?: string;
-        description?: string;
-        priority?: number;
-        default_reasoning_level?: string;
-        supported_reasoning_levels?: Array<{ effort: string }>;
-      }) => ({
-        slug: m.slug,
-        displayName: m.display_name || m.slug,
-        description: m.description || '',
-        priority: m.priority ?? 999,
-        defaultReasoningLevel: m.default_reasoning_level,
-        supportedReasoningLevels: (m.supported_reasoning_levels || []).map(
-          (r: { effort: string }) => r.effort,
-        ),
-      }))
-      .sort((a: { priority: number }, b: { priority: number }) => a.priority - b.priority);
-    return c.json({ models, source: 'cache', fetchedAt: raw.fetched_at });
-  } catch (err) {
-    logger.error({ err }, 'Failed to read Codex models cache');
-    return c.json({ models: [], source: 'error' });
-  }
-});
-
-// ─── Codex Provider Config Routes ───────────────────────────────
-
-configRoutes.get('/codex', authMiddleware, systemConfigMiddleware, (c) => {
-  try {
-    const cliStatus = detectLocalCodexCli();
-    return c.json({
-      mode: 'cli',
-      hasCliAuth: cliStatus.hasAuth,
-      cliAuthMode: cliStatus.authMode,
-      cliAuthAccountId: cliStatus.accountId,
-      cliAuthLastRefresh: cliStatus.lastRefresh,
-      hasEnvApiKey: !!process.env.OPENAI_API_KEY,
-    });
-  } catch (err) {
-    logger.error({ err }, 'Failed to load Codex config');
-    return c.json({ error: 'Failed to load Codex config' }, 500);
-  }
-});
-
-configRoutes.get(
-  '/codex/detect-local',
-  authMiddleware,
-  systemConfigMiddleware,
-  (c) => {
-    return c.json(detectLocalCodexCli());
-  },
-);
-
-configRoutes.get(
-  '/codex/rate-limits',
-  authMiddleware,
-  systemConfigMiddleware,
-  async (c) => {
-    try {
-      const cli = detectLocalCodexCli();
-      if (!cli.hasAuth) {
-        return c.json({ available: false, reason: 'not_logged_in' });
-      }
-      const refresh = c.req.query('refresh') === '1';
-      const data = await queryCodexRateLimits(refresh);
-      return c.json({ available: true, rateLimits: data.rateLimits });
-    } catch (err) {
-      logger.error({ err }, 'Failed to query Codex rate limits');
-      const msg = err instanceof Error ? err.message : 'Unknown error';
-      return c.json({ error: msg }, 500);
-    }
-  },
-);
-
-configRoutes.get('/claude', authMiddleware, systemConfigMiddleware, (c) => {
-  try {
-    const local = detectLocalClaudeCode();
-    return c.json({
-      anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL || '',
-      happyclawModel: '',
-      updatedAt: null,
-      hasAnthropicAuthToken: false,
-      hasAnthropicApiKey: !!process.env.ANTHROPIC_API_KEY,
-      hasClaudeCodeOauthToken: !!process.env.CLAUDE_CODE_OAUTH_TOKEN,
-      anthropicAuthTokenMasked: null,
-      anthropicApiKeyMasked: process.env.ANTHROPIC_API_KEY ? '***' : null,
-      claudeCodeOauthTokenMasked: process.env.CLAUDE_CODE_OAUTH_TOKEN ? '***' : null,
-      hasClaudeOAuthCredentials: local.hasCredentials,
-      claudeOAuthCredentialsExpiresAt: local.expiresAt,
-      claudeOAuthCredentialsAccessTokenMasked: local.accessTokenMasked,
-    });
-  } catch (err) {
-    logger.error({ err }, 'Failed to load Claude config');
-    return c.json({ error: 'Failed to load Claude config' }, 500);
-  }
-});
 
 // ─── Helpers ────────────────────────────────────────────────────
 
@@ -1874,16 +1760,5 @@ configRoutes.put('/im/bindings/:imJid', authMiddleware, async (c) => {
   );
   return c.json({ success: true });
 });
-
-// ─── Local Claude Code detection ──────────────────────────────────
-
-configRoutes.get(
-  '/claude/detect-local',
-  authMiddleware,
-  systemConfigMiddleware,
-  (c) => {
-    return c.json(detectLocalClaudeCode());
-  },
-);
 
 export default configRoutes;

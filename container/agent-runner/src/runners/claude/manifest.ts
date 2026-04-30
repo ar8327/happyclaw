@@ -1,4 +1,6 @@
 import type { RunnerManifest } from '../types.js';
+import { RUNNER_DESCRIPTORS } from '../../runner-descriptor.types.js';
+import { descriptorHealthCheck, descriptorModels } from '../health.js';
 import {
   hasClaudeOneShotAuth,
   invokeClaudeOneShot,
@@ -14,72 +16,28 @@ function configuredModel(ctxModel?: string): string {
 }
 
 export const claudeManifest: RunnerManifest = {
-  descriptor: {
-    id: 'claude',
-    label: 'Claude',
-    description:
-      'Claude Code CLI runner with native turn streaming and MCP tools.',
-    defaultModel: 'opus',
-    modelPatterns: ['^(opus|sonnet|haiku)$', '^claude-'],
-    capabilities: {
-      sessionResume: 'strong',
-      interrupt: 'strong',
-      imageInput: true,
-      usage: 'exact',
-      midQueryPush: true,
-      runtimeModeSwitch: false,
-      toolStreaming: 'fine',
-      backgroundTasks: true,
-      subAgent: 'tool-only',
-      customTools: 'mcp',
-      mcpTransport: ['stdio'],
-      skills: ['native', 'tool-loader'],
-      ephemeralSession: true,
-      filesystemAccess: true,
-    },
-    lifecycle: {
-      turnBoundary: 'native',
-      archivalTrigger: ['pre_compact'],
-      contextShrinkTrigger: 'native_event',
-      beforeToolExecutionGuard: 'native_hook',
-      hookStreaming: 'progress',
-      postCompactRepair: 'native',
-    },
-    promptContract: {
-      mode: 'append',
-      dynamicContextReload: 'turn',
-    },
-    runtimeContract: {
-      requiredCommands: ['claude'],
-      auth: 'external_cli',
-    },
-    toolContract: {
-      mode: 'mcp_stdio',
-      supportsUserMcp: true,
-      userMcpSources: ['happyclaw', 'claude_settings', 'profile'],
-      builtinServerName: 'happyclaw',
-    },
-    compatibility: {
-      chat: 'full',
-      im: 'full',
-      observability: 'full',
-    },
-  },
+  descriptor: RUNNER_DESCRIPTORS.claude,
   createRunner: async (ctx) => {
-    const { ClaudeRunner } =
-      await import('../../providers/claude/claude-runner.js');
+    const { ClaudeRunner } = await import('./runner.js');
     return new ClaudeRunner({
       ...ctx,
       model: configuredModel(ctx.containerInput.runnerConfig?.model),
       thinkingEffort:
         ctx.containerInput.runnerConfig?.thinkingEffort || ctx.thinkingEffort,
+      command: ctx.containerInput.runnerConfig?.command,
+      builtinMcpServerName:
+        RUNNER_DESCRIPTORS.claude.toolContract.builtinServerName,
     });
   },
+  healthCheck: (ctx) =>
+    descriptorHealthCheck(RUNNER_DESCRIPTORS.claude, ctx.env),
+  listModels: async () => descriptorModels(RUNNER_DESCRIPTORS.claude),
   createOneShotInvoker: (ctx) =>
     hasClaudeOneShotAuth(ctx.env)
       ? {
           runnerId: 'claude',
           label: 'Claude',
+          description: RUNNER_DESCRIPTORS.claude.description,
           defaultModel: ctx.env.HAPPYCLAW_MODEL || 'sonnet',
           models: ['haiku', 'sonnet', 'opus'],
           invoke: (input) =>

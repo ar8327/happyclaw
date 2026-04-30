@@ -37,3 +37,13 @@ TARGETS_RD=(
 for target in "${TARGETS_RD[@]}"; do
   cp "$SRC_RD" "$target"
 done
+
+# --- Runner health helpers (2 targets) ---
+SRC_RH="$ROOT/shared/runner-health.ts"
+TARGETS_RH=(
+  "$ROOT/src/runner-health.ts"
+  "$ROOT/container/agent-runner/src/runners/health.ts"
+)
+for target in "${TARGETS_RH[@]}"; do
+  cp "$SRC_RH" "$target"
+done

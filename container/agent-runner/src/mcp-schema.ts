@@ -21,8 +21,25 @@ function zodFromPropertySchema(schema: unknown): z.ZodTypeAny {
     case 'boolean':
       return z.boolean();
     case 'array':
-      return z.array(z.unknown());
+      return z.array(zodFromPropertySchema(typed.items));
     case 'object':
+      if (
+        typed.properties &&
+        typeof typed.properties === 'object' &&
+        !Array.isArray(typed.properties)
+      ) {
+        return convertJsonSchemaToZod(typed);
+      }
+      if (
+        typed.additionalProperties &&
+        typeof typed.additionalProperties === 'object' &&
+        !Array.isArray(typed.additionalProperties)
+      ) {
+        return z.record(
+          z.string(),
+          zodFromPropertySchema(typed.additionalProperties),
+        );
+      }
       return z.record(z.string(), z.unknown());
     default:
       return z.unknown();

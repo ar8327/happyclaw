@@ -1,5 +1,5 @@
 /**
- * Shared types for HappyClaw Agent Runner.
+ * Shared types for AgentDock Agent Runner.
  *
  * These types are used across index.ts, stream-processor.ts, and mcp-tools.ts.
  */
@@ -13,6 +13,7 @@ export interface RunnerResolvedConfig {
   profileId?: string;
   model?: string;
   thinkingEffort?: 'low' | 'medium' | 'high';
+  command?: string;
   config: Record<string, unknown>;
 }
 

@@ -1,19 +1,20 @@
 /**
- * HappyClaw Agent Runner — Entry Point
+ * AgentDock Agent Runner — Entry Point
  *
  * Thin entry: reads ContainerInput from stdin, resolves the runner,
  * initializes it, and starts the query loop.
  *
- * All provider logic lives in providers/claude/ (and future providers/codex/).
+ * Runner-specific logic lives in runners/{runnerId}/.
  * The generic query loop lives in query-loop.ts.
  */
 
+import './env-compat.js';
 import fs from 'fs';
 import path from 'path';
 import type { ContainerInput, ContainerOutput } from './types.js';
 export type { StreamEventType, StreamEvent } from './types.js';
 
-import { normalizeHomeFlags } from 'happyclaw-agent-runner-core';
+import { normalizeHomeFlags } from 'agentdock-agent-runner-core';
 import { SessionState } from './session-state.js';
 import {
   buildIpcPaths,
@@ -140,7 +141,7 @@ function loadMcpServersFromSource(
   source: UserMcpSource,
   input: ContainerInput,
 ): Record<string, unknown> {
-  if (source === 'happyclaw') {
+  if (source === 'agentdock' || source === 'happyclaw') {
     return readMcpServersFromEnv('HAPPYCLAW_USER_MCP_SERVERS');
   }
   if (source === 'profile') {
@@ -295,6 +296,8 @@ function validateDeclaredRunnerDescriptor(
     'promptContract',
     'runtimeContract',
     'toolContract',
+    'profileSchema',
+    'models',
     'compatibility',
   ] as const;
   const mismatches = keys.filter(
@@ -414,6 +417,7 @@ async function main(): Promise<void> {
       memoryDir: WORKSPACE_MEMORY,
       skillsDir: WORKSPACE_SKILLS,
     }),
+    promptContract: runnerManifest.descriptor.promptContract,
     initialPrompt: prompt,
     initialImages: promptImages,
     sessionRecordId,

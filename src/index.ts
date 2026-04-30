@@ -1,4 +1,5 @@
 import './fetch-globals.js';
+import './env-compat.js';
 
 import { ChildProcess, execFile } from 'child_process';
 import crypto from 'crypto';
@@ -188,6 +189,7 @@ import {
 } from './im-commentary.js';
 import { getLocalWorkbenchUserPublic } from './local-user.js';
 import { getDefaultRunnerId } from './runner-registry.js';
+import { clearSessionRuntimeFiles } from './runner-runtime-files.js';
 
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const execFileAsync = promisify(execFile);
@@ -1015,31 +1017,6 @@ function sendSystemMessage(jid: string, type: string, detail: string): void {
   });
 }
 
-function getSessionClaudeDir(folder: string, agentId?: string): string {
-  return agentId
-    ? path.join(DATA_DIR, 'sessions', folder, 'agents', agentId, '.claude')
-    : path.join(DATA_DIR, 'sessions', folder, '.claude');
-}
-
-async function clearSessionRuntimeFiles(
-  folder: string,
-  agentId?: string,
-): Promise<void> {
-  const claudeDir = getSessionClaudeDir(folder, agentId);
-  if (!fs.existsSync(claudeDir)) return;
-
-  try {
-    for (const entry of fs.readdirSync(claudeDir)) {
-      if (entry === 'settings.json') continue;
-      fs.rmSync(path.join(claudeDir, entry), { recursive: true, force: true });
-    }
-  } catch (err) {
-    logger.error(
-      { folder, agentId, err },
-      'Failed to clear session runtime files directly',
-    );
-  }
-}
 
 /**
  * Slash command handler for IM channels (Feishu/Telegram).
@@ -2128,7 +2105,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (chatJid === 'web:main' && isHome) {
     for (let i = missedMessages.length - 1; i >= 0; i--) {
       const sender = missedMessages[i]?.sender;
-      if (!sender || sender === 'happyclaw-agent' || sender === '__system__')
+      if (
+        !sender ||
+        sender === 'agentdock-agent' ||
+        sender === 'happyclaw-agent' ||
+        sender === '__system__'
+      )
         continue;
       const senderUser = getUserById(sender);
       if (senderUser?.status === 'active' && senderUser.role === 'admin') {
@@ -3169,7 +3151,7 @@ async function sendMessage(
     storeMessageDirect(
       msgId,
       jid,
-      'happyclaw-agent',
+      'agentdock-agent',
       ASSISTANT_NAME,
       text,
       timestamp,
@@ -3179,7 +3161,7 @@ async function sendMessage(
     broadcastNewMessage(jid, {
       id: msgId,
       chat_jid: jid,
-      sender: 'happyclaw-agent',
+      sender: 'agentdock-agent',
       sender_name: ASSISTANT_NAME,
       content: text,
       timestamp,
@@ -3464,7 +3446,7 @@ function startIpcWatcher(): void {
                       storeMessageDirect(
                         imgMsgId,
                         data.chatJid,
-                        'happyclaw-agent',
+                        'agentdock-agent',
                         ASSISTANT_NAME,
                         displayText,
                         imgTimestamp,
@@ -3473,7 +3455,7 @@ function startIpcWatcher(): void {
                       broadcastNewMessage(data.chatJid, {
                         id: imgMsgId,
                         chat_jid: data.chatJid,
-                        sender: 'happyclaw-agent',
+                        sender: 'agentdock-agent',
                         sender_name: ASSISTANT_NAME,
                         content: displayText,
                         timestamp: imgTimestamp,
@@ -4329,7 +4311,7 @@ async function processAgentConversation(
         storeMessageDirect(
           msgId,
           virtualChatJid,
-          'happyclaw-agent',
+          'agentdock-agent',
           ASSISTANT_NAME,
           text,
           timestamp,
@@ -4340,7 +4322,7 @@ async function processAgentConversation(
           {
             id: msgId,
             chat_jid: virtualChatJid,
-            sender: 'happyclaw-agent',
+            sender: 'agentdock-agent',
             sender_name: ASSISTANT_NAME,
             content: text,
             timestamp,
@@ -4490,7 +4472,7 @@ async function startMessageLoop(): Promise<void> {
   }
   messageLoopRunning = true;
 
-  logger.info('happyclaw running');
+  logger.info('agentdock running');
 
   while (!shuttingDown) {
     try {
@@ -6192,6 +6174,6 @@ async function checkImBindingsHealth(): Promise<void> {
 }
 
 main().catch((err) => {
-  logger.error({ err }, 'Failed to start happyclaw');
+  logger.error({ err }, 'Failed to start agentdock');
   process.exit(1);
 });

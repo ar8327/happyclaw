@@ -506,15 +506,6 @@ export function writeCredentialsFile(
   fs.renameSync(tmp, filePath);
 }
 
-// ─── Local Claude Code detection ──────────────────────────────────
-
-export interface LocalClaudeCodeStatus {
-  detected: boolean;
-  hasCredentials: boolean;
-  expiresAt: number | null;
-  accessTokenMasked: string | null;
-}
-
 /**
  * Read and parse OAuth credentials from ~/.claude/.credentials.json.
  * Returns the raw oauth object with accessToken, refreshToken, expiresAt, scopes,
@@ -548,35 +539,6 @@ function readLocalOAuthCredentials(): {
   } catch {
     return null;
   }
-}
-
-/**
- * Detect if the host machine has a valid ~/.claude/.credentials.json
- * (i.e. user has logged into Claude Code locally).
- */
-export function detectLocalClaudeCode(): LocalClaudeCodeStatus {
-  const oauth = readLocalOAuthCredentials();
-
-  if (oauth) {
-    return {
-      detected: true,
-      hasCredentials: true,
-      expiresAt: oauth.expiresAt ?? null,
-      accessTokenMasked: maskSecret(oauth.accessToken),
-    };
-  }
-
-  // Check if the file exists at all (detected but no valid credentials)
-  const homeDir = process.env.HOME || '/root';
-  const credFile = path.join(homeDir, '.claude', '.credentials.json');
-  const fileExists = fs.existsSync(credFile);
-
-  return {
-    detected: fileExists,
-    hasCredentials: false,
-    expiresAt: null,
-    accessTokenMasked: null,
-  };
 }
 
 /**
@@ -1756,63 +1718,4 @@ export function saveImPreferences(
   };
   fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), 'utf-8');
   return merged;
-}
-
-// ═══════════════════════════════════════════════════════════════════
-export interface LocalCodexCliStatus {
-  detected: boolean;
-  hasAuth: boolean;
-  authMode: string | null;
-  accountId: string | null;
-  lastRefresh: string | null;
-}
-
-// ─── Codex CLI detection (read-only) ────────────────────────────
-
-/**
- * Read and parse ~/.codex/auth.json.
- * Returns the raw parsed JSON object, or null if missing/invalid.
- */
-function readLocalCodexAuth(): Record<string, unknown> | null {
-  const homeDir = process.env.HOME || '/root';
-  const authFile = path.join(
-    process.env.CODEX_HOME || path.join(homeDir, '.codex'),
-    'auth.json',
-  );
-  try {
-    if (!fs.existsSync(authFile)) return null;
-    const content = JSON.parse(fs.readFileSync(authFile, 'utf-8'));
-    if (typeof content !== 'object' || content === null) return null;
-    return content as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-}
-
-export function detectLocalCodexCli(): LocalCodexCliStatus {
-  const homeDir = process.env.HOME || '/root';
-  const codexHome = process.env.CODEX_HOME || path.join(homeDir, '.codex');
-
-  const auth = readLocalCodexAuth();
-  if (auth && auth.tokens && typeof auth.tokens === 'object') {
-    const tokens = auth.tokens as Record<string, unknown>;
-    const accountId = typeof tokens.account_id === 'string' ? tokens.account_id : null;
-    return {
-      detected: true,
-      hasAuth: true,
-      authMode: typeof auth.auth_mode === 'string' ? auth.auth_mode : null,
-      accountId: accountId ? maskSecret(accountId) : null,
-      lastRefresh: typeof auth.last_refresh === 'string' ? auth.last_refresh : null,
-    };
-  }
-
-  // Check if directory exists at all
-  const dirExists = fs.existsSync(codexHome);
-  return {
-    detected: dirExists,
-    hasAuth: false,
-    authMode: null,
-    accountId: null,
-    lastRefresh: null,
-  };
 }

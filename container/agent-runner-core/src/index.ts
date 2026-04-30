@@ -1,5 +1,5 @@
 /**
- * happyclaw-agent-runner-core — shared infrastructure for all HappyClaw agent runners.
+ * agentdock-agent-runner-core — shared infrastructure for all AgentDock agent runners.
  *
  * Zero runtime dependencies. Provides:
  * - Protocol types (ContainerInput/Output, StreamEvent)

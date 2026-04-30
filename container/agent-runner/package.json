@@ -1,8 +1,8 @@
 {
-  "name": "happyclaw-agent-runner",
+  "name": "agentdock-agent-runner",
   "version": "1.0.0",
   "type": "module",
-  "description": "Container-side agent runner for HappyClaw",
+  "description": "Container-side agent runner for AgentDock",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
@@ -13,7 +13,7 @@
     "@modelcontextprotocol/sdk": "^1.28.0",
     "@openai/codex-sdk": "0.125.0",
     "cron-parser": "^5.0.0",
-    "happyclaw-agent-runner-core": "file:../agent-runner-core",
+    "agentdock-agent-runner-core": "file:../agent-runner-core",
     "zod": "^4.0.0"
   },
   "devDependencies": {
@@ -23,7 +23,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/riba2534/happyclaw.git",
+    "url": "git+https://github.com/riba2534/agentdock.git",
     "directory": "container/agent-runner"
   },
   "author": "riba2534",
@@ -31,6 +31,6 @@
     "claude-code",
     "agent-runner",
     "mcp",
-    "happyclaw"
+    "agentdock"
   ]
 }

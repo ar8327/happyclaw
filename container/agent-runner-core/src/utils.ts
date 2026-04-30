@@ -1,5 +1,5 @@
 /**
- * Pure utility functions for HappyClaw agent runners.
+ * Pure utility functions for AgentDock agent runners.
  */
 
 /** Shorten a string to maxLen, appending "..." if truncated. */

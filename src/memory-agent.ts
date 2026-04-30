@@ -707,7 +707,7 @@ function writeMemoryLog(
 
 const MEMORY_SESSION_ID_PREFIX = 'memory:';
 
-const MEMORY_CORE_INSTRUCTIONS = `你现在以 HappyClaw memory agent 的身份工作。
+const MEMORY_CORE_INSTRUCTIONS = `你现在以 AgentDock memory agent 的身份工作。
 
 边界要求：
 - 只允许读写 memory 目录里的文件

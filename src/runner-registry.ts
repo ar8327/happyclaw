@@ -1,153 +1,15 @@
-import type { RunnerDescriptor } from './types.js';
+import {
+  RUNNER_DESCRIPTORS,
+  type RunnerDescriptor,
+} from './runner-descriptor.types.js';
 
-export const RUNNER_REGISTRY: Record<RunnerDescriptor['id'], RunnerDescriptor> = {
-  claude: {
-    id: 'claude',
-    label: 'Claude',
-    description: 'Claude Code CLI runner with native turn streaming and MCP tools.',
-    defaultModel: 'opus',
-    modelPatterns: ['^(opus|sonnet|haiku)$', '^claude-'],
-    capabilities: {
-      sessionResume: 'strong',
-      interrupt: 'strong',
-      imageInput: true,
-      usage: 'exact',
-      midQueryPush: true,
-      runtimeModeSwitch: false,
-      toolStreaming: 'fine',
-      backgroundTasks: true,
-      subAgent: 'tool-only',
-      customTools: 'mcp',
-      mcpTransport: ['stdio'],
-      skills: ['native', 'tool-loader'],
-      ephemeralSession: true,
-      filesystemAccess: true,
-    },
-    lifecycle: {
-      turnBoundary: 'native',
-      archivalTrigger: ['pre_compact'],
-      contextShrinkTrigger: 'native_event',
-      beforeToolExecutionGuard: 'native_hook',
-      hookStreaming: 'progress',
-      postCompactRepair: 'native',
-    },
-    promptContract: {
-      mode: 'append',
-      dynamicContextReload: 'turn',
-    },
-    runtimeContract: {
-      requiredCommands: ['claude'],
-      auth: 'external_cli',
-    },
-    toolContract: {
-      mode: 'mcp_stdio',
-      supportsUserMcp: true,
-      userMcpSources: ['happyclaw', 'claude_settings', 'profile'],
-      builtinServerName: 'happyclaw',
-    },
-    profileSchema: {
-      type: 'object',
-      properties: {
-        model: {
-          type: 'string',
-          title: '模型',
-          description: '覆盖 Claude Code 使用的模型别名或完整模型名',
-        },
-        thinkingEffort: {
-          type: 'string',
-          enum: ['low', 'medium', 'high'],
-          title: '推理强度',
-        },
-        command: {
-          type: 'string',
-          title: '命令路径',
-          description: '默认使用 PATH 中的 claude',
-        },
-      },
-      additionalProperties: true,
-    },
-    compatibility: {
-      chat: 'full',
-      im: 'full',
-      observability: 'full',
-    },
-  },
-  codex: {
-    id: 'codex',
-    label: 'Codex',
-    description: 'Codex CLI runner with instruction-file prompt injection.',
-    defaultModel: 'gpt-5.4',
-    modelPatterns: ['^gpt-[a-z0-9._-]+$', '^o[1-9](?:$|[-._])'],
-    capabilities: {
-      sessionResume: 'weak',
-      interrupt: 'weak',
-      imageInput: true,
-      usage: 'approx',
-      midQueryPush: false,
-      runtimeModeSwitch: false,
-      toolStreaming: 'coarse',
-      backgroundTasks: false,
-      subAgent: 'tool-only',
-      customTools: 'mcp',
-      mcpTransport: ['stdio'],
-      skills: ['tool-loader'],
-      ephemeralSession: true,
-      filesystemAccess: true,
-    },
-    lifecycle: {
-      turnBoundary: 'native',
-      archivalTrigger: ['turn_threshold', 'cleanup_only'],
-      contextShrinkTrigger: 'synthetic',
-      beforeToolExecutionGuard: 'sandbox_only',
-      hookStreaming: 'none',
-      postCompactRepair: 'synthetic',
-    },
-    promptContract: {
-      mode: 'instructions_file',
-      dynamicContextReload: 'turn',
-    },
-    runtimeContract: {
-      requiredNodePackages: ['@openai/codex-sdk'],
-      requiredCommands: ['codex'],
-      auth: 'external_cli',
-    },
-    toolContract: {
-      mode: 'mcp_stdio',
-      supportsUserMcp: true,
-      userMcpSources: ['happyclaw', 'codex_config', 'profile'],
-      builtinServerName: 'happyclaw',
-    },
-    profileSchema: {
-      type: 'object',
-      properties: {
-        model: {
-          type: 'string',
-          title: '模型',
-          description: '覆盖 Codex CLI 使用的模型',
-        },
-        thinkingEffort: {
-          type: 'string',
-          enum: ['low', 'medium', 'high'],
-          title: '推理强度',
-        },
-        command: {
-          type: 'string',
-          title: '命令路径',
-          description: '默认使用 PATH 中的 codex',
-        },
-      },
-      additionalProperties: true,
-    },
-    compatibility: {
-      chat: 'full',
-      im: 'degraded',
-      observability: 'degraded',
-    },
-  },
-};
+export const RUNNER_REGISTRY: Record<
+  RunnerDescriptor['id'],
+  RunnerDescriptor
+> = RUNNER_DESCRIPTORS;
 
 export function getRunnerDescriptor(id: string): RunnerDescriptor | undefined {
-  return RUNNER_REGISTRY[id as keyof typeof RUNNER_REGISTRY];
+  return RUNNER_REGISTRY[id];
 }
 
 export function listRunnerDescriptors(): RunnerDescriptor[] {
@@ -261,12 +123,15 @@ export function explainRunnerDegradation(
 export function explainMemoryRunnerDegradation(
   descriptor: RunnerDescriptor,
 ): string[] {
-  const reasons: string[] = [];
-  if (descriptor.capabilities.toolStreaming === 'coarse') {
-    reasons.push('工具流式事件只有粗粒度观测');
+  const reasons = explainRunnerDegradation(descriptor);
+  if (descriptor.capabilities.customTools !== 'mcp') {
+    reasons.push('Memory Agent 需要通过 MCP 工具访问记忆能力');
   }
-  if (descriptor.lifecycle.hookStreaming === 'none') {
-    reasons.push('前端无法看到 hook 生命周期事件');
+  if (!descriptor.capabilities.ephemeralSession) {
+    reasons.push('Memory Agent 需要支持临时会话');
   }
-  return reasons;
+  if (!descriptor.capabilities.filesystemAccess) {
+    reasons.push('Memory Agent 需要文件系统访问能力');
+  }
+  return [...new Set(reasons)];
 }

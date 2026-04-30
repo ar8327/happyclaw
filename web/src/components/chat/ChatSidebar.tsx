@@ -123,7 +123,7 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
   };
 
   const appearance = useAuthStore((s) => s.appearance);
-  const appName = appearance?.appName || 'HappyClaw';
+  const appName = appearance?.appName || 'AgentDock';
 
   const handleCreated = (jid: string, sessionSlug: string) => {
     selectSession(jid);

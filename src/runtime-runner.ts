@@ -2,22 +2,22 @@
  * Session runtime launcher for happyclaw.
  * Unified local runtime launcher for happyclaw sessions.
  */
-import { ChildProcess, execFileSync, spawn } from 'child_process';
+import { ChildProcess, execFileSync, spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, GROUPS_DIR } from './config.js';
+import { applyAgentDockEnvAliases } from './env-compat.js';
 import { logger } from './logger.js';
 import {
   getDefaultRunnerId,
   getRunnerDescriptor,
   inferRunnerIdFromModel,
+  listRunnerDescriptors,
 } from './runner-registry.js';
 import { loadMountAllowlist } from './mount-security.js';
 import {
   getSystemSettings,
-  detectLocalClaudeCode,
-  detectLocalCodexCli,
   importLocalClaudeCredentials,
   writeCredentialsFile,
 } from './runtime-config.js';
@@ -47,6 +47,8 @@ import {
   getSessionRecord,
   listRunnerProfiles,
 } from './db.js';
+import { runnerAuthAvailable } from './runner-health.js';
+import { validateRunnerProfileConfig } from './runner-profile-schema.js';
 
 /**
  * Required env flags for settings.json — 每次 Runtime 启动时强制写入，不可被用户覆盖。
@@ -135,6 +137,7 @@ export interface RunnerResolvedConfig {
   profileId?: string;
   model?: string;
   thinkingEffort?: 'low' | 'medium' | 'high';
+  command?: string;
   config: Record<string, unknown>;
 }
 
@@ -285,6 +288,7 @@ function resolvePrimarySessionFolderForOwner(
 
 function parseRunnerProfileConfig(
   profile: RunnerProfileRecord | undefined,
+  descriptor?: RunnerDescriptor,
 ): Record<string, unknown> {
   if (!profile) return {};
   try {
@@ -293,6 +297,21 @@ function parseRunnerProfileConfig(
       logger.warn(
         { profileId: profile.id, runnerId: profile.runner_id },
         'Ignoring non-object runner profile config',
+      );
+      return {};
+    }
+    const validation = validateRunnerProfileConfig(
+      descriptor?.profileSchema,
+      parsed,
+    );
+    if (!validation.ok) {
+      logger.warn(
+        {
+          profileId: profile.id,
+          runnerId: profile.runner_id,
+          errors: validation.errors,
+        },
+        'Ignoring runner profile config that does not match schema',
       );
       return {};
     }
@@ -322,6 +341,49 @@ function thinkingEffortConfigValue(
   return value === 'low' || value === 'medium' || value === 'high'
     ? value
     : undefined;
+}
+
+function resolveRunnerProfileBundle(
+  runnerId: string,
+  selectedProfileId?: string | null,
+): {
+  descriptor?: RunnerDescriptor;
+  defaultProfile?: RunnerProfileRecord;
+  activeProfile?: RunnerProfileRecord;
+  config: Record<string, unknown>;
+} {
+  const descriptor = getRunnerDescriptor(runnerId);
+  const defaultProfile = listRunnerProfiles(runnerId).find(
+    (profile) => profile.is_default,
+  );
+  const selectedProfile = selectedProfileId
+    ? getRunnerProfile(selectedProfileId)
+    : undefined;
+  const activeProfile =
+    selectedProfile?.runner_id === runnerId ? selectedProfile : defaultProfile;
+  const config = {
+    ...(descriptor?.defaultProfileFactory?.() || {}),
+    ...parseRunnerProfileConfig(defaultProfile, descriptor),
+    ...parseRunnerProfileConfig(
+      activeProfile?.id === defaultProfile?.id ? undefined : activeProfile,
+      descriptor,
+    ),
+  };
+  return {
+    descriptor,
+    defaultProfile,
+    activeProfile,
+    config,
+  };
+}
+
+function commandExists(command: string, versionArgs: string[]): boolean {
+  const result = spawnSync(command, versionArgs, {
+    stdio: 'ignore',
+    timeout: 3000,
+    windowsHide: true,
+  });
+  return (result.error as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT';
 }
 
 export async function runHostAgent(
@@ -464,16 +526,16 @@ export async function runHostAgent(
     mode: 0o700,
   });
 
-  const groupSessionsDir = input.agentId
+  const sessionBaseDir = input.agentId
     ? path.join(
         DATA_DIR,
         'sessions',
         group.folder,
         'agents',
         input.agentId,
-        '.claude',
       )
-    : path.join(DATA_DIR, 'sessions', group.folder, '.claude');
+    : path.join(DATA_DIR, 'sessions', group.folder);
+  const groupSessionsDir = path.join(sessionBaseDir, '.claude');
   fs.mkdirSync(groupSessionsDir, { recursive: true });
 
   // 3. 写入 settings.json（合并模式，不覆盖已有用户配置）
@@ -542,36 +604,23 @@ export async function runHostAgent(
   const hostEnv: Record<string, string> = {
     ...(process.env as Record<string, string>),
   };
+  applyAgentDockEnvAliases(hostEnv);
   const settings = getSystemSettings();
 
   const storedRunnerId = sessionRecord?.runner_id || getDefaultRunnerId();
-  const runnerDescriptor = getRunnerDescriptor(storedRunnerId);
-  const defaultProfile = listRunnerProfiles(storedRunnerId).find(
-    (profile) => profile.is_default,
+  const storedProfileBundle = resolveRunnerProfileBundle(
+    storedRunnerId,
+    sessionRecord?.runner_profile_id,
   );
-  const selectedProfile = sessionRecord?.runner_profile_id
-    ? getRunnerProfile(sessionRecord.runner_profile_id)
-    : undefined;
-  const activeProfile =
-    selectedProfile?.runner_id === storedRunnerId
-      ? selectedProfile
-      : defaultProfile;
-  const runnerProfileConfig = {
-    ...(runnerDescriptor?.defaultProfileFactory?.() || {}),
-    ...parseRunnerProfileConfig(defaultProfile),
-    ...parseRunnerProfileConfig(
-      activeProfile?.id === defaultProfile?.id ? undefined : activeProfile,
-    ),
-  };
-  const profileModel = stringConfigValue(runnerProfileConfig, 'model');
+  const profileModel = stringConfigValue(storedProfileBundle.config, 'model');
   const profileThinkingEffort = thinkingEffortConfigValue(
-    runnerProfileConfig.thinkingEffort,
+    storedProfileBundle.config.thinkingEffort,
   );
   const explicitModel = sessionRecord?.model ?? group.model;
   const explicitThinkingEffort =
     sessionRecord?.thinking_effort ?? group.thinking_effort;
   const effectiveModel =
-    explicitModel ?? profileModel ?? runnerDescriptor?.defaultModel;
+    explicitModel ?? profileModel ?? storedProfileBundle.descriptor?.defaultModel;
   const effectiveThinkingEffort =
     explicitThinkingEffort ?? profileThinkingEffort;
   const inferredModelRunner = inferRunnerIdFromModel(effectiveModel);
@@ -581,7 +630,6 @@ export async function runHostAgent(
     inferredModelRunner !== storedRunnerId
       ? inferredModelRunner
       : storedRunnerId;
-  const effectiveRunnerDescriptor = getRunnerDescriptor(effectiveRunnerId);
   if (effectiveRunnerId !== storedRunnerId) {
     logger.warn(
       {
@@ -593,46 +641,38 @@ export async function runHostAgent(
       'Auto-corrected runner from model override for local runtime',
     );
   }
-  // Per-workspace model override takes priority over global and runtime-env config
+  const effectiveProfileBundle = resolveRunnerProfileBundle(
+    effectiveRunnerId,
+    effectiveRunnerId === storedRunnerId ? sessionRecord?.runner_profile_id : null,
+  );
+  const effectiveRunnerDescriptor = effectiveProfileBundle.descriptor;
+  const runnerConfigDir = path.join(sessionBaseDir, `.${effectiveRunnerId}`);
+  fs.mkdirSync(runnerConfigDir, { recursive: true });
+  const runnerProfileConfig = effectiveProfileBundle.config;
+  const activeProfile = effectiveProfileBundle.activeProfile;
+  const runnerCommand = stringConfigValue(runnerProfileConfig, 'command');
+  // Per-workspace model override takes priority over global and runtime-env config.
   if (
-    effectiveRunnerId === 'claude' &&
     effectiveModel &&
-    (!inferredModelRunner || inferredModelRunner === 'claude')
+    (!inferredModelRunner || inferredModelRunner === effectiveRunnerId)
   ) {
-    hostEnv['HAPPYCLAW_MODEL'] = effectiveModel;
-  } else if (
-    effectiveRunnerId === 'claude' &&
-    effectiveModel &&
-    inferredModelRunner
-  ) {
+    for (const envName of effectiveRunnerDescriptor?.runtimeContract.modelEnv ||
+      []) {
+      hostEnv[envName] = effectiveModel;
+    }
+  } else if (effectiveModel && inferredModelRunner) {
     logger.warn(
       { group: group.name, runnerId: effectiveRunnerId, model: effectiveModel },
       'Ignoring incompatible model override for local runtime',
     );
   }
 
-  if (effectiveRunnerId === 'codex') {
-    if (
-      effectiveModel &&
-      (!inferredModelRunner || inferredModelRunner === 'codex')
-    ) {
-      hostEnv['HAPPYCLAW_CODEX_MODEL'] = effectiveModel;
+  for (const descriptor of listRunnerDescriptors()) {
+    const availabilityEnv = descriptor.runtimeContract.availabilityEnv;
+    if (!availabilityEnv) continue;
+    if (runnerAuthAvailable(descriptor, hostEnv)) {
+      hostEnv[availabilityEnv] = '1';
     }
-  }
-
-  const localClaude = detectLocalClaudeCode();
-  const localCodex = detectLocalCodexCli();
-
-  if (
-    localClaude.hasCredentials ||
-    !!process.env.ANTHROPIC_API_KEY ||
-    !!process.env.CLAUDE_CODE_OAUTH_TOKEN
-  ) {
-    hostEnv['HAPPYCLAW_CLAUDE_AVAILABLE'] = '1';
-  }
-
-  if (localCodex.hasAuth || !!process.env.OPENAI_API_KEY) {
-    hostEnv['HAPPYCLAW_CODEX_AVAILABLE'] = '1';
   }
 
   // Thinking effort for local runtime
@@ -643,6 +683,7 @@ export async function runHostAgent(
     profileId: activeProfile?.id,
     model: effectiveModel,
     thinkingEffort: effectiveThinkingEffort,
+    command: runnerCommand,
     config: runnerProfileConfig,
   };
 
@@ -726,8 +767,13 @@ export async function runHostAgent(
     'container',
     'skills',
   );
-  hostEnv['CLAUDE_CONFIG_DIR'] = groupSessionsDir;
-  hostEnv['HAPPYCLAW_WORKSPACE_SESSION'] = path.dirname(groupSessionsDir);
+  hostEnv['HAPPYCLAW_RUNNER_CONFIG_DIR'] = runnerConfigDir;
+  hostEnv['HAPPYCLAW_WORKSPACE_SESSION'] = sessionBaseDir;
+  const runnerConfigDirEnv =
+    effectiveRunnerDescriptor?.runtimeContract.configDirEnv;
+  if (runnerConfigDirEnv) {
+    hostEnv[runnerConfigDirEnv] = runnerConfigDir;
+  }
   // Cross-provider invoke_agent: share home session dir for fresh OAuth tokens
   // (same pattern as memory-agent.ts — avoids stale refresh tokens)
   const homeClaudeDir = path.join(
@@ -815,6 +861,25 @@ export async function runHostAgent(
       `缺少 ${runnerSubdir} 依赖（${missing}）。请先执行：${installHint}`,
     );
   }
+  const versionArgs =
+    effectiveRunnerDescriptor?.runtimeContract.versionArgs || ['--version'];
+  const declaredCommands =
+    effectiveRunnerDescriptor?.runtimeContract.requiredCommands || [];
+  const requiredCommands = [
+    runnerCommand || declaredCommands[0],
+    ...declaredCommands.slice(1),
+  ].filter((command): command is string => !!command);
+  const missingCommands = requiredCommands.filter(
+    (command) => !commandExists(command, versionArgs),
+  );
+  if (missingCommands.length > 0) {
+    const missing = missingCommands.join(', ');
+    logger.error(
+      { group: group.name, runnerId: effectiveRunnerId, missingCommands },
+      'Local runtime preflight failed: runner commands missing',
+    );
+    return localRuntimeSetupError(`找不到 runner 命令：${missing}`);
+  }
   if (!fs.existsSync(agentRunnerDist)) {
     logger.error(
       { group: group.name, agentRunnerDist },
@@ -853,6 +918,7 @@ export async function runHostAgent(
   );
 
   const logsDir = path.join(groupDir, 'logs');
+  applyAgentDockEnvAliases(hostEnv);
 
   return new Promise((resolve) => {
     let settled = false;

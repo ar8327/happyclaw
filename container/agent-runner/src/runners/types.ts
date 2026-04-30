@@ -41,6 +41,7 @@ export type OneShotInvokeInput = {
 export interface OneShotInvoker {
   runnerId: string;
   label: string;
+  description?: string;
   defaultModel?: string;
   models?: string[];
   invoke(input: OneShotInvokeInput): Promise<string>;
@@ -48,6 +49,7 @@ export interface OneShotInvoker {
 
 export interface RunnerManifest {
   descriptor: RunnerDescriptor;
+  production?: boolean;
   createRunner(ctx: RunnerFactoryContext): AgentRunner | Promise<AgentRunner>;
   healthCheck?(ctx: RunnerHealthContext): Promise<RunnerHealth>;
   listModels?(ctx: RunnerHealthContext): Promise<RunnerModel[]>;

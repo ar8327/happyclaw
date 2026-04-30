@@ -1,10 +1,10 @@
-# HappyClaw (Fork) — AI 协作者指南
+# AgentDock (Fork) — AI 协作者指南
 
 本文档帮助 AI 和工程协作者快速理解项目架构、关键机制与修改边界。
 
 ## 1. 项目定位
 
-本项目是 [HappyClaw](https://github.com/riba2534/happyclaw) 的实验性 fork，当前主线已经迁移到**单用户多 Session 本地 workbench**。与上游的核心差异：
+本项目是 [AgentDock](https://github.com/riba2534/happyclaw) 的实验性 fork，当前主线已经迁移到**单用户多 Session 本地 workbench**。与上游的核心差异：
 
 - **Memory Agent 系统**：独立的记忆 Session 与 one-shot memory 执行链路，替代上游的 inline MCP 记忆工具，实现自动会话归档、索引自修复和深度整理
 - **显式消息路由**：Agent 的 stdout 仅显示在 Web 端，IM 消息必须通过 `send_message` MCP 工具显式发送，Agent 自主控制消息路由
@@ -12,7 +12,7 @@
 
 上游会定期选择性合并。
 
-当前 HappyClaw 更接近一个自托管的本地 Agent 工作台：
+当前 AgentDock 更接近一个自托管的本地 Agent 工作台：
 
 - **输入**：飞书 / Telegram / QQ / Web 界面消息，统一绑定到同一个本地操作者名下的 Session
 - **执行**：本地 runtime 启动 `container/agent-runner` 中的 Claude 或 Codex provider，不再区分 Docker 与宿主机双执行模式
@@ -167,7 +167,7 @@
 - `RuntimeRequestExecutor` 负责统一执行管线，memory 通过 `MemoryPromptBuilderHook`、`RuntimeStatePersistenceHook`、`OneShotCloseHook` 等 hook 拼装 prompt、收集响应、落盘轻量 runtime state
 - `MemoryProfile` 在 runtime 侧下沉工具白名单、额外目录和禁用 user MCP 的约束
 - 每个 memory 请求都会复用共享 `session-launcher` 启动一次性 runtime turn，不复用上一次的 `providerSessionId`、`resumeAnchor`、`providerState`
-- memory 的真实状态只保存在 `data/memory/{ownerKey}/` 的文件系统里，不参与 HappyClaw 的 synthetic compact
+- memory 的真实状态只保存在 `data/memory/{ownerKey}/` 的文件系统里，不参与 AgentDock 的 synthetic compact
 - 仓库里仍保留 `container/memory-agent/` 旧实验实现，但当前主链路已经不再依赖它
 
 **四种操作**：
@@ -636,7 +636,7 @@ Session runtime 收尾 → export transcripts
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `ASSISTANT_NAME` | `HappyClaw` | 助手名称 |
+| `ASSISTANT_NAME` | `AgentDock` | 助手名称 |
 | `WEB_PORT` | `3000` | 后端端口 |
 | `WEB_SESSION_SECRET` | 自动生成 | 会话签名密钥 |
 | `FEISHU_APP_ID` | - | 飞书应用 ID |

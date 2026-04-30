@@ -1,5 +1,5 @@
 /**
- * Core types for HappyClaw Agent Runner protocol.
+ * Core types for AgentDock Agent Runner protocol.
  *
  * These types define the contract between the host process and any agent runner.
  * Used by the Claude runner and shared infrastructure.

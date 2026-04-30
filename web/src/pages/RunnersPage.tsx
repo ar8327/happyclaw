@@ -72,6 +72,11 @@ interface JsonSchemaProperty {
   title?: string;
   description?: string;
   enum?: unknown[];
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -724,6 +729,31 @@ export function RunnersPage() {
                                 type === 'number' || type === 'integer'
                                   ? 'number'
                                   : 'text'
+                              }
+                              min={
+                                typeof property.minimum === 'number'
+                                  ? property.minimum
+                                  : undefined
+                              }
+                              max={
+                                typeof property.maximum === 'number'
+                                  ? property.maximum
+                                  : undefined
+                              }
+                              minLength={
+                                typeof property.minLength === 'number'
+                                  ? property.minLength
+                                  : undefined
+                              }
+                              maxLength={
+                                typeof property.maxLength === 'number'
+                                  ? property.maxLength
+                                  : undefined
+                              }
+                              pattern={
+                                typeof property.pattern === 'string'
+                                  ? property.pattern
+                                  : undefined
                               }
                               value={
                                 typeof value === 'string' ||

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { evaluateSafetyLite, runPreCompactHook } from './claude-hooks.js';
+import { evaluateSafetyLite, runPreCompactHook } from './hooks.js';
 
 async function readStdin(): Promise<string> {
   return await new Promise((resolve, reject) => {

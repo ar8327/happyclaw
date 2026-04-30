@@ -1,10 +1,10 @@
-# HappyClaw (Fork) — AI 协作者指南
+# AgentDock (Fork) — AI 协作者指南
 
 > 完整架构文档：`CLAUDE-full.md`（§2-§8 详细模块、数据流、API、行为规范）。按需 Read。
 
 ## 1. 项目定位
 
-[HappyClaw](https://github.com/riba2534/happyclaw) 的实验性 fork，探索更好的记忆能力和更高的 Agent 自主性。
+[AgentDock](https://github.com/riba2534/happyclaw) 的实验性 fork，探索更好的记忆能力和更高的 Agent 自主性。
 
 **核心差异**：Memory Agent 系统（per-user 记忆子进程）、显式消息路由（stdout→Web，IM 需 `send_message`）、Skills 自主创建。
 

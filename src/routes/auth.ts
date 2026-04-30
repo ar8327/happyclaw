@@ -12,10 +12,10 @@ import {
 } from '../local-user.js';
 import {
   getAppearanceConfig,
-  detectLocalClaudeCode,
-  detectLocalCodexCli,
   getImFeishuConfig,
 } from '../runtime-config.js';
+import { listRunnerDescriptors } from '../runner-registry.js';
+import { runnerAuthAvailable } from '../runner-health.js';
 import {
   ChangePasswordSchema,
   ProfileUpdateSchema,
@@ -26,22 +26,24 @@ const authRoutes = new Hono<{ Variables: Variables }>();
 const AVATAR_DIR = path.join(DATA_DIR, 'avatars');
 
 function buildSetupStatus() {
-  const claudeLocal = detectLocalClaudeCode();
-  const claudeConfigured =
-    claudeLocal.hasCredentials ||
-    !!process.env.ANTHROPIC_API_KEY ||
-    !!process.env.CLAUDE_CODE_OAUTH_TOKEN;
-  const codexLocal = detectLocalCodexCli();
-  const codexConfigured = codexLocal.hasAuth || !!process.env.OPENAI_API_KEY;
+  const runnerConfigured = Object.fromEntries(
+    listRunnerDescriptors().map((descriptor) => [
+      descriptor.id,
+      runnerAuthAvailable(descriptor),
+    ]),
+  );
+  const configuredRunnerIds = Object.entries(runnerConfigured)
+    .filter(([, configured]) => configured)
+    .map(([runnerId]) => runnerId);
   const feishuConfig = getImFeishuConfig();
   const feishuConfigured = !!(
     feishuConfig?.appId?.trim() && feishuConfig?.appSecret?.trim()
   );
 
   return {
-    needsSetup: !claudeConfigured && !codexConfigured,
-    claudeConfigured,
-    codexConfigured,
+    needsSetup: configuredRunnerIds.length === 0,
+    runnerConfigured,
+    configuredRunnerIds,
     feishuConfigured,
   };
 }

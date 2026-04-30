@@ -107,9 +107,6 @@ export async function invokeClaudeOneShot(input: {
   timeoutMs: number;
   maxTurns?: number;
 }): Promise<string> {
-  const credDir = process.env.HAPPYCLAW_CLAUDE_CREDENTIALS_DIR;
-  const prevConfigDir = process.env.CLAUDE_CONFIG_DIR;
-  if (credDir) process.env.CLAUDE_CONFIG_DIR = credDir;
   const prevAuthToken = process.env.ANTHROPIC_AUTH_TOKEN;
   delete process.env.ANTHROPIC_AUTH_TOKEN;
 
@@ -195,11 +192,6 @@ export async function invokeClaudeOneShot(input: {
       clearTimeout(timer);
     }
   } finally {
-    if (credDir) {
-      if (prevConfigDir !== undefined)
-        process.env.CLAUDE_CONFIG_DIR = prevConfigDir;
-      else delete process.env.CLAUDE_CONFIG_DIR;
-    }
     if (prevAuthToken !== undefined)
       process.env.ANTHROPIC_AUTH_TOKEN = prevAuthToken;
   }

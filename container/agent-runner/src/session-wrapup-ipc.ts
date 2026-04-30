@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { writeIpcFile } from 'happyclaw-agent-runner-core';
+import { writeIpcFile } from 'agentdock-agent-runner-core';
 
 const WORKSPACE_IPC = process.env.HAPPYCLAW_WORKSPACE_IPC || '/workspace/ipc';
 const TASKS_DIR = path.join(WORKSPACE_IPC, 'tasks');

@@ -64,7 +64,7 @@ async function main(): Promise<void> {
   const tools = ctxMgr.getActiveTools();
 
   const server = new McpServer({
-    name: 'happyclaw',
+    name: 'agentdock',
     version: '1.0.0',
   });
 

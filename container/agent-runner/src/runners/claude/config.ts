@@ -21,5 +21,6 @@ export const DEFAULT_CLAUDE_BUILTIN_TOOLS = [
 
 export const DEFAULT_ALLOWED_TOOLS = [
   ...DEFAULT_CLAUDE_BUILTIN_TOOLS,
+  'mcp__agentdock__*',
   'mcp__happyclaw__*',
 ];

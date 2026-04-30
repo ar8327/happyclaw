@@ -127,7 +127,7 @@ export function buildBasePrompt(ctx: PluginContext): string {
   const parts: string[] = [];
 
   parts.push(
-    `You are an AI assistant running in the HappyClaw platform${ctx.providerInfo ? `, powered by ${ctx.providerInfo}` : ''}.`,
+    `You are an AI assistant running in the AgentDock platform${ctx.providerInfo ? `, powered by ${ctx.providerInfo}` : ''}.`,
     '',
     '## Environment',
     `- Working directory: ${ctx.workspaceGroup}`,

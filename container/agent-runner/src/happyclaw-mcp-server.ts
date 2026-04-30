@@ -39,7 +39,7 @@ async function main(): Promise<void> {
   const tools = ctxMgr.getActiveTools();
 
   const server = new McpServer({
-    name: 'happyclaw',
+    name: 'agentdock',
     version: '1.0.0',
   });
 
@@ -64,6 +64,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error('[happyclaw-mcp-server] Fatal error:', err);
+  console.error('[agentdock-mcp-server] Fatal error:', err);
   process.exit(1);
 });

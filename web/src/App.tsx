@@ -24,7 +24,7 @@ export function App() {
       <Routes>
         <Route path="/login" element={<Navigate to="/chat" replace />} />
         <Route path="/setup" element={<Navigate to="/chat" replace />} />
-        <Route path="/setup/providers" element={<Navigate to="/settings?tab=claude" replace />} />
+        <Route path="/setup/providers" element={<Navigate to="/settings?tab=runners" replace />} />
         <Route path="/setup/channels" element={<Navigate to="/settings?tab=channels" replace />} />
 
         {/* Feishu OAuth Callback */}

@@ -1,14 +1,19 @@
 /**
  * InvokeAgentPlugin — invoke_agent tool for cross-provider agent calls.
  *
- * Allows a running agent (Claude or Codex) to synchronously call another
- * agent provider for a one-shot task. The sub-agent gets basic code/file
- * tools but no HappyClaw MCP tools (no send_message, schedule_task, etc.).
+ * Allows a running agent to synchronously call another runner for a one-shot
+ * task. The sub-agent gets basic code/file
+ * tools but no AgentDock MCP tools (no send_message, schedule_task, etc.).
  *
  * Safety: recursive calls are blocked via HAPPYCLAW_INVOKE_DEPTH env var.
  */
 
-import type { ContextPlugin, PluginContext, ToolDefinition, ToolResult } from 'happyclaw-agent-runner-core';
+import type {
+  ContextPlugin,
+  PluginContext,
+  ToolDefinition,
+  ToolResult,
+} from 'agentdock-agent-runner-core';
 import { listRunnerManifests } from '../runners/index.js';
 import type { OneShotInvoker } from '../runners/types.js';
 
@@ -16,11 +21,12 @@ const INVOKE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
 function listAvailableOneShotInvokers(cwd: string): OneShotInvoker[] {
   return listRunnerManifests()
-    .map((manifest) =>
-      manifest.createOneShotInvoker?.({
-        env: process.env,
-        cwd,
-      }) || null,
+    .map(
+      (manifest) =>
+        manifest.createOneShotInvoker?.({
+          env: process.env,
+          cwd,
+        }) || null,
     )
     .filter((invoker): invoker is OneShotInvoker => !!invoker);
 }
@@ -30,20 +36,9 @@ function buildRegistryDescription(invokers: OneShotInvoker[]): string {
     'Call another AI agent to perform a one-shot task synchronously.',
     '',
     'The sub-agent has access to file/code tools (Read, Write, Bash, etc.) in the current workspace,',
-    'but NOT to HappyClaw tools (send_message, memory, tasks, etc.).',
+    'but NOT to AgentDock tools (send_message, memory, tasks, etc.).',
     '',
   ];
-
-  // When-to-use guidance (only when both providers available)
-  if (invokers.length > 1) {
-    lines.push(
-      'When to choose a provider:',
-      '• Use Codex (OpenAI GPT) for fast, focused code generation or edits',
-      '• Use Claude for deep analysis, reasoning, or nuanced writing',
-      '• Don\'t use for simple tasks you can handle yourself — the overhead isn\'t worth it',
-      '',
-    );
-  }
 
   lines.push('Available providers:');
 
@@ -51,6 +46,9 @@ function buildRegistryDescription(invokers: OneShotInvoker[]): string {
     lines.push(
       `• provider="${invoker.runnerId}" — ${invoker.label}. Models: ${(invoker.models || []).join(', ') || 'unspecified'}. Default: ${invoker.defaultModel || 'provider default'}`,
     );
+    if (invoker.description) {
+      lines.push(`  ${invoker.description}`);
+    }
   }
   if (invokers.length === 0) {
     lines.push('• (none — no credentials configured)');
@@ -60,7 +58,7 @@ function buildRegistryDescription(invokers: OneShotInvoker[]): string {
     '',
     'Constraints:',
     '• 5 minute timeout — design prompts for focused, bounded tasks',
-    '• No HappyClaw tools — sub-agent cannot send messages, schedule tasks, or access memory',
+    '• No AgentDock tools — sub-agent cannot send messages, schedule tasks, or access memory',
     '• No recursion — sub-agent cannot call invoke_agent again',
     '• No session — each call is independent, no context preserved',
     '• Write clear, self-contained prompts — the sub-agent has no knowledge of your conversation',
@@ -97,11 +95,12 @@ export class InvokeAgentPlugin implements ContextPlugin {
             provider: {
               type: 'string',
               enum: availableProviders,
-              description: `Target provider: ${availableProviders.map(p => `"${p}"`).join(' or ')}`,
+              description: `Target provider: ${availableProviders.map((p) => `"${p}"`).join(' or ')}`,
             },
             prompt: {
               type: 'string',
-              description: 'Complete, self-contained task description for the sub-agent',
+              description:
+                'Complete, self-contained task description for the sub-agent',
             },
             model: {
               type: 'string',
@@ -109,12 +108,14 @@ export class InvokeAgentPlugin implements ContextPlugin {
             },
             max_turns: {
               type: 'number',
-              description: 'Max tool-use turns (default 10). Only applies to Claude provider.',
+              description:
+                'Max tool-use turns (default 10). Runners that do not support this option may ignore it.',
             },
             thinking_effort: {
               type: 'string',
               enum: ['low', 'medium', 'high', 'max'],
-              description: 'Thinking/reasoning effort level. low=fast, high=thorough, max=deepest reasoning.',
+              description:
+                'Thinking/reasoning effort level. low=fast, high=thorough, max=deepest reasoning.',
             },
           },
           required: ['provider', 'prompt'],
@@ -131,7 +132,10 @@ export class InvokeAgentPlugin implements ContextPlugin {
           try {
             const invoker = invokers.find((item) => item.runnerId === provider);
             if (!invoker) {
-              return { content: `Unknown provider "${provider}". Use ${availableProviders.map(p => `"${p}"`).join(' or ')}.`, isError: true };
+              return {
+                content: `Unknown provider "${provider}". Use ${availableProviders.map((p) => `"${p}"`).join(' or ')}.`,
+                isError: true,
+              };
             }
             const result = await invoker.invoke({
               prompt,
@@ -146,7 +150,10 @@ export class InvokeAgentPlugin implements ContextPlugin {
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             if (msg.includes('abort') || msg.includes('Abort')) {
-              return { content: 'Sub-agent call timed out (5 minute limit).', isError: true };
+              return {
+                content: 'Sub-agent call timed out (5 minute limit).',
+                isError: true,
+              };
             }
             return { content: `Sub-agent error: ${msg}`, isError: true };
           }
