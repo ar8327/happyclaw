@@ -111,10 +111,19 @@ export interface RunnerRuntimeContract {
   requiredEnv?: string[];
   configDirEnv?: string;
   modelEnv?: string[];
+  modelCatalog?: RunnerModelCatalog;
   availabilityEnv?: string;
   auth?: 'none' | 'api_key' | 'oauth' | 'external_cli';
   authProbe?: RunnerAuthProbe;
   versionArgs?: string[];
+}
+
+export interface RunnerModelCatalog {
+  type: 'codex_models_cache';
+  envPath?: string;
+  relativeToEnv?: string;
+  relativeToHome?: string;
+  path?: string;
 }
 
 export interface RunnerToolContract {
@@ -178,7 +187,8 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
   claude: {
     id: 'claude',
     label: 'Claude',
-    description: 'Claude Code CLI runner with native turn streaming and MCP tools.',
+    description:
+      'Claude Code CLI runner with native turn streaming and MCP tools.',
     defaultModel: 'opus',
     modelPatterns: ['^(opus|sonnet|haiku)$', '^claude-'],
     capabilities: {
@@ -309,6 +319,12 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       requiredCommands: ['codex'],
       configDirEnv: 'CODEX_CONFIG_DIR',
       modelEnv: ['HAPPYCLAW_CODEX_MODEL'],
+      modelCatalog: {
+        type: 'codex_models_cache',
+        envPath: 'CODEX_HOME',
+        relativeToEnv: 'models_cache.json',
+        relativeToHome: '.codex/models_cache.json',
+      },
       availabilityEnv: 'HAPPYCLAW_CODEX_AVAILABLE',
       auth: 'external_cli',
       authProbe: {

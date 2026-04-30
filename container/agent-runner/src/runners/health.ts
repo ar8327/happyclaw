@@ -32,9 +32,18 @@ export interface RunnerAuthProbe {
 export interface RunnerRuntimeContractForHealth {
   requiredCommands?: string[];
   requiredEnv?: string[];
+  modelCatalog?: RunnerModelCatalog;
   auth?: 'none' | 'api_key' | 'oauth' | 'external_cli';
   authProbe?: RunnerAuthProbe;
   versionArgs?: string[];
+}
+
+export interface RunnerModelCatalog {
+  type: 'codex_models_cache';
+  envPath?: string;
+  relativeToEnv?: string;
+  relativeToHome?: string;
+  path?: string;
 }
 
 export interface RunnerDescriptorForHealth {
@@ -60,6 +69,14 @@ export interface RunnerModel {
   description?: string;
 }
 
+interface CodexCachedModel {
+  slug?: unknown;
+  display_name?: unknown;
+  description?: unknown;
+  visibility?: unknown;
+  priority?: unknown;
+}
+
 function expandHomePath(value: string): string {
   if (value === '~') return os.homedir();
   if (value.startsWith('~/')) return path.join(os.homedir(), value.slice(2));
@@ -76,6 +93,23 @@ function resolveProbeFilePath(
   }
   if (file.path) return expandHomePath(file.path);
   if (file.relativeToHome) return path.join(os.homedir(), file.relativeToHome);
+  return null;
+}
+
+function resolveModelCatalogPath(
+  catalog: RunnerModelCatalog,
+  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
+): string | null {
+  if (catalog.envPath && env[catalog.envPath]) {
+    const base = expandHomePath(String(env[catalog.envPath]));
+    return catalog.relativeToEnv
+      ? path.join(base, catalog.relativeToEnv)
+      : base;
+  }
+  if (catalog.path) return expandHomePath(catalog.path);
+  if (catalog.relativeToHome) {
+    return path.join(os.homedir(), catalog.relativeToHome);
+  }
   return null;
 }
 
@@ -232,10 +266,8 @@ export function runnerAuthAvailable(
   if (!descriptor) return false;
   if (descriptor.runtimeContract.auth === 'none') return true;
   if (descriptor.runtimeContract.authProbe) {
-    return evaluateRunnerAuthProbe(
-      descriptor.runtimeContract.authProbe,
-      env,
-    ).authenticated;
+    return evaluateRunnerAuthProbe(descriptor.runtimeContract.authProbe, env)
+      .authenticated;
   }
   if (descriptor.runtimeContract.auth === 'api_key') {
     return (descriptor.runtimeContract.requiredEnv || []).every(
@@ -262,13 +294,71 @@ async function detectCommandVersion(
 
 export function modelsForDescriptor(
   descriptor: RunnerDescriptorForHealth,
+  env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
 ): RunnerModel[] {
+  const catalogModels = modelsFromCatalog(
+    descriptor.runtimeContract.modelCatalog,
+    env,
+  );
+  if (catalogModels.length > 0) {
+    return catalogModels;
+  }
   if (descriptor.models && descriptor.models.length > 0) {
     return descriptor.models;
   }
   return descriptor.defaultModel
     ? [{ id: descriptor.defaultModel, label: descriptor.defaultModel }]
     : [];
+}
+
+function modelsFromCatalog(
+  catalog: RunnerModelCatalog | undefined,
+  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
+): RunnerModel[] {
+  if (!catalog) return [];
+  if (catalog.type === 'codex_models_cache') {
+    return modelsFromCodexCache(catalog, env);
+  }
+  return [];
+}
+
+function modelsFromCodexCache(
+  catalog: RunnerModelCatalog,
+  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
+): RunnerModel[] {
+  const cachePath = resolveModelCatalogPath(catalog, env);
+  if (!cachePath || !fs.existsSync(cachePath)) return [];
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(cachePath, 'utf-8')) as {
+      models?: unknown;
+    };
+    const models = Array.isArray(parsed.models) ? parsed.models : [];
+    return models
+      .filter((model): model is CodexCachedModel => {
+        if (!model || typeof model !== 'object' || Array.isArray(model)) {
+          return false;
+        }
+        return model.visibility === 'list' && typeof model.slug === 'string';
+      })
+      .map((model) => ({
+        id: String(model.slug),
+        label:
+          typeof model.display_name === 'string' && model.display_name.trim()
+            ? model.display_name
+            : String(model.slug),
+        description:
+          typeof model.description === 'string' ? model.description : undefined,
+        priority:
+          typeof model.priority === 'number' && Number.isFinite(model.priority)
+            ? model.priority
+            : 999,
+      }))
+      .sort((a, b) => a.priority - b.priority)
+      .map(({ priority: _priority, ...model }) => model);
+  } catch {
+    return [];
+  }
 }
 
 export async function buildRunnerHealth(

@@ -1,16 +1,14 @@
-import { buildRunnerHealth } from '../runner-health.js';
+import {
+  buildRunnerHealth,
+  modelsForDescriptor as resolveModelsForDescriptor,
+} from '../runner-health.js';
 import type { RunnerDescriptor, RunnerModel } from '../types.js';
 import type { RunnerServerManifest } from './types.js';
 
 export function modelsForDescriptor(
   descriptor: RunnerDescriptor,
 ): RunnerModel[] {
-  if (descriptor.models && descriptor.models.length > 0) {
-    return descriptor.models;
-  }
-  return descriptor.defaultModel
-    ? [{ id: descriptor.defaultModel, label: descriptor.defaultModel }]
-    : [];
+  return resolveModelsForDescriptor(descriptor);
 }
 
 export function createDescriptorBackedManifest(

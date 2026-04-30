@@ -10,7 +10,10 @@ import type {
 import type { RunnerPromptContract } from '../src/runner-descriptor.types.js';
 import { listRunnerManifests } from '../src/runners/index.js';
 import { fakeJsonManifest } from '../src/runners/fake-json/manifest.js';
-import { evaluateRunnerAuthProbe } from '../../../src/runner-health.js';
+import {
+  evaluateRunnerAuthProbe,
+  modelsForDescriptor,
+} from '../../../src/runner-health.js';
 import { listRunnerServerManifests } from '../../../src/runners/index.js';
 import { validateRunnerProfileConfig } from '../../../src/runner-profile-schema.js';
 
@@ -307,7 +310,10 @@ function assertClaudeRunnerIsOneShotCli(): void {
     path.resolve('container/agent-runner/src/runners/one-shot-invokers.ts'),
     'utf-8',
   );
-  assert.equal(oneShotInvokers.includes('process.env.CLAUDE_CONFIG_DIR'), false);
+  assert.equal(
+    oneShotInvokers.includes('process.env.CLAUDE_CONFIG_DIR'),
+    false,
+  );
 }
 
 function assertRunnerProfileSchemaValidation(): void {
@@ -391,6 +397,58 @@ function assertDescriptorAuthProbeWorks(): void {
     assert.equal(result.authenticated, true);
     assert.equal(result.detected, true);
     assert.equal(result.details.accountId, 'acco...6789');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function assertCodexModelCacheCatalogWorks(): void {
+  const dir = fs.mkdtempSync(path.join(process.cwd(), '.tmp-runner-models-'));
+  const cacheFile = path.join(dir, 'models_cache.json');
+  fs.writeFileSync(
+    cacheFile,
+    JSON.stringify({
+      models: [
+        {
+          slug: 'hidden-model',
+          display_name: 'Hidden Model',
+          visibility: 'hide',
+          priority: 0,
+        },
+        {
+          slug: 'gpt-5.4-mini',
+          display_name: 'GPT-5.4-Mini',
+          visibility: 'list',
+          priority: 4,
+        },
+        {
+          slug: 'gpt-5.5',
+          display_name: 'GPT-5.5',
+          visibility: 'list',
+          priority: 0,
+        },
+      ],
+    }),
+  );
+  try {
+    const models = modelsForDescriptor(
+      {
+        id: 'codex',
+        defaultModel: 'gpt-5.4',
+        models: [{ id: 'gpt-5.4', label: 'GPT-5.4' }],
+        runtimeContract: {
+          modelCatalog: {
+            type: 'codex_models_cache',
+            path: cacheFile,
+          },
+        },
+      },
+      {},
+    );
+    assert.deepEqual(
+      models.map((model) => model.id),
+      ['gpt-5.5', 'gpt-5.4-mini'],
+    );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -494,6 +552,7 @@ assertClaudeRunnerIsOneShotCli();
 assertRunnerProfileSchemaValidation();
 assertInvokeAgentIsRegistryDriven();
 assertDescriptorAuthProbeWorks();
+assertCodexModelCacheCatalogWorks();
 await assertFakeRunnerContract();
 await assertBaseCliRunnerRecoverableError();
 await assertBaseCliRunnerGenericError();
