@@ -34,6 +34,50 @@ export interface CodexSessionOptions {
   config?: Record<string, unknown>;
 }
 
+const DEFAULT_BUILTIN_MCP_STARTUP_TIMEOUT_SEC = 30;
+const DEFAULT_MEMORY_QUERY_TIMEOUT_MS = 60_000;
+const DEFAULT_MEMORY_SEND_TIMEOUT_MS = 120_000;
+const BUILTIN_MCP_TOOL_TIMEOUT_BUFFER_SEC = 30;
+
+function parsePositiveInteger(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function readEnvNumber(
+  env: Record<string, string> | undefined,
+  key: string,
+): number | undefined {
+  return parsePositiveInteger(env?.[key] || process.env[key]);
+}
+
+function buildBuiltinMcpTimeoutConfig(env: Record<string, string> | undefined): {
+  startup_timeout_sec: number;
+  tool_timeout_sec: number;
+} {
+  const queryTimeoutMs =
+    readEnvNumber(env, 'HAPPYCLAW_MEMORY_QUERY_TIMEOUT') ||
+    DEFAULT_MEMORY_QUERY_TIMEOUT_MS;
+  const sendTimeoutMs =
+    readEnvNumber(env, 'HAPPYCLAW_MEMORY_SEND_TIMEOUT') ||
+    DEFAULT_MEMORY_SEND_TIMEOUT_MS;
+  const explicitToolTimeoutSec = readEnvNumber(
+    env,
+    'HAPPYCLAW_MCP_TOOL_TIMEOUT_SEC',
+  );
+  const derivedToolTimeoutSec =
+    Math.ceil(Math.max(queryTimeoutMs, sendTimeoutMs) / 1000) +
+    BUILTIN_MCP_TOOL_TIMEOUT_BUFFER_SEC;
+
+  return {
+    startup_timeout_sec:
+      readEnvNumber(env, 'HAPPYCLAW_MCP_STARTUP_TIMEOUT_SEC') ||
+      DEFAULT_BUILTIN_MCP_STARTUP_TIMEOUT_SEC,
+    tool_timeout_sec: explicitToolTimeoutSec || derivedToolTimeoutSec,
+  };
+}
+
 export type CodexItemType =
   | 'agent_message'
   | 'reasoning'
@@ -578,6 +622,7 @@ export class CodexSession {
           command: 'node',
           args: [this.config.mcpServerPath],
           env: this.config.mcpServerEnv || {},
+          ...buildBuiltinMcpTimeoutConfig(this.config.mcpServerEnv),
         }
       : null;
     const mcpServers = {
