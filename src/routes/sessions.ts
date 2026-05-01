@@ -2290,24 +2290,11 @@ sessionRoutes.delete('/:id', authMiddleware, async (c) => {
       .filter((candidate) => candidate.parent_session_id === session.id)
       .map((candidate) => candidate.id),
   );
-  const blockingBindings = listSessionBindings().filter(
+  const cascadingBindings = listSessionBindings().filter(
     (binding) =>
       binding.session_id === session.id ||
       childSessionIds.has(binding.session_id),
   );
-  if (blockingBindings.length > 0) {
-    return c.json(
-      {
-        error: '该会话仍绑定了 IM 渠道，请先解绑后再删除。',
-        bound_channels: blockingBindings.map((binding) => ({
-          jid: binding.channel_jid,
-          name: binding.display_name || binding.channel_jid,
-          session_id: binding.session_id,
-        })),
-      },
-      409,
-    );
-  }
 
   const deps = getWebDeps();
   if (!deps) return c.json({ error: 'Server not initialized' }, 500);
@@ -2338,7 +2325,14 @@ sessionRoutes.delete('/:id', authMiddleware, async (c) => {
   delete deps.getSessions()[backingGroup.folder];
   deps.setLastAgentTimestamp(backingJid, { rowid: 0 });
 
-  return c.json({ success: true });
+  return c.json({
+    success: true,
+    unbound_channels: cascadingBindings.map((binding) => ({
+      jid: binding.channel_jid,
+      name: binding.display_name || binding.channel_jid,
+      session_id: binding.session_id,
+    })),
+  });
 });
 
 export default sessionRoutes;
