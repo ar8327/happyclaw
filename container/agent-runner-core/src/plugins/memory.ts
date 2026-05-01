@@ -99,19 +99,16 @@ export class MemoryPlugin implements ContextPlugin {
     ];
   }
 
-  getSystemPromptSection(ctx: PluginContext): string {
-    if (ctx.isHome || ctx.isAdminHome) {
-      return this.buildHomeMemoryPrompt(ctx);
-    }
-    return this.buildGroupMemoryPrompt();
+  getSystemPromptSection(): string {
+    return this.buildFullMemoryPrompt();
   }
 
   /**
-   * Full memory prompt for home containers (~70 lines).
+   * Full memory prompt for all containers (~70 lines).
    * Includes index.md, personality.md, memory_query usage examples,
    * memory_remember guidance, and compaction notes.
    */
-  private buildHomeMemoryPrompt(ctx: PluginContext): string {
+  private buildFullMemoryPrompt(): string {
     // Memory Agent mode: read index.md from the memory-index mount
     const WORKSPACE_MEMORY_INDEX = process.env.HAPPYCLAW_WORKSPACE_MEMORY_INDEX || '/workspace/memory-index';
     const parts: string[] = ['', '## 记忆系统', ''];
@@ -181,24 +178,6 @@ export class MemoryPlugin implements ContextPlugin {
       '不要在 CLAUDE.md 里手动维护用户信息——用户身份、偏好、知识由记忆系统统一管理，已通过上方随身索引加载。',
     );
     return parts.join('\n');
-  }
-
-  /**
-   * Read-only memory prompt for non-home group containers (~15 lines).
-   */
-  private buildGroupMemoryPrompt(): string {
-    return [
-      '',
-      '## 记忆',
-      '',
-      '### 查询记忆',
-      '可使用 `memory_query` 工具查询用户的记忆（过去的对话、偏好、项目知识等）。',
-      '查询可能需要几秒钟。',
-      '',
-      '### 本地记忆',
-      '重要信息直接记录在当前工作区的 CLAUDE.md 或其他文件中。',
-      'Claude 会自动维护你的会话记忆，无需额外操作。',
-    ].join('\n');
   }
 
   // ─── Private helpers ────────────────────────────────────────

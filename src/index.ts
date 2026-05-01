@@ -4078,6 +4078,7 @@ async function processTaskIpc(
           const continuation = await updateContinuationSummaryFromTranscript({
             groupFolder: workspaceFolder,
             chatJids: transcript.chatJids,
+            transcriptFile: transcript.transcriptFile,
             transcriptFilePath,
             generateSummary: async ({ systemPrompt, userMessage }) => {
               const generated = await wrapupOrchestrator.continuationSummary(

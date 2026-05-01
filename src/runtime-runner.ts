@@ -789,9 +789,6 @@ export async function runHostAgent(
   hostEnv['HAPPYCLAW_TOOL_CALL_HARD_TIMEOUT_MS'] = String(
     settings.toolCallHardTimeoutMs,
   );
-  hostEnv['HAPPYCLAW_CODEX_ARCHIVE_THRESHOLD'] = String(
-    settings.codexArchiveThreshold,
-  );
   hostEnv['HAPPYCLAW_MEMORY_SEND_TIMEOUT'] = String(settings.memorySendTimeout);
 
   // Memory Agent env vars

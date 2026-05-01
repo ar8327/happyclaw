@@ -1312,7 +1312,6 @@ export interface SystemSettings {
   memoryQueryTimeout: number;
   memoryGlobalSleepTimeout: number;
   memorySendTimeout: number;
-  codexArchiveThreshold: number;
   turnBatchWindowMs: number;
   turnMaxBatchMs: number;
   traceRetentionDays: number;
@@ -1337,7 +1336,6 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   memoryQueryTimeout: 60000,
   memoryGlobalSleepTimeout: 300000,
   memorySendTimeout: 120000,
-  codexArchiveThreshold: 200000,
   turnBatchWindowMs: 5000,
   turnMaxBatchMs: 30000,
   traceRetentionDays: 7,
@@ -1436,11 +1434,6 @@ function readSystemSettingsFromFile(): SystemSettings | null {
       typeof raw.memorySendTimeout === 'number' && raw.memorySendTimeout > 0
         ? raw.memorySendTimeout
         : DEFAULT_SYSTEM_SETTINGS.memorySendTimeout,
-    codexArchiveThreshold:
-      typeof raw.codexArchiveThreshold === 'number' &&
-      raw.codexArchiveThreshold > 0
-        ? raw.codexArchiveThreshold
-        : DEFAULT_SYSTEM_SETTINGS.codexArchiveThreshold,
     turnBatchWindowMs:
       typeof raw.turnBatchWindowMs === 'number' && raw.turnBatchWindowMs > 0
         ? raw.turnBatchWindowMs
@@ -1529,10 +1522,6 @@ function buildEnvFallbackSettings(): SystemSettings {
     memorySendTimeout: parseIntEnv(
       process.env.MEMORY_SEND_TIMEOUT,
       DEFAULT_SYSTEM_SETTINGS.memorySendTimeout,
-    ),
-    codexArchiveThreshold: parseIntEnv(
-      process.env.CODEX_ARCHIVE_THRESHOLD,
-      DEFAULT_SYSTEM_SETTINGS.codexArchiveThreshold,
     ),
     turnBatchWindowMs: parseIntEnv(
       process.env.TURN_BATCH_WINDOW_MS,
@@ -1634,10 +1623,6 @@ export function saveSystemSettings(
     merged.memoryGlobalSleepTimeout = 3600000; // max 1 hour
   if (merged.memorySendTimeout < 30000) merged.memorySendTimeout = 30000; // min 30s
   if (merged.memorySendTimeout > 3600000) merged.memorySendTimeout = 3600000; // max 1 hour
-  if (merged.codexArchiveThreshold < 10000)
-    merged.codexArchiveThreshold = 10000;
-  if (merged.codexArchiveThreshold > 2000000)
-    merged.codexArchiveThreshold = 2000000;
   if (merged.turnBatchWindowMs < 1000) merged.turnBatchWindowMs = 1000; // min 1s
   if (merged.turnBatchWindowMs > 60000) merged.turnBatchWindowMs = 60000; // max 60s
   if (merged.turnMaxBatchMs < 5000) merged.turnMaxBatchMs = 5000; // min 5s

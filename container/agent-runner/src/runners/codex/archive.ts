@@ -1,8 +1,8 @@
 /**
- * Codex Archive Manager — token-threshold-based conversation archival.
+ * Codex post-compact archive manager.
  *
- * Since Codex has no PreCompact hook, we archive based on the current
- * model context-window usage reported by the latest turn.
+ * Codex app-server exposes native context compaction. HappyClaw uses that as
+ * the trigger for transcript wrapup and optional supplemental summary injection.
  */
 
 import type { UsageInfo } from '../../runner-interface.js';
@@ -11,13 +11,6 @@ import {
   waitForSessionWrapupResponse,
   type SessionWrapupResponse,
 } from '../../session-wrapup-ipc.js';
-
-const ARCHIVE_TOKEN_THRESHOLD = parseInt(
-  process.env.HAPPYCLAW_CODEX_ARCHIVE_THRESHOLD
-    || process.env.CODEX_ARCHIVE_THRESHOLD
-    || '200000',
-  10,
-);
 
 function log(message: string): void {
   console.error(`[codex-archive] ${message}`);
@@ -30,6 +23,7 @@ export class CodexArchiveManager {
   private lastCacheReadInputTokens = 0;
   private turnCount = 0;
   private lastCompactedAt: string | null = null;
+  private nativeCompactCount = 0;
 
   hydrate(snapshot?: {
     lastContextWindowTokens?: unknown;
@@ -40,6 +34,7 @@ export class CodexArchiveManager {
     cumulativeOutputTokens?: unknown;
     turnCount?: unknown;
     lastCompactedAt?: unknown;
+    nativeCompactCount?: unknown;
   }): void {
     if (!snapshot || typeof snapshot !== 'object') return;
     this.lastContextWindowTokens =
@@ -72,6 +67,11 @@ export class CodexArchiveManager {
       && snapshot.lastCompactedAt.trim().length > 0
         ? snapshot.lastCompactedAt
         : null;
+    this.nativeCompactCount =
+      typeof snapshot.nativeCompactCount === 'number'
+      && Number.isFinite(snapshot.nativeCompactCount)
+        ? snapshot.nativeCompactCount
+        : 0;
   }
 
   snapshot(): {
@@ -81,6 +81,7 @@ export class CodexArchiveManager {
     lastCacheReadInputTokens: number;
     turnCount: number;
     lastCompactedAt: string | null;
+    nativeCompactCount: number;
   } {
     return {
       lastContextWindowTokens: this.lastContextWindowTokens,
@@ -89,6 +90,7 @@ export class CodexArchiveManager {
       lastCacheReadInputTokens: this.lastCacheReadInputTokens,
       turnCount: this.turnCount,
       lastCompactedAt: this.lastCompactedAt,
+      nativeCompactCount: this.nativeCompactCount,
     };
   }
 
@@ -100,20 +102,15 @@ export class CodexArchiveManager {
       this.lastCacheReadInputTokens = usage.cacheReadInputTokens;
       this.lastContextWindowTokens = usage.inputTokens + usage.outputTokens;
       log(
-        `Recorded turn usage for archive: contextWindow=${this.lastContextWindowTokens}/${ARCHIVE_TOKEN_THRESHOLD}, input=${usage.inputTokens}, output=${usage.outputTokens}, cachedInput=${usage.cacheReadInputTokens}`,
+        `Recorded Codex turn usage: contextWindow=${this.lastContextWindowTokens}, input=${usage.inputTokens}, output=${usage.outputTokens}, cachedInput=${usage.cacheReadInputTokens}`,
       );
     }
   }
 
-  shouldArchive(): boolean {
-    return this.lastContextWindowTokens >= ARCHIVE_TOKEN_THRESHOLD;
-  }
-
-  async archive(
+  async archiveAfterNativeCompact(
     groupFolder: string,
     userId?: string,
   ): Promise<SessionWrapupResponse | null> {
-    if (this.turnCount === 0) return null;
     return this.executeArchive(groupFolder, userId, true);
   }
 
@@ -162,6 +159,7 @@ export class CodexArchiveManager {
     if (response?.success) {
       if (markAsCompact) {
         this.lastCompactedAt = new Date().toISOString();
+        this.nativeCompactCount++;
       }
       this.reset();
     } else {

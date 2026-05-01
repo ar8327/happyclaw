@@ -10,6 +10,7 @@ export type McpTransport = 'stdio' | 'http' | 'sse';
 export type TurnBoundaryMode = 'native' | 'simulated';
 export type ArchivalTrigger =
   | 'pre_compact'
+  | 'post_compact'
   | 'turn_threshold'
   | 'cleanup_only'
   | 'external';
@@ -139,16 +140,6 @@ export interface RunnerCompatibility {
   observability: 'full' | 'degraded' | 'unsupported';
 }
 
-export interface RunnerContextArchiveView {
-  statePath?: string;
-  pendingFreshSessionPath?: string;
-  tokenThresholdSetting?: 'codexArchiveThreshold';
-}
-
-export interface RunnerRuntimeStateViews {
-  contextArchive?: RunnerContextArchiveView;
-}
-
 export interface RunnerDescriptor {
   id: RunnerId;
   label: string;
@@ -163,7 +154,6 @@ export interface RunnerDescriptor {
   profileSchema?: Record<string, unknown>;
   models?: RunnerModel[];
   compatibility: RunnerCompatibility;
-  runtimeStateViews?: RunnerRuntimeStateViews;
   defaultProfileFactory?: () => Record<string, unknown>;
 }
 
@@ -283,7 +273,7 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
   codex: {
     id: 'codex',
     label: 'Codex',
-    description: 'Codex CLI runner with instruction-file prompt injection.',
+    description: 'Codex app-server runner with native compaction detection.',
     defaultModel: 'gpt-5.4',
     modelPatterns: ['^gpt-[a-z0-9._-]+$', '^o[1-9](?:$|[-._])'],
     capabilities: {
@@ -304,18 +294,18 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
     },
     lifecycle: {
       turnBoundary: 'native',
-      archivalTrigger: ['turn_threshold', 'cleanup_only'],
-      contextShrinkTrigger: 'synthetic',
+      archivalTrigger: ['post_compact', 'cleanup_only'],
+      contextShrinkTrigger: 'native_event',
       beforeToolExecutionGuard: 'sandbox_only',
       hookStreaming: 'none',
-      postCompactRepair: 'synthetic',
+      postCompactRepair: 'native',
     },
     promptContract: {
       mode: 'instructions_file',
       dynamicContextReload: 'turn',
     },
     runtimeContract: {
-      requiredNodePackages: ['@openai/codex-sdk'],
+      requiredNodePackages: [],
       requiredCommands: ['codex'],
       configDirEnv: 'CODEX_CONFIG_DIR',
       modelEnv: ['HAPPYCLAW_CODEX_MODEL'],
@@ -378,13 +368,6 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       chat: 'full',
       im: 'degraded',
       observability: 'degraded',
-    },
-    runtimeStateViews: {
-      contextArchive: {
-        statePath: 'archiveState',
-        pendingFreshSessionPath: 'startFreshOnNextTurn',
-        tokenThresholdSetting: 'codexArchiveThreshold',
-      },
     },
   },
 };
