@@ -6,18 +6,15 @@
  */
 
 import type {
-  ThreadEvent,
-  ItemStartedEvent,
-  ItemCompletedEvent,
-  TurnFailedEvent,
-  ThreadErrorEvent,
-} from '@openai/codex-sdk';
+  CodexThreadEvent,
+  CodexThreadItem,
+} from './session.js';
 import type { StreamEvent } from '../../types.js';
 
 /**
  * Convert a Codex ThreadEvent to zero or more HappyClaw StreamEvents.
  */
-export function convertThreadEvent(event: ThreadEvent): StreamEvent[] {
+export function convertThreadEvent(event: CodexThreadEvent): StreamEvent[] {
   switch (event.type) {
     case 'thread.started':
       return [{ eventType: 'init' }];
@@ -43,6 +40,10 @@ export function convertThreadEvent(event: ThreadEvent): StreamEvent[] {
       // inspecting token_count events, so do not emit usage from the adapter.
       return [];
 
+    case 'token_count':
+    case 'compact.completed':
+      return [];
+
     case 'turn.failed':
       return handleTurnFailed(event);
 
@@ -54,7 +55,7 @@ export function convertThreadEvent(event: ThreadEvent): StreamEvent[] {
   }
 }
 
-function handleItemStarted(event: ItemStartedEvent): StreamEvent[] {
+function handleItemStarted(event: Extract<CodexThreadEvent, { type: 'item.started' }>): StreamEvent[] {
   const item = event.item;
   switch (item.type) {
     case 'command_execution':
@@ -85,6 +86,9 @@ function handleItemStarted(event: ItemStartedEvent): StreamEvent[] {
         toolName: 'WebSearch',
       }];
 
+    case 'context_compaction':
+      return [];
+
     case 'reasoning':
       return [];
 
@@ -100,7 +104,7 @@ function handleItemStarted(event: ItemStartedEvent): StreamEvent[] {
   }
 }
 
-function handleItemCompleted(event: ItemCompletedEvent): StreamEvent[] {
+function handleItemCompleted(event: Extract<CodexThreadEvent, { type: 'item.completed' }>): StreamEvent[] {
   const item = event.item;
   const events: StreamEvent[] = [];
 
@@ -158,21 +162,26 @@ function handleItemCompleted(event: ItemCompletedEvent): StreamEvent[] {
         statusText: `Error: ${item.message}`,
       });
       break;
+
+    case 'context_compaction':
+      break;
   }
 
   return events;
 }
 
-function handleTurnFailed(event: TurnFailedEvent): StreamEvent[] {
+function handleTurnFailed(event: Extract<CodexThreadEvent, { type: 'turn.failed' }>): StreamEvent[] {
   return [{
     eventType: 'status',
     statusText: `Turn failed: ${event.error.message}`,
   }];
 }
 
-function handleError(event: ThreadErrorEvent): StreamEvent[] {
+function handleError(event: Extract<CodexThreadEvent, { type: 'error' }>): StreamEvent[] {
   return [{
     eventType: 'status',
     statusText: `Error: ${event.message}`,
   }];
 }
+
+export type { CodexThreadEvent, CodexThreadItem };

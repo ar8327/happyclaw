@@ -48,6 +48,7 @@ export interface CompressOptions {
 export interface ContinuationSummaryOptions {
   groupFolder: string;
   chatJids: string[];
+  transcriptFile?: string;
   transcriptFilePath: string;
   generateSummary: (input: {
     systemPrompt: string;
@@ -119,9 +120,65 @@ function buildTranscript(
   return lines.join('\n\n');
 }
 
-function truncateForSummary(text: string, maxLen: number): string {
-  if (text.length <= maxLen) return text;
-  return `${text.slice(0, maxLen)}\n\n[...内容截断...]`;
+interface LineNumberedTranscript {
+  text: string;
+  totalLines: number;
+  includedLines: number;
+  truncated: boolean;
+}
+
+function buildLineNumberedTranscript(
+  transcript: string,
+  maxLen: number,
+): LineNumberedTranscript {
+  const rawLines = transcript.split(/\r?\n/);
+  const numberedLines: string[] = [];
+  let currentLength = 0;
+  for (let i = 0; i < rawLines.length; i++) {
+    const numbered = `L${String(i + 1).padStart(4, '0')} | ${rawLines[i]}`;
+    const nextLength = currentLength + numbered.length + 1;
+    if (nextLength > maxLen) {
+      return {
+        text: `${numberedLines.join('\n')}\n\n[...内容截断，后续原始 transcript 行未纳入本次总结输入...]`,
+        totalLines: rawLines.length,
+        includedLines: i,
+        truncated: true,
+      };
+    }
+    numberedLines.push(numbered);
+    currentLength = nextLength;
+  }
+  return {
+    text: numberedLines.join('\n'),
+    totalLines: rawLines.length,
+    includedLines: rawLines.length,
+    truncated: false,
+  };
+}
+
+function buildContinuationSummarySourceHeader(options: {
+  transcriptFilePath: string;
+  transcriptFile?: string;
+  totalLines: number;
+  includedLines: number;
+  truncated: boolean;
+}): string {
+  return [
+    '来源 transcript：',
+    `- path: ${options.transcriptFilePath}`,
+    options.transcriptFile ? `- memory_relative_path: ${options.transcriptFile}` : '',
+    `- lines: L0001-L${String(options.totalLines).padStart(4, '0')}`,
+    options.truncated
+      ? `- summarization_input: L0001-L${String(options.includedLines).padStart(4, '0')}，后续行因长度限制未纳入`
+      : '- summarization_input: full',
+  ].filter(Boolean).join('\n');
+}
+
+function attachSourceHeader(summary: string, sourceHeader: string): string {
+  if (summary.includes('来源 transcript：') || summary.includes('Source transcript:')) {
+    return summary;
+  }
+  return `${sourceHeader}\n\n${summary}`;
 }
 
 /**
@@ -211,11 +268,11 @@ export async function updateContinuationSummaryFromTranscript(
     return { success: false, error: 'No chatJids provided' };
   }
 
-  let transcript: string;
+  let rawTranscript: string;
   try {
-    transcript = truncateForSummary(
-      await fs.promises.readFile(options.transcriptFilePath, 'utf-8'),
-      80_000,
+    rawTranscript = await fs.promises.readFile(
+      options.transcriptFilePath,
+      'utf-8',
     );
   } catch (err) {
     return {
@@ -236,6 +293,15 @@ export async function updateContinuationSummaryFromTranscript(
       ? Array.from(previousSummaries.keys()).join('\n\n---\n\n')
       : '无';
 
+  const transcript = buildLineNumberedTranscript(rawTranscript, 80_000);
+  const sourceHeader = buildContinuationSummarySourceHeader({
+    transcriptFilePath: options.transcriptFilePath,
+    transcriptFile: options.transcriptFile,
+    totalLines: transcript.totalLines,
+    includedLines: transcript.includedLines,
+    truncated: transcript.truncated,
+  });
+
   const summaryPrompt = `你是 AgentDock 的 continuation summary 生成器。你的输出会被注入到新的模型 thread 中，用于延续刚刚 compact 的对话。
 
 目标：
@@ -244,25 +310,31 @@ export async function updateContinuationSummaryFromTranscript(
 3. 保留短句指代所需的最近上下文，例如“确实”“有道理”“就这样”指向什么
 4. 保留 IM 发送状态，例如已经通过 Telegram 或飞书发给用户的内容
 5. 合并旧摘要和新 transcript，不要丢掉仍然相关的早期上下文
+6. 提供可追溯来源，让后续模型能按 transcript 路径和行号回查细节
 
 要求：
 - 使用中文
 - 控制在 2000 tokens 以内
 - 直接输出摘要正文，不要输出 JSON，不要加解释性前言
-- 不要编造 transcript 中没有的信息`;
+- 不要编造 transcript 中没有的信息
+- 必须保留“来源 transcript”小节，包含 transcript path、memory_relative_path 和行数范围
+- 必须保留“主题索引”小节，用 bullet 写出 3 到 8 个主题，每个主题必须带原始 transcript 行号范围，例如 L0012-L0038
+- 行号引用只能使用输入里出现的 Lxxxx 编号，表示原始 transcript 文件中的行`;
 
   try {
     const generated = await options.generateSummary({
       systemPrompt: summaryPrompt,
       userMessage: [
+        sourceHeader,
+        '',
         '旧 continuation summary：',
         previousSummaryText,
         '',
-        '新 compact transcript：',
-        transcript,
+        '新 compact transcript，左侧 Lxxxx 是原始 transcript 文件行号：',
+        transcript.text,
       ].join('\n'),
     });
-    const summary = generated.summary.trim();
+    const summary = attachSourceHeader(generated.summary.trim(), sourceHeader);
     if (!summary) {
       return {
         success: false,
@@ -275,7 +347,7 @@ export async function updateContinuationSummaryFromTranscript(
         group_folder: options.groupFolder,
         chat_jid: jid,
         summary,
-        message_count: (transcript.match(/^\*\*/gm) || []).length,
+        message_count: (rawTranscript.match(/^\*\*/gm) || []).length,
         created_at: new Date().toISOString(),
         model_used: generated.modelUsed || 'memory-runner',
       });

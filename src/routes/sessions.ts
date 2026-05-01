@@ -767,7 +767,7 @@ function resolveContextArchiveThreshold(descriptor: RunnerDescriptor): number {
   if (thresholdSetting === 'codexArchiveThreshold') {
     return Math.max(1, getSystemSettings().codexArchiveThreshold);
   }
-  return 1;
+  return 0;
 }
 
 function buildContextArchivePayload(
@@ -797,10 +797,14 @@ function buildContextArchivePayload(
   const outputTokens =
     parseFiniteNumber(archiveSnapshot?.lastOutputTokens) ||
     parseFiniteNumber(archiveSnapshot?.cumulativeOutputTokens);
-  const thresholdTokens = resolveContextArchiveThreshold(descriptor);
   const currentTokens =
     parseFiniteNumber(archiveSnapshot?.lastContextWindowTokens) ||
     inputTokens + outputTokens;
+  const configuredThresholdTokens = resolveContextArchiveThreshold(descriptor);
+  const thresholdTokens =
+    configuredThresholdTokens > 0
+      ? configuredThresholdTokens
+      : Math.max(1, currentTokens);
   const pendingFreshSession =
     readProviderStatePath(
       providerState,
@@ -812,9 +816,16 @@ function buildContextArchivePayload(
     current_input_tokens: inputTokens,
     current_output_tokens: outputTokens,
     threshold_tokens: thresholdTokens,
-    remaining_tokens: Math.max(0, thresholdTokens - currentTokens),
-    progress: Math.min(1, currentTokens / thresholdTokens),
+    remaining_tokens:
+      configuredThresholdTokens > 0
+        ? Math.max(0, thresholdTokens - currentTokens)
+        : 0,
+    progress:
+      configuredThresholdTokens > 0
+        ? Math.min(1, currentTokens / thresholdTokens)
+        : currentTokens > 0 ? 1 : 0,
     turn_count: parseFiniteNumber(archiveSnapshot?.turnCount),
+    native_compact_count: parseFiniteNumber(archiveSnapshot?.nativeCompactCount),
     pending_fresh_session: pendingFreshSession,
     last_compacted_at:
       parseOptionalIsoString(archiveSnapshot?.lastCompactedAt) ||

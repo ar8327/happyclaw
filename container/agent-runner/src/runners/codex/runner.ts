@@ -12,7 +12,6 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import type { ThreadEvent, ThreadItem } from '@openai/codex-sdk';
 import {
   normalizeHomeFlags,
 } from 'agentdock-agent-runner-core';
@@ -30,7 +29,12 @@ import type {
 import type { ContainerInput, ContainerOutput } from '../../types.js';
 import type { SessionState } from '../../session-state.js';
 import type { IpcPaths } from '../../ipc-handler.js';
-import { CodexSession, type CodexSessionConfig } from './session.js';
+import {
+  CodexSession,
+  type CodexItemType,
+  type CodexSessionConfig,
+  type CodexThreadEvent,
+} from './session.js';
 import { convertThreadEvent } from './event-adapter.js';
 import { saveImagesToTempFiles } from './image-utils.js';
 import { CodexArchiveManager } from './archive.js';
@@ -70,42 +74,16 @@ function resolveAdditionalDirectories(defaultDirs: string[]): string[] {
   }
 }
 
-interface CodexTokenUsage {
-  input_tokens?: unknown;
-  cached_input_tokens?: unknown;
-  output_tokens?: unknown;
-}
-
-interface CodexTokenCountEvent {
-  type?: string;
-  payload?: {
-    type?: string;
-    info?: {
-      last_token_usage?: CodexTokenUsage;
-    } | null;
-  };
-}
-
 function numberOrZero(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
-function usageFromCodexTokenCount(event: ThreadEvent): UsageInfo | null {
-  const tokenEvent = event as unknown as CodexTokenCountEvent;
-  if (
-    tokenEvent.type !== 'event_msg' ||
-    tokenEvent.payload?.type !== 'token_count'
-  ) {
-    return null;
-  }
-
-  const last = tokenEvent.payload.info?.last_token_usage;
-  if (!last) return null;
-
+function usageFromCodexTokenCount(event: CodexThreadEvent): UsageInfo | null {
+  if (event.type !== 'token_count') return null;
   return {
-    inputTokens: numberOrZero(last.input_tokens),
-    outputTokens: numberOrZero(last.output_tokens),
-    cacheReadInputTokens: numberOrZero(last.cached_input_tokens),
+    inputTokens: numberOrZero(event.usage.input_tokens),
+    outputTokens: numberOrZero(event.usage.output_tokens),
+    cacheReadInputTokens: numberOrZero(event.usage.cached_input_tokens),
     cacheCreationInputTokens: 0,
     costUSD: 0,
     durationMs: 0,
@@ -113,7 +91,7 @@ function usageFromCodexTokenCount(event: ThreadEvent): UsageInfo | null {
   };
 }
 
-function usageFromCodexTurnCompleted(event: ThreadEvent): UsageInfo | null {
+function usageFromCodexTurnCompleted(event: CodexThreadEvent): UsageInfo | null {
   if (event.type !== 'turn.completed') return null;
   return {
     inputTokens: event.usage.input_tokens,
@@ -188,9 +166,10 @@ export class CodexRunner implements AgentRunner {
   private mcpServerPath!: string;
   private tmpDir!: string;
   private archiveMgr = new CodexArchiveManager();
-  private startFreshOnNextTurn = false;
   private providerCumulativeUsage: UsageInfo | null = null;
   private activeToolCalls = new Map<string, number>();
+  private pendingPostCompact = false;
+  private seenCompactKeys = new Set<string>();
   private readonly opts: CodexRunnerOptions;
 
   constructor(opts: CodexRunnerOptions) {
@@ -201,7 +180,6 @@ export class CodexRunner implements AgentRunner {
     const { containerInput, groupDir, globalDir, memoryDir } = this.opts;
     const { isHome, isAdminHome } = normalizeHomeFlags(containerInput);
     const persistedState = this.opts.state.getProviderState<{
-      startFreshOnNextTurn?: unknown;
       archiveState?: {
         lastInputTokens?: unknown;
         lastOutputTokens?: unknown;
@@ -215,7 +193,6 @@ export class CodexRunner implements AgentRunner {
       activeThreadId?: unknown;
     }>();
     if (!this.opts.disableSyntheticArchive) {
-      this.startFreshOnNextTurn = persistedState?.startFreshOnNextTurn === true;
       this.archiveMgr.hydrate(persistedState?.archiveState);
       this.providerCumulativeUsage = readUsageSnapshot(
         persistedState?.providerCumulativeUsage,
@@ -287,7 +264,7 @@ export class CodexRunner implements AgentRunner {
       event: {
         eventType: 'lifecycle',
         phase: 'compact_started',
-        trigger: 'synthetic_threshold',
+        trigger: 'native',
       },
     };
   }
@@ -326,14 +303,85 @@ export class CodexRunner implements AgentRunner {
     return subtractUsage(cumulativeUsage, previous);
   }
 
+  private buildArchiveCompletedMessage(
+    archiveResult: Awaited<ReturnType<CodexArchiveManager['archiveAfterNativeCompact']>>,
+    statusText: string,
+  ): NormalizedMessage {
+    return {
+      kind: 'stream_event',
+      event: {
+        eventType: 'lifecycle',
+        phase: 'archive_completed',
+        statusText,
+        archivedFolders: [this.opts.containerInput.groupFolder],
+        transcriptFiles: [
+          archiveResult?.conversationArchiveFile,
+          archiveResult?.transcriptFile,
+        ].filter(
+          (file): file is string =>
+            typeof file === 'string' && file.trim().length > 0,
+        ),
+      },
+    };
+  }
+
+  private async injectPostCompactContextWithRetry(
+    continuationSummary?: string,
+  ): Promise<boolean> {
+    const maxAttempts = 3;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await this.session.injectPostCompactContext({
+          continuationSummary,
+          activeChannels: this.opts.state.getActiveImChannels(),
+        });
+        return true;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.opts.log(`Codex post-compact context injection failed (${attempt}/${maxAttempts}): ${msg}`);
+        if (attempt < maxAttempts) {
+          await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+        }
+      }
+    }
+    return false;
+  }
+
+  private async runPostCompactArchive(): Promise<{
+    archiveResult: Awaited<ReturnType<CodexArchiveManager['archiveAfterNativeCompact']>>;
+    statusText: string;
+  }> {
+    this.pendingPostCompact = true;
+    try {
+      const archiveResult = await this.archiveMgr.archiveAfterNativeCompact(
+        this.opts.containerInput.groupFolder,
+        this.opts.containerInput.userId || undefined,
+      );
+      if (!archiveResult?.success) {
+        return { archiveResult, statusText: 'session_wrapup_failed' };
+      }
+      const summary = archiveResult.continuationSummary?.trim();
+      const injected = await this.injectPostCompactContextWithRetry(summary);
+      return {
+        archiveResult,
+        statusText: injected
+          ? summary
+            ? 'session_wrapup_completed_post_compact_context_injected'
+            : 'session_wrapup_completed_post_compact_context_injected_no_summary'
+          : 'session_wrapup_completed_post_compact_context_injection_failed',
+      };
+    } finally {
+      this.pendingPostCompact = false;
+    }
+  }
+
   async *runQuery(config: QueryConfig): AsyncGenerator<NormalizedMessage, QueryResult> {
     const { opts } = this;
     const { log } = opts;
 
     const composedPrompt = config.prompt;
-    const resumeTarget = this.startFreshOnNextTurn
-      ? undefined
-      : (config.resumeAt || config.sessionId || undefined);
+    const isManualCompact = composedPrompt.trim() === '/compact';
+    const resumeTarget = config.resumeAt || config.sessionId || undefined;
     const systemPrompt = resumeTarget
       ? this.buildResumeInstructions()
       : config.systemPrompt;
@@ -350,21 +398,24 @@ export class CodexRunner implements AgentRunner {
     }
 
     // Start or resume thread
-    this.session.startOrResume(resumeTarget);
+    await this.session.startOrResume(resumeTarget);
     if (!resumeTarget) {
       this.providerCumulativeUsage = null;
     }
-    this.startFreshOnNextTurn = false;
 
     // Run turn and convert events
     let usage: UsageInfo | undefined;
     let fallbackUsage: UsageInfo | undefined;
     let finalText: string | null = null;
     let threadId: string | null = null;
+    const compactKeysThisTurn: string[] = [];
     this.activeToolCalls.clear();
 
     try {
-      for await (const event of this.session.runTurn(composedPrompt, imagePaths)) {
+      const eventStream = isManualCompact
+        ? this.session.runCompact()
+        : this.session.runTurn(composedPrompt, imagePaths);
+      for await (const event of eventStream) {
         this.trackActivityEvent(event);
 
         const tokenCountUsage = usageFromCodexTokenCount(event);
@@ -394,6 +445,15 @@ export class CodexRunner implements AgentRunner {
         const turnCompletedUsage = usageFromCodexTurnCompleted(event);
         if (turnCompletedUsage) {
           fallbackUsage = this.normalizeProviderUsage(turnCompletedUsage);
+        }
+
+        if (event.type === 'compact.completed') {
+          const compactKey = `${event.thread_id}:${event.turn_id}`;
+          if (!this.seenCompactKeys.has(compactKey)) {
+            this.seenCompactKeys.add(compactKey);
+            compactKeysThisTurn.push(compactKey);
+            yield this.buildCompactStartedMessage();
+          }
         }
 
         // Handle errors
@@ -434,8 +494,14 @@ export class CodexRunner implements AgentRunner {
       this.archiveMgr.recordTurn(usage);
     }
 
-    if (!this.opts.disableSyntheticArchive && this.archiveMgr.shouldArchive()) {
-      yield this.buildCompactStartedMessage();
+    // Emit resume anchor (thread ID) before post-compact work so the runtime
+    // can persist the native Codex thread id even if wrapup fails.
+    const currentThreadId = threadId || this.session.getThreadId();
+    if (currentThreadId) {
+      yield { kind: 'resume_anchor', anchor: currentThreadId };
+    }
+
+    if (!this.opts.disableSyntheticArchive && compactKeysThisTurn.length > 0) {
       yield {
         kind: 'stream_event',
         event: {
@@ -443,46 +509,9 @@ export class CodexRunner implements AgentRunner {
           phase: 'archive_started',
         },
       };
-      const archiveResult = await this.archiveMgr.archive(
-        this.opts.containerInput.groupFolder,
-        this.opts.containerInput.userId || undefined,
-      );
-      if (archiveResult?.success) {
-        this.session.resetThread();
-        this.startFreshOnNextTurn = true;
-        this.providerCumulativeUsage = null;
-        yield this.buildCompactCompletedMessage();
-      } else {
-        log(
-          `Skipping synthetic compact reset for ${this.opts.containerInput.groupFolder}: session_wrapup did not complete`,
-        );
-      }
-      yield {
-        kind: 'stream_event',
-        event: {
-          eventType: 'lifecycle',
-          phase: 'archive_completed',
-          statusText: archiveResult?.success
-            ? 'session_wrapup_completed'
-            : 'session_wrapup_failed',
-          archivedFolders: [this.opts.containerInput.groupFolder],
-          transcriptFiles: [
-            archiveResult?.conversationArchiveFile,
-            archiveResult?.transcriptFile,
-          ].filter(
-            (file): file is string =>
-              typeof file === 'string' && file.trim().length > 0,
-          ),
-        },
-      };
-    }
-
-    // Emit resume anchor (thread ID)
-    const currentThreadId = this.startFreshOnNextTurn
-      ? null
-      : (threadId || this.session.getThreadId());
-    if (currentThreadId) {
-      yield { kind: 'resume_anchor', anchor: currentThreadId };
+      const { archiveResult, statusText } = await this.runPostCompactArchive();
+      yield this.buildCompactCompletedMessage();
+      yield this.buildArchiveCompletedMessage(archiveResult, statusText);
     }
 
     return {
@@ -501,7 +530,7 @@ export class CodexRunner implements AgentRunner {
   }
 
   async interrupt(): Promise<void> {
-    this.session.interrupt();
+    await this.session.interrupt();
   }
 
   getActivityReport(): ActivityReport {
@@ -514,7 +543,7 @@ export class CodexRunner implements AgentRunner {
     return {
       hasActiveToolCall: oldestStartedAt > 0,
       activeToolDurationMs: oldestStartedAt > 0 ? Date.now() - oldestStartedAt : 0,
-      hasPendingBackgroundTasks: false,
+      hasPendingBackgroundTasks: this.pendingPostCompact,
     };
   }
 
@@ -524,7 +553,6 @@ export class CodexRunner implements AgentRunner {
       activeThreadId: currentThreadId,
     };
     if (!this.opts.disableSyntheticArchive) {
-      providerState.startFreshOnNextTurn = this.startFreshOnNextTurn;
       providerState.archiveState = this.archiveMgr.snapshot();
       if (this.providerCumulativeUsage) {
         providerState.providerCumulativeUsage = this.providerCumulativeUsage;
@@ -533,12 +561,6 @@ export class CodexRunner implements AgentRunner {
     return {
       providerState,
       lastMessageCursor: currentThreadId,
-      sessionControl: this.startFreshOnNextTurn
-        ? {
-            clearProviderSession: true,
-            clearResumeAnchor: true,
-          }
-        : undefined,
     };
   }
 
@@ -549,16 +571,14 @@ export class CodexRunner implements AgentRunner {
         this.opts.containerInput.userId || undefined,
       );
     }
-    if (this.startFreshOnNextTurn) {
-      this.session.resetThread();
-    }
+    await this.session.close();
     // Clean up temp directory
     try {
       fs.rmSync(this.tmpDir, { recursive: true, force: true });
     } catch { /* ignore */ }
   }
 
-  private trackActivityEvent(event: ThreadEvent): void {
+  private trackActivityEvent(event: CodexThreadEvent): void {
     if (event.type === 'item.started' && this.isToolLikeItem(event.item.type)) {
       this.activeToolCalls.set(event.item.id, Date.now());
       return;
@@ -572,7 +592,7 @@ export class CodexRunner implements AgentRunner {
     }
   }
 
-  private isToolLikeItem(itemType: ThreadItem['type']): boolean {
+  private isToolLikeItem(itemType: CodexItemType): boolean {
     return itemType === 'command_execution'
       || itemType === 'mcp_tool_call'
       || itemType === 'file_change'
