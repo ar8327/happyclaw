@@ -20,7 +20,6 @@ interface RuntimeEnvPanelProps {
   onClose?: () => void;
   title?: string;
   hideSessionFields?: boolean;
-  hideCodexCompact?: boolean;
   hostCommandDescription?: string;
 }
 
@@ -34,7 +33,6 @@ type RuntimeEnvSession = {
   model?: string | null;
   thinking_effort?: SessionInfo['thinking_effort'] | null;
   cwd?: string | null;
-  context_archive?: SessionInfo['context_archive'];
 };
 
 interface RunnerProfileOption {
@@ -75,17 +73,6 @@ interface RunnerOption {
   capabilities: RunnerCapabilities;
   lifecycle: RunnerLifecycle;
   degradation_reasons: string[];
-}
-
-function formatNumber(value: number | undefined | null): string {
-  return new Intl.NumberFormat('en-US').format(Math.round(value || 0));
-}
-
-function formatDateTime(value: string | null | undefined): string {
-  if (!value) return '暂无记录';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '暂无记录';
-  return date.toLocaleString('zh-CN');
 }
 
 function RunnerCapabilityCard({ runner }: { runner: RunnerOption | null }) {
@@ -155,7 +142,6 @@ export function RuntimeEnvPanel({
   onClose,
   title = '会话运行环境',
   hideSessionFields = false,
-  hideCodexCompact = false,
   hostCommandDescription,
 }: RuntimeEnvPanelProps) {
   const sessionFromChat = useChatStore((s) => s.groups[sessionId]);
@@ -324,8 +310,6 @@ export function RuntimeEnvPanel({
           },
         ]
       : DEFAULT_MODEL_OPTIONS;
-  const contextArchive = session?.context_archive;
-  const archiveProgressWidth = `${Math.max(0, Math.min(100, Math.round((contextArchive?.progress || 0) * 100)))}%`;
   const resolvedHostCommandDescription =
     hostCommandDescription ||
     'AgentDock 不再管理 provider 连接配置。认证、Base URL、API Key、自定义环境变量都需要由宿主机自己提供。当前面板只保留 Session 级的 Runner、模型和工作目录设置。';
@@ -473,59 +457,6 @@ export function RuntimeEnvPanel({
         )}
 
         {!hideSessionFields && <div className="border-t border-slate-100" />}
-
-        {!hideCodexCompact && contextArchive && (
-          <>
-            <div className="space-y-3">
-              <div className="text-xs font-medium text-slate-500 uppercase tracking-wide">Context Archive</div>
-
-              <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 space-y-3">
-                <div className="flex items-center justify-between gap-3 text-xs">
-                  <div className="font-medium text-slate-700">当前 context window</div>
-                  <div className="font-mono text-slate-600">
-                    {formatNumber(contextArchive.current_tokens)} / {formatNumber(contextArchive.threshold_tokens)}
-                  </div>
-                </div>
-
-                <div className="h-2 rounded-full bg-slate-200 overflow-hidden">
-                  <div
-                    className="h-full rounded-full bg-sky-500 transition-[width] duration-300"
-                    style={{ width: archiveProgressWidth }}
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-2 text-[11px]">
-                  <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
-                    距下次归档: <span className="font-medium text-slate-700">{formatNumber(contextArchive.remaining_tokens)}</span>
-                  </div>
-                  <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
-                    统计轮次: <span className="font-medium text-slate-700">{formatNumber(contextArchive.turn_count)}</span>
-                  </div>
-                  <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
-                    输入 tokens: <span className="font-medium text-slate-700">{formatNumber(contextArchive.current_input_tokens)}</span>
-                  </div>
-                  <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
-                    输出 tokens: <span className="font-medium text-slate-700">{formatNumber(contextArchive.current_output_tokens)}</span>
-                  </div>
-                  <div className="rounded border border-slate-200 bg-white px-2 py-1.5 col-span-2">
-                    上次归档: <span className="font-medium text-slate-700">{formatDateTime(contextArchive.last_compacted_at)}</span>
-                  </div>
-                  <div className="rounded border border-slate-200 bg-white px-2 py-1.5 col-span-2">
-                    状态更新时间: <span className="font-medium text-slate-700">{formatDateTime(contextArchive.state_updated_at)}</span>
-                  </div>
-                </div>
-
-                {contextArchive.pending_fresh_session && (
-                  <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
-                    当前会话已经完成归档，下一轮会重新开启 provider 会话。
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="border-t border-slate-100" />
-          </>
-        )}
 
         <div className="space-y-3">
           <div className="text-xs font-medium text-slate-500 uppercase tracking-wide">本机命令模式</div>

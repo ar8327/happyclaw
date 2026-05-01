@@ -24,18 +24,6 @@ export interface SessionInfo {
   bound_channels?: string[];
   backing_jid?: string | null;
   degradation_reasons?: string[];
-  context_archive?: {
-    current_tokens: number;
-    current_input_tokens: number;
-    current_output_tokens: number;
-    threshold_tokens: number;
-    remaining_tokens: number;
-    progress: number;
-    turn_count: number;
-    pending_fresh_session: boolean;
-    last_compacted_at: string | null;
-    state_updated_at: string | null;
-  } | null;
 }
 
 export interface AgentInfo {

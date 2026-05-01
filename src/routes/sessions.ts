@@ -71,7 +71,6 @@ import {
 import { serializeRunnerDescriptor } from '../runner-catalog.js';
 import { compressContext, isCompressing } from '../context-compressor.js';
 import { DATA_DIR, GROUPS_DIR } from '../config.js';
-import { getSystemSettings } from '../runtime-config.js';
 import { executeSessionReset } from '../commands.js';
 import { loadTurnTrace } from '../turn-trace.js';
 import {
@@ -644,14 +643,6 @@ function buildSessionPayload(
       : [],
     has_summary: !!summary,
     summary_created_at: summary?.created_at ?? null,
-    context_archive:
-      descriptor?.runtimeStateViews?.contextArchive && session.kind !== 'memory'
-        ? buildContextArchivePayload(
-            session,
-            descriptor,
-            summary?.created_at ?? null,
-          )
-        : null,
     pinned_at: session.is_pinned ? session.updated_at : undefined,
     selected_skills: isMemorySession
       ? undefined
@@ -738,101 +729,6 @@ function parseSessionStateJson<T>(
   } catch {
     return fallback;
   }
-}
-
-function parseFiniteNumber(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
-}
-
-function parseOptionalIsoString(value: unknown): string | null {
-  return typeof value === 'string' && value.trim().length > 0 ? value : null;
-}
-
-function readProviderStatePath(
-  value: Record<string, unknown> | undefined,
-  pathExpression: string | undefined,
-): unknown {
-  if (!value || !pathExpression) return undefined;
-  return pathExpression.split('.').reduce<unknown>((current, segment) => {
-    if (!current || typeof current !== 'object' || Array.isArray(current)) {
-      return undefined;
-    }
-    return (current as Record<string, unknown>)[segment];
-  }, value);
-}
-
-function resolveContextArchiveThreshold(descriptor: RunnerDescriptor): number {
-  const thresholdSetting =
-    descriptor.runtimeStateViews?.contextArchive?.tokenThresholdSetting;
-  if (thresholdSetting === 'codexArchiveThreshold') {
-    return Math.max(1, getSystemSettings().codexArchiveThreshold);
-  }
-  return 0;
-}
-
-function buildContextArchivePayload(
-  session: SessionRecord,
-  descriptor: RunnerDescriptor,
-  summaryCreatedAt: string | null,
-): Record<string, unknown> | null {
-  const archiveView = descriptor.runtimeStateViews?.contextArchive;
-  if (!archiveView) return null;
-  const runtimeState = getSessionRuntimeState(session.id);
-  const providerState = parseSessionStateJson<
-    Record<string, unknown> | undefined
-  >(runtimeState?.provider_state_json, undefined);
-  const rawArchiveState = readProviderStatePath(
-    providerState,
-    archiveView.statePath,
-  );
-  const archiveSnapshot =
-    rawArchiveState &&
-    typeof rawArchiveState === 'object' &&
-    !Array.isArray(rawArchiveState)
-      ? (rawArchiveState as Record<string, unknown>)
-      : undefined;
-  const inputTokens =
-    parseFiniteNumber(archiveSnapshot?.lastInputTokens) ||
-    parseFiniteNumber(archiveSnapshot?.cumulativeInputTokens);
-  const outputTokens =
-    parseFiniteNumber(archiveSnapshot?.lastOutputTokens) ||
-    parseFiniteNumber(archiveSnapshot?.cumulativeOutputTokens);
-  const currentTokens =
-    parseFiniteNumber(archiveSnapshot?.lastContextWindowTokens) ||
-    inputTokens + outputTokens;
-  const configuredThresholdTokens = resolveContextArchiveThreshold(descriptor);
-  const thresholdTokens =
-    configuredThresholdTokens > 0
-      ? configuredThresholdTokens
-      : Math.max(1, currentTokens);
-  const pendingFreshSession =
-    readProviderStatePath(
-      providerState,
-      archiveView.pendingFreshSessionPath,
-    ) === true;
-
-  return {
-    current_tokens: currentTokens,
-    current_input_tokens: inputTokens,
-    current_output_tokens: outputTokens,
-    threshold_tokens: thresholdTokens,
-    remaining_tokens:
-      configuredThresholdTokens > 0
-        ? Math.max(0, thresholdTokens - currentTokens)
-        : 0,
-    progress:
-      configuredThresholdTokens > 0
-        ? Math.min(1, currentTokens / thresholdTokens)
-        : currentTokens > 0 ? 1 : 0,
-    turn_count: parseFiniteNumber(archiveSnapshot?.turnCount),
-    native_compact_count: parseFiniteNumber(archiveSnapshot?.nativeCompactCount),
-    pending_fresh_session: pendingFreshSession,
-    last_compacted_at:
-      parseOptionalIsoString(archiveSnapshot?.lastCompactedAt) ||
-      summaryCreatedAt ||
-      null,
-    state_updated_at: runtimeState?.updated_at || null,
-  };
 }
 
 function persistPermissionModeSnapshot(

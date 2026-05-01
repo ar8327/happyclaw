@@ -159,7 +159,6 @@ export const SystemSettingsSchema = z.object({
   memoryQueryTimeout: z.number().int().min(10000).max(600000).optional(),
   memoryGlobalSleepTimeout: z.number().int().min(60000).max(3600000).optional(),
   memorySendTimeout: z.number().int().min(30000).max(3600000).optional(),
-  codexArchiveThreshold: z.number().int().min(10000).max(2000000).optional(),
   turnBatchWindowMs: z.number().int().min(1000).max(60000).optional(),
   turnMaxBatchMs: z.number().int().min(5000).max(300000).optional(),
   traceRetentionDays: z.number().int().min(1).max(90).optional(),

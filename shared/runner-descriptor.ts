@@ -140,16 +140,6 @@ export interface RunnerCompatibility {
   observability: 'full' | 'degraded' | 'unsupported';
 }
 
-export interface RunnerContextArchiveView {
-  statePath?: string;
-  pendingFreshSessionPath?: string;
-  tokenThresholdSetting?: 'codexArchiveThreshold';
-}
-
-export interface RunnerRuntimeStateViews {
-  contextArchive?: RunnerContextArchiveView;
-}
-
 export interface RunnerDescriptor {
   id: RunnerId;
   label: string;
@@ -164,7 +154,6 @@ export interface RunnerDescriptor {
   profileSchema?: Record<string, unknown>;
   models?: RunnerModel[];
   compatibility: RunnerCompatibility;
-  runtimeStateViews?: RunnerRuntimeStateViews;
   defaultProfileFactory?: () => Record<string, unknown>;
 }
 
@@ -379,11 +368,6 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       chat: 'full',
       im: 'degraded',
       observability: 'degraded',
-    },
-    runtimeStateViews: {
-      contextArchive: {
-        statePath: 'archiveState',
-      },
     },
   },
 };

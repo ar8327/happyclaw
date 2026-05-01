@@ -114,17 +114,6 @@ const fields: FieldConfig[] = [
     step: 10,
   },
   {
-    key: 'codexArchiveThreshold',
-    label: 'Codex 归档阈值',
-    description: 'Codex synthetic archive 触发所需的累计 token 数',
-    unit: 'tokens',
-    toDisplay: (v) => v,
-    toStored: (v) => v,
-    min: 10000,
-    max: 2000000,
-    step: 10000,
-  },
-  {
     key: 'turnBatchWindowMs',
     label: '消息聚合窗口',
     description: '同渠道消息在此时间窗口内追加到当前 Turn',
