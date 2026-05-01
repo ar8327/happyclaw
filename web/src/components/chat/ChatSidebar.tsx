@@ -360,7 +360,7 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
         onClose={() => setDeleteState({ open: false, jid: '', name: '' })}
         onConfirm={handleDeleteConfirm}
         title="删除会话"
-        message={`确认删除会话「${deleteState.name}」吗？此操作会彻底删除该会话的全部数据，包括聊天记录、工作目录文件和定时任务。此操作不可撤销。`}
+        message={`确认删除会话「${deleteState.name}」吗？此操作会彻底删除该会话的全部数据，包括聊天记录、工作目录文件、定时任务和相关 IM 绑定。此操作不可撤销。`}
         confirmText="删除"
         cancelText="取消"
         confirmVariant="danger"
