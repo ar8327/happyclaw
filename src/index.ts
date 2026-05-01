@@ -190,6 +190,7 @@ import {
 import { getLocalWorkbenchUserPublic } from './local-user.js';
 import { getDefaultRunnerId } from './runner-registry.js';
 import { clearSessionRuntimeFiles } from './runner-runtime-files.js';
+import { getInheritedWorkspaceRuntimeConfig } from './session-defaults.js';
 
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const execFileAsync = promisify(execFile);
@@ -1339,17 +1340,14 @@ function createOwnedWorkspace(
   ownerKey: string,
   now: string,
 ): RegisteredGroup {
+  const runtimeConfig = getInheritedWorkspaceRuntimeConfig(ownerKey);
   saveSessionRecord({
     id: `main:${folder}`,
     name,
     kind: 'workspace',
     parent_session_id: null,
     cwd: path.join(GROUPS_DIR, folder),
-    runner_id: getDefaultRunnerId(),
-    runner_profile_id: null,
-    model: null,
-    thinking_effort: null,
-    context_compression: 'off',
+    ...runtimeConfig,
     is_pinned: false,
     archived: false,
     owner_key: ownerKey,
