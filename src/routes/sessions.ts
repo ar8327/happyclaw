@@ -80,6 +80,7 @@ import {
 } from '../mount-security.js';
 import { validateRunnerProfileConfig } from '../runner-profile-schema.js';
 import { initializeWorkspaceFromLocalDirectory } from '../workspace-init.js';
+import { getInheritedWorkspaceRuntimeConfig } from '../session-defaults.js';
 import {
   buildWorkerConversationJid,
   buildWorkerSessionId,
@@ -1203,17 +1204,14 @@ sessionRoutes.post('/', authMiddleware, async (c) => {
     );
   }
 
+  const runtimeConfig = getInheritedWorkspaceRuntimeConfig(user.id);
   const createdSession: SessionRecord = {
     id: `main:${folder}`,
     name,
     kind: 'workspace',
     parent_session_id: null,
     cwd: sessionDir,
-    runner_id: getDefaultRunnerId(),
-    runner_profile_id: null,
-    model: null,
-    thinking_effort: null,
-    context_compression: 'off',
+    ...runtimeConfig,
     is_pinned: false,
     archived: false,
     owner_key: user.id,
