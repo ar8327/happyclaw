@@ -16,12 +16,20 @@ user-invocable: false
 
 1. 理解用户意图——他们想让 Skill 做什么、什么时候触发
 2. 编写 SKILL.md 草稿
-3. 保存到 Skills 目录并创建符号链接（当前会话立刻可用）
+3. 保存到 `$HAPPYCLAW_SKILLS_DIR`（由 HappyClaw 负责运行时链接）
 4. 和用户一起测试、收集反馈
 5. 根据反馈迭代改进
 6. 直到用户满意为止
 
 你的工作是判断用户处于哪个阶段，然后帮他们推进。可能他们说"我想做一个 X 的 skill"，那就从需求捕获开始；也可能他们已经有一份现成的 SKILL.md，那就直接进入适配/改进环节。
+
+## 存储位置原则
+
+HappyClaw 有自己的 Skill 管理机制。创建、迁移或修改用户级 Skill 时，**只把源文件写到 `$HAPPYCLAW_SKILLS_DIR`**（宿主机对应 `data/skills/{ownerId}/`）。不要把 HappyClaw Skill 安装到 provider 原生目录，例如 `~/.claude/skills`、`~/.codex/skills`、`~/.agents/skills`。
+
+这些 provider 原生目录可能只对某个 runner 或当前宿主环境生效，不会进入 HappyClaw 的 `/api/skills`、Web Skills 管理页，也不保证能被未来自动新建的 workspace 继承。`data/sessions/<workspace>/.claude/skills` / `.claude/skills` 这类目录只应视为 HappyClaw 启动 runtime 时生成的链接层或缓存，不是持久化来源。
+
+只有在用户明确要求“给 Codex/Claude 原生环境单独安装一个 skill，和 HappyClaw 无关”时，才考虑写入 provider 原生目录，并且要说明它不会被 HappyClaw 统一管理。
 
 ## 需求捕获
 
@@ -137,24 +145,21 @@ description 是触发的核心机制。Claude 看到用户消息后，根据 des
 
 ### 创建新 Skill
 
-Skills 目录路径通过环境变量 `$HAPPYCLAW_SKILLS_DIR` 获取。
+Skills 目录路径通过环境变量 `$HAPPYCLAW_SKILLS_DIR` 获取。这个目录是 HappyClaw 用户级 Skill 的唯一持久化来源。
 
 ```bash
-# 1. 创建 skill 目录和 SKILL.md
+# 创建 skill 目录和 SKILL.md
 mkdir -p "$HAPPYCLAW_SKILLS_DIR/my-new-skill"
-# 然后用 Write/Edit 工具写入 SKILL.md
-
-# 2. 创建符号链接让当前会话立刻可用
-ln -sfn "$HAPPYCLAW_SKILLS_DIR/my-new-skill" ~/.claude/skills/my-new-skill
+# 然后用 Write/Edit 工具写入 $HAPPYCLAW_SKILLS_DIR/my-new-skill/SKILL.md
 ```
 
-两步都要做：写文件是持久化（下次启动自动发现），创建符号链接是让当前会话也能用。
+不要额外写入 `~/.claude/skills`、`~/.codex/skills`、`~/.agents/skills`。HappyClaw 会在每次 runtime 启动时自动把 `$HAPPYCLAW_PROJECT_SKILLS_DIR` 和 `$HAPPYCLAW_SKILLS_DIR` 链接进 session 目录；Codex 的 tool-loader 也会直接扫描这两个目录。
+
+如果当前 runtime 已经启动，新创建的 skill 通常从下一轮/下一次 runtime 启动开始稳定可见。需要立刻验证时，优先直接读取 `$HAPPYCLAW_SKILLS_DIR/<skill-id>/SKILL.md` 或重新启动一次相关 runtime，不要为了“立即可见”污染 provider 原生目录。
 
 ### 编辑已有 Skill
 
-已有的 skill 通过符号链接挂载在 `~/.claude/skills/` 下。用户级 skill 的实际文件在 `$HAPPYCLAW_SKILLS_DIR/` 中，可以直接用 Read/Edit 工具修改。
-
-项目级 skill（`/workspace/project-skills/`）是只读的，不能直接修改。要定制它们，使用下面的覆盖机制。
+用户级 skill 的实际文件在 `$HAPPYCLAW_SKILLS_DIR/` 中，可以直接用 Read/Edit 工具修改。项目级 skill 在 `$HAPPYCLAW_PROJECT_SKILLS_DIR`（通常是 `/workspace/project-skills/` 或 `container/skills/`）中，默认只读；要定制它们，使用下面的覆盖机制。
 
 ### 定制默认 Skill（Copy-on-Write）
 
@@ -167,11 +172,10 @@ cp -r /workspace/project-skills/agent-browser "$HAPPYCLAW_SKILLS_DIR/agent-brows
 # 2. 编辑用户目录中的副本（这里可以随意修改）
 # 用 Read/Edit 工具修改 $HAPPYCLAW_SKILLS_DIR/agent-browser/SKILL.md
 
-# 3. 更新符号链接让当前会话使用修改后的版本
-ln -sfn "$HAPPYCLAW_SKILLS_DIR/agent-browser" ~/.claude/skills/agent-browser
+# 3. 无需手动写 provider 原生目录；HappyClaw 下次 runtime 启动会自动链接用户级覆盖
 ```
 
-**原理**：容器启动时，符号链接按"项目级 → 用户级"的顺序创建，同名的用户级 skill 会自动覆盖项目级。所以只要在用户目录放一个同名目录，下次启动就生效。
+**原理**：runtime 启动时，符号链接按"项目级 → 用户级"的顺序创建，同名的用户级 skill 会自动覆盖项目级。所以只要在用户目录放一个同名目录，下次启动就生效。
 
 **恢复默认**：在 Web UI 的 Skills 页面删除用户级的同名 skill，或者手动 `rm -rf "$HAPPYCLAW_SKILLS_DIR/agent-browser"`。下次启动时项目级原版会自动恢复。
 
@@ -180,8 +184,9 @@ ln -sfn "$HAPPYCLAW_SKILLS_DIR/agent-browser" ~/.claude/skills/agent-browser
 ### 查看已有 Skill
 
 ```bash
-ls ~/.claude/skills/           # 列出所有可用的 skill
-cat ~/.claude/skills/*/SKILL.md  # 查看所有 skill 内容
+ls "$HAPPYCLAW_SKILLS_DIR"                 # 列出用户级 skill
+ls "$HAPPYCLAW_PROJECT_SKILLS_DIR"         # 列出项目级 skill
+cat "$HAPPYCLAW_SKILLS_DIR"/*/SKILL.md     # 查看用户级 skill 内容
 ```
 
 ## 迭代改进

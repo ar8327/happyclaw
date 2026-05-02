@@ -157,7 +157,7 @@ Agent 在运行时可通过内置 MCP Server 与主进程通信：
 ### Skills 系统（Fork 特有：Agent 自主创建）
 
 - **项目级 Skills** — 放在 `container/skills/`，作为本地 runtime 的共享技能目录
-- **本地技能目录** — Agent 可通过 `skill-creator` 直接写入本地技能目录，当前存储结构仍带有兼容期的 ownerKey 维度
+- **本地技能目录** — Agent 可通过 `skill-creator` 直接写入 `$HAPPYCLAW_SKILLS_DIR` / `data/skills/{ownerKey}/`；不要把 HappyClaw Skill 写进 `~/.claude/skills`、`~/.codex/skills`、`~/.agents/skills` 等 provider 原生目录
 - **主机同步** — 可将宿主机 `~/.claude/skills/` 同步到本地技能目录
 - 无需镜像构建，符号链接与本地目录扫描即可自动发现技能。上游的注册表安装机制已移除
 

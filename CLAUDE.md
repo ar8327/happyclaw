@@ -91,4 +91,4 @@ make help          # 所有命令
 
 **修改 DB Schema**：`db.ts` 加 migration → 更新 `SCHEMA_VERSION` → 同步 CREATE TABLE
 
-**新增 Skills**：项目级放 `container/skills/`；用户级由 Agent 通过 `skill-creator` 创建到 `$HAPPYCLAW_SKILLS_DIR`。无需重建镜像。
+**新增 Skills**：项目级放 `container/skills/`；用户级由 Agent 通过 `skill-creator` 创建到 `$HAPPYCLAW_SKILLS_DIR`。不要写入 `~/.claude/skills`、`~/.codex/skills`、`~/.agents/skills` 等 provider 原生目录。无需重建镜像。

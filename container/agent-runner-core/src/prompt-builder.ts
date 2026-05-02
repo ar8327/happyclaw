@@ -45,6 +45,19 @@ export const OUTPUT_GUIDELINES = [
   'Web 界面会自动将 Mermaid 代码渲染为可视化图表。',
 ].join('\n');
 
+export const SKILL_STORAGE_GUIDELINES = [
+  '',
+  '## Skill storage policy',
+  '',
+  'When creating, installing, migrating, or modifying Skills in HappyClaw, use the HappyClaw-managed skill directories, not provider-native directories.',
+  '',
+  '- User-level Skills must be written under `$HAPPYCLAW_SKILLS_DIR` (host path: `data/skills/{ownerKey}/`).',
+  '- Project/shared Skills belong under `$HAPPYCLAW_PROJECT_SKILLS_DIR` / `container/skills/` only when intentionally changing the HappyClaw project itself.',
+  '- Do not create or install HappyClaw Skills under provider-native locations such as `~/.claude/skills`, `~/.codex/skills`, or `~/.agents/skills`, unless the user explicitly asks for a provider-specific host installation outside HappyClaw.',
+  '- Treat `.claude/skills` inside a session as a runtime link/cache managed by HappyClaw. It is not the source of truth for new Skills.',
+  '- If you need a Skill to persist across future workspaces, place it in `$HAPPYCLAW_SKILLS_DIR`; HappyClaw will link it into each runtime automatically.',
+].join('\n');
+
 export const WEB_FETCH_GUIDELINES = [
   '',
   '## 网页访问策略',
@@ -201,6 +214,7 @@ export function buildAppendPrompt(
     INTERACTION_GUIDELINES,
     channelRoutingSection,
     ...pluginSections,
+    SKILL_STORAGE_GUIDELINES,
     OUTPUT_GUIDELINES,
     WEB_FETCH_GUIDELINES,
     BACKGROUND_TASK_GUIDELINES,

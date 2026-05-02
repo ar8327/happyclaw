@@ -731,7 +731,7 @@ make help          # 列出所有可用的 make 命令
 
 **项目级 Skills**：添加到 `container/skills/`。这是本地 runtime 的共享技能目录。
 
-**用户级 Skills**：存储在 `data/skills/{userId}/`。Agent 可通过 `skill-creator` 项目级 Skill 自主创建新 Skills，直接写入 `$HAPPYCLAW_SKILLS_DIR`。
+**用户级 Skills**：存储在 `data/skills/{userId}/`。Agent 可通过 `skill-creator` 项目级 Skill 自主创建新 Skills，直接写入 `$HAPPYCLAW_SKILLS_DIR`；不要写入 `~/.claude/skills`、`~/.codex/skills`、`~/.agents/skills` 等 provider 原生目录。
 
 **主机同步**：`POST /api/skills/sync-host` 可将宿主机 `~/.claude/skills/` 同步到用户目录。
 
