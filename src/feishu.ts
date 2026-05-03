@@ -6,6 +6,7 @@ import {
   setLastGroupSync,
   storeChatMetadata,
   storeMessageDirect,
+  messageExists,
   updateChatName,
 } from './db.js';
 import { logger } from './logger.js';
@@ -830,6 +831,23 @@ export function createFeishuConnection(
     } = payload;
     if (!chatId || !messageId) return;
 
+    const resolvedCreateTimeMsForProgress =
+      createTimeMs > 0 ? createTimeMs : Date.now();
+
+    if (messageExists(messageId)) {
+      // Backfill and reconnect delivery can replay messages that were already
+      // persisted before the current process started. The in-memory msgCache
+      // cannot catch those, so guard with the database before triggering
+      // interrupts, broadcasts, or agent runs.
+      markSeen(messageId);
+      rememberChatProgress(chatId, resolvedCreateTimeMsForProgress, chatType);
+      logger.info(
+        { messageId, chatId, source },
+        'Skipping already stored Feishu message',
+      );
+      return;
+    }
+
     if (isDuplicate(messageId)) {
       logger.debug({ messageId }, 'Duplicate message, skipping');
       return;
@@ -1024,7 +1042,7 @@ export function createFeishuConnection(
 
     lastMessageIdByChat.set(chatId, messageId);
 
-    const resolvedCreateTimeMs = createTimeMs > 0 ? createTimeMs : Date.now();
+    const resolvedCreateTimeMs = resolvedCreateTimeMsForProgress;
     const timestamp = new Date(resolvedCreateTimeMs).toISOString();
     rememberChatProgress(chatId, resolvedCreateTimeMs, chatType);
 

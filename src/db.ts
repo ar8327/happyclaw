@@ -1361,6 +1361,13 @@ export function ensureChatExists(chatJid: string): void {
  * Store a message with full content (channel-agnostic).
  * Only call this for registered groups where message history is needed.
  */
+export function messageExists(msgId: string): boolean {
+  const row = db
+    .prepare('SELECT 1 FROM messages WHERE id = ? LIMIT 1')
+    .get(msgId) as unknown | undefined;
+  return row !== undefined;
+}
+
 export function storeMessageDirect(
   msgId: string,
   chatJid: string,
