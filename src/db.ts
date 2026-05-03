@@ -2490,6 +2490,49 @@ function deriveSessionCwd(group: RegisteredGroup): string {
   return path.join(GROUPS_DIR, group.folder);
 }
 
+function resolveSessionRuntimeProjection(
+  group: RegisteredGroup | null | undefined,
+  existing: SessionRecord | undefined,
+  ownerKey: string | null | undefined = existing?.owner_key ?? null,
+): Pick<
+  SessionRecord,
+  | 'runner_id'
+  | 'runner_profile_id'
+  | 'model'
+  | 'thinking_effort'
+  | 'context_compression'
+> {
+  const runnerId = existing?.runner_id || deriveRunnerId(group || null);
+  const primarySession = ownerKey ? getPrimarySessionForOwner(ownerKey) : undefined;
+  const existingMatchesRunner = existing?.runner_id === runnerId;
+  const primaryMatchesRunner =
+    primarySession?.id !== existing?.id && primarySession?.runner_id === runnerId;
+
+  return {
+    runner_id: runnerId,
+    runner_profile_id: existingMatchesRunner
+      ? existing.runner_profile_id
+      : primaryMatchesRunner
+        ? primarySession.runner_profile_id
+        : null,
+    model:
+      group?.model ??
+      (existingMatchesRunner ? existing.model : null) ??
+      (primaryMatchesRunner ? primarySession.model : null) ??
+      null,
+    thinking_effort:
+      group?.thinking_effort ??
+      (existingMatchesRunner ? existing.thinking_effort : null) ??
+      (primaryMatchesRunner ? primarySession.thinking_effort : null) ??
+      null,
+    context_compression:
+      group?.context_compression ??
+      existing?.context_compression ??
+      primarySession?.context_compression ??
+      'off',
+  };
+}
+
 function findPrimarySessionChannelForFolder(
   groupFolder: string,
 ): RegisteredGroup | undefined {
@@ -2509,18 +2552,19 @@ function ensureSessionRecordFromGroup(
   const now = group.added_at || new Date().toISOString();
   const sessionId = buildMainSessionId(group.folder);
   const existing = getSessionRecord(sessionId);
-  const resolvedRunnerId = existing?.runner_id || deriveRunnerId(group);
+  const runtimeConfig = resolveSessionRuntimeProjection(group, existing);
   db.prepare(
     `INSERT INTO sessions (
       id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
       model, thinking_effort, context_compression, is_pinned, archived,
       owner_key, created_at, updated_at
-    ) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, 0, 0, ?, ?, ?)
+    ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       kind = excluded.kind,
       cwd = excluded.cwd,
       runner_id = excluded.runner_id,
+      runner_profile_id = excluded.runner_profile_id,
       model = excluded.model,
       thinking_effort = excluded.thinking_effort,
       context_compression = excluded.context_compression,
@@ -2531,10 +2575,11 @@ function ensureSessionRecordFromGroup(
     group.name,
     deriveSessionKind(group),
     deriveSessionCwd(group),
-    resolvedRunnerId,
-    group.model ?? null,
-    group.thinking_effort ?? null,
-    group.context_compression ?? 'off',
+    runtimeConfig.runner_id,
+    runtimeConfig.runner_profile_id,
+    runtimeConfig.model,
+    runtimeConfig.thinking_effort,
+    runtimeConfig.context_compression,
     existing?.owner_key ?? null,
     now,
     new Date().toISOString(),
@@ -2580,21 +2625,31 @@ function ensureSessionRecordForLegacyKey(
     );
     return sessionId;
   }
-  const folderOwnerKey = getSessionRecord(buildMainSessionId(groupFolder))?.owner_key ?? null;
+  const existing = getSessionRecord(sessionId);
+  const folderOwnerKey =
+    existing?.owner_key ??
+    getSessionRecord(buildMainSessionId(groupFolder))?.owner_key ??
+    null;
+  const runtimeConfig = resolveSessionRuntimeProjection(
+    folderGroup || null,
+    existing,
+    folderOwnerKey,
+  );
   db.prepare(
     `INSERT OR IGNORE INTO sessions (
       id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
       model, thinking_effort, context_compression, is_pinned, archived,
       owner_key, created_at, updated_at
-    ) VALUES (?, ?, 'workspace', NULL, ?, ?, NULL, ?, ?, ?, 0, 0, ?, ?, ?)`,
+    ) VALUES (?, ?, 'workspace', NULL, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
   ).run(
     sessionId,
     groupFolder,
     folderGroup ? deriveSessionCwd(folderGroup) : path.join(GROUPS_DIR, groupFolder),
-    deriveRunnerId(folderGroup || null),
-    folderGroup?.model ?? null,
-    folderGroup?.thinking_effort ?? null,
-    folderGroup?.context_compression ?? 'off',
+    runtimeConfig.runner_id,
+    runtimeConfig.runner_profile_id,
+    runtimeConfig.model,
+    runtimeConfig.thinking_effort,
+    runtimeConfig.context_compression,
     folderOwnerKey,
     now,
     now,

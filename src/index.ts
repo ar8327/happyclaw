@@ -1356,6 +1356,9 @@ function createOwnedWorkspace(
     name,
     folder,
     added_at: now,
+    model: runtimeConfig.model ?? undefined,
+    thinking_effort: runtimeConfig.thinking_effort ?? undefined,
+    context_compression: runtimeConfig.context_compression,
   };
   registerGroup(jid, group);
   ensureChatExists(jid);
