@@ -171,10 +171,31 @@ async function consumeQueryStream(
   // result-level fallback only for providers that do not stream usage.
   let sawUsageStreamEvent = false;
 
+  let watchdogReject: ((err: Error) => void) | null = null;
+  let watchdogTriggered = false;
+  const watchdogPromise = new Promise<never>((_, reject) => {
+    watchdogReject = reject;
+  });
+
+  const triggerWatchdog = (message: string): void => {
+    if (watchdogTriggered) return;
+    watchdogTriggered = true;
+    log(message);
+    poller.stop();
+    // Do not await interrupt here.  Some SDK hangs never settle the interrupted
+    // turn, and awaiting would leave consumeQueryStream stuck with the IPC poller
+    // already stopped.  Race the generator against this watchdog so the process
+    // can exit and the host can retry queued messages with a fresh runtime.
+    runner.interrupt().catch((err) => {
+      log(`Interrupt after activity timeout failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
+    watchdogReject?.(new Error(message));
+  };
+
   const resetActivityTimer = () => {
     if (activityTimer) clearTimeout(activityTimer);
-    activityTimer = setTimeout(async () => {
-      if (!poller.isActive) return; // query already ended
+    activityTimer = setTimeout(() => {
+      if (!poller.isActive || watchdogTriggered) return; // query already ended
 
       const report = runner.getActivityReport?.() ?? {
         hasActiveToolCall: false,
@@ -194,13 +215,10 @@ async function consumeQueryStream(
           resetActivityTimer();
           return;
         }
-        log(`Tool call hard timeout: ${Math.round(report.activeToolDurationMs / 1000)}s exceeds ${TOOL_HARD_TIMEOUT_MS / 1000}s`);
+        triggerWatchdog(`Tool call hard timeout: ${Math.round(report.activeToolDurationMs / 1000)}s exceeds ${TOOL_HARD_TIMEOUT_MS / 1000}s`);
       } else {
-        log(`Activity timeout: no events for ${ACTIVITY_TIMEOUT_MS}ms`);
+        triggerWatchdog(`Activity timeout: no events for ${ACTIVITY_TIMEOUT_MS}ms`);
       }
-
-      await runner.interrupt();
-      poller.stop();
     }, ACTIVITY_TIMEOUT_MS);
   };
   resetActivityTimer();
@@ -211,7 +229,7 @@ async function consumeQueryStream(
   let genericError: string | undefined;
 
   let iterResult: IteratorResult<NormalizedMessage, QueryResult>;
-  while (!(iterResult = await gen.next()).done) {
+  while (!(iterResult = await Promise.race([gen.next(), watchdogPromise])).done) {
     resetActivityTimer();
     const msg = iterResult.value;
 
