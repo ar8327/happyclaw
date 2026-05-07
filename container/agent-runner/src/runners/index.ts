@@ -6,9 +6,13 @@ import { RUNNER_DESCRIPTORS } from '../runner-descriptor.types.js';
 import type { RunnerManifest } from './types.js';
 
 function isRunnerManifest(value: unknown): value is RunnerManifest {
+  const descriptor = (value as { descriptor?: unknown } | null)?.descriptor;
   return (
     !!value &&
     typeof value === 'object' &&
+    !!descriptor &&
+    typeof descriptor === 'object' &&
+    typeof (descriptor as { id?: unknown }).id === 'string' &&
     'descriptor' in value &&
     'createRunner' in value
   );
