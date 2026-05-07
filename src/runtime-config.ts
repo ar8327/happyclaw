@@ -1332,7 +1332,7 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   maxConcurrentScripts: 10,
   scriptTimeout: 60000,
   queryActivityTimeoutMs: 300000,
-  toolCallHardTimeoutMs: 1200000,
+  toolCallHardTimeoutMs: 7200000,
   memoryQueryTimeout: 60000,
   memoryGlobalSleepTimeout: 300000,
   memorySendTimeout: 120000,
