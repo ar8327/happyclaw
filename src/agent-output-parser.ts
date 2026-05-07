@@ -242,6 +242,38 @@ export function handleTimeoutClose(
 ): boolean {
   if (!timedOut) return false;
 
+  // If the runtime already emitted a successful terminal marker and then
+  // exited with code 0, this is the common idle-shutdown race: the hard
+  // runtime timer fired at the same time the host wrote the idle _close
+  // sentinel. Treat it as a normal idle exit instead of surfacing a false
+  // "Local Runtime timed out" to users.
+  if (code === 0 && ctx.stdoutState.hasSuccessOutput && ctx.onOutput) {
+    const { newSessionId, outputChain, hasClosedOutput, hasDrainedOutput } =
+      ctx.stdoutState;
+    logger.warn(
+      { group: ctx.groupName, duration, newSessionId },
+      `${ctx.label} timeout raced with successful idle shutdown; treating as success`,
+    );
+    waitForOutputChain(
+      outputChain,
+      ctx.groupName,
+      `${ctx.filePrefix} timeout-idle-race path`,
+      () => {
+        const finalStatus = hasClosedOutput
+          ? ('closed' as const)
+          : hasDrainedOutput
+            ? ('drained' as const)
+            : ('success' as const);
+        ctx.resolvePromise({
+          status: finalStatus,
+          result: null,
+          newSessionId,
+        });
+      },
+    );
+    return true;
+  }
+
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   fs.mkdirSync(ctx.logsDir, { recursive: true });
   const timeoutLog = path.join(ctx.logsDir, `${ctx.filePrefix}-${ts}.log`);

@@ -207,6 +207,27 @@ const queue = new SessionRuntimeManager();
 const turnManager = new TurnManager();
 const EMPTY_CURSOR: MessageCursor = { rowid: 0 };
 const terminalWarmupInFlight = new Set<string>();
+const IDLE_SHUTDOWN_TIMEOUT_GRACE_MS = 30_000;
+
+function getIdleShutdownTimeoutMs(group?: RegisteredGroup): number {
+  const settings = getSystemSettings();
+  const runtimeTimeout =
+    group?.containerConfig?.timeout || settings.runtimeTimeout;
+
+  // The idle shutdown timer must fire before the hard runtime timeout. If both
+  // are equal, the two timers race: the host can mark the runtime timedOut at
+  // the same time the idle path writes _close, producing a false
+  // "Local Runtime timed out" even though the agent was only waiting for IPC.
+  if (settings.idleTimeout >= runtimeTimeout) {
+    const grace = Math.min(
+      IDLE_SHUTDOWN_TIMEOUT_GRACE_MS,
+      Math.max(1000, Math.floor(runtimeTimeout / 10)),
+    );
+    return Math.max(1000, runtimeTimeout - grace);
+  }
+
+  return settings.idleTimeout;
+}
 
 /**
  * Per-folder map of trigger messages: sourceJid → { id, sender } of the last
@@ -2157,7 +2178,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         'Idle timeout, closing container stdin',
       );
       queue.closeStdin(chatJid);
-    }, getSystemSettings().idleTimeout);
+    }, getIdleShutdownTimeoutMs(group));
   };
 
   await setTyping(chatJid, true);
@@ -2913,7 +2934,7 @@ async function runTerminalWarmup(chatJid: string): Promise<void> {
         'Terminal warmup idle timeout, closing stdin',
       );
       queue.closeStdin(chatJid);
-    }, getSystemSettings().idleTimeout);
+    }, getIdleShutdownTimeoutMs(group));
   };
 
   try {
@@ -4216,7 +4237,7 @@ async function processAgentConversation(
         'Agent conversation idle timeout, closing stdin',
       );
       queue.closeStdin(workerSessionId);
-    }, getSystemSettings().idleTimeout);
+    }, getIdleShutdownTimeoutMs(effectiveGroup));
   };
 
   let cursorCommitted = false;
