@@ -192,6 +192,11 @@ async function consumeQueryStream(
     watchdogReject?.(new Error(message));
   };
 
+  const emitTimeoutHeartbeat = (message: string): void => {
+    writeOutput({ status: 'heartbeat', result: null });
+    log(message);
+  };
+
   const resetActivityTimer = () => {
     if (activityTimer) clearTimeout(activityTimer);
     activityTimer = setTimeout(() => {
@@ -204,14 +209,18 @@ async function consumeQueryStream(
       };
 
       if (report.hasPendingBackgroundTasks) {
-        log('Activity timeout skipped: background tasks pending, extending');
+        emitTimeoutHeartbeat(
+          'Activity timeout skipped: background tasks pending, extending',
+        );
         resetActivityTimer();
         return;
       }
 
       if (report.hasActiveToolCall) {
         if (report.activeToolDurationMs < TOOL_HARD_TIMEOUT_MS) {
-          log(`Activity timeout skipped: tool call in progress (${Math.round(report.activeToolDurationMs / 1000)}s)`);
+          emitTimeoutHeartbeat(
+            `Activity timeout skipped: tool call in progress (${Math.round(report.activeToolDurationMs / 1000)}s)`,
+          );
           resetActivityTimer();
           return;
         }

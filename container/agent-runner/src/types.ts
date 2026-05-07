@@ -54,7 +54,7 @@ export interface ContainerInput {
 }
 
 export interface ContainerOutput {
-  status: 'success' | 'error' | 'stream' | 'closed' | 'drained';
+  status: 'success' | 'error' | 'stream' | 'closed' | 'drained' | 'heartbeat';
   result: string | null;
   newSessionId?: string;
   error?: string;

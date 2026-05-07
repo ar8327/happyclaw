@@ -128,7 +128,10 @@ export function attachStdoutHandler(
           }
           // Activity detected — reset the hard timeout
           opts.resetTimeout();
-          // Call onOutput for all markers (including null results)
+          if (parsed.status === 'heartbeat') {
+            continue;
+          }
+          // Call onOutput for all non-heartbeat markers (including null results)
           // so idle timers start even for "silent" query completions.
           const onOutputFn = opts.onOutput;
           state.outputChain = state.outputChain
@@ -571,7 +574,7 @@ function parseLegacyOutput(ctx: CloseHandlerContext): void {
       jsonLine = lines[lines.length - 1];
     }
 
-    const output: RuntimeOutput = JSON.parse(jsonLine);
+    const output = parseLastNonHeartbeatOutput(jsonLine, stdout);
 
     logger.info(
       {
@@ -601,4 +604,36 @@ function parseLegacyOutput(ctx: CloseHandlerContext): void {
       error: `Failed to parse ${ctx.filePrefix} output: ${err instanceof Error ? err.message : String(err)}`,
     });
   }
+}
+
+function parseLastNonHeartbeatOutput(
+  fallbackJsonLine: string,
+  stdout: string,
+): RuntimeOutput {
+  let searchFrom = 0;
+  let lastOutput: RuntimeOutput | null = null;
+
+  while (true) {
+    const startIdx = stdout.indexOf(OUTPUT_START_MARKER, searchFrom);
+    if (startIdx === -1) break;
+    const endIdx = stdout.indexOf(OUTPUT_END_MARKER, startIdx);
+    if (endIdx === -1) break;
+    searchFrom = endIdx + OUTPUT_END_MARKER.length;
+
+    const markerJson = stdout
+      .slice(startIdx + OUTPUT_START_MARKER.length, endIdx)
+      .trim();
+    try {
+      const output: RuntimeOutput = JSON.parse(markerJson);
+      if (output.status !== 'heartbeat') {
+        lastOutput = output;
+      }
+    } catch {
+      // Preserve legacy behavior: a bad later marker should not hide an earlier
+      // valid result in the accumulated stdout.
+    }
+  }
+
+  if (lastOutput) return lastOutput;
+  return JSON.parse(fallbackJsonLine);
 }

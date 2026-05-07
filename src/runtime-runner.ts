@@ -153,7 +153,7 @@ export interface ContainerInput extends RuntimeInput {
 }
 
 export interface RuntimeOutput {
-  status: 'success' | 'error' | 'stream' | 'closed' | 'drained';
+  status: 'success' | 'error' | 'stream' | 'closed' | 'drained' | 'heartbeat';
   result: string | null;
   newSessionId?: string;
   error?: string;
