@@ -700,8 +700,17 @@ function getRelevantChatJids(
 
   if (session.id.startsWith('main:')) {
     const folder = session.id.slice('main:'.length);
+    const sessionId = session.id;
+    const boundElsewhere = new Set(
+      bindings
+        .filter((binding) => binding.session_id !== sessionId)
+        .map((binding) => binding.channel_jid),
+    );
+    const folderJids = getJidsByFolder(folder).filter(
+      (jid) => !boundElsewhere.has(jid),
+    );
     return Array.from(
-      new Set([...getJidsByFolder(folder), ...sessionBindings]),
+      new Set([...folderJids, ...sessionBindings]),
     );
   }
 

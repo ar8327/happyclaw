@@ -774,6 +774,34 @@ function resolveEffectiveGroup(
   effectiveGroup: RegisteredGroup;
   isHome: boolean;
 } {
+  const boundTarget = resolveBoundSessionTarget(chatJid, group);
+  if (boundTarget.folder && boundTarget.folder !== group.folder) {
+    const targetGroup =
+      boundTarget.effectiveJid && !boundTarget.boundAgentId
+        ? registeredGroups[boundTarget.effectiveJid] ??
+          getRegisteredGroup(boundTarget.effectiveJid)
+        : undefined;
+    if (targetGroup && boundTarget.effectiveJid) {
+      registeredGroups[boundTarget.effectiveJid] = targetGroup;
+    }
+    return {
+      effectiveGroup: {
+        ...group,
+        name: targetGroup?.name || group.name,
+        folder: boundTarget.folder,
+        customCwd: targetGroup?.customCwd || group.customCwd,
+        selected_skills: targetGroup?.selected_skills ?? group.selected_skills,
+        mcp_mode: targetGroup?.mcp_mode ?? group.mcp_mode,
+        selected_mcps: targetGroup?.selected_mcps ?? group.selected_mcps,
+        model: targetGroup?.model ?? group.model,
+        thinking_effort: targetGroup?.thinking_effort ?? group.thinking_effort,
+        context_compression:
+          targetGroup?.context_compression ?? boundTarget.contextCompression,
+      },
+      isHome: false,
+    };
+  }
+
   const primarySessionFolder = isPrimarySessionFolder(group.folder);
   if (chatJid.startsWith('web:') && primarySessionFolder) {
     return { effectiveGroup: group, isHome: true };
@@ -2022,7 +2050,7 @@ function splitRuntimeJid(chatJid: string): {
 function resolveGroupFolder(chatJid: string): string {
   const { baseJid } = splitRuntimeJid(chatJid);
   const group = registeredGroups[baseJid];
-  return group?.folder || baseJid;
+  return resolveEffectiveFolder(baseJid) || group?.folder || baseJid;
 }
 
 function resolveRuntimeOwnerContext(chatJid: string): {
@@ -4974,7 +5002,7 @@ function buildOnNewChat(
       // 2. Register the IM group and bind to the new workspace
       registerGroup(chatJid, {
         name: chatName,
-        folder: primarySessionFolder,
+        folder,
         added_at: now,
         reply_policy: 'source_only',
       });
