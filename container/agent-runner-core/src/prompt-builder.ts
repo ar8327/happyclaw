@@ -169,15 +169,16 @@ export function buildBasePrompt(ctx: PluginContext): string {
  * Append prompt — all guideline segments + plugin prompt sections.
  * Used by ALL providers (Claude appends to preset, Codex appends to base).
  *
- * Segments (in order, matching original context-builder.ts):
+ * Segments (in order, static sections first to maximize prompt cache prefix matching):
  * 1. Global CLAUDE.md (only for isHome — Claude preset doesn't load this)
- * 2. contextSummary (if any)
- * 3. Interaction guidelines (static)
- * 4. Channel routing (static + dynamic recentImChannels)
- * 5. Plugin prompt sections (includes MemoryPlugin)
- * 6. Output guidelines (static)
- * 7. WebFetch guidelines (static)
- * 8. Background task guidelines (static)
+ * 2. Interaction guidelines (static)
+ * 3. Skill storage guidelines (static)
+ * 4. Output guidelines (static)
+ * 5. WebFetch guidelines (static)
+ * 6. Background task guidelines (static)
+ * 7. contextSummary (if any, dynamic)
+ * 8. Channel routing (static + dynamic recentImChannels)
+ * 9. Plugin prompt sections (includes MemoryPlugin, dynamic)
  */
 export function buildAppendPrompt(
   ctx: PluginContext,
@@ -191,16 +192,17 @@ export function buildAppendPrompt(
     globalClaudeMd = tryReadFile(globalClaudeMdPath) || '';
   }
 
-  // 2. Context summary
+  // 2-6. Static guideline constants first — cache-friendly prefix
+  // (INTERACTION_GUIDELINES, SKILL_STORAGE_GUIDELINES, OUTPUT_GUIDELINES,
+  //  WEB_FETCH_GUIDELINES, BACKGROUND_TASK_GUIDELINES)
+
+  // 7. Context summary (dynamic)
   const contextSummarySection = buildContextSummarySection(ctx.contextSummary);
 
-  // 3. Interaction guidelines
-  // (static constant)
-
-  // 4. Channel routing (static + dynamic IM channels)
+  // 8. Channel routing (static + dynamic IM channels)
   const channelRoutingSection = buildChannelRoutingSection(ctx.recentImChannels);
 
-  // 5. Plugin prompt sections
+  // 9. Plugin prompt sections (dynamic — e.g. MemoryPlugin index/personality)
   const pluginSections: string[] = [];
   for (const plugin of plugins) {
     if (!plugin.isEnabled(ctx)) continue;
@@ -210,14 +212,14 @@ export function buildAppendPrompt(
 
   return [
     globalClaudeMd,
-    contextSummarySection,
     INTERACTION_GUIDELINES,
-    channelRoutingSection,
-    ...pluginSections,
     SKILL_STORAGE_GUIDELINES,
     OUTPUT_GUIDELINES,
     WEB_FETCH_GUIDELINES,
     BACKGROUND_TASK_GUIDELINES,
+    contextSummarySection,
+    channelRoutingSection,
+    ...pluginSections,
   ].filter(Boolean).join('\n');
 }
 
