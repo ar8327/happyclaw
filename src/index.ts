@@ -2217,7 +2217,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let lastReplyMsgId: string | undefined;
   const queryTaskIds = new Set<string>();
   const lastProcessed = missedMessages[missedMessages.length - 1];
-  let handoffAfterCompletedTurn = false;
   let lastTurnCompletedSuccessfully = false;
 
   const pickRunningTaskForNotification = (): string | null => {
@@ -2308,6 +2307,44 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     syncPendingTurnObservability(group.folder);
     // Reset im-commentary turn timer so next turn gets a fresh 30s warmup
     resetTurnCommentaryTimer(group.folder);
+  };
+
+  const drainQueuedTurn = (): boolean => {
+    const nextEntry = turnManager.drainNext(group.folder);
+    if (!nextEntry) return false;
+
+    logger.info(
+      {
+        folder: group.folder,
+        nextChatJid: nextEntry.chatJid,
+        nextChannel: nextEntry.channel,
+      },
+      'Turn: draining next queued entry',
+    );
+    // The next message poll cycle will pick up the queued chatJid's messages
+    // via the normal cursor mechanism since we didn't advance cursor for queued messages.
+    const queuedDetail =
+      nextEntry.chatJid === chatJid
+        ? '上一轮已结束，等待下一轮开始'
+        : `正在等待当前 Turn 结束 · ${nextEntry.channel}`;
+    broadcastRunnerState(nextEntry.chatJid, 'queued', queuedDetail);
+    queue.enqueueMessageCheck(nextEntry.chatJid);
+    return true;
+  };
+
+  const completeSuccessfulTurn = (): void => {
+    const activeTurn = turnManager.getActiveTurn(group.folder);
+    if (!activeTurn) {
+      broadcastRunnerState(chatJid, 'idle');
+      resetIdleTimer();
+      return;
+    }
+
+    finalizeCurrentTurn('completed');
+    if (!drainQueuedTurn()) {
+      broadcastRunnerState(chatJid, 'idle');
+      resetIdleTimer();
+    }
   };
 
   // 新一轮从干净状态开始
@@ -2627,38 +2664,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         if (result.status === 'success') {
           lastTurnCompletedSuccessfully = true;
           await completeAndResetProgressSessionsForFolder(group.folder);
-        }
-
-        // Query 返回无文本结果（仅工具调用、send_message 等）：通知前端清除
-        // 流式状态，避免 agent idle 期间持续显示"正在思考..."。
-        if (result.status === 'success' && !result.result) {
-          const pendingCounts = turnManager.getPendingCounts(group.folder);
-          if (pendingCounts.size > 0) {
-            handoffAfterCompletedTurn = true;
-            const drained = queue.sendDrain(chatJid);
-            logger.info(
-              {
-                chatJid,
-                folder: group.folder,
-                pendingChannels: Array.from(pendingCounts.entries()),
-                drained,
-              },
-              'Turn completed with queued work pending, draining runner for handoff',
-            );
-            if (!drained) {
-              handoffAfterCompletedTurn = false;
-              finalizeCurrentTurn('completed');
-              broadcastRunnerState(chatJid, 'idle');
-              resetIdleTimer();
-            }
-          } else {
-            finalizeCurrentTurn('completed');
-            broadcastRunnerState(chatJid, 'idle');
-            // Tool-only turns (for example send_message over IM) complete with
-            // result:null. They still leave the long-lived runner waiting for
-            // IPC, so arm the same idle shutdown timer used for text replies.
-            resetIdleTimer();
-          }
+          // Long-lived IPC runners stay alive after each result and wait for
+          // more input, so the Turn must finish when the result arrives rather
+          // than waiting for process exit. This covers both visible replies and
+          // tool-only turns (for example send_message over IM with result:null).
+          completeSuccessfulTurn();
         }
 
         if (result.status === 'error') {
@@ -2717,34 +2727,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         ? 'interrupted'
         : isErrorExit_
           ? 'error'
-          : handoffAfterCompletedTurn
-            ? 'completed'
-            : isDrained
-              ? 'drained'
-              : 'completed',
+          : isDrained
+            ? 'drained'
+            : 'completed',
       { errorDetail: output.error || lastError },
     );
 
     // Check if there are queued turns to process next
-    const nextEntry = turnManager.drainNext(group.folder);
-    if (nextEntry) {
-      logger.info(
-        {
-          folder: group.folder,
-          nextChatJid: nextEntry.chatJid,
-          nextChannel: nextEntry.channel,
-        },
-        'Turn: draining next queued entry',
-      );
-      // The next message poll cycle will pick up the queued chatJid's messages
-      // via the normal cursor mechanism since we didn't advance cursor for queued messages
-      const queuedDetail =
-        nextEntry.chatJid === chatJid
-          ? '上一轮已结束，等待下一轮开始'
-          : `正在等待当前 Turn 结束 · ${nextEntry.channel}`;
-      broadcastRunnerState(nextEntry.chatJid, 'queued', queuedDetail);
-      queue.enqueueMessageCheck(nextEntry.chatJid);
-    }
+    drainQueuedTurn();
   }
 
   streamingBlocksManager.remove(group.folder);
