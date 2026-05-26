@@ -577,7 +577,7 @@ export class CodexSession {
   private async ensureServer(): Promise<void> {
     if (this.initialized) return;
     const command = this.options.codexPathOverride || 'codex';
-    const child = spawn(command, ['app-server', '--listen', 'stdio://'], {
+    const child = spawn(command, ['app-server'], {
       env: {
         ...(process.env as Record<string, string>),
         ...(this.options.apiKey ? { OPENAI_API_KEY: this.options.apiKey } : {}),

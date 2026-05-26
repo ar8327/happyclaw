@@ -33,6 +33,7 @@ const BASE_RETRY_MS = 5000;
 interface GroupState {
   active: boolean;
   busy: boolean;
+  draining: boolean;
   pendingMessages: boolean;
   pendingTasks: QueuedTask[];
   process: ChildProcess | null;
@@ -72,6 +73,7 @@ export class SessionRuntimeQueue {
       state = {
         active: false,
         busy: false,
+        draining: false,
         pendingMessages: false,
         pendingTasks: [],
         process: null,
@@ -331,6 +333,13 @@ export class SessionRuntimeQueue {
   ): SendMessageResult {
     const state = this.resolveActiveState(groupJid);
     if (!state) return 'no_active';
+    if (state.draining) {
+      logger.info(
+        { groupJid, groupFolder: state.groupFolder },
+        'Runtime is draining; queue message instead of injecting into IPC',
+      );
+      return 'no_active';
+    }
 
     if (intent === 'stop') {
       this.interruptQuery(groupJid);
@@ -404,6 +413,7 @@ export class SessionRuntimeQueue {
     try {
       fs.mkdirSync(inputDir, { recursive: true });
       fs.writeFileSync(path.join(inputDir, '_drain'), '');
+      state.draining = true;
       logger.info(
         { groupJid, groupFolder: state.groupFolder },
         'Drain sentinel written',
@@ -667,6 +677,7 @@ export class SessionRuntimeQueue {
     const state = this.getGroup(groupJid);
     state.active = true;
     state.busy = true;
+    state.draining = false;
     state.pendingMessages = false;
     // Pre-set groupFolder so resolveActiveState() works immediately,
     // before registerProcess() is called after the agent process spawns.
@@ -704,6 +715,7 @@ export class SessionRuntimeQueue {
     } finally {
       state.active = false;
       state.busy = false;
+      state.draining = false;
       state.process = null;
       state.runtimeIdentifier = null;
       state.runtimeLabel = null;
@@ -729,6 +741,7 @@ export class SessionRuntimeQueue {
     const state = this.getGroup(groupJid);
     state.active = true;
     state.busy = true;
+    state.draining = false;
     state.groupFolder = this.getSerializationKey(groupJid);
     this.waitingGroups.delete(groupJid);
     this.activeCount++;
@@ -748,6 +761,7 @@ export class SessionRuntimeQueue {
     } finally {
       state.active = false;
       state.busy = false;
+      state.draining = false;
       state.process = null;
       state.runtimeIdentifier = null;
       state.runtimeLabel = null;
