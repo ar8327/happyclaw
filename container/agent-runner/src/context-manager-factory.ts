@@ -15,6 +15,7 @@ import {
   type PluginContext,
 } from 'agentdock-agent-runner-core';
 import { InvokeAgentPlugin } from './plugins/invoke-agent-plugin.js';
+import { WorkflowPlugin } from './plugins/workflow-plugin.js';
 
 // ─── Options ─────────────────────────────────────────────────
 
@@ -91,6 +92,10 @@ export function createContextManager(
 
   if (isPluginEnabled('invoke-agent')) {
     ctxMgr.register(new InvokeAgentPlugin());
+  }
+
+  if (isPluginEnabled('workflow')) {
+    ctxMgr.register(new WorkflowPlugin());
   }
 
   return ctxMgr;

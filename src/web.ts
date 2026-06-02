@@ -55,6 +55,7 @@ import agentDefinitionsRoutes from './routes/agent-definitions.js';
 import memoryAgentInternalRoutes from './routes/memory-agent.js';
 import feishuApiRoutes, { injectFeishuApiDeps } from './routes/feishu-api.js';
 import searchRoutes from './routes/search.js';
+import workflowsRoutes from './routes/workflows.js';
 import { getSystemSettings } from './runtime-config.js';
 
 // Database and types (only for handleWebUserMessage and broadcast)
@@ -200,6 +201,7 @@ app.route('/api/skills', skillsRoutes);
 app.route('/api/browse', browseRoutes);
 app.route('/api/mcp-servers', mcpServersRoutes);
 app.route('/api/runners', runnersRoutes);
+app.route('/api/workflows', workflowsRoutes);
 app.route('/api/sessions', agentRoutes);
 app.route('/api/logs', logsRoutes);
 app.route('/api/sessions', turnsRoutes);
