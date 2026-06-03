@@ -81,6 +81,17 @@ const fields: FieldConfig[] = [
     step: 1,
   },
   {
+    key: 'maxConcurrentWorkflowNodes',
+    label: '工作流节点全局最大并发数',
+    description: '所有 Dynamic Workflow run 合计同时执行的子节点数量上限',
+    unit: '个',
+    toDisplay: (v) => v,
+    toStored: (v) => v,
+    min: 1,
+    max: 50,
+    step: 1,
+  },
+  {
     key: 'scriptTimeout',
     label: '脚本执行超时',
     description: '单个脚本任务的最长执行时间',

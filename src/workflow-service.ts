@@ -17,6 +17,7 @@ import {
   updateWorkflowRun,
 } from './db.js';
 import { logger } from './logger.js';
+import { getSystemSettings } from './runtime-config.js';
 import type {
   WorkflowAgentNode,
   WorkflowDefinition,
@@ -54,6 +55,13 @@ interface NodeExecutionContext {
   outputs: Map<string, string>;
   nodeRunIds: Map<string, string>;
   abortController: AbortController;
+}
+
+interface GlobalNodeSlotWaiter {
+  resolve: (release: () => void) => void;
+  reject: (err: Error) => void;
+  signal?: AbortSignal;
+  abortHandler: () => void;
 }
 
 function nowIso(): string {
@@ -169,9 +177,62 @@ function buildRunResult(runId: string): {
 class WorkflowService {
   private activeRuns = new Map<string, AbortController>();
   private runPromises = new Map<string, Promise<void>>();
+  private activeGlobalNodeSlots = 0;
+  private globalNodeSlotWaiters: GlobalNodeSlotWaiter[] = [];
 
   providers() {
     return listWorkflowProviders();
+  }
+
+  private globalNodeConcurrencyLimit(): number {
+    const configured = getSystemSettings().maxConcurrentWorkflowNodes;
+    if (!Number.isFinite(configured)) return 10;
+    return Math.max(1, Math.min(50, Math.floor(configured)));
+  }
+
+  private readonly releaseGlobalNodeSlot = () => {
+    this.activeGlobalNodeSlots = Math.max(0, this.activeGlobalNodeSlots - 1);
+    this.drainGlobalNodeSlotWaiters();
+  };
+
+  private drainGlobalNodeSlotWaiters() {
+    while (
+      this.activeGlobalNodeSlots < this.globalNodeConcurrencyLimit() &&
+      this.globalNodeSlotWaiters.length > 0
+    ) {
+      const waiter = this.globalNodeSlotWaiters.shift()!;
+      if (waiter.signal?.aborted) {
+        waiter.reject(new Error('Workflow node cancelled'));
+        continue;
+      }
+      waiter.signal?.removeEventListener('abort', waiter.abortHandler);
+      this.activeGlobalNodeSlots += 1;
+      waiter.resolve(this.releaseGlobalNodeSlot);
+    }
+  }
+
+  private acquireGlobalNodeSlot(signal?: AbortSignal): Promise<() => void> {
+    if (signal?.aborted) {
+      return Promise.reject(new Error('Workflow node cancelled'));
+    }
+    if (this.activeGlobalNodeSlots < this.globalNodeConcurrencyLimit()) {
+      this.activeGlobalNodeSlots += 1;
+      return Promise.resolve(this.releaseGlobalNodeSlot);
+    }
+    return new Promise((resolve, reject) => {
+      const waiter: GlobalNodeSlotWaiter = {
+        resolve,
+        reject,
+        signal,
+        abortHandler: () => {
+          this.globalNodeSlotWaiters = this.globalNodeSlotWaiters.filter((item) => item !== waiter);
+          reject(new Error('Workflow node cancelled'));
+        },
+      };
+      signal?.addEventListener('abort', waiter.abortHandler, { once: true });
+      this.globalNodeSlotWaiters.push(waiter);
+      this.drainGlobalNodeSlotWaiters();
+    });
   }
 
   list(ownerKey: string) {
@@ -354,14 +415,14 @@ class WorkflowService {
     const now = nowIso();
     updateWorkflowRun(run.id, { status: 'running', started_at: now, updated_at: now });
 
-    const nodesById = new Map(definition.nodes.map((node) => [node.id, node]));
     const nodeRuns = listWorkflowNodeRuns(run.id);
     const nodeRunIds = new Map(nodeRuns.map((nodeRun) => [nodeRun.node_id, nodeRun.id]));
     const outputs = new Map<string, string>();
     const completed = new Set<string>();
     const running = new Set<string>();
     const failed = new Set<string>();
-    const maxConcurrency = Math.max(1, Math.min(10, definition.settings?.max_concurrency || 3));
+    const skipped = new Set<string>();
+    const maxConcurrency = Math.max(1, Math.min(100, definition.settings?.max_concurrency || 3));
     const ctx: NodeExecutionContext = {
       run,
       definition,
@@ -375,18 +436,52 @@ class WorkflowService {
 
     try {
       await new Promise<void>((resolve, reject) => {
+        const markBlockedNodesSkipped = () => {
+          let changed = false;
+          do {
+            changed = false;
+            for (const node of definition.nodes) {
+              if (
+                completed.has(node.id) ||
+                failed.has(node.id) ||
+                skipped.has(node.id) ||
+                running.has(node.id)
+              ) {
+                continue;
+              }
+              const blockedDependency = normalizeDependsOn(node).find((dep) => failed.has(dep) || skipped.has(dep));
+              if (!blockedDependency) continue;
+              skipped.add(node.id);
+              const nodeRunId = nodeRunIds.get(node.id);
+              if (nodeRunId) {
+                const skippedAt = nowIso();
+                updateWorkflowNodeRun(nodeRunId, {
+                  status: 'skipped',
+                  error: `Skipped because dependency "${blockedDependency}" failed or was skipped`,
+                  finished_at: skippedAt,
+                  updated_at: skippedAt,
+                });
+              }
+              changed = true;
+            }
+          } while (changed);
+        };
+
         const schedule = () => {
           if (controller.signal.aborted) {
             reject(new Error('Workflow run cancelled'));
             return;
           }
-          if (completed.size + failed.size === definition.nodes.length) {
-            failed.size > 0 ? reject(new Error(`${failed.size} workflow node(s) failed`)) : resolve();
+          markBlockedNodesSkipped();
+          if (completed.size + failed.size + skipped.size === definition.nodes.length) {
+            failed.size > 0 || skipped.size > 0
+              ? reject(new Error(`${failed.size} workflow node(s) failed; ${skipped.size} workflow node(s) skipped`))
+              : resolve();
             return;
           }
 
           const ready = definition.nodes.filter((node) => {
-            if (completed.has(node.id) || failed.has(node.id) || running.has(node.id)) return false;
+            if (completed.has(node.id) || failed.has(node.id) || skipped.has(node.id) || running.has(node.id)) return false;
             return normalizeDependsOn(node).every((dep) => completed.has(dep));
           });
 
@@ -433,7 +528,7 @@ class WorkflowService {
         updated_at: finished,
       });
       for (const node of definition.nodes) {
-        if (!completed.has(node.id) && !failed.has(node.id)) {
+        if (!completed.has(node.id) && !failed.has(node.id) && !skipped.has(node.id)) {
           const nodeRunId = nodeRunIds.get(node.id);
           if (nodeRunId) updateWorkflowNodeRun(nodeRunId, { status: status === 'cancelled' ? 'cancelled' : 'skipped', updated_at: finished });
         }
@@ -445,20 +540,24 @@ class WorkflowService {
     const nodeRunId = ctx.nodeRunIds.get(node.id);
     if (!nodeRunId) throw new Error(`Missing node run for ${node.id}`);
     const renderedPrompt = renderPrompt(node.prompt, ctx);
-    const start = Date.now();
-    const startedAt = nowIso();
     const provider = node.provider || ctx.definition.settings?.provider || undefined;
     const model = node.model || ctx.definition.settings?.model || undefined;
-    updateWorkflowNodeRun(nodeRunId, {
-      status: 'running',
-      provider: provider || null,
-      model: model || null,
-      prompt_hash: hashPrompt(renderedPrompt),
-      started_at: startedAt,
-      updated_at: startedAt,
-    });
-
+    const waitStart = Date.now();
+    let start = waitStart;
+    let releaseGlobalSlot: (() => void) | null = null;
     try {
+      releaseGlobalSlot = await this.acquireGlobalNodeSlot(ctx.abortController.signal);
+      start = Date.now();
+      const startedAt = nowIso();
+      updateWorkflowNodeRun(nodeRunId, {
+        status: 'running',
+        provider: provider || null,
+        model: model || null,
+        prompt_hash: hashPrompt(renderedPrompt),
+        started_at: startedAt,
+        updated_at: startedAt,
+      });
+
       const result = await invokeWorkflowNode({
         prompt: renderedPrompt,
         cwd: ctx.workspaceFolder,
@@ -519,6 +618,8 @@ class WorkflowService {
         updated_at: finishedAt,
       });
       throw err;
+    } finally {
+      releaseGlobalSlot?.();
     }
   }
 }
