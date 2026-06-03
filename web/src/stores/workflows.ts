@@ -76,6 +76,8 @@ export interface WorkflowRun {
   status: WorkflowRunStatus;
   input_json: string | null;
   result_json: string | null;
+  result_path: string | null;
+  final_node_id: string | null;
   result_excerpt?: string | null;
   error: string | null;
   workspace_folder: string | null;

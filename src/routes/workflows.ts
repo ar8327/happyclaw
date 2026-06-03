@@ -74,6 +74,7 @@ workflowsRoutes.get('/runs', authMiddleware, (c) => {
   return c.json({
     runs: workflowService.runs(authUser.id, undefined, limit, {
       includeResult: boolValue(c.req.query('include_result')),
+      includeTrigger: boolValue(c.req.query('include_trigger')) || boolValue(c.req.query('verbose')),
       excerptLength: excerptLength(c.req.query('excerpt_length')),
     }),
   });
@@ -83,6 +84,7 @@ workflowsRoutes.get('/runs/:runId', authMiddleware, (c) => {
   const authUser = c.get('user') as AuthUser;
   const run = workflowService.runStatus(authUser.id, c.req.param('runId'), {
     includeResult: boolValue(c.req.query('include_result')),
+    includeTrigger: boolValue(c.req.query('include_trigger')) || boolValue(c.req.query('verbose')),
     excerptLength: excerptLength(c.req.query('excerpt_length')),
   });
   if (!run) return c.json({ error: 'Run not found' }, 404);
@@ -159,7 +161,8 @@ workflowsRoutes.post('/:workflowId/run', authMiddleware, async (c) => {
         userId: authUser.id,
       },
     });
-    return c.json(result);
+    const runId = result.run?.id;
+    return c.json(runId ? { run: workflowService.runStatus(authUser.id, runId) } : result);
   } catch (err) {
     return c.json({ error: errorMessage(err) }, 400);
   }
@@ -168,7 +171,13 @@ workflowsRoutes.post('/:workflowId/run', authMiddleware, async (c) => {
 workflowsRoutes.get('/:workflowId/runs', authMiddleware, (c) => {
   const authUser = c.get('user') as AuthUser;
   const limit = Number.parseInt(c.req.query('limit') || '50', 10);
-  return c.json({ runs: workflowService.runs(authUser.id, c.req.param('workflowId'), limit) });
+  return c.json({
+    runs: workflowService.runs(authUser.id, c.req.param('workflowId'), limit, {
+      includeResult: boolValue(c.req.query('include_result')),
+      includeTrigger: boolValue(c.req.query('include_trigger')) || boolValue(c.req.query('verbose')),
+      excerptLength: excerptLength(c.req.query('excerpt_length')),
+    }),
+  });
 });
 
 // Internal agent-tool API. These endpoints are token authenticated and scoped by body.userId.
@@ -214,8 +223,8 @@ workflowsRoutes.post('/internal/tool', async (c) => {
         if (!workflow) return c.json({ error: 'Workflow not found' }, 404);
         return c.json({ workflow });
       }
-      case 'run':
-        return c.json(await workflowService.startRun({
+      case 'run': {
+        const result = await workflowService.startRun({
           ownerKey,
           workflowId: String(body.workflowId || ''),
           input: body.input && typeof body.input === 'object' ? body.input : null,
@@ -231,10 +240,14 @@ workflowsRoutes.post('/internal/tool', async (c) => {
             chatJid: typeof body.chatJid === 'string' ? body.chatJid : null,
             createdBy: typeof body.createdBy === 'string' ? body.createdBy : null,
           },
-        }));
+        });
+        const runId = result.run?.id;
+        return c.json(runId ? { run: workflowService.runStatus(ownerKey, runId) } : result);
+      }
       case 'status': {
         const run = workflowService.runStatus(ownerKey, String(body.runId || ''), {
           includeResult: body.include_result === true,
+          includeTrigger: body.include_trigger === true || body.verbose === true,
           excerptLength: excerptLength(body.excerpt_length),
         });
         if (!run) return c.json({ error: 'Run not found' }, 404);
@@ -248,6 +261,7 @@ workflowsRoutes.post('/internal/tool', async (c) => {
             Number(body.limit || 50),
             {
               includeResult: body.include_result === true,
+              includeTrigger: body.include_trigger === true || body.verbose === true,
               excerptLength: excerptLength(body.excerpt_length),
             },
           ),

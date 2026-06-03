@@ -50,6 +50,7 @@ interface RunWorkflowInput {
 
 interface WorkflowRunStatusOptions {
   includeResult?: boolean;
+  includeTrigger?: boolean;
   excerptLength?: number;
 }
 
@@ -263,6 +264,7 @@ function lightweightRun(run: WorkflowRunRecord, options: WorkflowRunStatusOption
   return {
     ...run,
     result_json: options.includeResult ? run.result_json : null,
+    trigger_json: options.includeTrigger ? run.trigger_json : null,
     result_excerpt: summary ? excerpt(summary, excerptLength) : null,
   };
 }
@@ -459,6 +461,8 @@ class WorkflowService {
       status: 'queued',
       input_json: input.input ? JSON.stringify(input.input, null, 2) : null,
       result_json: null,
+      result_path: null,
+      final_node_id: null,
       error: null,
       workspace_folder: workspaceFolder,
       group_folder: workflow.group_folder,
@@ -690,13 +694,27 @@ class WorkflowService {
 
       const finished = nowIso();
       const finalNodes = definition.nodes.filter((node) => !definition.nodes.some((other) => normalizeDependsOn(other).includes(node.id)));
+      const summary = finalNodes.map((node) => `## ${node.id}\n${outputs.get(node.id) || ''}`).join('\n\n');
+      const resultPath = path.join(
+        DATA_DIR,
+        'workflows',
+        safeSegment(workflow.owner_key),
+        safeSegment(workflow.id),
+        'runs',
+        safeSegment(run.id),
+        'result.output.txt',
+      );
+      fs.mkdirSync(path.dirname(resultPath), { recursive: true });
+      fs.writeFileSync(resultPath, summary, 'utf8');
       const result = {
-        summary: finalNodes.map((node) => `## ${node.id}\n${outputs.get(node.id) || ''}`).join('\n\n'),
+        summary,
         outputs: Object.fromEntries([...outputs.entries()].map(([id, value]) => [id, excerpt(value, 4000)])),
       };
       updateWorkflowRun(run.id, {
         status: 'success',
         result_json: JSON.stringify(result, null, 2),
+        result_path: resultPath,
+        final_node_id: finalNodes.length === 1 ? finalNodes[0].id : null,
         finished_at: finished,
         updated_at: finished,
       });

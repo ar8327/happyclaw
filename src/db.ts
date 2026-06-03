@@ -943,6 +943,8 @@ export function initDatabase(): void {
       status TEXT NOT NULL,
       input_json TEXT,
       result_json TEXT,
+      result_path TEXT,
+      final_node_id TEXT,
       error TEXT,
       workspace_folder TEXT,
       group_folder TEXT,
@@ -1013,6 +1015,8 @@ export function initDatabase(): void {
   ensureColumn('users', 'deleted_at', 'TEXT');
   ensureColumn('workflow_runs', 'run_source', 'TEXT');
   ensureColumn('workflow_runs', 'trigger_json', 'TEXT');
+  ensureColumn('workflow_runs', 'result_path', 'TEXT');
+  ensureColumn('workflow_runs', 'final_node_id', 'TEXT');
   ensureColumn('workflow_node_runs', 'transcript_path', 'TEXT');
   ensureColumn('users', 'avatar_emoji', 'TEXT');
   ensureColumn('users', 'avatar_color', 'TEXT');
@@ -1300,7 +1304,7 @@ export function initDatabase(): void {
 
   syncSessionWorkbenchProjection();
 
-  const SCHEMA_VERSION = '45';
+  const SCHEMA_VERSION = '46';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -2353,9 +2357,9 @@ export function createWorkflowRun(record: WorkflowRunRecord): void {
     `
     INSERT INTO workflow_runs (
       id, workflow_id, owner_key, version, status, input_json, result_json,
-      error, workspace_folder, group_folder, run_source, trigger_json,
+      result_path, final_node_id, error, workspace_folder, group_folder, run_source, trigger_json,
       started_at, finished_at, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
   ).run(
     record.id,
@@ -2365,6 +2369,8 @@ export function createWorkflowRun(record: WorkflowRunRecord): void {
     record.status,
     record.input_json,
     record.result_json,
+    record.result_path,
+    record.final_node_id,
     record.error,
     record.workspace_folder,
     record.group_folder,
@@ -2384,6 +2390,8 @@ export function updateWorkflowRun(
       WorkflowRunRecord,
       | 'status'
       | 'result_json'
+      | 'result_path'
+      | 'final_node_id'
       | 'error'
       | 'started_at'
       | 'finished_at'

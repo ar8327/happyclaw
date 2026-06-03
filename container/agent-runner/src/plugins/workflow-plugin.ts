@@ -187,12 +187,14 @@ export class WorkflowPlugin implements ContextPlugin {
       },
       {
         name: 'workflow_run_status',
-        description: 'Get lightweight current status for a workflow run. By default excludes large result payloads.',
+        description: 'Get lightweight current status for a workflow run. By default excludes large result/trigger payloads; successful runs include result_path/final_node_id as a stable full-result pointer.',
         parameters: {
           type: 'object' as const,
           properties: {
             run_id: { type: 'string' },
             include_result: { type: 'boolean' },
+            include_trigger: { type: 'boolean' },
+            verbose: { type: 'boolean' },
             excerpt_length: { type: 'number' },
           },
           required: ['run_id'],
@@ -200,6 +202,8 @@ export class WorkflowPlugin implements ContextPlugin {
         execute: async (args) => callWorkflowApi(ctx, 'status', {
           runId: args.run_id,
           include_result: args.include_result === true,
+          include_trigger: args.include_trigger === true,
+          verbose: args.verbose === true,
           excerpt_length: args.excerpt_length,
         }),
       },
