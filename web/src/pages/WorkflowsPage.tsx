@@ -135,6 +135,7 @@ export function WorkflowsPage() {
                         </div>
                         <div className="text-xs text-muted-foreground mt-1 font-mono">{run.id}</div>
                         <div className="text-xs text-muted-foreground mt-1">{fmtDate(run.started_at || run.created_at)} → {fmtDate(run.finished_at)}</div>
+                        {run.run_source && <div className="text-xs text-muted-foreground mt-1">source: {run.run_source}</div>}
                       </div>
                       {(run.status === 'running' || run.status === 'queued') && (
                         <Button variant="outline" size="sm" onClick={() => cancelRun(run.id)}>

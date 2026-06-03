@@ -219,6 +219,7 @@ export class WorkflowPlugin implements ContextPlugin {
       'You can create, save, run, and monitor dynamic workflows using workflow_* tools.',
       'Workflow execution is handled by AgentDock host. Workflow node agents are bare CLI agents and do not receive AgentDock tools such as send_message, memory, tasks, or workflow tools.',
       'The MVP supports DAG workflows with agent nodes. Use depends_on to express dependencies; independent nodes may run concurrently.',
+      'Dependency outputs are automatically appended to a dependent node prompt when the prompt does not explicitly reference dependency placeholders such as {{research}} or {{research.output}}.',
     ].join('\n');
   }
 }

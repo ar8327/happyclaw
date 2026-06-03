@@ -129,6 +129,11 @@ workflowsRoutes.post('/:workflowId/run', authMiddleware, async (c) => {
       workflowId: c.req.param('workflowId'),
       input: body.input && typeof body.input === 'object' ? body.input : null,
       wait: body.wait === true,
+      runSource: 'web',
+      trigger: {
+        route: 'POST /api/workflows/:workflowId/run',
+        userId: authUser.id,
+      },
     });
     return c.json(result);
   } catch (err) {
@@ -192,6 +197,16 @@ workflowsRoutes.post('/internal/tool', async (c) => {
           input: body.input && typeof body.input === 'object' ? body.input : null,
           workspaceFolder: typeof body.workspaceFolder === 'string' ? body.workspaceFolder : null,
           wait: body.wait === true,
+          runSource: 'agent-tool',
+          trigger: {
+            route: 'POST /api/workflows/internal/tool',
+            action,
+            userId: ownerKey,
+            groupFolder: typeof body.groupFolder === 'string' ? body.groupFolder : null,
+            workspaceFolder: typeof body.workspaceFolder === 'string' ? body.workspaceFolder : null,
+            chatJid: typeof body.chatJid === 'string' ? body.chatJid : null,
+            createdBy: typeof body.createdBy === 'string' ? body.createdBy : null,
+          },
         }));
       case 'status': {
         const run = workflowService.runStatus(ownerKey, String(body.runId || ''));

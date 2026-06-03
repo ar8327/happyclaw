@@ -215,6 +215,8 @@ export interface WorkflowRunRecord {
   error: string | null;
   workspace_folder: string | null;
   group_folder: string | null;
+  run_source: string | null;
+  trigger_json: string | null;
   started_at: string | null;
   finished_at: string | null;
   created_at: string;

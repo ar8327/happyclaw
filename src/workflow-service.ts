@@ -44,6 +44,8 @@ interface RunWorkflowInput {
   input?: Record<string, unknown> | null;
   workspaceFolder?: string | null;
   wait?: boolean;
+  runSource?: string | null;
+  trigger?: Record<string, unknown> | null;
 }
 
 interface NodeExecutionContext {
@@ -149,7 +151,7 @@ function hashPrompt(prompt: string): string {
   return crypto.createHash('sha256').update(prompt).digest('hex');
 }
 
-function renderPrompt(template: string, ctx: NodeExecutionContext): string {
+function renderTemplate(template: string, ctx: NodeExecutionContext): string {
   return template.replace(/\{\{\s*([a-zA-Z0-9_.-]+)(?:\.output)?\s*\}\}/g, (_match, key: string) => {
     if (key.startsWith('input.')) {
       const value = key.slice('input.'.length).split('.').reduce<unknown>((acc, part) => {
@@ -162,6 +164,42 @@ function renderPrompt(template: string, ctx: NodeExecutionContext): string {
     if (!output) return '';
     return output.length > 12000 ? `${output.slice(0, 12000)}\n...[truncated]` : output;
   });
+}
+
+function hasDependencyOutputPlaceholder(template: string, dependencies: string[]): boolean {
+  return dependencies.some((dep) => {
+    const escaped = dep.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`\\{\\{\\s*${escaped}(?:\\.output)?\\s*\\}\\}`).test(template);
+  });
+}
+
+function renderNodePrompt(node: WorkflowAgentNode, ctx: NodeExecutionContext): string {
+  const rendered = renderTemplate(node.prompt, ctx);
+  const dependencies = normalizeDependsOn(node);
+  if (dependencies.length === 0 || hasDependencyOutputPlaceholder(node.prompt, dependencies)) {
+    return rendered;
+  }
+
+  const upstream = dependencies
+    .map((dep) => {
+      const output = ctx.outputs.get(dep) || '';
+      const trimmed = output.trim();
+      return [
+        `### ${dep}`,
+        trimmed.length > 12000 ? `${trimmed.slice(0, 12000)}\n...[truncated]` : trimmed || '(no output)',
+      ].join('\n\n');
+    })
+    .join('\n\n');
+
+  return [
+    rendered.trimEnd(),
+    '',
+    '## Upstream node outputs',
+    '',
+    'The following sections are the completed outputs of this node’s direct dependencies. Use them as primary source material unless the task explicitly says otherwise.',
+    '',
+    upstream,
+  ].join('\n');
 }
 
 function buildRunResult(runId: string): {
@@ -330,12 +368,24 @@ class WorkflowService {
       error: null,
       workspace_folder: workspaceFolder,
       group_folder: workflow.group_folder,
+      run_source: input.runSource || null,
+      trigger_json: input.trigger ? JSON.stringify(input.trigger, null, 2) : null,
       started_at: null,
       finished_at: null,
       created_at: now,
       updated_at: now,
     };
     createWorkflowRun(run);
+    logger.info(
+      {
+        runId: run.id,
+        workflowId: workflow.id,
+        ownerKey: workflow.owner_key,
+        runSource: run.run_source,
+        trigger: input.trigger || null,
+      },
+      'Dynamic workflow run started',
+    );
 
     for (const node of definition.nodes) {
       createWorkflowNodeRun({
@@ -539,7 +589,7 @@ class WorkflowService {
   private async executeNode(ctx: NodeExecutionContext, node: WorkflowAgentNode): Promise<string> {
     const nodeRunId = ctx.nodeRunIds.get(node.id);
     if (!nodeRunId) throw new Error(`Missing node run for ${node.id}`);
-    const renderedPrompt = renderPrompt(node.prompt, ctx);
+    const renderedPrompt = renderNodePrompt(node, ctx);
     const provider = node.provider || ctx.definition.settings?.provider || undefined;
     const model = node.model || ctx.definition.settings?.model || undefined;
     const waitStart = Date.now();
@@ -564,7 +614,7 @@ class WorkflowService {
         provider,
         model,
         thinkingEffort: node.thinking_effort || ctx.definition.settings?.thinking_effort,
-        timeoutMs: node.timeout_ms || ctx.definition.settings?.node_timeout_ms || 5 * 60 * 1000,
+        timeoutMs: node.timeout_ms || ctx.definition.settings?.node_timeout_ms || 10 * 60 * 1000,
         maxTurns: node.max_turns,
         signal: ctx.abortController.signal,
       });

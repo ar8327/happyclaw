@@ -946,6 +946,8 @@ export function initDatabase(): void {
       error TEXT,
       workspace_folder TEXT,
       group_folder TEXT,
+      run_source TEXT,
+      trigger_json TEXT,
       started_at TEXT,
       finished_at TEXT,
       created_at TEXT NOT NULL,
@@ -1008,6 +1010,8 @@ export function initDatabase(): void {
   ensureColumn('users', 'disable_reason', 'TEXT');
   ensureColumn('users', 'notes', 'TEXT');
   ensureColumn('users', 'deleted_at', 'TEXT');
+  ensureColumn('workflow_runs', 'run_source', 'TEXT');
+  ensureColumn('workflow_runs', 'trigger_json', 'TEXT');
   ensureColumn('users', 'avatar_emoji', 'TEXT');
   ensureColumn('users', 'avatar_color', 'TEXT');
   ensureColumn('messages', 'attachments', 'TEXT');
@@ -1294,7 +1298,7 @@ export function initDatabase(): void {
 
   syncSessionWorkbenchProjection();
 
-  const SCHEMA_VERSION = '43';
+  const SCHEMA_VERSION = '44';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -2347,9 +2351,9 @@ export function createWorkflowRun(record: WorkflowRunRecord): void {
     `
     INSERT INTO workflow_runs (
       id, workflow_id, owner_key, version, status, input_json, result_json,
-      error, workspace_folder, group_folder, started_at, finished_at,
-      created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      error, workspace_folder, group_folder, run_source, trigger_json,
+      started_at, finished_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
   ).run(
     record.id,
@@ -2362,6 +2366,8 @@ export function createWorkflowRun(record: WorkflowRunRecord): void {
     record.error,
     record.workspace_folder,
     record.group_folder,
+    record.run_source,
+    record.trigger_json,
     record.started_at,
     record.finished_at,
     record.created_at,
