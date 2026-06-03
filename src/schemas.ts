@@ -153,6 +153,7 @@ export const SystemSettingsSchema = z.object({
     .optional(),
   maxConcurrentRuntimes: z.number().int().min(1).max(100).optional(),
   maxConcurrentScripts: z.number().int().min(1).max(50).optional(),
+  maxConcurrentWorkflowNodes: z.number().int().min(1).max(50).optional(),
   scriptTimeout: z.number().int().min(5000).max(600000).optional(),
   queryActivityTimeoutMs: z.number().int().min(30000).max(3600000).optional(),
   toolCallHardTimeoutMs: z.number().int().min(60000).max(7200000).optional(),

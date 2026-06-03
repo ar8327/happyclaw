@@ -71,6 +71,7 @@ export interface SystemSettings {
   runtimeMaxOutputSize: number;
   maxConcurrentRuntimes: number;
   maxConcurrentScripts: number;
+  maxConcurrentWorkflowNodes: number;
   scriptTimeout: number;
   queryActivityTimeoutMs: number;
   toolCallHardTimeoutMs: number;

@@ -1306,6 +1306,7 @@ export interface SystemSettings {
   runtimeMaxOutputSize: number;
   maxConcurrentRuntimes: number;
   maxConcurrentScripts: number;
+  maxConcurrentWorkflowNodes: number;
   scriptTimeout: number;
   queryActivityTimeoutMs: number;
   toolCallHardTimeoutMs: number;
@@ -1330,6 +1331,7 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   runtimeMaxOutputSize: 10485760,
   maxConcurrentRuntimes: 20,
   maxConcurrentScripts: 10,
+  maxConcurrentWorkflowNodes: 10,
   scriptTimeout: 60000,
   queryActivityTimeoutMs: 300000,
   toolCallHardTimeoutMs: 7200000,
@@ -1407,6 +1409,11 @@ function readSystemSettingsFromFile(): SystemSettings | null {
       raw.maxConcurrentScripts > 0
         ? raw.maxConcurrentScripts
         : DEFAULT_SYSTEM_SETTINGS.maxConcurrentScripts,
+    maxConcurrentWorkflowNodes:
+      typeof raw.maxConcurrentWorkflowNodes === 'number' &&
+      raw.maxConcurrentWorkflowNodes > 0
+        ? raw.maxConcurrentWorkflowNodes
+        : DEFAULT_SYSTEM_SETTINGS.maxConcurrentWorkflowNodes,
     scriptTimeout:
       typeof raw.scriptTimeout === 'number' && raw.scriptTimeout > 0
         ? raw.scriptTimeout
@@ -1498,6 +1505,10 @@ function buildEnvFallbackSettings(): SystemSettings {
     maxConcurrentScripts: parseIntEnv(
       process.env.MAX_CONCURRENT_SCRIPTS,
       DEFAULT_SYSTEM_SETTINGS.maxConcurrentScripts,
+    ),
+    maxConcurrentWorkflowNodes: parseIntEnv(
+      process.env.MAX_CONCURRENT_WORKFLOW_NODES,
+      DEFAULT_SYSTEM_SETTINGS.maxConcurrentWorkflowNodes,
     ),
     scriptTimeout: parseIntEnv(
       process.env.SCRIPT_TIMEOUT,
@@ -1605,6 +1616,9 @@ export function saveSystemSettings(
     merged.maxConcurrentRuntimes = 100;
   if (merged.maxConcurrentScripts < 1) merged.maxConcurrentScripts = 1;
   if (merged.maxConcurrentScripts > 50) merged.maxConcurrentScripts = 50;
+  if (merged.maxConcurrentWorkflowNodes < 1) merged.maxConcurrentWorkflowNodes = 1;
+  if (merged.maxConcurrentWorkflowNodes > 50)
+    merged.maxConcurrentWorkflowNodes = 50;
   if (merged.scriptTimeout < 5000) merged.scriptTimeout = 5000; // min 5s
   if (merged.scriptTimeout > 600000) merged.scriptTimeout = 600000; // max 10 min
   if (merged.queryActivityTimeoutMs < 30000)

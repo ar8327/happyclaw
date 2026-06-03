@@ -145,6 +145,115 @@ export interface TaskRunLog {
   error: string | null;
 }
 
+// --- Dynamic workflow types ---
+
+export type WorkflowStatus = 'active' | 'archived';
+export type WorkflowRunStatus =
+  | 'queued'
+  | 'running'
+  | 'success'
+  | 'error'
+  | 'cancelled';
+export type WorkflowNodeStatus =
+  | 'pending'
+  | 'running'
+  | 'success'
+  | 'error'
+  | 'skipped'
+  | 'cancelled';
+
+export interface WorkflowAgentNode {
+  id: string;
+  type: 'agent';
+  prompt: string;
+  provider?: string;
+  model?: string;
+  thinking_effort?: 'low' | 'medium' | 'high' | 'max';
+  depends_on?: string[];
+  timeout_ms?: number;
+  max_turns?: number;
+  retry?: {
+    max_attempts?: number;
+    backoff_ms?: number;
+  };
+}
+
+export type WorkflowNode = WorkflowAgentNode;
+
+export interface WorkflowDefinition {
+  name?: string;
+  description?: string;
+  nodes: WorkflowNode[];
+  settings?: {
+    max_concurrency?: number;
+    node_timeout_ms?: number;
+    provider?: string;
+    model?: string;
+    thinking_effort?: 'low' | 'medium' | 'high' | 'max';
+    retry?: {
+      max_attempts?: number;
+      backoff_ms?: number;
+    };
+  };
+}
+
+export interface WorkflowRecord {
+  id: string;
+  owner_key: string;
+  name: string;
+  description: string | null;
+  version: number;
+  definition_json: string;
+  workspace_folder: string | null;
+  group_folder: string | null;
+  created_by: string | null;
+  status: WorkflowStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkflowRunRecord {
+  id: string;
+  workflow_id: string;
+  owner_key: string;
+  version: number;
+  status: WorkflowRunStatus;
+  input_json: string | null;
+  result_json: string | null;
+  result_path: string | null;
+  final_node_id: string | null;
+  error: string | null;
+  workspace_folder: string | null;
+  group_folder: string | null;
+  run_source: string | null;
+  trigger_json: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkflowNodeRunRecord {
+  id: string;
+  run_id: string;
+  workflow_id: string;
+  owner_key: string;
+  node_id: string;
+  status: WorkflowNodeStatus;
+  provider: string | null;
+  model: string | null;
+  prompt_hash: string | null;
+  output_path: string | null;
+  transcript_path: string | null;
+  output_excerpt: string | null;
+  error: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  duration_ms: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
 // --- Auth types ---
 
 export type UserRole = 'admin' | 'member';

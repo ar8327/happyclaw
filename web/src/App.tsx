@@ -11,6 +11,7 @@ import { APP_BASE, shouldUseHashRouter } from './utils/url';
 
 const ChatPage = lazy(() => import('./pages/ChatPage').then(m => ({ default: m.ChatPage })));
 const TasksPage = lazy(() => import('./pages/TasksPage').then(m => ({ default: m.TasksPage })));
+const WorkflowsPage = lazy(() => import('./pages/WorkflowsPage').then(m => ({ default: m.WorkflowsPage })));
 const MonitorPage = lazy(() => import('./pages/MonitorPage').then(m => ({ default: m.MonitorPage })));
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then(m => ({ default: m.SettingsPage })));
 const LogsPage = lazy(() => import('./pages/LogsPage').then(m => ({ default: m.LogsPage })));
@@ -49,6 +50,7 @@ export function App() {
           <Route path="/search" element={<ErrorBoundary label="SearchPage"><Suspense fallback={null}><SearchPage /></Suspense></ErrorBoundary>} />
           <Route path="/groups" element={<Navigate to="/settings?tab=sessions" replace />} />
           <Route path="/tasks" element={<ErrorBoundary label="TasksPage"><Suspense fallback={null}><TasksPage /></Suspense></ErrorBoundary>} />
+          <Route path="/workflows" element={<ErrorBoundary label="WorkflowsPage"><Suspense fallback={null}><WorkflowsPage /></Suspense></ErrorBoundary>} />
           <Route path="/monitor" element={<ErrorBoundary label="MonitorPage"><Suspense fallback={null}><MonitorPage /></Suspense></ErrorBoundary>} />
           <Route path="/memory" element={<MemoryPage />} />
           <Route path="/skills" element={<SkillsPage />} />

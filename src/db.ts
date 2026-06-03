@@ -26,6 +26,9 @@ import {
   SessionRecord,
   SessionRuntimeStateRecord,
   RunnerProfileRecord,
+  WorkflowNodeRunRecord,
+  WorkflowRecord,
+  WorkflowRunRecord,
   SubAgent,
   TaskRunLog,
   WorkerSessionRecord,
@@ -918,6 +921,62 @@ export function initDatabase(): void {
       completed_at TEXT,
       result_summary TEXT
     );
+    CREATE TABLE IF NOT EXISTS workflows (
+      id TEXT PRIMARY KEY,
+      owner_key TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      version INTEGER NOT NULL DEFAULT 1,
+      definition_json TEXT NOT NULL,
+      workspace_folder TEXT,
+      group_folder TEXT,
+      created_by TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS workflow_runs (
+      id TEXT PRIMARY KEY,
+      workflow_id TEXT NOT NULL,
+      owner_key TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      input_json TEXT,
+      result_json TEXT,
+      result_path TEXT,
+      final_node_id TEXT,
+      error TEXT,
+      workspace_folder TEXT,
+      group_folder TEXT,
+      run_source TEXT,
+      trigger_json TEXT,
+      started_at TEXT,
+      finished_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (workflow_id) REFERENCES workflows(id)
+    );
+    CREATE TABLE IF NOT EXISTS workflow_node_runs (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      workflow_id TEXT NOT NULL,
+      owner_key TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      provider TEXT,
+      model TEXT,
+      prompt_hash TEXT,
+      output_path TEXT,
+      transcript_path TEXT,
+      output_excerpt TEXT,
+      error TEXT,
+      started_at TEXT,
+      finished_at TEXT,
+      duration_ms INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES workflow_runs(id)
+    );
     CREATE TABLE IF NOT EXISTS runner_profiles (
       id TEXT PRIMARY KEY,
       runner_id TEXT NOT NULL,
@@ -936,6 +995,10 @@ export function initDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
     CREATE INDEX IF NOT EXISTS idx_bindings_session ON session_bindings(session_id);
     CREATE INDEX IF NOT EXISTS idx_worker_parent ON worker_sessions(parent_session_id);
+    CREATE INDEX IF NOT EXISTS idx_workflows_owner ON workflows(owner_key, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_workflow_runs_owner ON workflow_runs(owner_key, created_at);
+    CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow ON workflow_runs(workflow_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_workflow_node_runs_run ON workflow_node_runs(run_id, node_id);
     CREATE INDEX IF NOT EXISTS idx_profiles_runner ON runner_profiles(runner_id);
   `);
 
@@ -950,6 +1013,11 @@ export function initDatabase(): void {
   ensureColumn('users', 'disable_reason', 'TEXT');
   ensureColumn('users', 'notes', 'TEXT');
   ensureColumn('users', 'deleted_at', 'TEXT');
+  ensureColumn('workflow_runs', 'run_source', 'TEXT');
+  ensureColumn('workflow_runs', 'trigger_json', 'TEXT');
+  ensureColumn('workflow_runs', 'result_path', 'TEXT');
+  ensureColumn('workflow_runs', 'final_node_id', 'TEXT');
+  ensureColumn('workflow_node_runs', 'transcript_path', 'TEXT');
   ensureColumn('users', 'avatar_emoji', 'TEXT');
   ensureColumn('users', 'avatar_color', 'TEXT');
   ensureColumn('messages', 'attachments', 'TEXT');
@@ -1236,7 +1304,7 @@ export function initDatabase(): void {
 
   syncSessionWorkbenchProjection();
 
-  const SCHEMA_VERSION = '42';
+  const SCHEMA_VERSION = '46';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -2202,6 +2270,265 @@ export function cleanupOldTaskRunLogs(retentionDays = 30): number {
     .prepare(`DELETE FROM task_run_logs WHERE run_at < ?`)
     .run(cutoff);
   return result.changes;
+}
+
+// ── Dynamic Workflows ──────────────────────────────────────
+
+export function createWorkflow(record: WorkflowRecord): void {
+  db.prepare(
+    `
+    INSERT INTO workflows (
+      id, owner_key, name, description, version, definition_json,
+      workspace_folder, group_folder, created_by, status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  ).run(
+    record.id,
+    record.owner_key,
+    record.name,
+    record.description,
+    record.version,
+    record.definition_json,
+    record.workspace_folder,
+    record.group_folder,
+    record.created_by,
+    record.status,
+    record.created_at,
+    record.updated_at,
+  );
+}
+
+export function updateWorkflow(
+  id: string,
+  ownerKey: string,
+  updates: Partial<
+    Pick<
+      WorkflowRecord,
+      | 'name'
+      | 'description'
+      | 'version'
+      | 'definition_json'
+      | 'workspace_folder'
+      | 'group_folder'
+      | 'status'
+      | 'updated_at'
+    >
+  >,
+): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  for (const [key, value] of Object.entries(updates)) {
+    if (value === undefined) continue;
+    fields.push(`${key} = ?`);
+    values.push(value);
+  }
+  if (fields.length === 0) return;
+  values.push(id, ownerKey);
+  db.prepare(
+    `UPDATE workflows SET ${fields.join(', ')} WHERE id = ? AND owner_key = ?`,
+  ).run(...values);
+}
+
+export function listWorkflows(ownerKey: string): WorkflowRecord[] {
+  return db
+    .prepare(
+      `
+      SELECT * FROM workflows
+      WHERE owner_key = ? AND status != 'archived'
+      ORDER BY updated_at DESC
+      `,
+    )
+    .all(ownerKey) as WorkflowRecord[];
+}
+
+export function getWorkflow(
+  id: string,
+  ownerKey?: string,
+): WorkflowRecord | undefined {
+  const sql = ownerKey
+    ? 'SELECT * FROM workflows WHERE id = ? AND owner_key = ?'
+    : 'SELECT * FROM workflows WHERE id = ?';
+  const params = ownerKey ? [id, ownerKey] : [id];
+  return db.prepare(sql).get(...params) as WorkflowRecord | undefined;
+}
+
+export function createWorkflowRun(record: WorkflowRunRecord): void {
+  db.prepare(
+    `
+    INSERT INTO workflow_runs (
+      id, workflow_id, owner_key, version, status, input_json, result_json,
+      result_path, final_node_id, error, workspace_folder, group_folder, run_source, trigger_json,
+      started_at, finished_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  ).run(
+    record.id,
+    record.workflow_id,
+    record.owner_key,
+    record.version,
+    record.status,
+    record.input_json,
+    record.result_json,
+    record.result_path,
+    record.final_node_id,
+    record.error,
+    record.workspace_folder,
+    record.group_folder,
+    record.run_source,
+    record.trigger_json,
+    record.started_at,
+    record.finished_at,
+    record.created_at,
+    record.updated_at,
+  );
+}
+
+export function updateWorkflowRun(
+  id: string,
+  updates: Partial<
+    Pick<
+      WorkflowRunRecord,
+      | 'status'
+      | 'result_json'
+      | 'result_path'
+      | 'final_node_id'
+      | 'error'
+      | 'started_at'
+      | 'finished_at'
+      | 'updated_at'
+    >
+  >,
+): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  for (const [key, value] of Object.entries(updates)) {
+    if (value === undefined) continue;
+    fields.push(`${key} = ?`);
+    values.push(value);
+  }
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(`UPDATE workflow_runs SET ${fields.join(', ')} WHERE id = ?`).run(
+    ...values,
+  );
+}
+
+export function getWorkflowRun(
+  id: string,
+  ownerKey?: string,
+): WorkflowRunRecord | undefined {
+  const sql = ownerKey
+    ? 'SELECT * FROM workflow_runs WHERE id = ? AND owner_key = ?'
+    : 'SELECT * FROM workflow_runs WHERE id = ?';
+  const params = ownerKey ? [id, ownerKey] : [id];
+  return db.prepare(sql).get(...params) as WorkflowRunRecord | undefined;
+}
+
+export function listWorkflowRuns(
+  ownerKey: string,
+  workflowId?: string,
+  limit = 50,
+): WorkflowRunRecord[] {
+  const boundedLimit = Math.max(1, Math.min(200, Math.floor(limit)));
+  if (workflowId) {
+    return db
+      .prepare(
+        `
+        SELECT * FROM workflow_runs
+        WHERE owner_key = ? AND workflow_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+        `,
+      )
+      .all(ownerKey, workflowId, boundedLimit) as WorkflowRunRecord[];
+  }
+  return db
+    .prepare(
+      `
+      SELECT * FROM workflow_runs
+      WHERE owner_key = ?
+      ORDER BY created_at DESC
+      LIMIT ?
+      `,
+    )
+    .all(ownerKey, boundedLimit) as WorkflowRunRecord[];
+}
+
+export function createWorkflowNodeRun(record: WorkflowNodeRunRecord): void {
+  db.prepare(
+    `
+    INSERT INTO workflow_node_runs (
+      id, run_id, workflow_id, owner_key, node_id, status, provider, model,
+      prompt_hash, output_path, transcript_path, output_excerpt, error,
+      started_at, finished_at, duration_ms, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  ).run(
+    record.id,
+    record.run_id,
+    record.workflow_id,
+    record.owner_key,
+    record.node_id,
+    record.status,
+    record.provider,
+    record.model,
+    record.prompt_hash,
+    record.output_path,
+    record.transcript_path,
+    record.output_excerpt,
+    record.error,
+    record.started_at,
+    record.finished_at,
+    record.duration_ms,
+    record.created_at,
+    record.updated_at,
+  );
+}
+
+export function updateWorkflowNodeRun(
+  id: string,
+  updates: Partial<
+    Pick<
+      WorkflowNodeRunRecord,
+      | 'status'
+      | 'provider'
+      | 'model'
+      | 'prompt_hash'
+      | 'output_path'
+      | 'transcript_path'
+      | 'output_excerpt'
+      | 'error'
+      | 'started_at'
+      | 'finished_at'
+      | 'duration_ms'
+      | 'updated_at'
+    >
+  >,
+): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  for (const [key, value] of Object.entries(updates)) {
+    if (value === undefined) continue;
+    fields.push(`${key} = ?`);
+    values.push(value);
+  }
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(
+    `UPDATE workflow_node_runs SET ${fields.join(', ')} WHERE id = ?`,
+  ).run(...values);
+}
+
+export function listWorkflowNodeRuns(runId: string): WorkflowNodeRunRecord[] {
+  return db
+    .prepare(
+      `
+      SELECT * FROM workflow_node_runs
+      WHERE run_id = ?
+      ORDER BY created_at ASC
+      `,
+    )
+    .all(runId) as WorkflowNodeRunRecord[];
 }
 
 // ── Context Summaries ───────────────────────────────────────
