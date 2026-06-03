@@ -3,6 +3,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+import { buildCodexExecArgs } from './codex-exec-adapter.js';
+
 export interface WorkflowInvokeInput {
   prompt: string;
   cwd: string;
@@ -121,21 +123,12 @@ async function invokeCodex(input: WorkflowInvokeInput): Promise<WorkflowInvokeRe
   const model = input.model || process.env.HAPPYCLAW_CODEX_MODEL || process.env.OPENAI_MODEL || 'gpt-5.4';
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdock-workflow-codex-'));
   const outFile = path.join(tmpDir, 'last-message.txt');
-  const args = [
-    'exec',
-    '--skip-git-repo-check',
-    '--ephemeral',
-    '--ignore-user-config',
-    '--ignore-rules',
-    '--dangerously-bypass-approvals-and-sandbox',
-    '--cd',
-    input.cwd,
-    '--model',
+  const args = buildCodexExecArgs({
+    cwd: input.cwd,
     model,
-    '--output-last-message',
-    outFile,
-    '-',
-  ];
+    thinkingEffort: input.thinkingEffort,
+    outputLastMessageFile: outFile,
+  });
   const child = spawn('codex', args, {
     cwd: input.cwd,
     env: sanitizedEnv(),
