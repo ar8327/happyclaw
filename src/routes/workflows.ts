@@ -28,6 +28,15 @@ function parseDefinition(value: unknown): WorkflowDefinition {
   return value as WorkflowDefinition;
 }
 
+function boolValue(value: unknown): boolean {
+  return value === true || value === 'true' || value === '1';
+}
+
+function excerptLength(value: unknown): number | undefined {
+  const parsed = typeof value === 'number' ? value : Number.parseInt(String(value || ''), 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 // Public Web API
 workflowsRoutes.get('/providers', authMiddleware, (c) => {
   return c.json({ providers: workflowService.providers() });
@@ -62,12 +71,20 @@ workflowsRoutes.post('/', authMiddleware, async (c) => {
 workflowsRoutes.get('/runs', authMiddleware, (c) => {
   const authUser = c.get('user') as AuthUser;
   const limit = Number.parseInt(c.req.query('limit') || '50', 10);
-  return c.json({ runs: workflowService.runs(authUser.id, undefined, limit) });
+  return c.json({
+    runs: workflowService.runs(authUser.id, undefined, limit, {
+      includeResult: boolValue(c.req.query('include_result')),
+      excerptLength: excerptLength(c.req.query('excerpt_length')),
+    }),
+  });
 });
 
 workflowsRoutes.get('/runs/:runId', authMiddleware, (c) => {
   const authUser = c.get('user') as AuthUser;
-  const run = workflowService.runStatus(authUser.id, c.req.param('runId'));
+  const run = workflowService.runStatus(authUser.id, c.req.param('runId'), {
+    includeResult: boolValue(c.req.query('include_result')),
+    excerptLength: excerptLength(c.req.query('excerpt_length')),
+  });
   if (!run) return c.json({ error: 'Run not found' }, 404);
   return c.json({ run });
 });
@@ -81,13 +98,20 @@ workflowsRoutes.post('/runs/:runId/cancel', authMiddleware, (c) => {
 
 workflowsRoutes.get('/runs/:runId/nodes/:nodeId/output', authMiddleware, (c) => {
   const authUser = c.get('user') as AuthUser;
-  const output = workflowService.readNodeOutput(
+  const result = workflowService.readNodeOutput(
     authUser.id,
     c.req.param('runId'),
     c.req.param('nodeId'),
+    {
+      includeMetadata: boolValue(c.req.query('include_metadata')),
+      includeLogs: boolValue(c.req.query('include_logs')),
+    },
   );
-  if (output == null) return c.json({ error: 'Output not found' }, 404);
-  return c.text(output, 200, { 'Content-Type': 'application/json; charset=utf-8' });
+  if (result == null) return c.json({ error: 'Output not found' }, 404);
+  if (boolValue(c.req.query('include_metadata')) || boolValue(c.req.query('include_logs'))) {
+    return c.json(result);
+  }
+  return c.text(String(result.output || ''), 200, { 'Content-Type': 'text/plain; charset=utf-8' });
 });
 
 workflowsRoutes.get('/:workflowId', authMiddleware, (c) => {
@@ -128,7 +152,7 @@ workflowsRoutes.post('/:workflowId/run', authMiddleware, async (c) => {
       ownerKey: authUser.id,
       workflowId: c.req.param('workflowId'),
       input: body.input && typeof body.input === 'object' ? body.input : null,
-      wait: body.wait === true,
+      wait: false,
       runSource: 'web',
       trigger: {
         route: 'POST /api/workflows/:workflowId/run',
@@ -196,7 +220,7 @@ workflowsRoutes.post('/internal/tool', async (c) => {
           workflowId: String(body.workflowId || ''),
           input: body.input && typeof body.input === 'object' ? body.input : null,
           workspaceFolder: typeof body.workspaceFolder === 'string' ? body.workspaceFolder : null,
-          wait: body.wait === true,
+          wait: false,
           runSource: 'agent-tool',
           trigger: {
             route: 'POST /api/workflows/internal/tool',
@@ -209,18 +233,34 @@ workflowsRoutes.post('/internal/tool', async (c) => {
           },
         }));
       case 'status': {
-        const run = workflowService.runStatus(ownerKey, String(body.runId || ''));
+        const run = workflowService.runStatus(ownerKey, String(body.runId || ''), {
+          includeResult: body.include_result === true,
+          excerptLength: excerptLength(body.excerpt_length),
+        });
         if (!run) return c.json({ error: 'Run not found' }, 404);
         return c.json({ run });
       }
       case 'runs':
-        return c.json({ runs: workflowService.runs(ownerKey, typeof body.workflowId === 'string' ? body.workflowId : undefined, Number(body.limit || 50)) });
+        return c.json({
+          runs: workflowService.runs(
+            ownerKey,
+            typeof body.workflowId === 'string' ? body.workflowId : undefined,
+            Number(body.limit || 50),
+            {
+              includeResult: body.include_result === true,
+              excerptLength: excerptLength(body.excerpt_length),
+            },
+          ),
+        });
       case 'cancel':
         return c.json({ ok: workflowService.cancel(ownerKey, String(body.runId || '')) });
       case 'read_node_output': {
-        const output = workflowService.readNodeOutput(ownerKey, String(body.runId || ''), String(body.nodeId || ''));
+        const output = workflowService.readNodeOutput(ownerKey, String(body.runId || ''), String(body.nodeId || ''), {
+          includeMetadata: body.include_metadata === true,
+          includeLogs: body.include_logs === true,
+        });
         if (output == null) return c.json({ error: 'Output not found' }, 404);
-        return c.json({ output });
+        return c.json(output);
       }
       default:
         return c.json({ error: `Unknown workflow action: ${action}` }, 400);

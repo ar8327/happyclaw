@@ -13,6 +13,10 @@ export interface WorkflowDefinition {
     provider?: string;
     model?: string;
     thinking_effort?: 'low' | 'medium' | 'high' | 'max';
+    retry?: {
+      max_attempts?: number;
+      backoff_ms?: number;
+    };
   };
   nodes: Array<{
     id: string;
@@ -24,6 +28,10 @@ export interface WorkflowDefinition {
     depends_on?: string[];
     timeout_ms?: number;
     max_turns?: number;
+    retry?: {
+      max_attempts?: number;
+      backoff_ms?: number;
+    };
   }>;
 }
 
@@ -51,6 +59,8 @@ export interface WorkflowNodeRun {
   status: WorkflowNodeStatus;
   provider: string | null;
   model: string | null;
+  output_path?: string | null;
+  transcript_path?: string | null;
   output_excerpt: string | null;
   error: string | null;
   started_at: string | null;
@@ -66,6 +76,7 @@ export interface WorkflowRun {
   status: WorkflowRunStatus;
   input_json: string | null;
   result_json: string | null;
+  result_excerpt?: string | null;
   error: string | null;
   workspace_folder: string | null;
   group_folder: string | null;

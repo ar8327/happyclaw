@@ -172,6 +172,10 @@ export interface WorkflowAgentNode {
   depends_on?: string[];
   timeout_ms?: number;
   max_turns?: number;
+  retry?: {
+    max_attempts?: number;
+    backoff_ms?: number;
+  };
 }
 
 export type WorkflowNode = WorkflowAgentNode;
@@ -186,6 +190,10 @@ export interface WorkflowDefinition {
     provider?: string;
     model?: string;
     thinking_effort?: 'low' | 'medium' | 'high' | 'max';
+    retry?: {
+      max_attempts?: number;
+      backoff_ms?: number;
+    };
   };
 }
 
@@ -234,6 +242,7 @@ export interface WorkflowNodeRunRecord {
   model: string | null;
   prompt_hash: string | null;
   output_path: string | null;
+  transcript_path: string | null;
   output_excerpt: string | null;
   error: string | null;
   started_at: string | null;

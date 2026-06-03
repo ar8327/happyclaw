@@ -965,6 +965,7 @@ export function initDatabase(): void {
       model TEXT,
       prompt_hash TEXT,
       output_path TEXT,
+      transcript_path TEXT,
       output_excerpt TEXT,
       error TEXT,
       started_at TEXT,
@@ -1012,6 +1013,7 @@ export function initDatabase(): void {
   ensureColumn('users', 'deleted_at', 'TEXT');
   ensureColumn('workflow_runs', 'run_source', 'TEXT');
   ensureColumn('workflow_runs', 'trigger_json', 'TEXT');
+  ensureColumn('workflow_node_runs', 'transcript_path', 'TEXT');
   ensureColumn('users', 'avatar_emoji', 'TEXT');
   ensureColumn('users', 'avatar_color', 'TEXT');
   ensureColumn('messages', 'attachments', 'TEXT');
@@ -1298,7 +1300,7 @@ export function initDatabase(): void {
 
   syncSessionWorkbenchProjection();
 
-  const SCHEMA_VERSION = '44';
+  const SCHEMA_VERSION = '45';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -2449,9 +2451,9 @@ export function createWorkflowNodeRun(record: WorkflowNodeRunRecord): void {
     `
     INSERT INTO workflow_node_runs (
       id, run_id, workflow_id, owner_key, node_id, status, provider, model,
-      prompt_hash, output_path, output_excerpt, error, started_at, finished_at,
-      duration_ms, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      prompt_hash, output_path, transcript_path, output_excerpt, error,
+      started_at, finished_at, duration_ms, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
   ).run(
     record.id,
@@ -2464,6 +2466,7 @@ export function createWorkflowNodeRun(record: WorkflowNodeRunRecord): void {
     record.model,
     record.prompt_hash,
     record.output_path,
+    record.transcript_path,
     record.output_excerpt,
     record.error,
     record.started_at,
@@ -2484,6 +2487,7 @@ export function updateWorkflowNodeRun(
       | 'model'
       | 'prompt_hash'
       | 'output_path'
+      | 'transcript_path'
       | 'output_excerpt'
       | 'error'
       | 'started_at'

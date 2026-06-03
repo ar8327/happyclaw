@@ -63,6 +63,13 @@ export class WorkflowPlugin implements ContextPlugin {
             provider: { type: 'string', description: 'Default provider, e.g. codex, claude, echo' },
             model: { type: 'string' },
             thinking_effort: { type: 'string', enum: ['low', 'medium', 'high', 'max'] },
+            retry: {
+              type: 'object',
+              properties: {
+                max_attempts: { type: 'number' },
+                backoff_ms: { type: 'number' },
+              },
+            },
           },
         },
         nodes: {
@@ -79,6 +86,13 @@ export class WorkflowPlugin implements ContextPlugin {
               depends_on: { type: 'array', items: { type: 'string' } },
               timeout_ms: { type: 'number' },
               max_turns: { type: 'number' },
+              retry: {
+                type: 'object',
+                properties: {
+                  max_attempts: { type: 'number' },
+                  backoff_ms: { type: 'number' },
+                },
+              },
             },
             required: ['id', 'type', 'prompt'],
           },
@@ -156,32 +170,38 @@ export class WorkflowPlugin implements ContextPlugin {
       {
         name: 'workflow_run',
         description:
-          'Run a saved dynamic workflow. Defaults to async; use wait=true only for short workflows. Returns run id and node statuses.',
+          'Start a saved dynamic workflow asynchronously. Returns immediately with run id and initial node statuses; use workflow_run_status to poll.',
         parameters: {
           type: 'object' as const,
           properties: {
             workflow_id: { type: 'string' },
             input: { type: 'object' },
-            wait: { type: 'boolean' },
           },
           required: ['workflow_id'],
         },
         execute: async (args) => callWorkflowApi(ctx, 'run', {
           workflowId: args.workflow_id,
           input: args.input,
-          wait: args.wait === true,
           workspaceFolder: ctx.workspaceGroup,
         }),
       },
       {
         name: 'workflow_run_status',
-        description: 'Get current status for a workflow run, including node statuses and output excerpts.',
+        description: 'Get lightweight current status for a workflow run. By default excludes large result payloads.',
         parameters: {
           type: 'object' as const,
-          properties: { run_id: { type: 'string' } },
+          properties: {
+            run_id: { type: 'string' },
+            include_result: { type: 'boolean' },
+            excerpt_length: { type: 'number' },
+          },
           required: ['run_id'],
         },
-        execute: async (args) => callWorkflowApi(ctx, 'status', { runId: args.run_id }),
+        execute: async (args) => callWorkflowApi(ctx, 'status', {
+          runId: args.run_id,
+          include_result: args.include_result === true,
+          excerpt_length: args.excerpt_length,
+        }),
       },
       {
         name: 'workflow_cancel',
@@ -195,18 +215,22 @@ export class WorkflowPlugin implements ContextPlugin {
       },
       {
         name: 'workflow_read_node_output',
-        description: 'Read the full persisted output for a completed workflow node.',
+        description: 'Read the persisted business-text output for a completed workflow node. Debug metadata/log transcript is optional.',
         parameters: {
           type: 'object' as const,
           properties: {
             run_id: { type: 'string' },
             node_id: { type: 'string' },
+            include_metadata: { type: 'boolean' },
+            include_logs: { type: 'boolean' },
           },
           required: ['run_id', 'node_id'],
         },
         execute: async (args) => callWorkflowApi(ctx, 'read_node_output', {
           runId: args.run_id,
           nodeId: args.node_id,
+          include_metadata: args.include_metadata === true,
+          include_logs: args.include_logs === true,
         }),
       },
     ];
@@ -217,6 +241,7 @@ export class WorkflowPlugin implements ContextPlugin {
       '## Dynamic Workflows',
       '',
       'You can create, save, run, and monitor dynamic workflows using workflow_* tools.',
+      'workflow_run is asynchronous and returns quickly. Poll workflow_run_status for long-running workflows; do not wait in a tool call for workflow completion.',
       'Workflow execution is handled by AgentDock host. Workflow node agents are bare CLI agents and do not receive AgentDock tools such as send_message, memory, tasks, or workflow tools.',
       'The MVP supports DAG workflows with agent nodes. Use depends_on to express dependencies; independent nodes may run concurrently.',
       'Dependency outputs are automatically appended to a dependent node prompt when the prompt does not explicitly reference dependency placeholders such as {{research}} or {{research.output}}.',

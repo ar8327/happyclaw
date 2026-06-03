@@ -48,6 +48,29 @@ interface RunWorkflowInput {
   trigger?: Record<string, unknown> | null;
 }
 
+interface WorkflowRunStatusOptions {
+  includeResult?: boolean;
+  excerptLength?: number;
+}
+
+interface ReadNodeOutputOptions {
+  includeMetadata?: boolean;
+  includeLogs?: boolean;
+}
+
+interface NodeAttemptRecord {
+  attempt: number;
+  status: 'success' | 'error';
+  provider: string;
+  model: string | null;
+  started_at: string;
+  finished_at: string;
+  duration_ms: number;
+  error?: string;
+  stdout?: string;
+  stderr?: string;
+}
+
 interface NodeExecutionContext {
   run: WorkflowRunRecord;
   definition: WorkflowDefinition;
@@ -147,6 +170,11 @@ function excerpt(output: string, max = 2000): string {
   return trimmed.length > max ? `${trimmed.slice(0, max)}…` : trimmed;
 }
 
+function clampExcerptLength(value: number | undefined, fallback = 2000): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.min(20000, Math.floor(value || 0)));
+}
+
 function hashPrompt(prompt: string): string {
   return crypto.createHash('sha256').update(prompt).digest('hex');
 }
@@ -202,6 +230,13 @@ function renderNodePrompt(node: WorkflowAgentNode, ctx: NodeExecutionContext): s
   ].join('\n');
 }
 
+function retryConfig(node: WorkflowAgentNode, definition: WorkflowDefinition): { maxAttempts: number; backoffMs: number } {
+  const retry = node.retry || definition.settings?.retry;
+  const maxAttempts = Math.max(1, Math.min(5, Math.floor(retry?.max_attempts || 1)));
+  const backoffMs = Math.max(0, Math.min(60000, Math.floor(retry?.backoff_ms || 3000)));
+  return { maxAttempts, backoffMs };
+}
+
 function buildRunResult(runId: string): {
   run: WorkflowRunRecord | undefined;
   nodes: WorkflowNodeRunRecord[];
@@ -210,6 +245,60 @@ function buildRunResult(runId: string): {
     run: getWorkflowRun(runId),
     nodes: listWorkflowNodeRuns(runId),
   };
+}
+
+function parseRunResult(resultJson: string | null): Record<string, unknown> | null {
+  if (!resultJson) return null;
+  try {
+    return JSON.parse(resultJson) as Record<string, unknown>;
+  } catch {
+    return { raw: resultJson };
+  }
+}
+
+function lightweightRun(run: WorkflowRunRecord, options: WorkflowRunStatusOptions = {}) {
+  const excerptLength = clampExcerptLength(options.excerptLength);
+  const parsedResult = parseRunResult(run.result_json);
+  const summary = typeof parsedResult?.summary === 'string' ? parsedResult.summary : '';
+  return {
+    ...run,
+    result_json: options.includeResult ? run.result_json : null,
+    result_excerpt: summary ? excerpt(summary, excerptLength) : null,
+  };
+}
+
+function lightweightNode(node: WorkflowNodeRunRecord, excerptLength: number): WorkflowNodeRunRecord {
+  return {
+    ...node,
+    output_excerpt: node.output_excerpt ? excerpt(node.output_excerpt, excerptLength) : node.output_excerpt,
+  };
+}
+
+function safeReadWorkflowFile(filePath: string | null | undefined): string | null {
+  if (!filePath) return null;
+  const root = path.join(DATA_DIR, 'workflows');
+  const resolved = path.resolve(filePath);
+  if (!resolved.startsWith(path.resolve(root))) return null;
+  if (!fs.existsSync(resolved)) return null;
+  return fs.readFileSync(resolved, 'utf8');
+}
+
+async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return;
+  if (signal?.aborted) throw new Error('Workflow node cancelled');
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', abortHandler);
+      resolve();
+    }, ms);
+    timer.unref();
+    const abortHandler = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abortHandler);
+      reject(new Error('Workflow node cancelled'));
+    };
+    signal?.addEventListener('abort', abortHandler, { once: true });
+  });
 }
 
 class WorkflowService {
@@ -336,17 +425,22 @@ class WorkflowService {
     return true;
   }
 
-  runs(ownerKey: string, workflowId?: string, limit?: number) {
+  runs(ownerKey: string, workflowId?: string, limit?: number, options: WorkflowRunStatusOptions = {}) {
+    const excerptLength = clampExcerptLength(options.excerptLength);
     return listWorkflowRuns(ownerKey, workflowId, limit).map((run) => ({
-      ...run,
-      nodes: listWorkflowNodeRuns(run.id),
+      ...lightweightRun(run, options),
+      nodes: listWorkflowNodeRuns(run.id).map((node) => lightweightNode(node, excerptLength)),
     }));
   }
 
-  runStatus(ownerKey: string, runId: string) {
+  runStatus(ownerKey: string, runId: string, options: WorkflowRunStatusOptions = {}) {
     const run = getWorkflowRun(runId, ownerKey);
     if (!run) return null;
-    return { ...run, nodes: listWorkflowNodeRuns(runId) };
+    const excerptLength = clampExcerptLength(options.excerptLength);
+    return {
+      ...lightweightRun(run, options),
+      nodes: listWorkflowNodeRuns(runId).map((node) => lightweightNode(node, excerptLength)),
+    };
   }
 
   async startRun(input: RunWorkflowInput) {
@@ -399,6 +493,7 @@ class WorkflowService {
         model: node.model || definition.settings?.model || null,
         prompt_hash: null,
         output_path: null,
+        transcript_path: null,
         output_excerpt: null,
         error: null,
         started_at: null,
@@ -441,16 +536,53 @@ class WorkflowService {
     return true;
   }
 
-  readNodeOutput(ownerKey: string, runId: string, nodeId: string): string | null {
+  readNodeOutput(ownerKey: string, runId: string, nodeId: string, options: ReadNodeOutputOptions = {}) {
     const run = getWorkflowRun(runId, ownerKey);
     if (!run) return null;
     const node = listWorkflowNodeRuns(runId).find((item) => item.node_id === nodeId);
-    if (!node?.output_path) return null;
-    const root = path.join(DATA_DIR, 'workflows');
-    const resolved = path.resolve(node.output_path);
-    if (!resolved.startsWith(path.resolve(root))) return null;
-    if (!fs.existsSync(resolved)) return null;
-    return fs.readFileSync(resolved, 'utf8');
+    if (!node) return null;
+    let output: string | null = null;
+    if (node.output_path?.endsWith('.json')) {
+      const legacy = safeReadWorkflowFile(node.output_path);
+      if (legacy) {
+        try {
+          const parsed = JSON.parse(legacy) as { output?: unknown };
+          if (typeof parsed.output === 'string') output = parsed.output;
+        } catch {
+          output = legacy;
+        }
+      }
+    } else {
+      output = safeReadWorkflowFile(node.output_path);
+    }
+    if (output == null) return null;
+    const response: Record<string, unknown> = {
+      node_id: node.node_id,
+      output,
+    };
+    if (options.includeMetadata || options.includeLogs) {
+      response.provider = node.provider;
+      response.model = node.model;
+      response.status = node.status;
+      response.started_at = node.started_at;
+      response.finished_at = node.finished_at;
+      response.duration_ms = node.duration_ms;
+      response.output_path = node.output_path;
+      response.transcript_path = node.transcript_path;
+    }
+    if (options.includeLogs) {
+      const transcript = safeReadWorkflowFile(node.transcript_path);
+      if (transcript) {
+        try {
+          response.transcript = JSON.parse(transcript);
+        } catch {
+          response.transcript = transcript;
+        }
+      } else {
+        response.transcript = null;
+      }
+    }
+    return response;
   }
 
   private async executeRun(
@@ -592,79 +724,151 @@ class WorkflowService {
     const renderedPrompt = renderNodePrompt(node, ctx);
     const provider = node.provider || ctx.definition.settings?.provider || undefined;
     const model = node.model || ctx.definition.settings?.model || undefined;
-    const waitStart = Date.now();
-    let start = waitStart;
+    const { maxAttempts, backoffMs } = retryConfig(node, ctx.definition);
+    const nodeStart = Date.now();
+    let startedAt: string | null = null;
     let releaseGlobalSlot: (() => void) | null = null;
-    try {
-      releaseGlobalSlot = await this.acquireGlobalNodeSlot(ctx.abortController.signal);
-      start = Date.now();
-      const startedAt = nowIso();
-      updateWorkflowNodeRun(nodeRunId, {
-        status: 'running',
-        provider: provider || null,
-        model: model || null,
-        prompt_hash: hashPrompt(renderedPrompt),
-        started_at: startedAt,
-        updated_at: startedAt,
-      });
+    const attempts: NodeAttemptRecord[] = [];
+    const transcriptPath = path.join(
+      DATA_DIR,
+      'workflows',
+      safeSegment(ctx.workflow.owner_key),
+      safeSegment(ctx.workflow.id),
+      'runs',
+      safeSegment(ctx.run.id),
+      `${safeSegment(node.id)}.transcript.json`,
+    );
+    const outputPath = path.join(
+      DATA_DIR,
+      'workflows',
+      safeSegment(ctx.workflow.owner_key),
+      safeSegment(ctx.workflow.id),
+      'runs',
+      safeSegment(ctx.run.id),
+      `${safeSegment(node.id)}.output.txt`,
+    );
 
-      const result = await invokeWorkflowNode({
-        prompt: renderedPrompt,
-        cwd: ctx.workspaceFolder,
-        provider,
-        model,
-        thinkingEffort: node.thinking_effort || ctx.definition.settings?.thinking_effort,
-        timeoutMs: node.timeout_ms || ctx.definition.settings?.node_timeout_ms || 10 * 60 * 1000,
-        maxTurns: node.max_turns,
-        signal: ctx.abortController.signal,
-      });
-      const finishedAt = nowIso();
-      const outputPath = path.join(
-        DATA_DIR,
-        'workflows',
-        safeSegment(ctx.workflow.owner_key),
-        safeSegment(ctx.workflow.id),
-        'runs',
-        safeSegment(ctx.run.id),
-        `${safeSegment(node.id)}.json`,
-      );
-      fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-      fs.writeFileSync(
-        outputPath,
-        JSON.stringify(
-          {
+    const writeTranscript = (payload: Record<string, unknown>) => {
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      fs.writeFileSync(transcriptPath, JSON.stringify(payload, null, 2), 'utf8');
+    };
+
+    try {
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        releaseGlobalSlot = await this.acquireGlobalNodeSlot(ctx.abortController.signal);
+        const attemptStartMs = Date.now();
+        const attemptStartedAt = nowIso();
+        if (!startedAt) {
+          startedAt = attemptStartedAt;
+          updateWorkflowNodeRun(nodeRunId, {
+            status: 'running',
+            provider: provider || null,
+            model: model || null,
+            prompt_hash: hashPrompt(renderedPrompt),
+            transcript_path: transcriptPath,
+            started_at: startedAt,
+            updated_at: startedAt,
+          });
+        }
+
+        try {
+          const result = await invokeWorkflowNode({
+            prompt: renderedPrompt,
+            cwd: ctx.workspaceFolder,
+            provider,
+            model,
+            thinkingEffort: node.thinking_effort || ctx.definition.settings?.thinking_effort,
+            timeoutMs: node.timeout_ms || ctx.definition.settings?.node_timeout_ms || 10 * 60 * 1000,
+            maxTurns: node.max_turns,
+            signal: ctx.abortController.signal,
+          });
+          const finishedAt = nowIso();
+          attempts.push({
+            attempt,
+            status: 'success',
+            provider: result.provider,
+            model: result.model,
+            started_at: attemptStartedAt,
+            finished_at: finishedAt,
+            duration_ms: Date.now() - attemptStartMs,
+            stdout: result.stdout,
+            stderr: result.stderr,
+          });
+
+          fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+          fs.writeFileSync(outputPath, result.output, 'utf8');
+          writeTranscript({
             node_id: node.id,
             provider: result.provider,
             model: result.model,
             prompt: renderedPrompt,
+            output_path: outputPath,
             output: result.output,
             stdout: result.stdout,
             stderr: result.stderr,
+            attempts,
             started_at: startedAt,
             finished_at: finishedAt,
-          },
-          null,
-          2,
-        ),
-      );
-      updateWorkflowNodeRun(nodeRunId, {
-        status: 'success',
-        provider: result.provider,
-        model: result.model,
-        output_path: outputPath,
-        output_excerpt: excerpt(result.output),
-        finished_at: finishedAt,
-        duration_ms: Date.now() - start,
-        updated_at: finishedAt,
-      });
-      return result.output;
+          });
+          updateWorkflowNodeRun(nodeRunId, {
+            status: 'success',
+            provider: result.provider,
+            model: result.model,
+            output_path: outputPath,
+            transcript_path: transcriptPath,
+            output_excerpt: excerpt(result.output),
+            finished_at: finishedAt,
+            duration_ms: Date.now() - nodeStart,
+            updated_at: finishedAt,
+          });
+          return result.output;
+        } catch (err) {
+          const finishedAt = nowIso();
+          const message = err instanceof Error ? err.message : String(err);
+          attempts.push({
+            attempt,
+            status: 'error',
+            provider: provider || 'default',
+            model: model || null,
+            started_at: attemptStartedAt,
+            finished_at: finishedAt,
+            duration_ms: Date.now() - attemptStartMs,
+            error: message,
+          });
+          releaseGlobalSlot?.();
+          releaseGlobalSlot = null;
+          if (ctx.abortController.signal.aborted || attempt >= maxAttempts) {
+            throw err;
+          }
+          updateWorkflowNodeRun(nodeRunId, {
+            error: `Attempt ${attempt}/${maxAttempts} failed: ${message}; retrying`,
+            updated_at: finishedAt,
+          });
+          await sleep(backoffMs, ctx.abortController.signal);
+        } finally {
+          releaseGlobalSlot?.();
+          releaseGlobalSlot = null;
+        }
+      }
+      throw new Error('Workflow node retry loop ended unexpectedly');
     } catch (err) {
       const finishedAt = nowIso();
+      writeTranscript({
+        node_id: node.id,
+        provider: provider || null,
+        model: model || null,
+        prompt: renderedPrompt,
+        attempts,
+        error: err instanceof Error ? err.message : String(err),
+        started_at: startedAt,
+        finished_at: finishedAt,
+      });
       updateWorkflowNodeRun(nodeRunId, {
         status: ctx.abortController.signal.aborted ? 'cancelled' : 'error',
+        transcript_path: transcriptPath,
         error: err instanceof Error ? err.message : String(err),
         finished_at: finishedAt,
-        duration_ms: Date.now() - start,
+        duration_ms: Date.now() - nodeStart,
         updated_at: finishedAt,
       });
       throw err;
