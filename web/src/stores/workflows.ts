@@ -66,6 +66,8 @@ export interface WorkflowNodeRun {
   started_at: string | null;
   finished_at: string | null;
   duration_ms: number | null;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface WorkflowRun {
@@ -108,6 +110,7 @@ interface WorkflowsState {
   load: () => Promise<void>;
   runWorkflow: (workflowId: string) => Promise<void>;
   cancelRun: (runId: string) => Promise<void>;
+  importWorkflow: (definition: WorkflowDefinition, name?: string, description?: string | null) => Promise<void>;
   clearError: () => void;
 }
 
@@ -141,6 +144,19 @@ export const useWorkflowsStore = create<WorkflowsState>((set, get) => ({
   runWorkflow: async (workflowId: string) => {
     try {
       await api.post(`/api/workflows/${workflowId}/run`, { wait: false }, 20000);
+      await get().load();
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+    }
+  },
+
+  importWorkflow: async (definition: WorkflowDefinition, name?: string, description?: string | null) => {
+    try {
+      await api.post('/api/workflows', {
+        name: name || definition.name || 'Imported workflow',
+        description: description ?? definition.description,
+        definition,
+      }, 20000);
       await get().load();
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });

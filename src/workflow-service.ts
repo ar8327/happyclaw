@@ -181,7 +181,7 @@ function hashPrompt(prompt: string): string {
 }
 
 function renderTemplate(template: string, ctx: NodeExecutionContext): string {
-  return template.replace(/\{\{\s*([a-zA-Z0-9_.-]+)(?:\.output)?\s*\}\}/g, (_match, key: string) => {
+  return template.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_match, key: string) => {
     if (key.startsWith('input.')) {
       const value = key.slice('input.'.length).split('.').reduce<unknown>((acc, part) => {
         if (!acc || typeof acc !== 'object') return undefined;
@@ -189,7 +189,7 @@ function renderTemplate(template: string, ctx: NodeExecutionContext): string {
       }, ctx.input);
       return value == null ? '' : String(value);
     }
-    const output = ctx.outputs.get(key);
+    const output = ctx.outputs.get(key) || (key.endsWith('.output') ? ctx.outputs.get(key.slice(0, -'.output'.length)) : undefined);
     if (!output) return '';
     return output.length > 12000 ? `${output.slice(0, 12000)}\n...[truncated]` : output;
   });
