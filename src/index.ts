@@ -1009,6 +1009,13 @@ function sendImWithFailTracking(
     });
 }
 
+function isNoopAgentReply(text: string): boolean {
+  return text
+    .trim()
+    .replace(/[。.!！]+$/u, '')
+    .toLowerCase() === 'done';
+}
+
 function isCursorAfter(candidate: MessageCursor, base: MessageCursor): boolean {
   return candidate.rowid > base.rowid;
 }
@@ -2212,6 +2219,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   await setTyping(chatJid, true);
   let hadError = false;
   let sentReply = false;
+  let sawSendMessageTool = false;
   let lastError = '';
   let cursorCommitted = false;
   let lastReplyMsgId: string | undefined;
@@ -2405,6 +2413,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
           // IM Commentary: update the progress card with human-readable explanation (fire-and-forget)
           const _se = result.streamEvent;
+          if (
+            _se.eventType === 'tool_use_start' &&
+            typeof _se.toolName === 'string' &&
+            _se.toolName.endsWith('__send_message')
+          ) {
+            sawSendMessageTool = true;
+          }
+
           if (
             _se.eventType === 'tool_use_start' &&
             feishuConfig?.imCommentary &&
@@ -2923,6 +2939,56 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   // Final fallback for silent-success paths (no visible reply).
+  const latestSourceJid =
+    missedMessages[missedMessages.length - 1]?.source_jid || chatJid;
+  const latestSourceChannel = getChannelType(latestSourceJid)
+    ? latestSourceJid
+    : null;
+  const latestSubstantiveAssistantReply = getMessagesPage(
+    chatJid,
+    undefined,
+    20,
+  ).find(
+    (message) =>
+      message.is_from_me &&
+      message.timestamp > lastProcessed.timestamp &&
+      !isNoopAgentReply(message.content),
+  );
+  if (
+    !isErrorExit &&
+    latestSourceChannel &&
+    !sawSendMessageTool
+  ) {
+    const fallbackText = latestSubstantiveAssistantReply?.content || '收到啦。';
+    let imMsgId: string | undefined;
+    try {
+      imMsgId = await imManager.sendMessage(latestSourceChannel, fallbackText);
+      imSendFailCounts.delete(latestSourceChannel);
+    } catch (err) {
+      logger.warn(
+        { imJid: latestSourceChannel, err },
+        'Failed to relay silent-success fallback to IM',
+      );
+      const count = (imSendFailCounts.get(latestSourceChannel) ?? 0) + 1;
+      imSendFailCounts.set(latestSourceChannel, count);
+    }
+    if (!latestSubstantiveAssistantReply) {
+      lastReplyMsgId = await sendMessage(chatJid, fallbackText, {
+        sendToIM: false,
+        externalMsgId: imMsgId,
+      });
+    }
+    sentReply = true;
+    logger.warn(
+      {
+        chatJid,
+        imJid: latestSourceChannel,
+        forwardedExistingReply: !!latestSubstantiveAssistantReply,
+      },
+      'Sent IM fallback for successful turn without send_message',
+    );
+  }
+
   commitCursor();
   tryAutoCompress();
 

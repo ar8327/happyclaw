@@ -350,7 +350,7 @@ function buildInvariantReminder(activeChannels: string[]): string {
     '## HappyClaw post-compact invariant reminder',
     '',
     '- Codex 已完成 native compact。Codex 自己保留下来的 compact 上下文是主上下文，本消息是 HappyClaw 平台补充上下文。',
-    '- stdout 只会显示在 Web UI。回复飞书、Telegram、QQ 等 IM 用户时，必须使用 send_message，并使用最新消息 source 属性里的 channel。',
+    '- stdout 只会显示在 Web UI。最新用户消息来自飞书、Telegram、QQ 等 IM 渠道时，每一轮都必须使用 send_message，并使用最新消息 source 属性里的 channel；寒暄、感谢、确认、短回复也一样，不要只输出 "Done"。',
     activeChannels.length > 0
       ? `- 最近活跃 IM channels: ${activeChannels.join(', ')}。完成任务后需要主动向相关 channel 汇报。`
       : '- 当前没有记录到最近活跃 IM channel。若最新消息带 source 属性，以最新消息 source 为准。',

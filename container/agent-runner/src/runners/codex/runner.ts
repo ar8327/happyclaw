@@ -288,7 +288,7 @@ export class CodexRunner implements AgentRunner {
       'Continue the existing AgentDock conversation thread.',
       'Follow the system, workspace, memory, and routing instructions already established earlier in this thread.',
       'Focus on the latest user message. Do not repeat old replies.',
-      'Your stdout is only visible in the Web UI. For IM channels, use send_message with the channel from the latest message source attribute.',
+      'Your stdout is only visible in the Web UI. For every latest user message from an IM channel, call send_message with the channel from that message source attribute. This also applies to greetings, thanks, acknowledgements, and short confirmations; do not only output "Done".',
       activeChannels.length > 0
         ? `Recently active IM channels: ${activeChannels.join(', ')}.`
         : '',
