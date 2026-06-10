@@ -35,7 +35,11 @@ interface FeishuFileInfo {
 export interface ConnectOptions {
   onReady: () => void;
   /** 收到消息后调用，让调用方自动注册未知的飞书聊天 */
-  onNewChat?: (chatJid: string, chatName: string, chatType?: 'p2p' | 'group') => void;
+  onNewChat?: (
+    chatJid: string,
+    chatName: string,
+    chatType?: 'p2p' | 'group',
+  ) => void;
   /** 热重连时设置：丢弃 create_time 早于此时间戳（epoch ms）的消息，避免处理渠道关闭期间的堆积消息 */
   ignoreMessagesBefore?: number;
   /** 斜杠指令回调（如 /clear），返回回复文本或 null */
@@ -397,7 +401,10 @@ function getFileType(
  * Build a Feishu interactive card from markdown text.
  * Extracts headings as card title, splits content into visual sections.
  */
-function buildInteractiveCard(text: string, extraElements?: Array<Record<string, unknown>>): object {
+function buildInteractiveCard(
+  text: string,
+  extraElements?: Array<Record<string, unknown>>,
+): object {
   const lines = text.split('\n');
   let title = '';
   let bodyStartIdx = 0;
@@ -883,10 +890,7 @@ export function createFeishuConnection(
         // 展开成功，将内容作为纯文本处理
         effectiveContent = JSON.stringify({ text: expanded });
         effectiveType = 'text';
-        logger.info(
-          { messageId },
-          'merge_forward message expanded via API',
-        );
+        logger.info({ messageId }, 'merge_forward message expanded via API');
       }
     }
 
@@ -919,7 +923,9 @@ export function createFeishuConnection(
       let groupName = chatNameById.get(chatId);
       if (!groupName && client) {
         try {
-          const res = await client.im.v1.chat.get({ path: { chat_id: chatId } });
+          const res = await client.im.v1.chat.get({
+            path: { chat_id: chatId },
+          });
           if (res.data?.name) {
             groupName = res.data.name;
             chatNameById.set(chatId, groupName);
@@ -927,7 +933,10 @@ export function createFeishuConnection(
         } catch (err: unknown) {
           const errMsg = err instanceof Error ? err.message : String(err);
           if (errMsg.includes('99991672') || errMsg.includes('im:chat')) {
-            logger.warn({ chatId }, '无法获取飞书群名称：应用缺少 im:chat:readonly 权限');
+            logger.warn(
+              { chatId },
+              '无法获取飞书群名称：应用缺少 im:chat:readonly 权限',
+            );
           } else {
             logger.warn({ chatId, err: errMsg }, '获取飞书群名称失败');
           }
@@ -937,7 +946,11 @@ export function createFeishuConnection(
     }
 
     // 先注册会话，确保 resolveGroupFolder 能正确解析 folder（含首条文件消息场景）
-    onNewChat?.(chatJid, resolvedChatName, chatType === 'p2p' ? 'p2p' : 'group');
+    onNewChat?.(
+      chatJid,
+      resolvedChatName,
+      chatType === 'p2p' ? 'p2p' : 'group',
+    );
 
     let attachmentsJson: string | undefined;
 
@@ -1105,15 +1118,14 @@ export function createFeishuConnection(
     }
 
     // ── Ack Reaction：确认已收到消息（在 mention 过滤之后，避免对未处理的消息加表情） ──
-    if (source === 'ws') {
-      addReaction(messageId, 'OnIt')
-        .then((reactionId) => {
-          if (reactionId) {
-            ackReactionByChat.set(chatId, `${messageId}:${reactionId}`);
-          }
-        })
-        .catch(() => {});
-    }
+    // backfill 来源的消息同样补发表情，让用户看出断线期间的消息已被补收处理
+    addReaction(messageId, 'OnIt')
+      .then((reactionId) => {
+        if (reactionId) {
+          ackReactionByChat.set(chatId, `${messageId}:${reactionId}`);
+        }
+      })
+      .catch(() => {});
 
     // Store message and broadcast to WebSocket clients
     const agentRouting = resolveEffectiveChatJid?.(chatJid);
@@ -1200,6 +1212,8 @@ export function createFeishuConnection(
     sinceMs: number,
   ): Promise<void> {
     if (!client) return;
+    // 每个 chat 每次 backfill 至多发一条恢复提示，多页补收不重复提示
+    let recoveryNoticeSent = false;
     const nowSec = Math.floor(Date.now() / 1000);
     const startSec = Math.max(0, Math.floor(sinceMs / 1000));
     const params: {
@@ -1269,6 +1283,27 @@ export function createFeishuConnection(
           };
         })
         .sort((a, b) => a.createTimeMs - b.createTimeMs);
+
+      // 补收提示：让用户能区分「正常处理」和「断线补处理」。
+      // 仅统计真正会进入处理流程的新消息（已入库或断线前的旧消息会被
+      // handleIncomingMessage 跳过），并在处理前发送，确保提示先于回复。
+      const ignoreBefore = connectOptions?.ignoreMessagesBefore;
+      const newMessages = messages.filter(
+        (message) =>
+          !messageExists(message.messageId) &&
+          !(
+            ignoreBefore &&
+            message.createTimeMs > 0 &&
+            message.createTimeMs < ignoreBefore
+          ),
+      );
+      if (newMessages.length > 0 && !recoveryNoticeSent) {
+        recoveryNoticeSent = true;
+        await sendTextToChat(
+          chatId,
+          `📡 飞书连接已恢复，正在补处理断线期间的 ${newMessages.length} 条消息`,
+        );
+      }
 
       for (const message of messages) {
         await handleIncomingMessage(message, 'backfill');
@@ -1585,12 +1620,18 @@ export function createFeishuConnection(
 
       try {
         // Helper: send card or plain text via reply or create. Returns sent message_id.
-        const sendMsg = async (msgText: string): Promise<string | undefined> => {
+        const sendMsg = async (
+          msgText: string,
+        ): Promise<string | undefined> => {
           const c = client!; // safe: outer guard checks client != null
-          const card = buildInteractiveCard(msgText, options?.cardExtraElements);
+          const card = buildInteractiveCard(
+            msgText,
+            options?.cardExtraElements,
+          );
           const cardContent = JSON.stringify(card);
           // Prefer explicit replyToMsgId (from the triggering message) over generic lastMessageIdByChat
-          const lastMsgId = options?.replyToMsgId || lastMessageIdByChat.get(chatId);
+          const lastMsgId =
+            options?.replyToMsgId || lastMessageIdByChat.get(chatId);
 
           if (lastMsgId) {
             try {
@@ -1689,12 +1730,21 @@ export function createFeishuConnection(
                 params: { user_id_type: 'open_id' },
                 data: { user_id_list: userIds },
               });
-              logger.info({ chatId, sentMsgId, userIds }, 'Sent Feishu urgent notification');
+              logger.info(
+                { chatId, sentMsgId, userIds },
+                'Sent Feishu urgent notification',
+              );
             } catch (urgentErr) {
-              logger.warn({ chatId, sentMsgId, err: urgentErr }, 'Failed to send Feishu urgent notification');
+              logger.warn(
+                { chatId, sentMsgId, err: urgentErr },
+                'Failed to send Feishu urgent notification',
+              );
             }
           } else {
-            logger.debug({ chatId }, 'No user IDs provided for urgent notification');
+            logger.debug(
+              { chatId },
+              'No user IDs provided for urgent notification',
+            );
           }
         }
 
@@ -1847,7 +1897,10 @@ export function createFeishuConnection(
         const ext = path.extname(fileName);
         const fileType = getFileType(ext);
 
-        let uploadResult: { file_key?: string; data?: { file_key?: string } } | null = null;
+        let uploadResult: {
+          file_key?: string;
+          data?: { file_key?: string };
+        } | null = null;
         try {
           uploadResult = (await client.im.v1.file.create({
             data: {
@@ -1857,7 +1910,8 @@ export function createFeishuConnection(
             },
           })) as { file_key?: string; data?: { file_key?: string } } | null;
         } catch (uploadErr: unknown) {
-          const errMsg = uploadErr instanceof Error ? uploadErr.message : String(uploadErr);
+          const errMsg =
+            uploadErr instanceof Error ? uploadErr.message : String(uploadErr);
           const errCode = (uploadErr as Record<string, unknown>)?.code;
           logger.error(
             { chatId, fileName, fileType, errMsg, errCode },
@@ -1867,12 +1921,16 @@ export function createFeishuConnection(
         }
 
         logger.info(
-          { chatId, fileName, fileType, uploadResult: JSON.stringify(uploadResult) },
+          {
+            chatId,
+            fileName,
+            fileType,
+            uploadResult: JSON.stringify(uploadResult),
+          },
           'Feishu file.create response',
         );
 
-        const fileKey =
-          uploadResult?.file_key ?? uploadResult?.data?.file_key;
+        const fileKey = uploadResult?.file_key ?? uploadResult?.data?.file_key;
         if (!fileKey) {
           logger.error(
             { chatId, fileName, uploadResult: JSON.stringify(uploadResult) },
@@ -2009,7 +2067,11 @@ let _defaultInstance: FeishuConnection | null = null;
 export interface ConnectFeishuOptions {
   onReady: () => void;
   /** 收到消息后调用，让主模块自动注册未知的飞书聊天到主容器 */
-  onNewChat?: (chatJid: string, chatName: string, chatType?: 'p2p' | 'group') => void;
+  onNewChat?: (
+    chatJid: string,
+    chatName: string,
+    chatType?: 'p2p' | 'group',
+  ) => void;
   /** 热重连时设置：丢弃 create_time 早于此时间戳（epoch ms）的消息，避免处理渠道关闭期间的堆积消息 */
   ignoreMessagesBefore?: number;
 }

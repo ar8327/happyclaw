@@ -310,6 +310,93 @@ function trackIpcDeliveries(chatJids: Iterable<string>): void {
   }
 }
 
+// Ack-driven cursor commits: writing an IPC file does NOT mean the agent
+// consumed it. The lastAgentTimestamp advance is deferred until the agent
+// emits "ipc_message_received". If the ack never arrives (wedged runner,
+// process death, SDK dropping the query) the entry expires or is discarded
+// on runtime exit, the leftover IPC file is removed, and the messages are
+// re-delivered from the DB on the next turn instead of being silently lost.
+interface PendingIpcCursorCommit {
+  rowid: number;
+  ipcFilePath: string | null;
+  timer: ReturnType<typeof setTimeout>;
+}
+const pendingIpcCursorCommits = new Map<string, PendingIpcCursorCommit[]>();
+
+function removeUnconsumedIpcFile(
+  chatJid: string,
+  ipcFilePath: string | null,
+): void {
+  if (!ipcFilePath) return;
+  // Remove the leftover input file so the next runner's startup drain does
+  // not consume it — the same messages will be re-fetched from the DB into
+  // the next turn's initial prompt, and double delivery must be avoided.
+  try {
+    if (fs.existsSync(ipcFilePath)) {
+      fs.unlinkSync(ipcFilePath);
+      logger.warn(
+        { chatJid, ipcFilePath },
+        'Removed unconsumed IPC input file; messages will be re-delivered from DB',
+      );
+    }
+  } catch (err) {
+    logger.debug({ chatJid, ipcFilePath, err }, 'Failed to remove IPC file');
+  }
+}
+
+function deferIpcCursorCommit(
+  chatJid: string,
+  rowid: number,
+  ipcFilePath: string | null,
+): void {
+  const timer = setTimeout(() => {
+    const entries = pendingIpcCursorCommits.get(chatJid);
+    if (!entries) return;
+    const idx = entries.findIndex((e) => e.timer === timer);
+    if (idx < 0) return;
+    const [expired] = entries.splice(idx, 1);
+    if (entries.length === 0) pendingIpcCursorCommits.delete(chatJid);
+    removeUnconsumedIpcFile(chatJid, expired.ipcFilePath);
+    logger.warn(
+      { chatJid, rowid: expired.rowid, timeoutMs: IPC_DELIVERY_TIMEOUT_MS },
+      'IPC cursor commit expired without agent ack — re-queueing messages for delivery',
+    );
+    queue.enqueueMessageCheck(chatJid);
+  }, IPC_DELIVERY_TIMEOUT_MS);
+  const entries = pendingIpcCursorCommits.get(chatJid);
+  if (entries) entries.push({ rowid, ipcFilePath, timer });
+  else pendingIpcCursorCommits.set(chatJid, [{ rowid, ipcFilePath, timer }]);
+}
+
+function commitIpcCursorOnAck(chatJid: string): void {
+  const entries = pendingIpcCursorCommits.get(chatJid);
+  if (!entries || entries.length === 0) return;
+  const entry = entries.shift()!;
+  clearTimeout(entry.timer);
+  if (entries.length === 0) pendingIpcCursorCommits.delete(chatJid);
+  const current = lastAgentTimestamp[chatJid];
+  if (!current || entry.rowid > current.rowid) {
+    lastAgentTimestamp[chatJid] = { rowid: entry.rowid };
+    saveState();
+  }
+}
+
+/**
+ * Drop all deferred cursor commits for a chat without committing, removing
+ * any IPC input files the runner never consumed. Returns the dropped count
+ * so callers can trigger re-delivery.
+ */
+function discardPendingIpcCursorCommits(chatJid: string): number {
+  const entries = pendingIpcCursorCommits.get(chatJid);
+  if (!entries || entries.length === 0) return 0;
+  pendingIpcCursorCommits.delete(chatJid);
+  for (const entry of entries) {
+    clearTimeout(entry.timer);
+    removeUnconsumedIpcFile(chatJid, entry.ipcFilePath);
+  }
+  return entries.length;
+}
+
 function ackIpcDeliveries(chatJids: Iterable<string>): void {
   for (const chatJid of new Set(chatJids)) {
     if (chatJid) ackIpcDelivery(chatJid);
@@ -778,8 +865,8 @@ function resolveEffectiveGroup(
   if (boundTarget.folder && boundTarget.folder !== group.folder) {
     const targetGroup =
       boundTarget.effectiveJid && !boundTarget.boundAgentId
-        ? registeredGroups[boundTarget.effectiveJid] ??
-          getRegisteredGroup(boundTarget.effectiveJid)
+        ? (registeredGroups[boundTarget.effectiveJid] ??
+          getRegisteredGroup(boundTarget.effectiveJid))
         : undefined;
     if (targetGroup && boundTarget.effectiveJid) {
       registeredGroups[boundTarget.effectiveJid] = targetGroup;
@@ -1010,10 +1097,12 @@ function sendImWithFailTracking(
 }
 
 function isNoopAgentReply(text: string): boolean {
-  return text
-    .trim()
-    .replace(/[。.!！]+$/u, '')
-    .toLowerCase() === 'done';
+  return (
+    text
+      .trim()
+      .replace(/[。.!！]+$/u, '')
+      .toLowerCase() === 'done'
+  );
 }
 
 function isCursorAfter(candidate: MessageCursor, base: MessageCursor): boolean {
@@ -2449,6 +2538,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           ) {
             lastTurnCompletedSuccessfully = false;
             ackIpcDeliveries(collectIpcAckKeys([chatJid], se));
+            // Cursor commits are keyed by the JID queue.sendMessage() was
+            // called with (= the ack targets), never by source channels.
+            // Fall back to chatJid only for acks without explicit targets.
+            const ackCursorTargets = se.ipcAckTargets?.length
+              ? se.ipcAckTargets
+              : [chatJid];
+            for (const target of new Set(ackCursorTargets)) {
+              commitIpcCursorOnAck(target);
+            }
+            // The agent just consumed a new user message — it owes a fresh
+            // send_message. Reset the flag so the silent-success fallback
+            // also covers messages injected mid-turn.
+            sawSendMessageTool = false;
           }
           if (se.eventType === 'status' && se.statusText === 'interrupted') {
             wasInterrupted = true;
@@ -2702,6 +2804,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   await setTyping(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
   clearIpcDeliveryTracker(chatJid);
+  // Runtime exited with injected messages never acked: the cursor was never
+  // advanced past them, so re-queue a message check to deliver them in a
+  // fresh turn (their leftover IPC files are removed by the discard).
+  const droppedUnackedIpc = discardPendingIpcCursorCommits(chatJid);
+  if (droppedUnackedIpc > 0) {
+    logger.warn(
+      { chatJid, droppedUnackedIpc },
+      'Runtime exited with unacked IPC messages — re-queueing for delivery',
+    );
+    queue.enqueueMessageCheck(chatJid);
+  }
 
   // Complete or abort ALL Feishu progress cards for this folder
   // (includes cards created via IPC injection for sibling Feishu chats).
@@ -2939,8 +3052,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   // Final fallback for silent-success paths (no visible reply).
-  const latestSourceJid =
-    missedMessages[missedMessages.length - 1]?.source_jid || chatJid;
+  // Judge the turn by the latest user message the agent actually consumed —
+  // including messages injected mid-turn (their ack advanced the cursor) —
+  // not just the initial batch. Unacked messages are excluded: they get
+  // re-delivered in a fresh turn instead of a fallback reply.
+  const ackedCursorRowid = Math.max(
+    lastProcessed.rowid,
+    lastAgentTimestamp[chatJid]?.rowid ?? 0,
+  );
+  const latestConsumedMessage =
+    getMessagesSince(chatJid, { rowid: lastProcessed.rowid })
+      .filter((m) => m.rowid <= ackedCursorRowid)
+      .pop() ?? lastProcessed;
+  const latestSourceJid = latestConsumedMessage.source_jid || chatJid;
   const latestSourceChannel = getChannelType(latestSourceJid)
     ? latestSourceJid
     : null;
@@ -2951,14 +3075,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   ).find(
     (message) =>
       message.is_from_me &&
-      message.timestamp > lastProcessed.timestamp &&
+      message.timestamp > latestConsumedMessage.timestamp &&
       !isNoopAgentReply(message.content),
   );
-  if (
-    !isErrorExit &&
-    latestSourceChannel &&
-    !sawSendMessageTool
-  ) {
+  if (!isErrorExit && latestSourceChannel && !sawSendMessageTool) {
     const fallbackText = latestSubstantiveAssistantReply?.content || '收到啦。';
     let imMsgId: string | undefined;
     try {
@@ -4706,11 +4826,15 @@ async function startMessageLoop(): Promise<void> {
               turnManager.getActiveTurn(folder),
             );
             syncPendingTurnObservability(folder);
+            let injectedIpcFile: string | null = null;
             const sendResult = queue.sendMessage(
               chatJid,
               formatted,
               imagesForAgent,
               intent,
+              (ipcFilePath) => {
+                injectedIpcFile = ipcFilePath;
+              },
             );
             if (sendResult === 'sent') {
               updateTriggerMap();
@@ -4726,18 +4850,28 @@ async function startMessageLoop(): Promise<void> {
               trackIpcDeliveries(
                 collectIpcDeliveryKeys(chatJid, messagesToSend),
               );
+              // Defer the cursor advance until the agent acks consumption —
+              // a written IPC file is not a delivered message.
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
-              lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
-              saveState();
+              deferIpcCursorCommit(
+                chatJid,
+                lastProcessed.rowid,
+                injectedIpcFile,
+              );
             } else if (sendResult === 'interrupted_stop') {
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
               lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
               saveState();
               broadcastInterruptedTurn(folder, chatJid, '用户主动中断');
             } else if (sendResult === 'interrupted_correction') {
+              // Correction was written to IPC and is consumed after the query
+              // restarts — commit the cursor on ack like the 'sent' path.
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
-              lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
-              saveState();
+              deferIpcCursorCommit(
+                chatJid,
+                lastProcessed.rowid,
+                injectedIpcFile,
+              );
             } else {
               // no_active — shouldn't happen if TurnManager thinks there's an active turn,
               // but handle gracefully by treating as start_new
@@ -4766,11 +4900,15 @@ async function startMessageLoop(): Promise<void> {
             // Try to inject into an already-running agent first.
             // An agent might be idle in waitForIpcMessage() from a previous Turn
             // or from before the Turn system was deployed.
+            let injectedIpcFile: string | null = null;
             const sendResult = queue.sendMessage(
               chatJid,
               formatted,
               imagesForAgent,
               intent,
+              (ipcFilePath) => {
+                injectedIpcFile = ipcFilePath;
+              },
             );
             if (sendResult === 'sent') {
               updateTriggerMap();
@@ -4806,18 +4944,28 @@ async function startMessageLoop(): Promise<void> {
               trackIpcDeliveries(
                 collectIpcDeliveryKeys(chatJid, messagesToSend),
               );
+              // Defer the cursor advance until the agent acks consumption —
+              // a written IPC file is not a delivered message.
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
-              lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
-              saveState();
+              deferIpcCursorCommit(
+                chatJid,
+                lastProcessed.rowid,
+                injectedIpcFile,
+              );
             } else if (sendResult === 'interrupted_stop') {
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
               lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
               saveState();
               broadcastInterruptedTurn(folder, chatJid, '用户主动中断');
             } else if (sendResult === 'interrupted_correction') {
+              // Correction was written to IPC and is consumed after the query
+              // restarts — commit the cursor on ack like the 'sent' path.
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
-              lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
-              saveState();
+              deferIpcCursorCommit(
+                chatJid,
+                lastProcessed.rowid,
+                injectedIpcFile,
+              );
             } else {
               // no_active — truly no agent running, start a new one
               broadcastRunnerState(

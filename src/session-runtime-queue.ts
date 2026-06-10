@@ -329,7 +329,7 @@ export class SessionRuntimeQueue {
     text: string,
     images?: Array<{ data: string; mimeType?: string }>,
     intent: MessageIntent = 'continue',
-    onInjected?: () => void,
+    onInjected?: (ipcFilePath: string) => void,
   ): SendMessageResult {
     const state = this.resolveActiveState(groupJid);
     if (!state) return 'no_active';
@@ -377,7 +377,7 @@ export class SessionRuntimeQueue {
       );
       fs.renameSync(tempPath, filepath);
       state.busy = true;
-      onInjected?.();
+      onInjected?.(filepath);
       return intent === 'correction' ? 'interrupted_correction' : 'sent';
     } catch {
       return 'no_active';
@@ -447,10 +447,7 @@ export class SessionRuntimeQueue {
       }
     }
     if (closed > 0) {
-      logger.info(
-        { closed },
-        'Closed active runtimes for credential refresh',
-      );
+      logger.info({ closed }, 'Closed active runtimes for credential refresh');
     }
     return closed;
   }
@@ -651,7 +648,12 @@ export class SessionRuntimeQueue {
   removeGroupState(groupJid: string): void {
     const state = this.groups.get(groupJid);
     if (!state) return;
-    if (state.active || state.process || state.pendingMessages || state.pendingTasks.length > 0) {
+    if (
+      state.active ||
+      state.process ||
+      state.pendingMessages ||
+      state.pendingTasks.length > 0
+    ) {
       logger.warn(
         {
           groupJid,
