@@ -176,7 +176,7 @@ function extractScriptMeta(script: string): { name?: string; description?: strin
 
 function buildExecutableWorkflowScript(script: string): string {
   const trimmed = script.trim();
-  if (!trimmed.startsWith('export const meta =')) {
+  if (!/^\s*export\s+const\s+meta\s*=/.test(trimmed)) {
     throw new Error('script workflow must start with: export const meta = { name, description }');
   }
   if (/(^|[^\w$])require\s*\(/.test(trimmed)) throw new Error('workflow script cannot call require()');
@@ -185,7 +185,7 @@ function buildExecutableWorkflowScript(script: string): string {
   if (/(^|[^\w$])globalThis\s*\./.test(trimmed)) throw new Error('workflow script cannot access globalThis');
   if (/(^|[^\w$])(?:eval|Function)\s*\(/.test(trimmed)) throw new Error('workflow script cannot generate code dynamically');
 
-  let body = trimmed.replace(/^export\s+const\s+meta\s*=/, 'const meta =');
+  let body = trimmed.replace(/^\s*export\s+const\s+meta\s*=/, 'const meta =');
   body = body.replace(/\bexport\s+default\s+/g, '__workflowResult = ');
   if (/^\s*export\s+/m.test(body)) throw new Error('workflow script only supports export const meta and export default');
 
@@ -948,6 +948,21 @@ async function parallel(items, options) {
   await Promise.all(workers);
   return results;
 }
+async function fanout(items, mapper, options) {
+  if (typeof mapper !== 'function') throw new Error('fanout(items, mapper) expects mapper to be a function');
+  const isArray = Array.isArray(items);
+  if (!isArray && (!items || typeof items !== 'object')) throw new Error('fanout() expects an array or object');
+  const entries = isArray ? items.map((item, index) => [index, item]) : Object.entries(items);
+  return await parallel(entries.map(([key, value], index) => () => mapper(value, key, index)), options)
+    .then((values) => {
+      if (isArray) return values;
+      const result = {};
+      entries.forEach(([key], index) => {
+        result[key] = values[index];
+      });
+      return result;
+    });
+}
 async function pipeline(steps) {
   if (!Array.isArray(steps)) throw new Error('pipeline() expects an array');
   let value;
@@ -962,10 +977,34 @@ function log(message) {
 function checkpoint(key, value) {
   return rpc('checkpoint', { key, value });
 }
+function extractJson(text) {
+  if (text && typeof text === 'object') return text;
+  const raw = String(text);
+  const candidates = [
+    [raw.indexOf('{'), raw.lastIndexOf('}')],
+    [raw.indexOf('['), raw.lastIndexOf(']')],
+  ];
+  for (const [start, end] of candidates) {
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(raw.slice(start, end + 1));
+      } catch {
+        // Try the next JSON container shape before failing.
+      }
+    }
+  }
+  throw new Error('Expected JSON object or array in text output: ' + raw.slice(0, 400));
+}
+async function agentJson(input) {
+  return extractJson(await agent(input));
+}
 (async () => {
   const sandbox = vm.createContext({
     args: workerData.args,
     agent,
+    agentJson,
+    extractJson,
+    fanout,
     parallel,
     pipeline,
     phase,

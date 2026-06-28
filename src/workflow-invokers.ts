@@ -135,7 +135,10 @@ async function invokeCodex(input: WorkflowInvokeInput): Promise<WorkflowInvokeRe
     stdio: ['pipe', 'pipe', 'pipe'],
     detached: true,
   });
-  child.stdin?.end(input.prompt);
+  const prompt = input.maxTurns
+    ? [`You must complete this task within at most ${input.maxTurns} tool-use turns.`, '', input.prompt].join('\n')
+    : input.prompt;
+  child.stdin?.end(prompt);
   const result = await collectProcess(child, input.timeoutMs, input.signal);
   try {
     const output = fs.existsSync(outFile)
