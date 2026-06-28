@@ -91,8 +91,10 @@ function parseImportPayload(raw: unknown): { name?: string; description?: string
   if (!raw || typeof raw !== 'object') throw new Error('导入文件必须是 JSON object');
   const obj = raw as Record<string, unknown>;
   const definition = (obj.definition || obj) as WorkflowDefinition;
-  if (!definition || typeof definition !== 'object' || !Array.isArray(definition.nodes)) {
-    throw new Error('没有找到 workflow definition.nodes');
+  const hasDagNodes = Array.isArray(definition.nodes);
+  const hasScript = typeof definition.script === 'string' && definition.script.trim().length > 0;
+  if (!definition || typeof definition !== 'object' || (!hasDagNodes && !hasScript)) {
+    throw new Error('没有找到 workflow definition.nodes 或 definition.script');
   }
   return {
     name: typeof obj.name === 'string' ? obj.name : definition.name,
@@ -113,8 +115,16 @@ function workflowExportPayload(workflow: WorkflowRecord) {
   };
 }
 
+function workflowNodes(workflow: WorkflowRecord | undefined) {
+  return workflow?.definition.nodes || [];
+}
+
+function isScriptWorkflow(workflow: WorkflowRecord | undefined) {
+  return workflow?.kind === 'script' || workflow?.definition.kind === 'script' || !!workflow?.definition.script;
+}
+
 function NodeConfigCard({ workflow, nodeId }: { workflow: WorkflowRecord; nodeId: string }) {
-  const node = workflow.definition.nodes.find((item) => item.id === nodeId);
+  const node = workflowNodes(workflow).find((item) => item.id === nodeId);
   if (!node) return null;
   const settings = workflow.definition.settings || {};
   const effective = {
@@ -154,6 +164,8 @@ function NodeConfigCard({ workflow, nodeId }: { workflow: WorkflowRecord; nodeId
 function WorkflowCard({ workflow }: { workflow: WorkflowRecord }) {
   const { runWorkflow } = useWorkflowsStore();
   const [expanded, setExpanded] = useState(false);
+  const nodes = workflowNodes(workflow);
+  const scriptWorkflow = isScriptWorkflow(workflow);
 
   return (
     <div className="bg-card border border-border rounded-xl p-5">
@@ -166,7 +178,7 @@ function WorkflowCard({ workflow }: { workflow: WorkflowRecord }) {
           </div>
           {workflow.description && <p className="text-sm text-muted-foreground mt-2">{workflow.description}</p>}
           <p className="text-xs text-muted-foreground mt-2">
-            {workflow.definition.nodes.length} nodes · updated {fmtDate(workflow.updated_at)}
+            {scriptWorkflow ? 'script workflow' : `${nodes.length} nodes`} · updated {fmtDate(workflow.updated_at)}
           </p>
           <div className="text-xs text-muted-foreground mt-1 font-mono truncate">{workflow.id}</div>
         </div>
@@ -199,11 +211,23 @@ function WorkflowCard({ workflow }: { workflow: WorkflowRecord }) {
                 <pre className="mt-2 max-h-72 overflow-auto rounded-md bg-background border border-border p-3 text-foreground">{safeJson(workflow.definition.settings)}</pre>
               </details>
             )}
-            {workflow.definition.nodes.map((node) => <NodeConfigCard key={node.id} workflow={workflow} nodeId={node.id} />)}
+            {scriptWorkflow && workflow.definition.script && (
+              <details className="rounded-lg border border-border bg-muted/20 p-3 text-xs">
+                <summary className="cursor-pointer text-muted-foreground hover:text-foreground">Workflow script</summary>
+                <pre className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap rounded-md bg-background border border-border p-3 text-foreground">{workflow.definition.script}</pre>
+              </details>
+            )}
+            {nodes.map((node) => <NodeConfigCard key={node.id} workflow={workflow} nodeId={node.id} />)}
           </div>
         ) : (
           <div className="space-y-2">
-            {workflow.definition.nodes.map((node) => (
+            {scriptWorkflow && (
+              <div className="text-xs rounded-lg border border-border bg-muted/30 p-2">
+                <span className="font-mono text-foreground">script</span>
+                <span className="ml-2 text-muted-foreground">{workflow.definition.settings?.provider || 'default'}</span>
+              </div>
+            )}
+            {nodes.map((node) => (
               <div key={node.id} className="text-xs rounded-lg border border-border bg-muted/30 p-2">
                 <span className="font-mono text-foreground">{node.id}</span>
                 <span className="ml-2 text-muted-foreground">{node.provider || workflow.definition.settings?.provider || 'default'}</span>
@@ -237,7 +261,7 @@ function RunGantt({ run, workflow }: { run: WorkflowRun; workflow?: WorkflowReco
   const base = Math.min(runStart, ...startedValues);
   const end = Math.max(base + 1000, ...endedValues, run.finished_at ? new Date(run.finished_at).getTime() : nowMs);
   const span = Math.max(1000, end - base);
-  const nodesByDefinition = workflow?.definition.nodes.map((def) => run.nodes.find((node) => node.node_id === def.id)).filter(Boolean) as WorkflowNodeRun[] | undefined;
+  const nodesByDefinition = workflowNodes(workflow).map((def) => run.nodes.find((node) => node.node_id === def.id)).filter(Boolean) as WorkflowNodeRun[] | undefined;
   const nodes = nodesByDefinition && nodesByDefinition.length === run.nodes.length ? nodesByDefinition : run.nodes;
 
   return (
@@ -253,7 +277,7 @@ function RunGantt({ run, workflow }: { run: WorkflowRun; workflow?: WorkflowReco
           const left = start == null ? 0 : Math.max(0, Math.min(96, ((start - base) / span) * 100));
           const rawWidth = start == null || endMs == null ? 2 : ((Math.max(endMs, start + 1000) - start) / span) * 100;
           const width = Math.max(2, Math.min(100 - left, rawWidth));
-          const definition = workflow?.definition.nodes.find((item) => item.id === node.node_id);
+          const definition = workflowNodes(workflow).find((item) => item.id === node.node_id);
           return (
             <div key={node.id} className="grid grid-cols-[minmax(120px,220px)_1fr] gap-3 items-center text-xs">
               <div className="min-w-0">

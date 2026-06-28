@@ -147,6 +147,7 @@ export interface TaskRunLog {
 
 // --- Dynamic workflow types ---
 
+export type WorkflowKind = 'dag' | 'script';
 export type WorkflowStatus = 'active' | 'archived';
 export type WorkflowRunStatus =
   | 'queued'
@@ -181,12 +182,17 @@ export interface WorkflowAgentNode {
 export type WorkflowNode = WorkflowAgentNode;
 
 export interface WorkflowDefinition {
+  kind?: WorkflowKind;
   name?: string;
   description?: string;
-  nodes: WorkflowNode[];
+  nodes?: WorkflowNode[];
+  script?: string;
+  script_path?: string;
   settings?: {
     max_concurrency?: number;
+    max_agents?: number;
     node_timeout_ms?: number;
+    script_timeout_ms?: number;
     provider?: string;
     model?: string;
     thinking_effort?: 'low' | 'medium' | 'high' | 'max';
@@ -202,6 +208,7 @@ export interface WorkflowRecord {
   owner_key: string;
   name: string;
   description: string | null;
+  kind: WorkflowKind;
   version: number;
   definition_json: string;
   workspace_folder: string | null;
@@ -222,6 +229,8 @@ export interface WorkflowRunRecord {
   result_json: string | null;
   result_path: string | null;
   final_node_id: string | null;
+  script_path: string | null;
+  runtime_state_json: string | null;
   error: string | null;
   workspace_folder: string | null;
   group_folder: string | null;
@@ -242,7 +251,9 @@ export interface WorkflowNodeRunRecord {
   status: WorkflowNodeStatus;
   provider: string | null;
   model: string | null;
+  phase_id: string | null;
   prompt_hash: string | null;
+  input_hash: string | null;
   output_path: string | null;
   transcript_path: string | null;
   output_excerpt: string | null;

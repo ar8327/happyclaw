@@ -51,15 +51,22 @@ export class WorkflowPlugin implements ContextPlugin {
   getTools(ctx: PluginContext): ToolDefinition[] {
     const definitionSchema = {
       type: 'object',
-      description: 'Workflow definition. MVP supports DAGs with agent nodes only.',
+      description: 'Workflow definition. Supports DAG workflows with agent nodes and script workflows that orchestrate dynamic agent() calls.',
       properties: {
+        kind: { type: 'string', enum: ['dag', 'script'] },
         name: { type: 'string' },
         description: { type: 'string' },
+        script: {
+          type: 'string',
+          description: 'JavaScript workflow script. Must start with `export const meta = { name, description }`; use agent(), parallel(), pipeline(), phase(), log(), checkpoint().',
+        },
         settings: {
           type: 'object',
           properties: {
             max_concurrency: { type: 'number' },
+            max_agents: { type: 'number' },
             node_timeout_ms: { type: 'number' },
+            script_timeout_ms: { type: 'number' },
             provider: { type: 'string', description: 'Default provider, e.g. codex, claude, echo' },
             model: { type: 'string' },
             thinking_effort: { type: 'string', enum: ['low', 'medium', 'high', 'max'] },
@@ -98,7 +105,6 @@ export class WorkflowPlugin implements ContextPlugin {
           },
         },
       },
-      required: ['nodes'],
     };
 
     return [
@@ -186,6 +192,45 @@ export class WorkflowPlugin implements ContextPlugin {
         }),
       },
       {
+        name: 'workflow_run_script',
+        description:
+          'Create and run an inline JavaScript dynamic workflow script asynchronously. Use only Codex/echo providers unless the user explicitly allows another provider.',
+        parameters: {
+          type: 'object' as const,
+          properties: {
+            name: { type: 'string' },
+            description: { type: 'string' },
+            script: {
+              type: 'string',
+              description: 'Script beginning with `export const meta = { name, description }`. End with `export default result`. Globals: args, agent, parallel, pipeline, phase, log, checkpoint. For dynamic branching, ask an agent for JSON, parse it with JSON.parse(), then map items to agent() calls.',
+            },
+            input: { type: 'object', description: 'Structured args exposed to the script as global args.' },
+            settings: {
+              type: 'object',
+              properties: {
+                max_concurrency: { type: 'number' },
+                max_agents: { type: 'number' },
+                node_timeout_ms: { type: 'number' },
+                script_timeout_ms: { type: 'number' },
+                provider: { type: 'string' },
+                model: { type: 'string' },
+                thinking_effort: { type: 'string', enum: ['low', 'medium', 'high', 'max'] },
+              },
+            },
+          },
+          required: ['script'],
+        },
+        execute: async (args) => callWorkflowApi(ctx, 'run_script', {
+          name: args.name,
+          description: args.description,
+          script: args.script,
+          input: args.input,
+          settings: args.settings,
+          workspaceFolder: ctx.workspaceGroup,
+          groupFolder: ctx.groupFolder,
+        }),
+      },
+      {
         name: 'workflow_run_status',
         description: 'Get lightweight current status for a workflow run. By default excludes large result/trigger payloads; successful runs include result_path/final_node_id as a stable full-result pointer.',
         parameters: {
@@ -247,7 +292,13 @@ export class WorkflowPlugin implements ContextPlugin {
       'You can create, save, run, and monitor dynamic workflows using workflow_* tools.',
       'workflow_run is asynchronous and returns quickly. Poll workflow_run_status for long-running workflows; do not wait in a tool call for workflow completion.',
       'Workflow execution is handled by AgentDock host. Workflow node agents are bare CLI agents and do not receive AgentDock tools such as send_message, memory, tasks, or workflow tools.',
-      'The MVP supports DAG workflows with agent nodes. Use depends_on to express dependencies; independent nodes may run concurrently.',
+      'DAG workflows use definition.nodes and depends_on. Script workflows use JavaScript orchestration code with agent(), parallel(), pipeline(), phase(), log(), and checkpoint().',
+      'A script workflow must start with `export const meta = { name, description }`; optional meta.phases labels progress phases. End with `export default <final result>`.',
+      'The script receives structured input as global `args`. The script itself cannot read files, run shell commands, import modules, or access process/env; it must delegate real work through agent().',
+      'agent({ id, provider, prompt, input, model, thinking_effort, timeout_ms, max_turns, retry }) runs a child agent. input is appended to that child prompt as structured context.',
+      'parallel() accepts either an array or an object map. Use functions for lazy concurrency control, e.g. `await parallel(items.map(item => () => agent({...})), { concurrency: 4 })`; object maps return an object with the same keys.',
+      'For dynamic fan-out, use a first agent to produce strict JSON, parse it in the script, validate the array, then map each item to a child agent. Example: `const raw = await agent({id:"generate", prompt:"Return JSON only: {\\"hypotheses\\":[{\\"id\\":\\"...\\",\\"claim\\":\\"...\\"}]}" }); const hypotheses = JSON.parse(raw).hypotheses; const checks = await parallel(hypotheses.map((h, i) => () => agent({ id: `verify-${i}-${h.id}`, input: h, prompt: "Verify this hypothesis." })), { concurrency: 3 });`.',
+      'When parsing model output, prefer prompts that say JSON only/no markdown. If needed, extract from the first `{` to the last `}` before JSON.parse(), then throw a clear script error if the schema is missing.',
       'Dependency outputs are automatically appended to a dependent node prompt when the prompt does not explicitly reference dependency placeholders such as {{research}} or {{research.output}}.',
     ].join('\n');
   }
