@@ -120,6 +120,7 @@ interface ScriptAgentInput {
   name?: string;
   prompt: string;
   input?: unknown;
+  __phase?: string | null;
   provider?: string;
   model?: string;
   thinking_effort?: 'low' | 'medium' | 'high' | 'max';
@@ -906,17 +907,27 @@ parentPort.on('message', (message) => {
   if (message.type === 'resolve') pendingCall.resolve(message.value);
   else pendingCall.reject(new Error(message.error || 'Workflow runtime RPC failed'));
 });
+let currentPhase = null;
 async function agent(input) {
-  return await rpc('agent', input);
+  const payload = input && typeof input === 'object' && !Array.isArray(input)
+    ? { ...input, __phase: currentPhase }
+    : input;
+  return await rpc('agent', payload);
 }
 async function phase(name, fn) {
+  if (fn !== undefined && typeof fn !== 'function') throw new Error('phase(name, fn) expects fn to be a function');
+  const previousPhase = currentPhase;
+  currentPhase = String(name || 'phase');
   await rpc('phase_start', { name });
+  if (fn === undefined) return null;
   try {
     const value = await fn();
     await rpc('phase_end', { name });
+    currentPhase = previousPhase;
     return value;
   } catch (err) {
     await rpc('phase_error', { name, error: err instanceof Error ? err.message : String(err) }).catch(() => undefined);
+    currentPhase = previousPhase;
     throw err;
   }
 }
@@ -1128,6 +1139,7 @@ function checkpoint(key, value) {
 
     const rawNodeId = input.id || input.name || `agent-${ctx.agentCount}`;
     const nodeId = safeSegment(rawNodeId);
+    const effectivePhase = typeof input.__phase === 'string' ? safeSegment(input.__phase) : ctx.currentPhase;
     const provider = input.provider || ctx.definition.settings?.provider || undefined;
     const model = input.model || ctx.definition.settings?.model || undefined;
     const thinkingEffort = input.thinking_effort || ctx.definition.settings?.thinking_effort;
@@ -1165,7 +1177,7 @@ function checkpoint(key, value) {
         status: 'pending',
         provider: provider || null,
         model: model || null,
-        phase_id: ctx.currentPhase,
+        phase_id: effectivePhase,
         prompt_hash: null,
         input_hash: inputHash,
         output_path: null,
@@ -1206,7 +1218,7 @@ function checkpoint(key, value) {
           status: 'running',
           provider: provider || null,
           model: model || null,
-          phase_id: ctx.currentPhase,
+          phase_id: effectivePhase,
           prompt_hash: hashPrompt(renderedPrompt),
           input_hash: inputHash,
           transcript_path: transcriptPath,
@@ -1240,7 +1252,7 @@ function checkpoint(key, value) {
           fs.writeFileSync(outputPath, result.output, 'utf8');
           fs.writeFileSync(transcriptPath, JSON.stringify({
             node_id: nodeId,
-            phase_id: ctx.currentPhase,
+            phase_id: effectivePhase,
             provider: result.provider,
             model: result.model,
             prompt: renderedPrompt,
@@ -1298,7 +1310,7 @@ function checkpoint(key, value) {
       fs.mkdirSync(runDir, { recursive: true });
       fs.writeFileSync(transcriptPath, JSON.stringify({
         node_id: nodeId,
-        phase_id: ctx.currentPhase,
+        phase_id: effectivePhase,
         provider: provider || null,
         model: model || null,
         prompt: renderedPrompt,
