@@ -202,7 +202,7 @@ export class WorkflowPlugin implements ContextPlugin {
             description: { type: 'string' },
             script: {
               type: 'string',
-              description: 'Script beginning with `export const meta = { name, description }`. End with `export default result`. Globals: args, agent, agentJson, extractJson, fanout, parallel, pipeline, phase, log, checkpoint. For dynamic branching, ask an agent for JSON with agentJson(), then fanout items to agent() calls.',
+              description: 'Script beginning with `export const meta = { name, description }`. End with `export default result`. Globals: args, agent, agentJson, extractJson, fanout, parallel, pipeline, phase, log, checkpoint. Prefer phase labels, agentJson() for JSON outputs, object-map parallel() for named branches, and args.repoRoot || "." instead of hard-coded machine paths.',
             },
             input: { type: 'object', description: 'Structured args exposed to the script as global args.' },
             settings: {
@@ -294,13 +294,14 @@ export class WorkflowPlugin implements ContextPlugin {
       'Workflow execution is handled by AgentDock host. Workflow node agents are bare CLI agents and do not receive AgentDock tools such as send_message, memory, tasks, or workflow tools.',
       'DAG workflows use definition.nodes and depends_on. Script workflows use JavaScript orchestration code with agent(), agentJson(), extractJson(), fanout(), parallel(), pipeline(), phase(), log(), and checkpoint().',
       'A script workflow must start with `export const meta = { name, description }`; optional meta.phases labels progress phases. End with `export default <final result>`.',
-      'The script receives structured input as global `args`. The script itself cannot read files, run shell commands, import modules, or access process/env; it must delegate real work through agent().',
+      'The script receives structured input as global `args`. Prefer portable defaults such as `const repoRoot = args.repoRoot || "."`; avoid hard-coded machine-specific paths. The script itself cannot read files, run shell commands, import modules, or access process/env; it must delegate real work through agent().',
       'Use `await phase("name", async () => { ... })` to wrap a phase, or `phase("name")` / `await phase("name")` to mark subsequent agent() calls as belonging to that phase.',
-      'agent({ id, provider, prompt, input, model, thinking_effort, timeout_ms, max_turns, retry }) runs a child agent. input is appended to that child prompt as structured context.',
+      'agent({ id, provider, prompt, input, model, thinking_effort, timeout_ms, max_turns, retry }) runs a child agent. input is appended to that child prompt as structured context; prompts should explicitly tell the child to use the provided Agent input fields such as scope, files, repoRoot, or reports.',
       'parallel() accepts either an array or an object map. Use functions for lazy concurrency control, e.g. `await parallel(items.map(item => () => agent({...})), { concurrency: 4 })`; object maps return an object with the same keys. If you are mapping dynamic items, prefer fanout().',
       'fanout(items, mapper, { concurrency }) lazily maps arrays or object maps to concurrent work and preserves the input shape. Example: `const checks = await fanout(hypotheses, (h, i) => agent({ id: `verify-${i}-${h.id}`, input: h, prompt: "Verify this hypothesis." }), { concurrency: 3 });`.',
       'For dynamic fan-out, prefer: `const parsed = await agentJson({id:"generate", prompt:"Return JSON only: {\\"hypotheses\\":[{\\"id\\":\\"...\\",\\"claim\\":\\"...\\"}]}" }); const hypotheses = parsed.hypotheses; const checks = await fanout(hypotheses, (h, i) => agent({ id: `verify-${i}-${h.id}`, input: h, prompt: "Verify this hypothesis." }), { concurrency: 3 });`.',
-      'When parsing model output, prefer prompts that say JSON only/no markdown. agentJson() and extractJson() extract a JSON object or array from text, but scripts should still validate required fields and throw a clear error if the schema is missing.',
+      'For named parallel audits or reviews, prefer `phase("parallel_audit"); const reports = await parallel({ inbound: () => agentJson({ id: "audit-inbound", input: {...}, prompt }), queue_runtime: () => agentJson({ id: "audit-queue-runtime", input: {...}, prompt }) }, { concurrency: 2 }); phase("synthesis"); const result = await agentJson({ id: "synthesis", input: { reports }, prompt: "Merge reports and return JSON only." }); export default result;`.',
+      'When parsing model output, prefer prompts that say JSON only/no markdown. Do not reimplement extractJson inside scripts unless you need custom behavior; built-in agentJson() and extractJson() extract a JSON object or array from text. Scripts should still validate required fields and throw a clear error if the schema is missing.',
       'Dependency outputs are automatically appended to a dependent node prompt when the prompt does not explicitly reference dependency placeholders such as {{research}} or {{research.output}}.',
     ].join('\n');
   }
