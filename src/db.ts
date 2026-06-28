@@ -926,6 +926,7 @@ export function initDatabase(): void {
       owner_key TEXT NOT NULL,
       name TEXT NOT NULL,
       description TEXT,
+      kind TEXT NOT NULL DEFAULT 'dag',
       version INTEGER NOT NULL DEFAULT 1,
       definition_json TEXT NOT NULL,
       workspace_folder TEXT,
@@ -945,6 +946,8 @@ export function initDatabase(): void {
       result_json TEXT,
       result_path TEXT,
       final_node_id TEXT,
+      script_path TEXT,
+      runtime_state_json TEXT,
       error TEXT,
       workspace_folder TEXT,
       group_folder TEXT,
@@ -965,7 +968,9 @@ export function initDatabase(): void {
       status TEXT NOT NULL,
       provider TEXT,
       model TEXT,
+      phase_id TEXT,
       prompt_hash TEXT,
+      input_hash TEXT,
       output_path TEXT,
       transcript_path TEXT,
       output_excerpt TEXT,
@@ -1013,11 +1018,16 @@ export function initDatabase(): void {
   ensureColumn('users', 'disable_reason', 'TEXT');
   ensureColumn('users', 'notes', 'TEXT');
   ensureColumn('users', 'deleted_at', 'TEXT');
+  ensureColumn('workflows', 'kind', "TEXT NOT NULL DEFAULT 'dag'");
   ensureColumn('workflow_runs', 'run_source', 'TEXT');
   ensureColumn('workflow_runs', 'trigger_json', 'TEXT');
   ensureColumn('workflow_runs', 'result_path', 'TEXT');
   ensureColumn('workflow_runs', 'final_node_id', 'TEXT');
+  ensureColumn('workflow_runs', 'script_path', 'TEXT');
+  ensureColumn('workflow_runs', 'runtime_state_json', 'TEXT');
   ensureColumn('workflow_node_runs', 'transcript_path', 'TEXT');
+  ensureColumn('workflow_node_runs', 'phase_id', 'TEXT');
+  ensureColumn('workflow_node_runs', 'input_hash', 'TEXT');
   ensureColumn('users', 'avatar_emoji', 'TEXT');
   ensureColumn('users', 'avatar_color', 'TEXT');
   ensureColumn('messages', 'attachments', 'TEXT');
@@ -2278,15 +2288,16 @@ export function createWorkflow(record: WorkflowRecord): void {
   db.prepare(
     `
     INSERT INTO workflows (
-      id, owner_key, name, description, version, definition_json,
+      id, owner_key, name, description, kind, version, definition_json,
       workspace_folder, group_folder, created_by, status, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
   ).run(
     record.id,
     record.owner_key,
     record.name,
     record.description,
+    record.kind,
     record.version,
     record.definition_json,
     record.workspace_folder,
@@ -2306,6 +2317,7 @@ export function updateWorkflow(
       WorkflowRecord,
       | 'name'
       | 'description'
+      | 'kind'
       | 'version'
       | 'definition_json'
       | 'workspace_folder'
@@ -2357,9 +2369,9 @@ export function createWorkflowRun(record: WorkflowRunRecord): void {
     `
     INSERT INTO workflow_runs (
       id, workflow_id, owner_key, version, status, input_json, result_json,
-      result_path, final_node_id, error, workspace_folder, group_folder, run_source, trigger_json,
+      result_path, final_node_id, script_path, runtime_state_json, error, workspace_folder, group_folder, run_source, trigger_json,
       started_at, finished_at, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
   ).run(
     record.id,
@@ -2371,6 +2383,8 @@ export function createWorkflowRun(record: WorkflowRunRecord): void {
     record.result_json,
     record.result_path,
     record.final_node_id,
+    record.script_path,
+    record.runtime_state_json,
     record.error,
     record.workspace_folder,
     record.group_folder,
@@ -2392,6 +2406,8 @@ export function updateWorkflowRun(
       | 'result_json'
       | 'result_path'
       | 'final_node_id'
+      | 'script_path'
+      | 'runtime_state_json'
       | 'error'
       | 'started_at'
       | 'finished_at'
@@ -2459,9 +2475,9 @@ export function createWorkflowNodeRun(record: WorkflowNodeRunRecord): void {
     `
     INSERT INTO workflow_node_runs (
       id, run_id, workflow_id, owner_key, node_id, status, provider, model,
-      prompt_hash, output_path, transcript_path, output_excerpt, error,
+      phase_id, prompt_hash, input_hash, output_path, transcript_path, output_excerpt, error,
       started_at, finished_at, duration_ms, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
   ).run(
     record.id,
@@ -2472,7 +2488,9 @@ export function createWorkflowNodeRun(record: WorkflowNodeRunRecord): void {
     record.status,
     record.provider,
     record.model,
+    record.phase_id,
     record.prompt_hash,
+    record.input_hash,
     record.output_path,
     record.transcript_path,
     record.output_excerpt,
@@ -2493,7 +2511,9 @@ export function updateWorkflowNodeRun(
       | 'status'
       | 'provider'
       | 'model'
+      | 'phase_id'
       | 'prompt_hash'
+      | 'input_hash'
       | 'output_path'
       | 'transcript_path'
       | 'output_excerpt'

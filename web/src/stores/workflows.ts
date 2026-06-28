@@ -5,11 +5,16 @@ export type WorkflowRunStatus = 'queued' | 'running' | 'success' | 'error' | 'ca
 export type WorkflowNodeStatus = 'pending' | 'running' | 'success' | 'error' | 'skipped' | 'cancelled';
 
 export interface WorkflowDefinition {
+  kind?: 'dag' | 'script';
   name?: string;
   description?: string;
+  script?: string;
+  script_path?: string;
   settings?: {
     max_concurrency?: number;
+    max_agents?: number;
     node_timeout_ms?: number;
+    script_timeout_ms?: number;
     provider?: string;
     model?: string;
     thinking_effort?: 'low' | 'medium' | 'high' | 'max';
@@ -18,7 +23,7 @@ export interface WorkflowDefinition {
       backoff_ms?: number;
     };
   };
-  nodes: Array<{
+  nodes?: Array<{
     id: string;
     type: 'agent';
     prompt: string;
@@ -40,6 +45,7 @@ export interface WorkflowRecord {
   owner_key: string;
   name: string;
   description: string | null;
+  kind: 'dag' | 'script';
   version: number;
   definition_json: string;
   definition: WorkflowDefinition;
@@ -59,6 +65,8 @@ export interface WorkflowNodeRun {
   status: WorkflowNodeStatus;
   provider: string | null;
   model: string | null;
+  phase_id: string | null;
+  input_hash: string | null;
   output_path?: string | null;
   transcript_path?: string | null;
   output_excerpt: string | null;
@@ -80,6 +88,8 @@ export interface WorkflowRun {
   result_json: string | null;
   result_path: string | null;
   final_node_id: string | null;
+  script_path: string | null;
+  runtime_state_json: string | null;
   result_excerpt?: string | null;
   error: string | null;
   workspace_folder: string | null;

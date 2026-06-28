@@ -120,7 +120,7 @@ function collectProcess(child: ChildProcess, timeoutMs: number, signal?: AbortSi
 }
 
 async function invokeCodex(input: WorkflowInvokeInput): Promise<WorkflowInvokeResult> {
-  const model = input.model || process.env.HAPPYCLAW_CODEX_MODEL || process.env.OPENAI_MODEL || 'gpt-5.4';
+  const model = input.model || process.env.HAPPYCLAW_CODEX_MODEL || process.env.OPENAI_MODEL || undefined;
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdock-workflow-codex-'));
   const outFile = path.join(tmpDir, 'last-message.txt');
   const args = buildCodexExecArgs({
@@ -146,7 +146,7 @@ async function invokeCodex(input: WorkflowInvokeInput): Promise<WorkflowInvokeRe
     }
     return {
       provider: 'codex',
-      model,
+      model: model || null,
       output: output.trim(),
       stdout: result.stdout,
       stderr: result.stderr,
@@ -213,7 +213,7 @@ export function listWorkflowProviders(): WorkflowProviderInfo[] {
       id: 'codex',
       label: 'Codex CLI',
       available: commandExists('codex'),
-      defaultModel: process.env.HAPPYCLAW_CODEX_MODEL || process.env.OPENAI_MODEL || 'gpt-5.4',
+      defaultModel: process.env.HAPPYCLAW_CODEX_MODEL || process.env.OPENAI_MODEL || 'Codex CLI default',
       description: 'Runs `codex exec` with no AgentDock MCP tools injected.',
     },
     {

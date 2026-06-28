@@ -4,7 +4,7 @@ export type CodexExecThinkingEffort = 'low' | 'medium' | 'high' | 'max' | string
 
 export interface CodexExecArgsOptions {
   cwd: string;
-  model: string;
+  model?: string;
   outputLastMessageFile?: string;
   thinkingEffort?: CodexExecThinkingEffort;
   stdinPrompt?: boolean;
@@ -61,7 +61,10 @@ export function buildCodexExecArgs(options: CodexExecArgsOptions): string[] {
     }
   }
 
-  args.push('--cd', options.cwd, '--model', options.model);
+  args.push('--cd', options.cwd);
+  if (options.model) {
+    args.push('--model', options.model);
+  }
 
   const thinkingEffort = normalizeCodexExecThinkingEffort(options.thinkingEffort);
   if (thinkingEffort) {

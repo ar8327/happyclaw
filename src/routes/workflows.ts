@@ -244,6 +244,32 @@ workflowsRoutes.post('/internal/tool', async (c) => {
         const runId = result.run?.id;
         return c.json(runId ? { run: workflowService.runStatus(ownerKey, runId) } : result);
       }
+      case 'run_script': {
+        const result = await workflowService.startScriptRun({
+          ownerKey,
+          script: String(body.script || ''),
+          name: typeof body.name === 'string' ? body.name : undefined,
+          description: typeof body.description === 'string' ? body.description : null,
+          settings: body.settings && typeof body.settings === 'object' ? body.settings as WorkflowDefinition['settings'] : undefined,
+          input: body.input && typeof body.input === 'object' ? body.input : null,
+          workspaceFolder: typeof body.workspaceFolder === 'string' ? body.workspaceFolder : null,
+          groupFolder: typeof body.groupFolder === 'string' ? body.groupFolder : null,
+          createdBy: typeof body.createdBy === 'string' ? body.createdBy : null,
+          wait: body.wait === true,
+          runSource: 'agent-tool-script',
+          trigger: {
+            route: 'POST /api/workflows/internal/tool',
+            action,
+            userId: ownerKey,
+            groupFolder: typeof body.groupFolder === 'string' ? body.groupFolder : null,
+            workspaceFolder: typeof body.workspaceFolder === 'string' ? body.workspaceFolder : null,
+            chatJid: typeof body.chatJid === 'string' ? body.chatJid : null,
+            createdBy: typeof body.createdBy === 'string' ? body.createdBy : null,
+          },
+        });
+        const runId = result.run?.id;
+        return c.json(runId ? { run: workflowService.runStatus(ownerKey, runId) } : result);
+      }
       case 'status': {
         const run = workflowService.runStatus(ownerKey, String(body.runId || ''), {
           includeResult: body.include_result === true,
