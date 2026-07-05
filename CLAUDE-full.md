@@ -128,6 +128,14 @@
 - **敏感数据过滤**：StreamEvent 中的 `toolInputSummary` 会过滤 `ANTHROPIC_API_KEY` 等环境变量名
 - **能力声明校验**：container 启动时会用 `declaredIpcCapabilities` 对拍 runner 实例的 `ipcCapabilities`，声明和实现不一致直接 fail-fast
 - **Codex 升级约束**：`container/agent-runner/package.json` 里的 `@openai/codex-sdk` 已锁定精确版本。升级前必须复验 `model_instructions_file` 逐 turn 重读仍然成立
+- **Antigravity (agy) runner**：`runners/agy/`，print 模式逐轮 spawn `agy --print=...`，`--conversation <uuid>` 续接。关键机制：
+  - **会话隔离 HOME**：agy 无 config-dir 环境变量，runner 用 `HAPPYCLAW_AGY_HOME`（descriptor `configDirEnv`，宿主机自动指向 session 的 `.agy/`）作为子进程 `$HOME`；macOS 认证 token 在 login keychain（service=`gemini`），keychain 路径按 `$HOME` 推导，因此 `prepareAgyHome` 会把 `Library/Keychains` 软链回真实 HOME
+  - **系统提示词**：写入会话 HOME 的 `~/.gemini/GEMINI.md` 全局规则（每次运行重读、不膨胀会话历史）；workspace 级 `AGENTS.md`/`GEMINI.md` 在 print 模式**不生效**，勿依赖
+  - **MCP 工具**：写会话 HOME 的 `~/.gemini/config/mcp_config.json`（stdio: `command/args/env`，SSE: `serverUrl`），内置 happyclaw MCP server 全链路可用
+  - **resume 锚点**：从 `--log-file` 解析 `Print mode: conversation=<uuid>`，兜底读 `cache/last_conversations.json`；对未知 conversation id agy 会**静默新建会话**（不报错），runner 检测锚点不一致并发 status 事件提醒
+  - **图片输入**：print 模式无直接附图入口（CLI 无 media 参数），runner 把 base64 图片落盘到临时目录，提示词附绝对路径清单，由 agent 用自带文件查看工具读取（实测可正确识别，含工作区外路径）
+  - **合成压缩**：agy 无原生 compact（print 模式 `/compact` 会被当普通消息）。runner 每轮后从 conversation SQLite 的 `gen_metadata` protobuf（路径 f1→f4→f2）解出各请求 prompt tokens 取最大值作为上下文估算（`context-tracker.ts`，回落 `step_payload` 字节/4），超过阈值（默认 25 万，profile `compactThresholdTokens` / env `HAPPYCLAW_AGY_COMPACT_THRESHOLD_TOKENS`，0 关闭）即触发 `session_wrapup` 归档，成功后经 `sessionControl` 清除 resume 锚点、下一轮开新会话并把 `continuationSummary` 注入首条消息；wrapup 失败则保持原会话并冷却 3 轮再试。注意 agy 基线（自身系统提示词+工具）约 1.8 万 tokens
+  - **已知抖动**：agy 偶发启动期死挂（零输出、零日志、`--print-timeout` 不触发），runner 内置活性看门狗（stdout/stderr + 日志文件 + conversations SQLite WAL mtime，默认 180s，`HAPPYCLAW_AGY_STALL_TIMEOUT_MS` 可调），未产出任何输出且未建会话时自动重试一次
 
 **Agent Runner 模块结构**（`container/agent-runner/src/`）：
 

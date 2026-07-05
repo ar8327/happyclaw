@@ -370,4 +370,106 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       observability: 'degraded',
     },
   },
+  agy: {
+    id: 'agy',
+    label: 'Antigravity',
+    description:
+      'Google Antigravity CLI (agy) runner，print 模式逐轮调用，会话级隔离 HOME。',
+    defaultModel: 'Gemini 3.1 Pro (High)',
+    modelPatterns: ['^(Gemini|Claude|GPT-OSS) .+\\(.+\\)$'],
+    capabilities: {
+      sessionResume: 'weak',
+      interrupt: 'weak',
+      imageInput: true,
+      usage: 'none',
+      midQueryPush: false,
+      runtimeModeSwitch: false,
+      toolStreaming: 'none',
+      backgroundTasks: false,
+      subAgent: 'none',
+      customTools: 'mcp',
+      mcpTransport: ['stdio', 'sse'],
+      skills: ['tool-loader'],
+      ephemeralSession: true,
+      filesystemAccess: true,
+    },
+    lifecycle: {
+      turnBoundary: 'native',
+      archivalTrigger: ['turn_threshold', 'cleanup_only'],
+      contextShrinkTrigger: 'synthetic',
+      beforeToolExecutionGuard: 'none',
+      hookStreaming: 'none',
+      postCompactRepair: 'synthetic',
+    },
+    promptContract: {
+      mode: 'instructions_file',
+      dynamicContextReload: 'turn',
+    },
+    runtimeContract: {
+      requiredCommands: ['agy'],
+      configDirEnv: 'HAPPYCLAW_AGY_HOME',
+      modelEnv: ['HAPPYCLAW_AGY_MODEL'],
+      availabilityEnv: 'HAPPYCLAW_AGY_AVAILABLE',
+      auth: 'external_cli',
+      authProbe: {
+        type: 'json_file',
+        files: [
+          {
+            relativeToHome: '.gemini/google_accounts.json',
+            requiredJsonPaths: [['active']],
+          },
+        ],
+      },
+      versionArgs: ['--version'],
+    },
+    toolContract: {
+      mode: 'mcp_stdio',
+      supportsUserMcp: true,
+      userMcpSources: ['agentdock', 'profile'],
+      builtinServerName: 'agentdock',
+    },
+    profileSchema: {
+      type: 'object',
+      properties: {
+        model: {
+          type: 'string',
+          title: '模型',
+          description: '覆盖 Antigravity CLI 使用的模型显示名（见 agy models）',
+        },
+        command: {
+          type: 'string',
+          title: '命令路径',
+          description: '默认使用 PATH 中的 agy',
+        },
+        compactThresholdTokens: {
+          type: 'number',
+          title: '压缩阈值 (tokens)',
+          description:
+            '上下文估算超过该值时自动归档压缩并重开会话，0 关闭（默认 250000）',
+        },
+      },
+      additionalProperties: true,
+    },
+    models: [
+      { id: 'Gemini 3.1 Pro (High)', label: 'Gemini 3.1 Pro (High)' },
+      { id: 'Gemini 3.1 Pro (Low)', label: 'Gemini 3.1 Pro (Low)' },
+      { id: 'Gemini 3.5 Flash (High)', label: 'Gemini 3.5 Flash (High)' },
+      { id: 'Gemini 3.5 Flash (Medium)', label: 'Gemini 3.5 Flash (Medium)' },
+      { id: 'Gemini 3.5 Flash (Low)', label: 'Gemini 3.5 Flash (Low)' },
+      {
+        id: 'Claude Sonnet 4.6 (Thinking)',
+        label: 'Claude Sonnet 4.6 (Thinking)',
+      },
+      {
+        id: 'Claude Opus 4.6 (Thinking)',
+        label: 'Claude Opus 4.6 (Thinking)',
+      },
+      { id: 'GPT-OSS 120B (Medium)', label: 'GPT-OSS 120B (Medium)' },
+    ],
+    compatibility: {
+      chat: 'full',
+      im: 'degraded',
+      observability: 'degraded',
+    },
+  },
 };

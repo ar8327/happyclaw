@@ -43,6 +43,93 @@ export function hasCodexOneShotAuth(env: NodeJS.ProcessEnv): boolean {
   }
 }
 
+export function hasAgyOneShotAuth(env: NodeJS.ProcessEnv): boolean {
+  if (env.HAPPYCLAW_AGY_AVAILABLE === '1') return true;
+  try {
+    return fs.existsSync(
+      path.join(os.homedir(), '.gemini', 'google_accounts.json'),
+    );
+  } catch {
+    return false;
+  }
+}
+
+export async function invokeAgyOneShot(input: {
+  prompt: string;
+  model: string;
+  cwd: string;
+  timeoutMs: number;
+}): Promise<string> {
+  const { prepareAgyHome } = await import('./agy/agy-env.js');
+  const agyProbe = spawnSync('agy', ['--version'], { encoding: 'utf8' });
+  if (agyProbe.error || agyProbe.status !== 0) {
+    throw new Error(
+      `Antigravity CLI not available: ${agyProbe.error?.message || agyProbe.stderr || agyProbe.stdout}`,
+    );
+  }
+
+  // 一次性调用也用隔离 HOME，避免污染用户真实会话存储
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'happyclaw-agy-os-'));
+  prepareAgyHome(homeDir);
+  try {
+    const child = spawn(
+      'agy',
+      [
+        `--print=${input.prompt}`,
+        '--dangerously-skip-permissions',
+        '--print-timeout',
+        `${Math.max(60, Math.ceil(input.timeoutMs / 1000))}s`,
+        '--model',
+        input.model,
+      ],
+      {
+        cwd: input.cwd,
+        env: {
+          ...(process.env as Record<string, string>),
+          HOME: homeDir,
+          HAPPYCLAW_INVOKE_DEPTH: '1',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+
+    const timer = setTimeout(() => {
+      child.kill('SIGINT');
+      setTimeout(() => {
+        if (!child.killed) child.kill('SIGKILL');
+      }, 1000);
+    }, input.timeoutMs);
+    try {
+      const exitCode = await new Promise<number>((resolve, reject) => {
+        child.once('error', reject);
+        child.once('close', (code) => resolve(code ?? 0));
+      });
+      if (exitCode !== 0) {
+        throw new Error(
+          stderr.trim() ||
+            stdout.trim() ||
+            `Antigravity CLI exited with code ${exitCode}`,
+        );
+      }
+      return stdout.trim();
+    } finally {
+      clearTimeout(timer);
+    }
+  } finally {
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+}
+
 function toCodexEffort(effort: string): ModelReasoningEffort {
   const map: Record<string, ModelReasoningEffort> = {
     low: 'low',
