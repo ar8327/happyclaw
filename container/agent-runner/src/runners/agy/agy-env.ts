@@ -3,23 +3,20 @@
  *
  * agy 没有 config-dir 环境变量，所有状态都挂在 $HOME 下：
  *   $HOME/.gemini/antigravity-cli/   CLI 状态（conversations、cache、log）
+ *   $HOME/.gemini/antigravity-cli/antigravity-oauth-token   认证 token（文件态存储）
  *   $HOME/.gemini/config/mcp_config.json   全局 MCP 配置
  *   $HOME/.gemini/GEMINI.md          全局规则（print 模式每次运行重新读取）
  *
- * 会话隔离方案：每个会话一个独立 HOME 目录。macOS 上认证 token 存在
- * login keychain（service=gemini），而 keychain 路径也从 HOME 推导，
- * 因此需要把 Library/Keychains 软链回真实 HOME。
+ * 会话隔离方案：每个会话一个独立 HOME 目录，但认证 token 软链回真实
+ * HOME —— 多会话共享同一份凭据，且随宿主机的刷新始终保持最新，不需要
+ * 拷贝后再考虑过期同步。macOS 上 token 存在 login keychain
+ * （service=gemini），keychain 路径也从 HOME 推导，因此额外把
+ * Library/Keychains 软链回真实 HOME。
  */
 
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-
-const AUTH_SEED_FILES = [
-  'oauth_creds.json',
-  'google_accounts.json',
-  'installation_id',
-];
 
 /** 准备一个可用的会话级 agy HOME（幂等）。 */
 export function prepareAgyHome(homeDir: string): void {
@@ -36,24 +33,28 @@ export function prepareAgyHome(homeDir: string): void {
     }
   }
 
-  // best-effort 同步认证种子文件（Linux 无 keychain 时可能走文件后备）
-  const geminiDir = path.join(homeDir, '.gemini');
-  fs.mkdirSync(path.join(geminiDir, 'config'), {
+  fs.mkdirSync(path.join(homeDir, '.gemini', 'config'), {
     recursive: true,
     mode: 0o700,
   });
-  const realGemini = path.join(os.homedir(), '.gemini');
-  for (const file of AUTH_SEED_FILES) {
-    const src = path.join(realGemini, file);
-    const dst = path.join(geminiDir, file);
-    try {
-      if (fs.existsSync(src) && !fs.existsSync(dst)) {
-        fs.copyFileSync(src, dst);
-        fs.chmodSync(dst, 0o600);
-      }
-    } catch {
-      /* non-critical */
+
+  // Linux（SSH 场景）走文件态 token 存储：软链回真实 HOME 的那一份，
+  // 保证多会话共享同一份凭据、且始终随宿主机的刷新保持最新。
+  const tokenDir = path.join(homeDir, '.gemini', 'antigravity-cli');
+  fs.mkdirSync(tokenDir, { recursive: true, mode: 0o700 });
+  const tokenLink = path.join(tokenDir, 'antigravity-oauth-token');
+  const tokenTarget = path.join(
+    os.homedir(),
+    '.gemini',
+    'antigravity-cli',
+    'antigravity-oauth-token',
+  );
+  try {
+    if (!fs.existsSync(tokenLink) && fs.existsSync(tokenTarget)) {
+      fs.symlinkSync(tokenTarget, tokenLink);
     }
+  } catch {
+    /* non-critical */
   }
 }
 
