@@ -18,6 +18,7 @@ import {
 import { broadcastNewMessage } from './web.js';
 import { detectImageMimeType } from './image-detector.js';
 import { analyzeIntent } from './intent-analyzer.js';
+import { getSystemSettings } from './runtime-config.js';
 
 // ─── FeishuConnection Interface ────────────────────────────────
 
@@ -120,6 +121,20 @@ const WS_RECONNECT_MIN_INTERVAL_MS = 30_000;
 const BACKFILL_LOOKBACK_MS = 5 * 60 * 1000;
 const BACKFILL_PAGE_SIZE = 50;
 const BACKFILL_MAX_PAGES_PER_CHAT = 5;
+
+function getLarkSdkDomain(): lark.Domain | string {
+  const configured = getSystemSettings().feishuApiDomain.trim().toLowerCase();
+  if (configured === 'open.feishu.cn') return lark.Domain.Feishu;
+  if (
+    configured === 'open.larksuite.com' ||
+    configured === 'open.larkoffice.com'
+  ) {
+    return lark.Domain.Lark;
+  }
+  return /^https?:\/\//.test(configured)
+    ? configured
+    : `https://${configured}`;
+}
 
 interface FeishuMentionLike {
   key?: string;
@@ -481,6 +496,7 @@ function buildInteractiveCard(
 export function createFeishuConnection(
   config: FeishuConnectionConfig,
 ): FeishuConnection {
+  const sdkDomain = getLarkSdkDomain();
   // LRU deduplication cache
   const MSG_DEDUP_MAX = 1000;
   const MSG_DEDUP_TTL = 30 * 60 * 1000; // 30min
@@ -1372,6 +1388,7 @@ export function createFeishuConnection(
       wsClient = new lark.WSClient({
         appId: config.appId,
         appSecret: config.appSecret,
+        domain: sdkDomain,
         loggerLevel: lark.LoggerLevel.info,
       });
       await wsClient.start({ eventDispatcher });
@@ -1448,6 +1465,7 @@ export function createFeishuConnection(
       client = new lark.Client({
         appId: config.appId,
         appSecret: config.appSecret,
+        domain: sdkDomain,
         appType: lark.AppType.SelfBuild,
       });
 
@@ -1548,6 +1566,7 @@ export function createFeishuConnection(
       wsClient = new lark.WSClient({
         appId: config.appId,
         appSecret: config.appSecret,
+        domain: sdkDomain,
         loggerLevel: lark.LoggerLevel.info,
       });
 
