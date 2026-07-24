@@ -1403,6 +1403,49 @@ export function getAllChats(): ChatInfo[] {
     .all() as ChatInfo[];
 }
 
+export interface LatestChatMessage {
+  chat_jid: string;
+  content: string;
+  timestamp: string;
+}
+
+/**
+ * Get exactly one latest message for every requested chat.
+ *
+ * Joining through chats lets SQLite use idx_messages_jid_ts for an indexed
+ * reverse lookup per chat. This avoids scanning and sorting a combined message
+ * history just to build the session sidebar.
+ */
+export function getLatestMessagesForChats(
+  chatJids: string[],
+): LatestChatMessage[] {
+  const uniqueJids = Array.from(new Set(chatJids));
+  if (uniqueJids.length === 0) return [];
+
+  const results: LatestChatMessage[] = [];
+  const batchSize = 400;
+  for (let offset = 0; offset < uniqueJids.length; offset += batchSize) {
+    const batch = uniqueJids.slice(offset, offset + batchSize);
+    const placeholders = batch.map(() => '?').join(',');
+    const rows = db
+      .prepare(
+        `SELECT c.jid AS chat_jid, m.content, m.timestamp
+         FROM chats c
+         JOIN messages m ON m.rowid = (
+           SELECT latest.rowid
+           FROM messages latest
+           WHERE latest.chat_jid = c.jid
+           ORDER BY latest.timestamp DESC, latest.rowid DESC
+           LIMIT 1
+         )
+         WHERE c.jid IN (${placeholders})`,
+      )
+      .all(...batch) as LatestChatMessage[];
+    results.push(...rows);
+  }
+  return results;
+}
+
 /**
  * Get timestamp of last group metadata sync.
  */
@@ -2582,6 +2625,17 @@ export function getContextSummary(
       'SELECT * FROM context_summaries WHERE group_folder = ? AND chat_jid = ?',
     )
     .get(groupFolder, chatJid) as ContextSummary | undefined;
+}
+
+export type ContextSummaryMetadata = Pick<
+  ContextSummary,
+  'group_folder' | 'chat_jid' | 'created_at'
+>;
+
+export function listContextSummaryMetadata(): ContextSummaryMetadata[] {
+  return db
+    .prepare('SELECT group_folder, chat_jid, created_at FROM context_summaries')
+    .all() as ContextSummaryMetadata[];
 }
 
 export function setContextSummary(summary: ContextSummary): void {

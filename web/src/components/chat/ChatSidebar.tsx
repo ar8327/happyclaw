@@ -1,4 +1,5 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { useNavigate } from 'react-router-dom';
 import { Plus, PanelLeftClose } from 'lucide-react';
 import { useChatStore } from '../../stores/chat';
@@ -15,6 +16,9 @@ import type { SessionInfo } from '../../types';
 
 type SessionEntry = SessionInfo & { jid: string };
 type DateSection = { label: string; items: SessionEntry[] };
+type SidebarListItem =
+  | { type: 'heading'; key: string; label: string; variant: 'section' | 'date' }
+  | { type: 'session'; key: string; session: SessionEntry; isHome: boolean; isPinned: boolean };
 
 function groupByDate(items: SessionEntry[]): DateSection[] {
   const now = new Date();
@@ -65,6 +69,7 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
     togglePin,
   } = useChatStore();
   const navigate = useNavigate();
+  const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     loadSessions();
@@ -170,36 +175,43 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
 
   const allSessions = mainSession ? [mainSession, ...otherSessions] : otherSessions;
 
-  const renderSections = (sections: DateSection[]) =>
-    sections.map((section) => (
-      <div key={section.label} className="mb-1">
-        <div className="px-2 pt-2 pb-1">
-          <span className="text-[10px] text-muted-foreground/70 tracking-wide">
-            {section.label}
-          </span>
-        </div>
-        {section.items.map((g) => (
-          <ChatGroupItem
-            key={g.jid}
-            jid={g.jid}
-            name={g.name}
-            sessionSlug={g.folder}
-            lastMessage={g.lastMessage}
-            isActive={currentSession === g.jid}
-            isHome={false}
-            runnerLabel={g.runner_label}
-            model={g.model}
-            editable={g.editable}
-            deletable={g.deletable}
-            onSelect={handleSessionSelect}
-            onRename={(jid, name) => setRenameState({ open: true, jid, name })}
-            onClearHistory={(jid, name) => setClearState({ open: true, jid, name })}
-            onDelete={(jid, name) => setDeleteState({ open: true, jid, name })}
-            onTogglePin={(jid) => togglePin(jid)}
-          />
-        ))}
-      </div>
-    ));
+  const listItems = useMemo<SidebarListItem[]>(() => {
+    const items: SidebarListItem[] = [];
+    if (mainSession) {
+      items.push(
+        { type: 'heading', key: 'heading-main', label: '主会话', variant: 'section' },
+        { type: 'session', key: `session-${mainSession.jid}`, session: mainSession, isHome: true, isPinned: false },
+      );
+    }
+    if (pinnedSessions.length > 0) {
+      items.push({ type: 'heading', key: 'heading-pinned', label: '已固定', variant: 'section' });
+      for (const session of pinnedSessions) {
+        items.push({ type: 'session', key: `session-${session.jid}`, session, isHome: false, isPinned: true });
+      }
+    }
+    if (workspaceSections.length > 0) {
+      items.push({ type: 'heading', key: 'heading-workspaces', label: '其他会话', variant: 'section' });
+      for (const section of workspaceSections) {
+        items.push({ type: 'heading', key: `heading-date-${section.label}`, label: section.label, variant: 'date' });
+        for (const session of section.items) {
+          items.push({ type: 'session', key: `session-${session.jid}`, session, isHome: false, isPinned: false });
+        }
+      }
+    }
+    return items;
+  }, [mainSession, pinnedSessions, workspaceSections]);
+
+  const listVirtualizer = useVirtualizer({
+    count: listItems.length,
+    getScrollElement: () => listRef.current,
+    getItemKey: (index) => listItems[index]?.key || index,
+    estimateSize: (index) => {
+      const item = listItems[index];
+      if (item?.type === 'heading') return item.variant === 'date' ? 28 : 38;
+      return item?.type === 'session' && item.session.lastMessage ? 61 : 47;
+    },
+    overscan: 10,
+  });
 
   return (
     <div className={cn('flex flex-col h-full bg-background border-r', className)}>
@@ -242,90 +254,78 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
       </div>
 
       {/* Groups List */}
-      <div className="flex-1 overflow-y-auto px-2">
+      <div ref={listRef} className="flex-1 overflow-y-auto px-2">
         {loading && allSessions.length === 0 ? (
           <SkeletonCardList count={6} compact />
+        ) : listItems.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-32 px-4">
+            <p className="text-sm text-muted-foreground text-center">
+              {searchQuery ? '未找到匹配的会话' : '暂无会话'}
+            </p>
+          </div>
         ) : (
-          <>
-            {/* Section: Home container */}
-            {mainSession && (
-              <div className="mb-1">
-                <div className="px-2 pt-1 pb-1.5">
-                  <span className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">
-                    主会话
-                  </span>
-                </div>
-                <ChatGroupItem
-                  jid={mainSession.jid}
-                  name={mainSession.name}
-                  sessionSlug={mainSession.folder}
-                  lastMessage={mainSession.lastMessage}
-                  isActive={currentSession === mainSession.jid}
-                  isHome
-                  runnerLabel={mainSession.runner_label}
-                  model={mainSession.model}
-                  editable
-                  onSelect={handleSessionSelect}
-                  onRename={(jid, name) => setRenameState({ open: true, jid, name })}
-                  onClearHistory={(jid, name) => setClearState({ open: true, jid, name })}
-                />
-              </div>
-            )}
+          <div className="relative w-full" style={{ height: `${listVirtualizer.getTotalSize()}px` }}>
+            {listVirtualizer.getVirtualItems().map((virtualItem) => {
+              const item = listItems[virtualItem.index];
+              if (!item) return null;
+              const positionStyle = {
+                transform: `translateY(${virtualItem.start}px)`,
+              };
 
-            {/* Section: Pinned workspaces */}
-            {pinnedSessions.length > 0 && (
-              <div className="mb-1">
-                <div className="px-2 pt-3 pb-1.5">
-                  <span className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">
-                    已固定
-                  </span>
-                </div>
-                {pinnedSessions.map((session) => (
+              if (item.type === 'heading') {
+                return (
+                  <div
+                    key={virtualItem.key}
+                    ref={listVirtualizer.measureElement}
+                    data-index={virtualItem.index}
+                    className={cn(
+                      'absolute left-0 top-0 w-full px-2',
+                      item.variant === 'date' ? 'pt-2 pb-1' : 'pt-3 pb-1.5',
+                      item.key === 'heading-main' && 'pt-1',
+                    )}
+                    style={positionStyle}
+                  >
+                    <span className={item.variant === 'date'
+                      ? 'text-[10px] text-muted-foreground/70 tracking-wide'
+                      : 'text-[11px] font-bold text-muted-foreground uppercase tracking-wider'}
+                    >
+                      {item.label}
+                    </span>
+                  </div>
+                );
+              }
+
+              const session = item.session;
+              return (
+                <div
+                  key={virtualItem.key}
+                  ref={listVirtualizer.measureElement}
+                  data-index={virtualItem.index}
+                  className="absolute left-0 top-0 w-full"
+                  style={positionStyle}
+                >
                   <ChatGroupItem
-                    key={session.jid}
                     jid={session.jid}
                     name={session.name}
                     sessionSlug={session.folder}
                     lastMessage={session.lastMessage}
                     isActive={currentSession === session.jid}
-                    isHome={false}
-                    isPinned
+                    isHome={item.isHome}
+                    isPinned={item.isPinned}
                     runnerLabel={session.runner_label}
                     model={session.model}
-                    editable={session.editable}
+                    editable={item.isHome ? true : session.editable}
                     deletable={session.deletable}
                     onSelect={handleSessionSelect}
                     onRename={(jid, name) => setRenameState({ open: true, jid, name })}
                     onClearHistory={(jid, name) => setClearState({ open: true, jid, name })}
-                    onDelete={(jid, name) => setDeleteState({ open: true, jid, name })}
-                    onTogglePin={(jid) => togglePin(jid)}
+                    onDelete={item.isHome ? undefined : (jid, name) => setDeleteState({ open: true, jid, name })}
+                    onTogglePin={item.isHome ? undefined : togglePin}
                   />
-                ))}
-              </div>
-            )}
-
-            {/* Section: My workspaces + Collaborative workspaces */}
-            {workspaceSections.length === 0 && pinnedSessions.length === 0 && !mainSession ? (
-              <div className="flex flex-col items-center justify-center h-32 px-4">
-                <p className="text-sm text-muted-foreground text-center">
-                  {searchQuery ? '未找到匹配的会话' : '暂无会话'}
-                </p>
-              </div>
-            ) : (
-              <>
-                {workspaceSections.length > 0 && (
-                  <div>
-                    <div className="px-2 pt-3 pb-1.5">
-                      <span className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">
-                        其他会话
-                      </span>
-                    </div>
-                    {renderSections(workspaceSections)}
-                  </div>
-                )}
-              </>
-            )}
-          </>
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
 

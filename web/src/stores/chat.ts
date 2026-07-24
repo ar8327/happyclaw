@@ -857,11 +857,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   loadGroups: async () => {
+    if (get().loading) return;
     set({ loading: true });
     try {
       const data = await api.get<{
         sessions: Record<string, SessionInfo>;
-      }>('/api/sessions');
+      }>('/api/sessions?kinds=main%2Cworkspace');
       const sessionMap = data.sessions;
       const groups = Object.fromEntries(
         Object.entries(sessionMap)
