@@ -236,7 +236,10 @@ export async function invokeClaudeOneShot(input: {
 
     const child = spawn('claude', args, {
       cwd: input.cwd,
-      env: process.env as Record<string, string>,
+      env: {
+        ...(process.env as Record<string, string>),
+        HAPPYCLAW_INVOKE_DEPTH: '1',
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';

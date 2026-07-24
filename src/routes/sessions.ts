@@ -29,8 +29,10 @@ import {
   deleteSession,
   ensureChatExists,
   getAllChats,
+  getAllRegisteredGroups,
   getContextSummary,
   getJidsByFolder,
+  getLatestMessagesForChats,
   getMessage,
   getMessageIdsWithTrace,
   getMessagesAfter,
@@ -44,6 +46,7 @@ import {
   getSessionRuntimeState,
   getTurnByResultMessageId,
   getWorkerSessionRecord,
+  listContextSummaryMetadata,
   listSessionBindings,
   listRunnerProfiles,
   listSessionRecords,
@@ -69,7 +72,6 @@ import {
   listRunnerDescriptors,
 } from '../runner-registry.js';
 import { serializeRunnerDescriptor } from '../runner-catalog.js';
-import { compressContext, isCompressing } from '../context-compressor.js';
 import { DATA_DIR, GROUPS_DIR } from '../config.js';
 import { executeSessionReset } from '../commands.js';
 import { loadTurnTrace } from '../turn-trace.js';
@@ -92,6 +94,7 @@ import type {
   RunnerDescriptor,
   RunnerProfileRecord,
   SessionRecord,
+  SessionBindingRecord,
 } from '../types.js';
 
 const sessionRoutes = new Hono<{ Variables: Variables }>();
@@ -143,12 +146,68 @@ function getFolderForSession(session: SessionRecord): string {
   return path.basename(session.cwd);
 }
 
-function resolveBackingJid(session: SessionRecord): string | null {
+type SessionReadContext = {
+  bindingsBySessionId: Map<string, SessionBindingRecord[]>;
+  bindingSessionByJid: Map<string, string>;
+  groupsByJid: Map<string, RegisteredGroup & { jid: string }>;
+  jidsByFolder: Map<string, string[]>;
+  summaryMetadataByKey: Map<string, { created_at: string }>;
+};
+
+function buildSessionReadContext(
+  bindings: SessionBindingRecord[],
+): SessionReadContext {
+  const bindingsBySessionId = new Map<string, SessionBindingRecord[]>();
+  const bindingSessionByJid = new Map<string, string>();
+  for (const binding of bindings) {
+    const sessionBindings = bindingsBySessionId.get(binding.session_id);
+    if (sessionBindings) {
+      sessionBindings.push(binding);
+    } else {
+      bindingsBySessionId.set(binding.session_id, [binding]);
+    }
+    bindingSessionByJid.set(binding.channel_jid, binding.session_id);
+  }
+
+  const groupsByJid = new Map<string, RegisteredGroup & { jid: string }>();
+  const jidsByFolder = new Map<string, string[]>();
+  for (const [jid, group] of Object.entries(getAllRegisteredGroups())) {
+    groupsByJid.set(jid, { ...group, jid });
+    const folderJids = jidsByFolder.get(group.folder);
+    if (folderJids) {
+      folderJids.push(jid);
+    } else {
+      jidsByFolder.set(group.folder, [jid]);
+    }
+  }
+
+  const summaryMetadataByKey = new Map<string, { created_at: string }>();
+  for (const summary of listContextSummaryMetadata()) {
+    summaryMetadataByKey.set(`${summary.group_folder}\0${summary.chat_jid}`, {
+      created_at: summary.created_at,
+    });
+  }
+
+  return {
+    bindingsBySessionId,
+    bindingSessionByJid,
+    groupsByJid,
+    jidsByFolder,
+    summaryMetadataByKey,
+  };
+}
+
+function resolveBackingJid(
+  session: SessionRecord,
+  context?: SessionReadContext,
+): string | null {
   if (!session.id.startsWith('main:')) return null;
   const folder = session.id.slice('main:'.length);
+  const folderJids = context?.jidsByFolder.get(folder);
   return (
-    getJidsByFolder(folder).find((jid) => jid.startsWith('web:')) ||
-    `web:${folder}`
+    (folderJids || getJidsByFolder(folder)).find((jid) =>
+      jid.startsWith('web:'),
+    ) || `web:${folder}`
   );
 }
 
@@ -252,9 +311,7 @@ function normalizeActivationMode(
   return undefined;
 }
 
-function resolveBackingGroupForSession(
-  session: SessionRecord,
-): {
+function resolveBackingGroupForSession(session: SessionRecord): {
   backingJid: string;
   backingGroup: NonNullable<ReturnType<typeof getRegisteredGroup>>;
 } | null {
@@ -556,12 +613,13 @@ function buildSessionPayload(
     string,
     { jid: string; name?: string | null; last_message_time?: string | null }
   >,
+  context?: SessionReadContext,
 ) {
   const isMemorySession = session.kind === 'memory';
-  const sessionBindings = bindings.filter(
-    (binding) => binding.session_id === session.id,
-  );
-  const relevantJids = getRelevantChatJids(session, bindings);
+  const sessionBindings =
+    context?.bindingsBySessionId.get(session.id) ||
+    bindings.filter((binding) => binding.session_id === session.id);
+  const relevantJids = getRelevantChatJids(session, bindings, context);
   let latestAt: string | undefined;
   let lastMessage: string | undefined;
   for (const jid of relevantJids) {
@@ -576,17 +634,22 @@ function buildSessionPayload(
     }
   }
 
-  const backingJid = resolveBackingJid(session);
+  const backingJid = resolveBackingJid(session, context);
   const inferredRunnerId = inferRunnerIdFromModel(session.model);
   const effectiveRunnerId =
     session.model && inferredRunnerId && inferredRunnerId !== session.runner_id
       ? inferredRunnerId
       : session.runner_id;
   const descriptor = getRunnerDescriptor(effectiveRunnerId);
+  const folder = getFolderForSession(session);
   const summary = backingJid
-    ? getContextSummary(getFolderForSession(session), backingJid)
+    ? context
+      ? context.summaryMetadataByKey.get(`${folder}\0${backingJid}`)
+      : getContextSummary(folder, backingJid)
     : null;
-  const backingGroup = backingJid ? getRegisteredGroup(backingJid) : undefined;
+  const backingGroup = backingJid
+    ? context?.groupsByJid.get(backingJid) || getRegisteredGroup(backingJid)
+    : undefined;
   const uniformActivationMode =
     sessionBindings.length > 0 &&
     sessionBindings.every(
@@ -605,9 +668,10 @@ function buildSessionPayload(
     kind: session.kind,
     editable: session.kind === 'main' || session.kind === 'workspace',
     deletable:
+      session.kind === 'workspace' &&
       !!backingJid &&
       !!backingGroup &&
-      canDeleteGroup(user, { ...backingGroup, jid: backingJid }),
+      canModifyGroup(user, { ...backingGroup, jid: backingJid }),
     cwd: isMemorySession ? undefined : session.cwd,
     backing_jid: backingJid,
     owner_key: session.owner_key,
@@ -654,7 +718,11 @@ function buildSessionPayload(
   };
 }
 
-function canAccessSession(user: AuthUser, session: SessionRecord): boolean {
+function canAccessSession(
+  user: AuthUser,
+  session: SessionRecord,
+  context?: SessionReadContext,
+): boolean {
   if (session.kind === 'memory') {
     // Single-user workbench should only expose the operator's own memory session.
     // Internal projections like memory:system may exist for background flows, but
@@ -665,26 +733,31 @@ function canAccessSession(user: AuthUser, session: SessionRecord): boolean {
   if (session.kind === 'worker') {
     const worker = getWorkerSessionRecord(session.id);
     if (!worker) return false;
-    const sourceGroup = getRegisteredGroup(worker.source_chat_jid);
+    const sourceGroup =
+      context?.groupsByJid.get(worker.source_chat_jid) ||
+      getRegisteredGroup(worker.source_chat_jid);
     return (
       !!sourceGroup &&
       canAccessGroup(user, { ...sourceGroup, jid: worker.source_chat_jid })
     );
   }
 
-  const backingJid = resolveBackingJid(session);
+  const backingJid = resolveBackingJid(session, context);
   if (!backingJid) return false;
-  const group = getRegisteredGroup(backingJid);
+  const group =
+    context?.groupsByJid.get(backingJid) || getRegisteredGroup(backingJid);
   return !!group && canAccessGroup(user, { ...group, jid: backingJid });
 }
 
 function getRelevantChatJids(
   session: SessionRecord,
   bindings = listSessionBindings(),
+  context?: SessionReadContext,
 ): string[] {
-  const sessionBindings = bindings
-    .filter((binding) => binding.session_id === session.id)
-    .map((binding) => binding.channel_jid);
+  const sessionBindings = (
+    context?.bindingsBySessionId.get(session.id) ||
+    bindings.filter((binding) => binding.session_id === session.id)
+  ).map((binding) => binding.channel_jid);
 
   if (session.kind === 'worker') {
     const worker = getWorkerSessionRecord(session.id);
@@ -701,17 +774,23 @@ function getRelevantChatJids(
   if (session.id.startsWith('main:')) {
     const folder = session.id.slice('main:'.length);
     const sessionId = session.id;
-    const boundElsewhere = new Set(
-      bindings
-        .filter((binding) => binding.session_id !== sessionId)
-        .map((binding) => binding.channel_jid),
-    );
-    const folderJids = getJidsByFolder(folder).filter(
-      (jid) => !boundElsewhere.has(jid),
-    );
-    return Array.from(
-      new Set([...folderJids, ...sessionBindings]),
-    );
+    let folderJids: string[];
+    if (context) {
+      folderJids = (context.jidsByFolder.get(folder) || []).filter((jid) => {
+        const boundSessionId = context.bindingSessionByJid.get(jid);
+        return !boundSessionId || boundSessionId === sessionId;
+      });
+    } else {
+      const boundElsewhere = new Set(
+        bindings
+          .filter((binding) => binding.session_id !== sessionId)
+          .map((binding) => binding.channel_jid),
+      );
+      folderJids = getJidsByFolder(folder).filter(
+        (jid) => !boundElsewhere.has(jid),
+      );
+    }
+    return Array.from(new Set([...folderJids, ...sessionBindings]));
   }
 
   return sessionBindings;
@@ -1256,36 +1335,40 @@ sessionRoutes.post('/', authMiddleware, async (c) => {
 
 sessionRoutes.get('/', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
-  const sessions = listSessionRecords().filter((session) =>
-    canAccessSession(user, session),
+  const requestedKinds = new Set(
+    (c.req.query('kinds') || '')
+      .split(',')
+      .map((kind) => kind.trim())
+      .filter(
+        (kind): kind is SessionRecord['kind'] =>
+          kind === 'main' ||
+          kind === 'workspace' ||
+          kind === 'worker' ||
+          kind === 'memory',
+      ),
   );
   const bindings = listSessionBindings();
+  const readContext = buildSessionReadContext(bindings);
+  const sessions = listSessionRecords().filter(
+    (session) =>
+      (requestedKinds.size === 0 || requestedKinds.has(session.kind)) &&
+      canAccessSession(user, session, readContext),
+  );
   const chatsByJid = new Map(getAllChats().map((chat) => [chat.jid, chat]));
 
   const allRelevantJids = Array.from(
     new Set(
-      sessions.flatMap((session) => getRelevantChatJids(session, bindings)),
+      sessions.flatMap((session) =>
+        getRelevantChatJids(session, bindings, readContext),
+      ),
     ),
   );
-  const latestMessages = new Map<
-    string,
-    { content: string; timestamp: string }
-  >();
-  if (allRelevantJids.length > 0) {
-    const rows = getMessagesPageMulti(
-      allRelevantJids,
-      undefined,
-      Math.max(allRelevantJids.length * 3, 30),
-    );
-    for (const row of rows) {
-      if (!latestMessages.has(row.chat_jid)) {
-        latestMessages.set(row.chat_jid, {
-          content: row.content,
-          timestamp: row.timestamp,
-        });
-      }
-    }
-  }
+  const latestMessages = new Map(
+    getLatestMessagesForChats(allRelevantJids).map((message) => [
+      message.chat_jid,
+      { content: message.content, timestamp: message.timestamp },
+    ]),
+  );
 
   const payload: Record<string, Record<string, unknown>> = {};
   for (const session of sessions) {
@@ -1295,6 +1378,7 @@ sessionRoutes.get('/', authMiddleware, (c) => {
       bindings,
       latestMessages,
       chatsByJid,
+      readContext,
     );
   }
 
@@ -2011,26 +2095,24 @@ sessionRoutes.post('/:id/compress', authMiddleware, async (c) => {
   if (deps.queue.hasDirectActiveRunner(backingJid)) {
     return c.json({ error: 'Agent 正在运行中，请等待完成后再压缩' }, 409);
   }
-  if (isCompressing(backingGroup.folder)) {
-    return c.json({ error: '压缩正在进行中，请稍后再试' }, 409);
+  if (!deps.triggerSessionWrapup) {
+    return c.json({ error: '记忆整理管线未初始化' }, 503);
   }
 
   const sessions = deps.getSessions();
   const sessionIdBefore = sessions[backingGroup.folder];
-  const result = await compressContext(backingGroup.folder, backingJid, {
-    beforeTimestamp: new Date().toISOString(),
-  });
-  if (!result.success) {
-    return c.json({ error: result.error }, 400);
-  }
+  await deps.triggerSessionWrapup(backingGroup.folder);
+  deleteSession(backingGroup.folder);
   if (sessions[backingGroup.folder] === sessionIdBefore) {
     delete sessions[backingGroup.folder];
   }
+  const summary = getContextSummary(backingGroup.folder, backingJid);
 
   return c.json({
     success: true,
-    summary: result.summary,
-    messageCount: result.messageCount,
+    queued: true,
+    summary: summary?.summary || null,
+    messageCount: summary?.message_count || 0,
   });
 });
 

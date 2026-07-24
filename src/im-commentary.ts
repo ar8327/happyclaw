@@ -18,6 +18,7 @@ const RATE_LIMIT_SECONDS = 8;
 /** Tools that are too trivial to comment on. */
 const SKIP_TOOLS = new Set([
   'mcp__happyclaw__memory_query',
+  'mcp__happyclaw__memory_search',
   'mcp__happyclaw__memory_remember',
   'TodoWrite',
   'TodoRead',
@@ -146,13 +147,16 @@ async function tryHaiku(prompt: string): Promise<string | null> {
 /** Simple heuristic fallback when no model is available. */
 function formatFallback(toolName: string, inputSummary?: string): string {
   const short = inputSummary ? inputSummary.slice(0, 60) : '';
-  if (toolName === 'Bash') return short ? `执行命令: ${short}` : '执行 Shell 命令';
+  if (toolName === 'Bash')
+    return short ? `执行命令: ${short}` : '执行 Shell 命令';
   if (toolName === 'Read') return short ? `读取文件: ${short}` : '读取文件';
   if (toolName === 'Write') return short ? `写入文件: ${short}` : '写入文件';
   if (toolName === 'Edit') return short ? `编辑文件: ${short}` : '编辑文件';
   if (toolName === 'Grep') return short ? `搜索: ${short}` : '搜索代码';
   if (toolName === 'Glob') return short ? `查找文件: ${short}` : '查找文件';
-  if (toolName === 'Agent') return short ? `启动子代理: ${short}` : '启动子代理';
-  if (toolName === 'WebFetch' || toolName === 'WebSearch') return short ? `网页: ${short}` : '访问网页';
+  if (toolName === 'Agent')
+    return short ? `启动子代理: ${short}` : '启动子代理';
+  if (toolName === 'WebFetch' || toolName === 'WebSearch')
+    return short ? `网页: ${short}` : '访问网页';
   return short ? `${toolName}: ${short}` : toolName;
 }

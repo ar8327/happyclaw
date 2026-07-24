@@ -22,6 +22,7 @@ export type RunnerFactoryContext = {
   loadUserMcpServers: () => Record<string, unknown>;
   skillsDir: string;
   disableSyntheticArchive: boolean;
+  toolScope: 'default' | 'isolated' | 'read-only';
 };
 
 export type RunnerHealthContext = {

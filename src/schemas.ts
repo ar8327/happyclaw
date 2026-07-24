@@ -15,7 +15,10 @@ export const TaskPatchSchema = z.object({
   status: z.enum(['active', 'paused']).optional(),
   next_run: z.string().optional(),
   model: z.string().max(128).nullable().optional(),
-  notify_channels: z.array(z.enum(['feishu', 'telegram', 'qq', 'wechat'])).nullable().optional(),
+  notify_channels: z
+    .array(z.enum(['feishu', 'telegram', 'qq', 'wechat']))
+    .nullable()
+    .optional(),
 });
 
 // 简单 cron 表达式验证：5 或 6 段，每段允许 * 和常见 cron 语法
@@ -33,10 +36,16 @@ export const TaskCreateSchema = z
     execution_type: z.enum(['agent', 'script']).optional(),
     script_command: z.string().max(4096).optional(),
     model: z.string().max(128).optional(),
-    notify_channels: z.array(z.enum(['feishu', 'telegram', 'qq', 'wechat'])).nullable().optional(),
+    notify_channels: z
+      .array(z.enum(['feishu', 'telegram', 'qq', 'wechat']))
+      .nullable()
+      .optional(),
   })
   .superRefine((data, ctx) => {
-    if (!data.session_id && !(data.group_folder?.trim() && data.chat_jid?.trim())) {
+    if (
+      !data.session_id &&
+      !(data.group_folder?.trim() && data.chat_jid?.trim())
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['session_id'],
@@ -145,18 +154,14 @@ export const MemoryGlobalSchema = z.object({
 export const SystemSettingsSchema = z.object({
   runtimeTimeout: z.number().int().min(60000).max(86400000).optional(),
   idleTimeout: z.number().int().min(60000).max(86400000).optional(),
-  runtimeMaxOutputSize: z
-    .number()
-    .int()
-    .min(1048576)
-    .max(104857600)
-    .optional(),
+  runtimeMaxOutputSize: z.number().int().min(1048576).max(104857600).optional(),
   maxConcurrentRuntimes: z.number().int().min(1).max(100).optional(),
   maxConcurrentScripts: z.number().int().min(1).max(50).optional(),
   maxConcurrentWorkflowNodes: z.number().int().min(1).max(50).optional(),
   scriptTimeout: z.number().int().min(5000).max(600000).optional(),
   queryActivityTimeoutMs: z.number().int().min(30000).max(3600000).optional(),
   toolCallHardTimeoutMs: z.number().int().min(60000).max(7200000).optional(),
+  memoryQueryConcurrency: z.number().int().min(1).max(10).optional(),
   memoryQueryTimeout: z.number().int().min(10000).max(600000).optional(),
   memoryGlobalSleepTimeout: z.number().int().min(60000).max(3600000).optional(),
   memorySendTimeout: z.number().int().min(30000).max(3600000).optional(),
@@ -243,9 +248,7 @@ export const AdminPatchUserSchema = z.object({
 
 export const InviteCreateSchema = z.object({
   role: z.enum(['admin', 'member']).optional(),
-  permission_template: z
-    .enum(['admin_full', 'ops_manager'])
-    .optional(),
+  permission_template: z.enum(['admin_full', 'ops_manager']).optional(),
   permissions: z
     .array(PermissionValueSchema)
     .max(ALL_PERMISSIONS.length)

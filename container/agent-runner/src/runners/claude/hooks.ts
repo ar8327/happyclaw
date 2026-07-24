@@ -1,7 +1,4 @@
-import {
-  enqueueSessionWrapupTask,
-  waitForSessionWrapupResponse,
-} from '../../session-wrapup-ipc.js';
+import { enqueueSessionWrapupTask } from '../../session-wrapup-ipc.js';
 
 // ---------------------------------------------------------------------------
 // Transcript Archival (PreCompact hook)
@@ -47,19 +44,13 @@ export async function runPreCompactHook(
       userId: options.userId,
       archiveConversation: true,
     });
-    log(`Sent session_wrapup request ${requestId} for ${options.groupFolder}`);
-    const response = await waitForSessionWrapupResponse(requestId);
-    if (!response.success) {
-      log(
-        `session_wrapup failed for ${options.groupFolder}: ${response.error || 'unknown error'}`,
-      );
-      return;
-    }
     log(
-      `session_wrapup completed for ${options.groupFolder}${response.conversationArchiveFile ? ` -> ${response.conversationArchiveFile}` : ''}`,
+      `Queued session_wrapup request ${requestId} for ${options.groupFolder}`,
     );
   } catch (err) {
-    log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
+    log(
+      `Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }
 
@@ -73,7 +64,12 @@ export function createPreCompactHook(
   userId?: string,
 ): (input: PreCompactHookInput) => Promise<Record<string, never>> {
   return async (input) => {
-    await runPreCompactHook(input, { isHome, isAdminHome, groupFolder, userId });
+    await runPreCompactHook(input, {
+      isHome,
+      isAdminHome,
+      groupFolder,
+      userId,
+    });
     return {};
   };
 }
@@ -90,7 +86,10 @@ const DANGEROUS_PATTERNS = [
   /:\(\)\{ :\|:& \};:/, // fork bomb (escaped (){}|)
 ];
 
-export function evaluateSafetyLite(input: PreToolUseHookInput): { blocked: boolean; reason?: string } {
+export function evaluateSafetyLite(input: PreToolUseHookInput): {
+  blocked: boolean;
+  reason?: string;
+} {
   if (input.hook_event_name !== 'PreToolUse') return { blocked: false };
   if (input.tool_name !== 'Bash') return { blocked: false };
   const cmd =
@@ -98,7 +97,7 @@ export function evaluateSafetyLite(input: PreToolUseHookInput): { blocked: boole
     input.tool_input !== null &&
     'command' in input.tool_input &&
     typeof (input.tool_input as Record<string, unknown>).command === 'string'
-      ? (input.tool_input as Record<string, unknown>).command as string
+      ? ((input.tool_input as Record<string, unknown>).command as string)
       : '';
   for (const pattern of DANGEROUS_PATTERNS) {
     if (pattern.test(cmd)) {
@@ -111,10 +110,13 @@ export function evaluateSafetyLite(input: PreToolUseHookInput): { blocked: boole
   return { blocked: false };
 }
 
-export function createSafetyLiteHook(): (input: PreToolUseHookInput) => Promise<Record<string, unknown> | {
-  decision: 'block';
-  reason: string;
-}> {
+export function createSafetyLiteHook(): (input: PreToolUseHookInput) => Promise<
+  | Record<string, unknown>
+  | {
+      decision: 'block';
+      reason: string;
+    }
+> {
   return async (input) => {
     const result = evaluateSafetyLite(input);
     if (!result.blocked || !result.reason) return {};

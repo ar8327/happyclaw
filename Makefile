@@ -1,17 +1,15 @@
-.PHONY: dev dev-backend dev-web build build-backend build-web build-memory-agent start \
-       typecheck typecheck-backend typecheck-web typecheck-agent-runner-core typecheck-agent-runner typecheck-memory-agent test-runner-contracts \
+.PHONY: dev dev-backend dev-web build build-backend build-web start \
+       typecheck typecheck-backend typecheck-web typecheck-agent-runner-core typecheck-agent-runner test-runner-contracts test-prompt-characterization test-memory-timeout test-memory-lanes test-memory-write-queue test-memory-search test-memory-retention test-context-conformance \
        format format-check install clean reset-init sync-types ensure-deps \
        backup restore help
 
 # ─── Development ─────────────────────────────────────────────
 
 ensure-deps: ## 检查依赖是否齐全，缺失时自动安装
-	@if [ ! -d node_modules ] || [ package.json -nt node_modules ] || [ ! -d web/node_modules ] || [ web/package.json -nt web/node_modules ] || [ ! -d container/agent-runner-core/node_modules ] || [ container/agent-runner-core/package.json -nt container/agent-runner-core/node_modules ] || [ ! -d container/agent-runner/node_modules ] || [ container/agent-runner/package.json -nt container/agent-runner/node_modules ] || [ ! -d container/memory-agent/node_modules ] || [ container/memory-agent/package.json -nt container/memory-agent/node_modules ]; then echo "📦 依赖有更新，安装依赖..."; $(MAKE) install; fi
+	@if [ ! -d node_modules ] || [ package.json -nt node_modules ] || [ ! -d web/node_modules ] || [ web/package.json -nt web/node_modules ] || [ ! -d container/agent-runner-core/node_modules ] || [ container/agent-runner-core/package.json -nt container/agent-runner-core/node_modules ] || [ ! -d container/agent-runner/node_modules ] || [ container/agent-runner/package.json -nt container/agent-runner/node_modules ]; then echo "📦 依赖有更新，安装依赖..."; $(MAKE) install; fi
 
-dev: ensure-deps ## 启动前后端（首次自动安装依赖和构建容器镜像）
-	@if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && ! docker image inspect agentdock-agent:latest >/dev/null 2>&1; then echo "🐳 构建 Agent 容器镜像..."; ./container/build.sh; fi
+dev: ensure-deps ## 启动前后端
 	@npm --prefix container/agent-runner run build --silent 2>/dev/null || npm --prefix container/agent-runner run build
-	@npm --prefix container/memory-agent run build --silent 2>/dev/null || npm --prefix container/memory-agent run build
 	npm run dev:all
 
 dev-backend: ## 仅启动后端
@@ -26,7 +24,6 @@ build: ensure-deps sync-types ## 编译前后端及 agent-runner
 	npm run build:all
 	npm --prefix container/agent-runner-core run build
 	npm --prefix container/agent-runner run build
-	npm --prefix container/memory-agent run build
 
 build-backend: ## 仅编译后端
 	npm run build
@@ -34,19 +31,15 @@ build-backend: ## 仅编译后端
 build-web: ## 仅编译前端
 	npm run build:web
 
-build-memory-agent: ## 仅编译 memory-agent
-	npm --prefix container/memory-agent run build
-
 # ─── Production ──────────────────────────────────────────────
 
-start: ensure-deps ## 一键启动生产环境（首次自动安装依赖和构建容器镜像）
-	@if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && ! docker image inspect agentdock-agent:latest >/dev/null 2>&1; then echo "🐳 构建 Agent 容器镜像..."; ./container/build.sh; fi
+start: ensure-deps ## 一键启动生产环境
 	$(MAKE) build
 	npm run start
 
 # ─── Quality ─────────────────────────────────────────────────
 
-typecheck: sync-types typecheck-backend typecheck-web typecheck-agent-runner-core typecheck-agent-runner typecheck-memory-agent test-runner-contracts ## 全量类型检查
+typecheck: sync-types typecheck-backend typecheck-web typecheck-agent-runner-core typecheck-agent-runner test-runner-contracts test-prompt-characterization test-memory-timeout test-memory-lanes test-memory-write-queue test-memory-search test-memory-retention test-context-conformance ## 全量类型检查
 	@./scripts/check-stream-event-sync.sh
 
 typecheck-backend:
@@ -61,11 +54,29 @@ typecheck-agent-runner-core:
 typecheck-agent-runner:
 	cd container/agent-runner && npx tsc --noEmit
 
-typecheck-memory-agent:
-	cd container/memory-agent && npx tsc --noEmit
-
 test-runner-contracts:
 	npm run test:runner-contracts
+
+test-prompt-characterization:
+	npm run test:prompt-characterization
+
+test-memory-timeout:
+	npm run test:memory-timeout
+
+test-memory-lanes:
+	npm run test:memory-lanes
+
+test-memory-write-queue:
+	npm run test:memory-write-queue
+
+test-memory-search:
+	npm run test:memory-search
+
+test-memory-retention:
+	npm run test:memory-retention
+
+test-context-conformance:
+	npm run test:context-conformance
 
 format: ## 格式化代码
 	npm run format
@@ -86,17 +97,14 @@ install: ## 安装全部依赖并编译 agent-runner
 	npm --prefix container/agent-runner-core run build
 	npm --prefix container/agent-runner install
 	npm --prefix container/agent-runner run build
-	npm --prefix container/memory-agent install
-	npm --prefix container/memory-agent run build
 	cd web && npm install
-	@touch node_modules web/node_modules container/agent-runner-core/node_modules container/agent-runner/node_modules container/memory-agent/node_modules
+	@touch node_modules web/node_modules container/agent-runner-core/node_modules container/agent-runner/node_modules
 
 clean: ## 清理构建产物
 	rm -rf dist
 	rm -rf web/dist
 	rm -rf container/agent-runner-core/dist
 	rm -rf container/agent-runner/dist
-	rm -rf container/memory-agent/dist
 
 reset-init: ## 完全重置为首装状态（清空所有运行时数据）
 	rm -rf data store groups
@@ -149,8 +157,7 @@ restore: ## 从 agentdock-backup-*.tar.gz 恢复数据（用法：make restore �
 	echo "✅ 数据恢复完成"; \
 	echo ""; \
 	echo "后续步骤："; \
-	echo "  1. 如需 Docker 容器支持：./container/build.sh"; \
-	echo "  2. 启动服务：make start"
+	echo "  1. 启动服务：make start"
 
 # ─── Help ────────────────────────────────────────────────────
 

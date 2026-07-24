@@ -8,9 +8,7 @@ const IM_CHANNEL_TTL_MS = 24 * 60 * 60 * 1000;
 const INTERRUPT_GRACE_WINDOW_MS = 10_000;
 const HOST_RUNTIME_STATE_KEY = '__hostRuntime';
 
-function parsePendingRoutingRecentImChannels(
-  value: unknown,
-): string[] | null {
+function parsePendingRoutingRecentImChannels(value: unknown): string[] | null {
   if (!Array.isArray(value)) return null;
   const channels = Array.from(
     new Set(
@@ -36,10 +34,10 @@ function splitHostRuntimeState(
     };
   }
   const hostState =
-    providerState[HOST_RUNTIME_STATE_KEY]
-      && typeof providerState[HOST_RUNTIME_STATE_KEY] === 'object'
-      && !Array.isArray(providerState[HOST_RUNTIME_STATE_KEY])
-      ? providerState[HOST_RUNTIME_STATE_KEY] as Record<string, unknown>
+    providerState[HOST_RUNTIME_STATE_KEY] &&
+    typeof providerState[HOST_RUNTIME_STATE_KEY] === 'object' &&
+    !Array.isArray(providerState[HOST_RUNTIME_STATE_KEY])
+      ? (providerState[HOST_RUNTIME_STATE_KEY] as Record<string, unknown>)
       : null;
   const pendingRoutingRecentImChannels = parsePendingRoutingRecentImChannels(
     hostState?.pendingRoutingRecentImChannels,
@@ -82,6 +80,7 @@ export class SessionState {
   private providerState?: Record<string, unknown>;
   private lastMessageCursor: string | null = null;
   private pendingRoutingRecentImChannels: string[] | null = null;
+  private contextSummary: string | undefined;
 
   /** Load persisted IM channels from disk (with TTL filtering) */
   loadImChannels(channelsFile: string): void {
@@ -94,7 +93,8 @@ export class SessionState {
         for (const entry of data) {
           // Support both old format (plain string) and new format ({ channel, lastSeen })
           const channel = typeof entry === 'string' ? entry : entry?.channel;
-          const lastSeen = typeof entry === 'string' ? now : (entry?.lastSeen ?? now);
+          const lastSeen =
+            typeof entry === 'string' ? now : (entry?.lastSeen ?? now);
           if (typeof channel !== 'string') continue;
           if (now - lastSeen > IM_CHANNEL_TTL_MS) {
             pruned = true;
@@ -119,9 +119,9 @@ export class SessionState {
   }): void {
     if (!snapshot) return;
     if (
-      snapshot.providerState
-      && typeof snapshot.providerState === 'object'
-      && !Array.isArray(snapshot.providerState)
+      snapshot.providerState &&
+      typeof snapshot.providerState === 'object' &&
+      !Array.isArray(snapshot.providerState)
     ) {
       const parsed = splitHostRuntimeState({
         ...snapshot.providerState,
@@ -137,15 +137,24 @@ export class SessionState {
       }
     }
     if (snapshot.imChannelLastSeen) {
-      for (const [channel, lastSeen] of Object.entries(snapshot.imChannelLastSeen)) {
-        if (!channel || typeof lastSeen !== 'number' || !Number.isFinite(lastSeen)) {
+      for (const [channel, lastSeen] of Object.entries(
+        snapshot.imChannelLastSeen,
+      )) {
+        if (
+          !channel ||
+          typeof lastSeen !== 'number' ||
+          !Number.isFinite(lastSeen)
+        ) {
           continue;
         }
         this.recentImChannels.add(channel);
         this.imChannelLastSeen.set(channel, lastSeen);
       }
     }
-    if (typeof snapshot.currentPermissionMode === 'string' && snapshot.currentPermissionMode) {
+    if (
+      typeof snapshot.currentPermissionMode === 'string' &&
+      snapshot.currentPermissionMode
+    ) {
       this.currentPermissionMode = snapshot.currentPermissionMode;
     }
     if ('lastMessageCursor' in snapshot) {
@@ -217,7 +226,10 @@ export class SessionState {
   }
 
   isWithinInterruptGraceWindow(): boolean {
-    return this.lastInterruptRequestedAt > 0 && Date.now() - this.lastInterruptRequestedAt <= INTERRUPT_GRACE_WINDOW_MS;
+    return (
+      this.lastInterruptRequestedAt > 0 &&
+      Date.now() - this.lastInterruptRequestedAt <= INTERRUPT_GRACE_WINDOW_MS
+    );
   }
 
   applyRuntimeSnapshot(snapshot?: {
@@ -227,9 +239,9 @@ export class SessionState {
     if (!snapshot) return;
     if (Object.prototype.hasOwnProperty.call(snapshot, 'providerState')) {
       if (
-        snapshot.providerState
-        && typeof snapshot.providerState === 'object'
-        && !Array.isArray(snapshot.providerState)
+        snapshot.providerState &&
+        typeof snapshot.providerState === 'object' &&
+        !Array.isArray(snapshot.providerState)
       ) {
         const parsed = splitHostRuntimeState({
           ...snapshot.providerState,
@@ -271,6 +283,15 @@ export class SessionState {
     return this.lastMessageCursor;
   }
 
+  setContextSummary(summary: string | null | undefined): void {
+    const normalized = summary?.trim();
+    this.contextSummary = normalized || undefined;
+  }
+
+  getContextSummary(): string | undefined {
+    return this.contextSummary;
+  }
+
   snapshot(overrides?: {
     providerSessionId?: string;
     resumeAnchor?: string;
@@ -286,9 +307,11 @@ export class SessionState {
     lastMessageCursor?: string | null;
   } {
     const hasProviderStateOverride =
-      overrides && Object.prototype.hasOwnProperty.call(overrides, 'providerState');
+      overrides &&
+      Object.prototype.hasOwnProperty.call(overrides, 'providerState');
     const hasLastMessageCursorOverride =
-      overrides && Object.prototype.hasOwnProperty.call(overrides, 'lastMessageCursor');
+      overrides &&
+      Object.prototype.hasOwnProperty.call(overrides, 'lastMessageCursor');
     return {
       providerSessionId: overrides?.providerSessionId,
       resumeAnchor: overrides?.resumeAnchor,

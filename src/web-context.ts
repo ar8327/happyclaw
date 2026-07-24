@@ -6,9 +6,8 @@ import { SessionRuntimeManager } from './session-runtime-manager.js';
 import type { AuthUser, NewMessage, MessageCursor } from './types.js';
 import type { ActiveTurn } from './turn-manager.js';
 import type { TurnObservabilitySnapshot } from './turn-observability.js';
-import {
-  isPrimarySessionFolder,
-} from './db.js';
+import type { MemoryOrchestrator } from './memory-agent.js';
+import { isPrimarySessionFolder } from './db.js';
 import { getLocalWorkbenchAuthUser } from './local-user.js';
 
 export interface WsClientInfo {
@@ -19,6 +18,7 @@ export interface WsClientInfo {
 
 export interface WebDeps {
   queue: SessionRuntimeManager;
+  memoryOrchestrator?: MemoryOrchestrator;
   getRegisteredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
   processGroupMessages: (chatJid: string) => Promise<boolean>;

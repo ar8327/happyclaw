@@ -700,7 +700,9 @@ function globalImDir(): string {
   return GLOBAL_IM_CONFIG_DIR;
 }
 
-function globalImFile(fileName: (typeof LEGACY_IM_CONFIG_FILES)[number]): string {
+function globalImFile(
+  fileName: (typeof LEGACY_IM_CONFIG_FILES)[number],
+): string {
   return path.join(globalImDir(), fileName);
 }
 
@@ -784,7 +786,10 @@ export function migrateLegacyUserImConfigToGlobal(): void {
     }
     if (skipped.size > 0) {
       logger.warn(
-        { skipped: Object.fromEntries(skipped), targetDir: GLOBAL_IM_CONFIG_DIR },
+        {
+          skipped: Object.fromEntries(skipped),
+          targetDir: GLOBAL_IM_CONFIG_DIR,
+        },
         'Skipped legacy IM config files because global IM config already exists',
       );
     }
@@ -810,7 +815,8 @@ export function getImFeishuConfig(): UserFeishuConfig | null {
       appSecret: secret.appSecret,
       enabled: stored.enabled,
       updatedAt: stored.updatedAt || null,
-      replyThreadingMode: stored.replyThreadingMode === 'agent' ? 'agent' : 'auto',
+      replyThreadingMode:
+        stored.replyThreadingMode === 'agent' ? 'agent' : 'auto',
       streamingCard: stored.streamingCard ?? false,
       imCommentary: stored.imCommentary ?? false,
     };
@@ -1145,8 +1151,7 @@ export function getImGeneralConfig(): UserImGeneralConfig {
     const parsed = JSON.parse(content) as Record<string, unknown>;
     return {
       autoUnbindOnSendFailure: parsed.autoUnbindOnSendFailure === true,
-      updatedAt:
-        typeof parsed.updatedAt === 'string' ? parsed.updatedAt : null,
+      updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : null,
     };
   } catch (err) {
     logger.warn({ err }, 'Failed to read global IM general config');
@@ -1310,6 +1315,7 @@ export interface SystemSettings {
   scriptTimeout: number;
   queryActivityTimeoutMs: number;
   toolCallHardTimeoutMs: number;
+  memoryQueryConcurrency: number;
   memoryQueryTimeout: number;
   memoryGlobalSleepTimeout: number;
   memorySendTimeout: number;
@@ -1335,6 +1341,7 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   scriptTimeout: 60000,
   queryActivityTimeoutMs: 300000,
   toolCallHardTimeoutMs: 7200000,
+  memoryQueryConcurrency: 3,
   memoryQueryTimeout: 60000,
   memoryGlobalSleepTimeout: 300000,
   memorySendTimeout: 120000,
@@ -1428,6 +1435,11 @@ function readSystemSettingsFromFile(): SystemSettings | null {
       raw.toolCallHardTimeoutMs > 0
         ? raw.toolCallHardTimeoutMs
         : DEFAULT_SYSTEM_SETTINGS.toolCallHardTimeoutMs,
+    memoryQueryConcurrency:
+      typeof raw.memoryQueryConcurrency === 'number' &&
+      raw.memoryQueryConcurrency > 0
+        ? raw.memoryQueryConcurrency
+        : DEFAULT_SYSTEM_SETTINGS.memoryQueryConcurrency,
     memoryQueryTimeout:
       typeof raw.memoryQueryTimeout === 'number' && raw.memoryQueryTimeout > 0
         ? raw.memoryQueryTimeout
@@ -1522,6 +1534,10 @@ function buildEnvFallbackSettings(): SystemSettings {
       process.env.TOOL_CALL_HARD_TIMEOUT_MS,
       DEFAULT_SYSTEM_SETTINGS.toolCallHardTimeoutMs,
     ),
+    memoryQueryConcurrency: parseIntEnv(
+      process.env.MEMORY_QUERY_CONCURRENCY,
+      DEFAULT_SYSTEM_SETTINGS.memoryQueryConcurrency,
+    ),
     memoryQueryTimeout: parseIntEnv(
       process.env.MEMORY_QUERY_TIMEOUT,
       DEFAULT_SYSTEM_SETTINGS.memoryQueryTimeout,
@@ -1552,7 +1568,9 @@ function buildEnvFallbackSettings(): SystemSettings {
       process.env.FEISHU_DOC_DOMAIN || DEFAULT_SYSTEM_SETTINGS.feishuDocDomain,
     webPublicUrl:
       process.env.WEB_PUBLIC_URL || DEFAULT_SYSTEM_SETTINGS.webPublicUrl,
-    defaultClaudeModel: process.env.DEFAULT_CLAUDE_MODEL || DEFAULT_SYSTEM_SETTINGS.defaultClaudeModel,
+    defaultClaudeModel:
+      process.env.DEFAULT_CLAUDE_MODEL ||
+      DEFAULT_SYSTEM_SETTINGS.defaultClaudeModel,
   };
 }
 
@@ -1612,11 +1630,11 @@ export function saveSystemSettings(
   if (merged.runtimeMaxOutputSize > 104857600)
     merged.runtimeMaxOutputSize = 104857600; // max 100MB
   if (merged.maxConcurrentRuntimes < 1) merged.maxConcurrentRuntimes = 1;
-  if (merged.maxConcurrentRuntimes > 100)
-    merged.maxConcurrentRuntimes = 100;
+  if (merged.maxConcurrentRuntimes > 100) merged.maxConcurrentRuntimes = 100;
   if (merged.maxConcurrentScripts < 1) merged.maxConcurrentScripts = 1;
   if (merged.maxConcurrentScripts > 50) merged.maxConcurrentScripts = 50;
-  if (merged.maxConcurrentWorkflowNodes < 1) merged.maxConcurrentWorkflowNodes = 1;
+  if (merged.maxConcurrentWorkflowNodes < 1)
+    merged.maxConcurrentWorkflowNodes = 1;
   if (merged.maxConcurrentWorkflowNodes > 50)
     merged.maxConcurrentWorkflowNodes = 50;
   if (merged.scriptTimeout < 5000) merged.scriptTimeout = 5000; // min 5s
@@ -1629,6 +1647,8 @@ export function saveSystemSettings(
     merged.toolCallHardTimeoutMs = 60000; // min 1 min
   if (merged.toolCallHardTimeoutMs > 7200000)
     merged.toolCallHardTimeoutMs = 7200000; // max 2 hours
+  if (merged.memoryQueryConcurrency < 1) merged.memoryQueryConcurrency = 1;
+  if (merged.memoryQueryConcurrency > 10) merged.memoryQueryConcurrency = 10;
   if (merged.memoryQueryTimeout < 10000) merged.memoryQueryTimeout = 10000; // min 10s
   if (merged.memoryQueryTimeout > 600000) merged.memoryQueryTimeout = 600000; // max 10 min
   if (merged.memoryGlobalSleepTimeout < 60000)
@@ -1704,9 +1724,7 @@ export function getImPreferences(): UserIMPreferences {
   }
 }
 
-export function saveImPreferences(
-  prefs: UserIMPreferences,
-): UserIMPreferences {
+export function saveImPreferences(prefs: UserIMPreferences): UserIMPreferences {
   migrateLegacyUserImConfigToGlobal();
   const dir = globalImDir();
   fs.mkdirSync(dir, { recursive: true });

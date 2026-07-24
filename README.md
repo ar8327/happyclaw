@@ -67,7 +67,7 @@ AgentDock 源自 [HappyClaw](https://github.com/riba2534/happyclaw) 的实验性
 
 - **单用户多 Session** — 当前主模型是一个本地操作者配合多个 Session，会话可独立选择 runner、工作目录、压缩策略和 IM 绑定
 - **统一本地 Runtime** — Session 统一走本地 runtime，旧的 `host` 和 `container` 双执行模式只保留兼容痕迹，不再是产品能力
-- **原生 Claude 与 Codex Runner** — 通过 runner registry 暴露 Claude 与 Codex，两者都能承接聊天主链路，兼容能力差异会在界面中明确展示
+- **多 Runner 主链路** — runner registry 统一暴露 Claude、Codex 与 Antigravity，兼容能力差异会在界面中明确展示
 - **移动端 PWA** — 针对移动端深度优化，支持一键安装到桌面，iOS / Android 均已适配，随时随地通过手机访问 AI Agent
 - **四端消息统一路由** — 飞书 WebSocket 长连接（富文本卡片、Reaction 反馈）、Telegram Bot API、QQ Bot API v2（私聊 + 群聊 @Bot）、Web 界面，四端消息统一路由
 
@@ -91,13 +91,13 @@ AgentDock 源自 [HappyClaw](https://github.com/riba2534/happyclaw) 的实验性
 
 ### Agent 执行引擎
 
-主运行链路由 `src/runtime-runner.ts` 驱动，本地启动 `container/agent-runner` 中的 Claude 或 Codex provider，并统一向外暴露 Session 语义。
+主运行链路由 `src/runtime-runner.ts` 驱动，本地启动 `container/agent-runner` 中的 Claude、Codex 或 Antigravity runner，并统一向外暴露 Session 语义。
 
 更细的 runner 契约说明见 [docs/agent-runner-contract.md](docs/agent-runner-contract.md)。
 
 - **Session 是一等对象** — 主会话、workspace、worker、memory 都经由 `/api/sessions` 投影和管理
 - **统一本地 runtime** — 新 Session 固定走本地 runtime；`runtime_mode`、`execution_mode` 和 `llm_provider` 旧字段都已退出对外 Session 契约
-- **Runner 可切换** — 当前支持 Claude 与 Codex，runner profile、模型、thinking effort、环境变量都能在 Session 级别配置
+- **Runner 可切换** — 当前支持 Claude、Codex 与 Antigravity，runner profile、模型、thinking effort、环境变量都能在 Session 级别配置
 - **多 Session 并发** — Runtime 队列按 Session 调度，并通过 `/api/status` 统一暴露运行与排队状态
 - **工作目录可初始化** — 新建 Session 可从本地目录复制或从 Git 仓库初始化，再在设置中单独调整 cwd
 - **失败自动恢复** — 保留指数退避重试、上下文压缩和历史归档能力
@@ -129,6 +129,7 @@ Agent 在运行时可通过内置 MCP Server 与主进程通信：
 | `list_tasks` | 列出定时任务 |
 | `pause_task` / `resume_task` / `cancel_task` | 暂停、恢复、取消任务 |
 | `register_group` | 创建新工作区 Session 的兼容入口 |
+| `memory_search` | 直接检索记忆 Markdown，返回匹配文件与片段 |
 | `memory_query` | 查询 Memory Agent 记忆（同步，返回结果） |
 | `memory_remember` | 存储信息到 Memory Agent（异步） |
 
@@ -143,13 +144,15 @@ Agent 在运行时可通过内置 MCP Server 与主进程通信：
 
 当前 Memory 模型是“持久文件系统 + 一次性推理请求”，替代上游的 inline MCP 工具：
 
-- **Memory Session** — 记忆能力以 `memory:{ownerKey}` Session 配置投影暴露，可单独选择 runner，目前本地已验证 Claude 与 Codex 都能承接
+- **Memory Session** — 记忆能力以 `memory:{ownerKey}` Session 配置投影暴露，可单独选择满足 memory 契约的 runner
 - **One-shot 执行** — `query`、`remember`、`session_wrapup`、`global_sleep` 每次都会启动全新的 provider session，不复用 `providerSessionId`、`resumeAnchor`、`providerState`，也不参与 synthetic compact
 - **真实状态只在磁盘** — Memory 是否可继续工作，只依赖 `data/memory/{ownerKey}/` 下的 `index.md`、`knowledge/`、`impressions/`、`transcripts/` 等文件
-- **MemoryOrchestrator** — 主进程里的记忆编排器负责串行化同一用户请求，复用共享 `session-launcher` 发起 one-shot runtime；空闲 10 分钟只会清理内存里的协调器，不会保留 provider 对话
-- **随身索引** — `data/memory/{ownerKey}/index.md`，主 Agent 每次对话自动加载，Memory query 后会顺手做轻量索引修复
+- **MemoryOrchestrator** — 主进程使用可并行的只读查询车道和严格串行的写入车道；`remember`、wrapup、索引修复与 `global_sleep` 先进入 SQLite 持久队列，再由 one-shot runtime 消化
+- **分层查询** — `index.md` 每轮直接加载；普通查找先用只读 `memory_search`；只有跨文件归纳和冲突消解才启动 `memory_query`。查询发现的索引问题只进入延迟修复队列，不在查询车道写文件
 - **自动会话归档** — Session runtime 收尾时自动导出对话转录到 `transcripts/`，触发 `session_wrapup` 生成印象和知识
-- **深度整理** — `global_sleep` 定期压缩索引、清理旧印象、更新用户画像（需距上次 >6h、无活跃会话、有待处理 wrapup）
+- **批量归档** — 同一用户短时间内退出的多个 Session 最多八项合并为一次 wrapup，按 folder 与 cursor 去重；压缩和重开会话不等待长期记忆整理完成
+- **深度整理** — `global_sleep` 距上次超过 6 小时且存在待整理记录时进入写队列。活跃主会话不再阻塞，查询车道也不受影响
+- **保留策略** — 旧 transcript 自动压缩为 gzip，backup 保留最近 10 份，memory 日志与已完成队列定期清理，失效 cursor 会被裁剪
 - **会话记忆** — `data/groups/{folder}/CLAUDE.md`，会话私有（与上游相同）
 - **Web 管理** — Memory Agent 状态面板、手动触发按钮、超时配置、记忆文件在线编辑
 
@@ -209,7 +212,7 @@ Agent 在运行时可通过内置 MCP Server 与主进程通信：
 - **至少一个可用 Runner**
   - Claude 路线：本机可用 Claude Code CLI，并完成本地登录或兼容配置
   - Codex 路线：本机具备 Codex 所需认证，或在 Web 中配置兼容的 Base URL / 默认模型
-  - 两个 runner 不必同时启用，但至少需要一个能跑通
+  - 不必启用所有 runner，但至少需要一个能跑通
 
 **可选**
 
@@ -300,7 +303,8 @@ make start
 | Runner | 说明 | 当前状态 |
 |------|------|---------|
 | **Claude** | 原生支持更完整的 session resume、hook 与 observability | 聊天、记忆、IM、观测均为 full |
-| **Codex** | 聊天与 memory 主链路可用，但 IM 与观测存在降级 | 聊天、记忆可用，IM 与 observability 为 degraded |
+| **Codex** | 聊天、memory 与结构化观测可用，IM 能力仍有降级 | 聊天、记忆与 observability 为 full，IM 为 degraded |
+| **Antigravity** | `agy --print` 逐轮运行，支持 resume、图片与 MCP，缺少工具前置 hook | 聊天与记忆可用，安全防护和精确 usage 为 degraded |
 
 当前所有 Session 都通过本地 runtime 启动。`runtime_mode`、`execution_mode` 与 `llm_provider` 已不再作为 Session 接口字段返回；如果请求体继续携带这些旧字段，`/api/sessions` 会直接拒绝。它们只在历史数据库迁移和启动期兼容清理中被识别并移除。
 
@@ -326,19 +330,19 @@ flowchart TD
         Auth["认证<br/>(本地 operator 上下文 + 兼容 auth API)"]
         Config["配置管理<br/>(AES-256-GCM 加密)"]
         Bindings["IM Bindings<br/>(渠道绑定到 Session)"]
-        MemMgr["Memory Orchestrator<br/>(单用户串行调度)"]
+        MemMgr["Memory Orchestrator<br/>(只读并行 + 写入串行)"]
     end
 
     subgraph 执行层
         Runtime["本地 Runtime<br/>(runtime-runner)"]
-        AgentRunner["agent-runner<br/>(Claude / Codex provider)"]
+        AgentRunner["agent-runner<br/>(Claude / Codex / Antigravity)"]
         MemAgent["Memory Runtime<br/>(one-shot 请求)"]
     end
 
     subgraph Agent["Agent 运行时"]
-        Runner["Claude / Codex Runner"]
-        MCP["MCP Server<br/>(11 个工具)"]
-        Stream["流式事件<br/>(12 种类型)"]
+        Runner["Claude / Codex / Antigravity Runner"]
+        MCP["MCP Server<br/>(按能力过滤工具)"]
+        Stream["统一 StreamEvent"]
     end
 
     DB[("SQLite<br/>(WAL 模式)")]
@@ -367,7 +371,7 @@ flowchart TD
     Stream --> WS
     WS --> Web
 
-    MCP -->|memory_query/remember| MemMgr
+    MCP -->|memory_search/query/remember| MemMgr
     MemMgr --> MemAgent
     MemAgent --> Memory
 
@@ -383,7 +387,7 @@ flowchart TD
     class Memory cfg
 ```
 
-**数据流**：消息从接入层进入主进程，经去重和 Session 路由后分发到并发队列。队列统一启动本地 runtime，由 `runtime-runner` 调度 `container/agent-runner` 中的 Claude 或 Codex provider。流式事件通过 stdout 标记协议传回主进程，经 WebSocket 广播到 Web 客户端。IM 消息由 Agent 通过 `send_message` MCP 工具显式发送，经 IPC 文件通道路由到对应 IM 渠道。Memory 请求则由主进程内的 `MemoryOrchestrator` 串行接收，再通过共享 `session-launcher` 发起一次性的 memory runtime turn。
+**数据流**：消息从接入层进入主进程，经去重和 Session 路由后分发到并发队列。队列统一启动本地 runtime，由 `runtime-runner` 调度 `container/agent-runner` 中的 Claude、Codex 或 Antigravity。流式事件通过 stdout 标记协议传回主进程，经 WebSocket 广播到 Web 客户端。IM 消息由 Agent 通过 `send_message` MCP 工具显式发送，经 IPC 文件通道路由到对应 IM 渠道。Memory 的廉价检索直接读取 Markdown；深度查询走并行只读车道；持久写入由 SQLite 队列和串行写车道驱动 one-shot memory runtime。
 
 ### 技术栈
 
@@ -434,9 +438,8 @@ agentdock/
 │   │       ├── runner-interface.ts #   AgentRunner 契约与 QueryConfig
 │   │       ├── system-prompt.ts  #     共享 system prompt 构造
 │   │       ├── happyclaw-mcp-server.ts # 共用 MCP server 入口
-│   │       └── runners/          #     Runner manifest 与 Claude / Codex 实现
-│   ├── memory-agent/             #   历史实验实现，当前 Memory 主链路不再依赖
-│   │   └── src/index.ts          #     旧的持久 query 会话原型
+│   │       └── runners/          #     Runner manifest 与 Claude / Codex / Antigravity 实现
+│   ├── agent-runner-core/        #   ContextBundle、PromptBuilder 与 MCP 插件核心
 │   └── skills/                   #   项目级 Skills
 │
 ├── shared/                       # 跨项目共享类型定义
@@ -570,14 +573,14 @@ Commit message 使用简体中文，格式：`类型: 描述`
 
 ### 项目结构
 
-项目目前有三个主链路 Node.js 项目，外加一个保留中的历史实验项目，各自维护独立的 `package.json` 和 `tsconfig.json`：
+项目目前有四个活跃 Node.js 项目，各自维护独立的 `package.json` 和 `tsconfig.json`：
 
 | 项目 | 目录 | 用途 |
 |------|------|------|
 | 主服务 | `/`（根目录） | 后端服务 |
 | Web 前端 | `web/` | React SPA |
+| Agent Runner Core | `container/agent-runner-core/` | ContextBundle、共享 prompt 与 MCP 插件 |
 | Agent Runner | `container/agent-runner/` | 本地 runtime 使用的执行引擎 |
-| Legacy Memory Agent | `container/memory-agent/` | 历史实验实现，当前 Memory 主链路不依赖 |
 
 ## 许可证
 

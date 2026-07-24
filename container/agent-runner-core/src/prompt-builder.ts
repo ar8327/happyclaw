@@ -13,6 +13,12 @@
 import fs from 'fs';
 import path from 'path';
 import type { PluginContext, ContextPlugin } from './plugin.js';
+import {
+  renderContextBundle,
+  type ContextBundle,
+  type ContextSection,
+  type SectionId,
+} from './context-bundle.js';
 
 // ---------------------------------------------------------------------------
 // Static guideline constants (migrated from agent-runner/context-builder.ts)
@@ -137,32 +143,15 @@ function buildContextSummarySection(contextSummary?: string): string {
  * Claude doesn't need this (claude_code preset already includes base info).
  */
 export function buildBasePrompt(ctx: PluginContext): string {
-  const parts: string[] = [];
-
-  parts.push(
-    `You are an AI assistant running in the AgentDock platform${ctx.providerInfo ? `, powered by ${ctx.providerInfo}` : ''}.`,
-    '',
-    '## Environment',
-    `- Working directory: ${ctx.workspaceGroup}`,
-    `- Group folder: ${ctx.groupFolder}`,
-    '',
-  );
-
-  // Load workspace CLAUDE.md
-  const workspaceInstructions = tryReadFile(path.join(ctx.workspaceGroup, 'CLAUDE.md'));
-  if (workspaceInstructions) {
-    parts.push('## Workspace Instructions', '', workspaceInstructions, '');
-  }
-
-  // Load global CLAUDE.md (only for home containers, same logic as before)
-  if (ctx.isHome) {
-    const globalInstructions = tryReadFile(path.join(ctx.workspaceGlobal, 'CLAUDE.md'));
-    if (globalInstructions) {
-      parts.push('## Global Instructions', '', globalInstructions, '');
-    }
-  }
-
-  return parts.join('\n');
+  return renderContextBundle(buildContextBundle(ctx, []), {
+    exclude: [
+      'platform-guidelines',
+      'context-summary',
+      'channel-routing',
+      'memory-index',
+      'skills-catalog',
+    ],
+  });
 }
 
 /**
@@ -185,42 +174,18 @@ export function buildAppendPrompt(
   plugins: ContextPlugin[],
   options?: { includeGlobalInstructions?: boolean },
 ): string {
-  // 1. Global CLAUDE.md — only for home containers
-  let globalClaudeMd = '';
-  if (options?.includeGlobalInstructions !== false && ctx.isHome) {
-    const globalClaudeMdPath = path.join(ctx.workspaceGlobal, 'CLAUDE.md');
-    globalClaudeMd = tryReadFile(globalClaudeMdPath) || '';
+  const excluded: SectionId[] = [
+    'identity',
+    'environment',
+    'workspace-instructions',
+  ];
+  if (options?.includeGlobalInstructions === false) {
+    excluded.push('global-instructions');
   }
-
-  // 2-6. Static guideline constants first — cache-friendly prefix
-  // (INTERACTION_GUIDELINES, SKILL_STORAGE_GUIDELINES, OUTPUT_GUIDELINES,
-  //  WEB_FETCH_GUIDELINES, BACKGROUND_TASK_GUIDELINES)
-
-  // 7. Context summary (dynamic)
-  const contextSummarySection = buildContextSummarySection(ctx.contextSummary);
-
-  // 8. Channel routing (static + dynamic IM channels)
-  const channelRoutingSection = buildChannelRoutingSection(ctx.recentImChannels);
-
-  // 9. Plugin prompt sections (dynamic — e.g. MemoryPlugin index/personality)
-  const pluginSections: string[] = [];
-  for (const plugin of plugins) {
-    if (!plugin.isEnabled(ctx)) continue;
-    const section = plugin.getSystemPromptSection(ctx);
-    if (section) pluginSections.push(section);
-  }
-
-  return [
-    globalClaudeMd,
-    INTERACTION_GUIDELINES,
-    SKILL_STORAGE_GUIDELINES,
-    OUTPUT_GUIDELINES,
-    WEB_FETCH_GUIDELINES,
-    BACKGROUND_TASK_GUIDELINES,
-    contextSummarySection,
-    channelRoutingSection,
-    ...pluginSections,
-  ].filter(Boolean).join('\n');
+  return renderContextBundle(buildContextBundle(ctx, plugins), {
+    exclude: excluded,
+    globalInstructionsStyle: 'raw',
+  });
 }
 
 /**
@@ -231,11 +196,116 @@ export function buildFullPrompt(
   ctx: PluginContext,
   plugins: ContextPlugin[],
 ): string {
-  return (
-    buildBasePrompt(ctx) +
-    '\n' +
-    buildAppendPrompt(ctx, plugins, { includeGlobalInstructions: false })
+  return renderContextBundle(buildContextBundle(ctx, plugins));
+}
+
+function pluginSectionId(plugin: ContextPlugin): SectionId {
+  if (plugin.name === 'memory') return 'memory-index';
+  if (plugin.name === 'skills') return 'skills-catalog';
+  return `plugin:${plugin.name}`;
+}
+
+function pluginSectionStability(
+  plugin: ContextPlugin,
+): ContextSection['stability'] {
+  if (plugin.name === 'memory') return 'turn';
+  if (plugin.name === 'skills') return 'session';
+  return 'static';
+}
+
+export function buildContextBundle(
+  ctx: PluginContext,
+  plugins: ContextPlugin[],
+): ContextBundle {
+  const sections: ContextSection[] = [
+    {
+      id: 'identity',
+      stability: 'session',
+      content: `You are an AI assistant running in the AgentDock platform${ctx.providerInfo ? `, powered by ${ctx.providerInfo}` : ''}.`,
+    },
+    {
+      id: 'environment',
+      stability: 'session',
+      content: [
+        '',
+        '## Environment',
+        `- Working directory: ${ctx.workspaceGroup}`,
+        `- Group folder: ${ctx.groupFolder}`,
+        '',
+      ].join('\n'),
+    },
+  ];
+
+  const workspaceInstructions = tryReadFile(
+    path.join(ctx.workspaceGroup, 'CLAUDE.md'),
   );
+  if (workspaceInstructions) {
+    sections.push({
+      id: 'workspace-instructions',
+      stability: 'session',
+      content: [
+        '## Workspace Instructions',
+        '',
+        workspaceInstructions,
+        '',
+      ].join('\n'),
+    });
+  }
+
+  if (ctx.isHome) {
+    const globalInstructions = tryReadFile(
+      path.join(ctx.workspaceGlobal, 'CLAUDE.md'),
+    );
+    if (globalInstructions) {
+      sections.push({
+        id: 'global-instructions',
+        stability: 'session',
+        content: ['## Global Instructions', '', globalInstructions, ''].join(
+          '\n',
+        ),
+      });
+    }
+  }
+
+  sections.push({
+    id: 'platform-guidelines',
+    stability: 'static',
+    content: [
+      INTERACTION_GUIDELINES,
+      SKILL_STORAGE_GUIDELINES,
+      OUTPUT_GUIDELINES,
+      WEB_FETCH_GUIDELINES,
+      BACKGROUND_TASK_GUIDELINES,
+    ].join('\n'),
+  });
+
+  const contextSummary = buildContextSummarySection(ctx.contextSummary);
+  if (contextSummary) {
+    sections.push({
+      id: 'context-summary',
+      stability: 'turn',
+      content: contextSummary,
+    });
+  }
+
+  sections.push({
+    id: 'channel-routing',
+    stability: 'turn',
+    content: buildChannelRoutingSection(ctx.recentImChannels),
+  });
+
+  for (const plugin of plugins) {
+    if (!plugin.isEnabled(ctx)) continue;
+    const content = plugin.getSystemPromptSection(ctx);
+    if (!content) continue;
+    sections.push({
+      id: pluginSectionId(plugin),
+      stability: pluginSectionStability(plugin),
+      content,
+    });
+  }
+
+  return { sections };
 }
 
 /**
@@ -272,13 +342,18 @@ function tryReadFile(filePath: string): string | null {
     if (fs.existsSync(filePath)) {
       return fs.readFileSync(filePath, 'utf-8');
     }
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   return null;
 }
 
 /**
  * Normalize isHome/isAdminHome flags from ContainerInput.
  */
-export function normalizeHomeFlags(input: { isHome?: boolean; isAdminHome?: boolean }): { isHome: boolean; isAdminHome: boolean } {
+export function normalizeHomeFlags(input: {
+  isHome?: boolean;
+  isAdminHome?: boolean;
+}): { isHome: boolean; isAdminHome: boolean } {
   return { isHome: !!input.isHome, isAdminHome: !!input.isAdminHome };
 }

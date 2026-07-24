@@ -6,8 +6,10 @@
  */
 
 import crypto from 'crypto';
+import type { ChildProcess } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { gunzipSync, gzipSync } from 'node:zlib';
 
 import { DATA_DIR, GROUPS_DIR } from './config.js';
 import type {
@@ -15,6 +17,7 @@ import type {
   RuntimeInput,
   RuntimeOutput,
 } from './runtime-runner.js';
+import { killProcessTree } from './runtime-runner.js';
 import {
   getChatNamesByJids,
   getJidsByFolder,
@@ -25,6 +28,19 @@ import {
   listAgentsByFolder,
   listSessionRecords,
   getTranscriptMessagesSince,
+  claimNextMemoryWrite,
+  claimMemoryWriteBatch,
+  completeMemoryWrite,
+  enqueueMemoryWrite,
+  getContextSummary,
+  getMemoryWriteQueueMetrics,
+  getMemoryWriteQueueRecord,
+  obsoleteMemoryRepairsBefore,
+  pruneMemoryWriteQueue,
+  recoverInterruptedMemoryWrites,
+  retryMemoryWrite,
+  setContextSummary,
+  type MemoryWriteQueueRecord,
   saveSessionRecord,
   getUserById,
   upsertSessionRuntimeState,
@@ -33,6 +49,7 @@ import { SessionRuntimeManager } from './session-runtime-manager.js';
 import { logger } from './logger.js';
 import {
   getRunnerDescriptor,
+  resolveReadOnlyMemoryRunnerId,
   resolveMemoryRunnerId,
 } from './runner-registry.js';
 import {
@@ -46,15 +63,24 @@ import type { MessageCursor, SessionRecord } from './types.js';
 import { buildMemoryProfile } from './memory-profile.js';
 
 // Limits
-const MAX_CONCURRENT_MEMORY_AGENTS = 3;
 const IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 const DEFAULT_QUERY_TIMEOUT_MS = 60_000; // 60 seconds per query (configurable via Web UI)
 const IDLE_CHECK_INTERVAL_MS = 60_000; // Check idle agents every minute
+const MEMORY_WRITE_QUEUE_POLL_MS = 2_000;
+const MEMORY_WRITE_MAX_ATTEMPTS = 3;
+const MEMORY_WRITE_BATCH_SIZE = 8;
+const MEMORY_RETENTION_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const MEMORY_TRANSCRIPT_ARCHIVE_DAYS = 30;
+const MEMORY_LOG_RETENTION_DAYS = 30;
+const MEMORY_BACKUP_RETENTION_COUNT = 10;
+const MEMORY_QUEUE_RETENTION_DAYS = 30;
 
 interface AgentEntry {
   lastActivity: number;
-  inFlight: number;
-  tail: Promise<void>;
+  writeInFlight: number;
+  writeTail: Promise<void>;
+  readInFlight: number;
+  readWaiters: Array<() => void>;
 }
 
 interface MemoryExecutionContext {
@@ -81,7 +107,104 @@ interface MemoryRunResult {
     success: boolean;
     response?: string;
     error?: string;
+    repairs?: MemoryRepairSuggestion[];
   };
+}
+
+export interface MemoryRepairSuggestion {
+  file: string;
+  issue: string;
+  suggestion?: string;
+}
+
+export interface MemorySearchHit {
+  file: string;
+  score: number;
+  excerpt: string;
+}
+
+const MEMORY_TIMEOUT_KILL_GRACE_MS = 5_000;
+const MEMORY_TIMEOUT_SETTLE_GRACE_MS = 7_000;
+
+export class MemoryOperationTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`Memory operation timed out after ${timeoutMs}ms`);
+    this.name = 'MemoryOperationTimeoutError';
+  }
+}
+
+async function waitForPromiseSettlement(
+  promise: Promise<unknown>,
+  timeoutMs: number,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    await Promise.race([
+      promise.then(
+        () => undefined,
+        () => undefined,
+      ),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+export async function runMemoryOperationWithTimeout<T>(params: {
+  timeoutMs: number;
+  run: (onProcess: (process: ChildProcess) => void) => Promise<T>;
+  settleGraceMs?: number;
+  killGraceMs?: number;
+}): Promise<T> {
+  let child: ChildProcess | null = null;
+  let timedOut = false;
+  let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
+  let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+  let rejectTimeout!: (error: Error) => void;
+
+  const terminate = (process: ChildProcess): void => {
+    if (process.exitCode !== null || process.signalCode !== null) return;
+    killProcessTree(process, 'SIGTERM');
+    forceKillTimer = setTimeout(() => {
+      if (process.exitCode === null && process.signalCode === null) {
+        killProcessTree(process, 'SIGKILL');
+      }
+    }, params.killGraceMs ?? MEMORY_TIMEOUT_KILL_GRACE_MS);
+    forceKillTimer.unref?.();
+  };
+
+  const operation = params.run((process) => {
+    child = process;
+    if (timedOut) terminate(process);
+  });
+  const timeout = new Promise<never>((_resolve, reject) => {
+    rejectTimeout = reject;
+  });
+  timeoutTimer = setTimeout(() => {
+    timedOut = true;
+    if (child) terminate(child);
+    rejectTimeout(new MemoryOperationTimeoutError(params.timeoutMs));
+  }, params.timeoutMs);
+  timeoutTimer.unref?.();
+
+  try {
+    return await Promise.race([operation, timeout]);
+  } catch (error) {
+    if (timedOut) {
+      await waitForPromiseSettlement(
+        operation,
+        params.settleGraceMs ?? MEMORY_TIMEOUT_SETTLE_GRACE_MS,
+      );
+      throw new MemoryOperationTimeoutError(params.timeoutMs);
+    }
+    throw error;
+  } finally {
+    if (timeoutTimer) clearTimeout(timeoutTimer);
+    if (forceKillTimer) clearTimeout(forceKillTimer);
+  }
 }
 
 interface MemoryRuntimeRunContext {
@@ -103,6 +226,7 @@ export interface MemoryAgentResponse {
   transcriptFile?: string;
   workspaceFolder?: string;
   chatJids?: string[];
+  repairs?: MemoryRepairSuggestion[];
 }
 
 interface MemoryExecutionRequest {
@@ -110,8 +234,10 @@ interface MemoryExecutionRequest {
     | 'query'
     | 'remember'
     | 'session_wrapup'
+    | 'batch_session_wrapup'
     | 'global_sleep'
-    | 'continuation_summary';
+    | 'continuation_summary'
+    | 'repair_sweep';
   query?: string;
   context?: string;
   content?: string;
@@ -119,18 +245,56 @@ interface MemoryExecutionRequest {
   userMessage?: string;
   importance?: 'high' | 'normal';
   transcriptFile?: string;
+  transcripts?: Array<{
+    transcriptFile: string;
+    workspaceFolder: string;
+    chatJids: string[];
+  }>;
   workspaceFolder?: string;
   groupFolder?: string;
   chatJids?: string[];
   chatJid?: string;
   channelLabel?: string;
   source?: string;
+  repairs?: Array<MemoryRepairSuggestion & { id?: string }>;
 }
 
 function resolveRequestWorkspaceFolder(
   request: Pick<MemoryExecutionRequest, 'workspaceFolder' | 'groupFolder'>,
 ): string | undefined {
   return request.workspaceFolder || request.groupFolder;
+}
+
+function snapshotMemoryDirectory(root: string): string {
+  const entries: string[] = [];
+  const pending = [root];
+  while (pending.length > 0) {
+    const directory = pending.pop()!;
+    let children: fs.Dirent[];
+    try {
+      children = fs.readdirSync(directory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const child of children) {
+      const fullPath = path.join(directory, child.name);
+      if (child.isDirectory()) {
+        pending.push(fullPath);
+        continue;
+      }
+      if (!child.isFile()) continue;
+      try {
+        const stat = fs.statSync(fullPath);
+        entries.push(
+          `${path.relative(root, fullPath)}\0${stat.size}\0${stat.mtimeMs}`,
+        );
+      } catch {
+        entries.push(`${path.relative(root, fullPath)}\0missing`);
+      }
+    }
+  }
+  entries.sort();
+  return crypto.createHash('sha256').update(entries.join('\n')).digest('hex');
 }
 
 // --- Storage directory initialization ---
@@ -258,6 +422,233 @@ export function ensureMemoryDir(ownerKey: string): string {
   }
 
   return memDir;
+}
+
+function buildMemorySearchTerms(query: string): string[] {
+  const normalized = query.normalize('NFKC').toLowerCase().trim();
+  if (!normalized) return [];
+  const terms = new Set<string>();
+  for (const token of normalized.match(/[\p{L}\p{N}_-]+/gu) || []) {
+    if (token.length >= 2) terms.add(token);
+    if (/^[\p{Script=Han}]+$/u.test(token) && token.length > 2) {
+      for (let index = 0; index < token.length - 1; index += 1) {
+        terms.add(token.slice(index, index + 2));
+      }
+    }
+  }
+  return Array.from(terms).slice(0, 40);
+}
+
+export function searchMemoryMarkdown(
+  ownerKey: string,
+  query: string,
+  limit = 8,
+): MemorySearchHit[] {
+  const terms = buildMemorySearchTerms(query);
+  if (terms.length === 0) return [];
+  const root = ensureMemoryDir(ownerKey);
+  const files: string[] = [];
+  const pending = [root];
+  while (pending.length > 0 && files.length < 1_000) {
+    const directory = pending.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(directory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(fullPath);
+      } else if (
+        entry.isFile() &&
+        (entry.name.endsWith('.md') || entry.name.endsWith('.md.gz'))
+      ) {
+        files.push(fullPath);
+      }
+    }
+  }
+
+  const hits: MemorySearchHit[] = [];
+  for (const file of files) {
+    let content: string;
+    try {
+      if (fs.statSync(file).size > 2 * 1024 * 1024) continue;
+      const raw = fs.readFileSync(file);
+      content = file.endsWith('.gz')
+        ? gunzipSync(raw).toString('utf-8')
+        : raw.toString('utf-8');
+    } catch {
+      continue;
+    }
+    const lower = content.normalize('NFKC').toLowerCase();
+    const relative = path.relative(root, file);
+    let score = 0;
+    const matchedTerms: string[] = [];
+    for (const term of terms) {
+      let count = 0;
+      let from = 0;
+      while (count < 20) {
+        const found = lower.indexOf(term, from);
+        if (found < 0) break;
+        count += 1;
+        from = found + term.length;
+      }
+      if (count > 0) {
+        matchedTerms.push(term);
+        score += count;
+        if (relative.toLowerCase().includes(term)) score += 4;
+      }
+    }
+    if (score === 0) continue;
+
+    const lines = content.split(/\r?\n/);
+    const matchingLine = lines.findIndex((line) => {
+      const normalizedLine = line.normalize('NFKC').toLowerCase();
+      return matchedTerms.some((term) => normalizedLine.includes(term));
+    });
+    const start = Math.max(0, matchingLine - 2);
+    const excerpt = lines
+      .slice(start, Math.min(lines.length, start + 7))
+      .join('\n')
+      .trim()
+      .slice(0, 1_500);
+    hits.push({
+      file: relative,
+      score: score + matchedTerms.length * 2,
+      excerpt,
+    });
+  }
+  return hits
+    .sort(
+      (left, right) =>
+        right.score - left.score || left.file.localeCompare(right.file),
+    )
+    .slice(0, Math.max(1, Math.min(20, Math.floor(limit))));
+}
+
+function listFilesRecursively(root: string): string[] {
+  const files: string[] = [];
+  const pending = [root];
+  while (pending.length > 0) {
+    const directory = pending.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(directory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) pending.push(fullPath);
+      else if (entry.isFile()) files.push(fullPath);
+    }
+  }
+  return files;
+}
+
+export function runMemoryRetention(ownerKey: string): {
+  transcriptsArchived: number;
+  backupsDeleted: number;
+  logsDeleted: number;
+  cursorsPruned: number;
+  queueRowsPruned: number;
+} {
+  const now = Date.now();
+  const memDir = ensureMemoryDir(ownerKey);
+  const transcriptCutoff =
+    now - MEMORY_TRANSCRIPT_ARCHIVE_DAYS * 24 * 60 * 60 * 1000;
+  let transcriptsArchived = 0;
+  for (const file of listFilesRecursively(path.join(memDir, 'transcripts'))) {
+    if (!file.endsWith('.md')) continue;
+    try {
+      if (fs.statSync(file).mtimeMs >= transcriptCutoff) continue;
+      const archivePath = `${file}.gz`;
+      const tmpPath = `${archivePath}.tmp`;
+      fs.writeFileSync(tmpPath, gzipSync(fs.readFileSync(file)));
+      fs.renameSync(tmpPath, archivePath);
+      fs.unlinkSync(file);
+      transcriptsArchived += 1;
+    } catch (error) {
+      logger.warn(
+        { ownerKey, file, error },
+        'Failed to archive memory transcript',
+      );
+    }
+  }
+
+  let backupsDeleted = 0;
+  const backupFiles = listFilesRecursively(path.join(memDir, 'backups'))
+    .map((file) => ({ file, mtimeMs: fs.statSync(file).mtimeMs }))
+    .sort((left, right) => right.mtimeMs - left.mtimeMs);
+  for (const { file } of backupFiles.slice(MEMORY_BACKUP_RETENTION_COUNT)) {
+    try {
+      fs.unlinkSync(file);
+      backupsDeleted += 1;
+    } catch (error) {
+      logger.warn({ ownerKey, file, error }, 'Failed to prune memory backup');
+    }
+  }
+
+  let logsDeleted = 0;
+  const logCutoff = now - MEMORY_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  for (const folder of listOwnedPrimaryFolders(ownerKey)) {
+    for (const file of listFilesRecursively(
+      path.join(GROUPS_DIR, folder, 'logs'),
+    )) {
+      if (!/^memory-.*\.log$/.test(path.basename(file))) continue;
+      try {
+        if (fs.statSync(file).mtimeMs >= logCutoff) continue;
+        fs.unlinkSync(file);
+        logsDeleted += 1;
+      } catch (error) {
+        logger.warn({ ownerKey, file, error }, 'Failed to prune memory log');
+      }
+    }
+  }
+
+  const activeJids = new Set<string>();
+  for (const folder of listOwnedPrimaryFolders(ownerKey)) {
+    for (const jid of getJidsByFolder(folder)) activeJids.add(jid);
+    for (const agent of listAgentsByFolder(folder)) {
+      if (agent.kind === 'conversation') {
+        activeJids.add(`${agent.chat_jid}#agent:${agent.id}`);
+      }
+    }
+  }
+  const state = readMemoryState(ownerKey);
+  const cursors = normalizeWrapupCursors(
+    (state.lastSessionWrapups || {}) as Record<string, unknown>,
+  );
+  let cursorsPruned = 0;
+  for (const jid of Object.keys(cursors)) {
+    if (activeJids.has(jid)) continue;
+    delete cursors[jid];
+    cursorsPruned += 1;
+  }
+  if (cursorsPruned > 0) {
+    state.lastSessionWrapups = cursors;
+    writeMemoryState(ownerKey, state);
+  }
+
+  const queueRowsPruned = pruneMemoryWriteQueue(
+    new Date(
+      now - MEMORY_QUEUE_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+    ).toISOString(),
+  );
+  const metrics = {
+    transcriptsArchived,
+    backupsDeleted,
+    logsDeleted,
+    cursorsPruned,
+    queueRowsPruned,
+  };
+  if (Object.values(metrics).some((count) => count > 0)) {
+    logger.info({ ownerKey, ...metrics }, 'Applied memory retention policy');
+  }
+  return metrics;
 }
 
 /**
@@ -610,11 +1001,74 @@ export function exportTranscriptSnapshotForUser(
   }
 }
 
+export function writeConversationArchiveFromTranscript(
+  ownerKey: string,
+  workspaceFolder: string,
+  transcriptFile: string,
+): string {
+  const transcriptPath = path.join(
+    DATA_DIR,
+    'memory',
+    ownerKey,
+    transcriptFile,
+  );
+  const conversationsDir = path.join(
+    GROUPS_DIR,
+    workspaceFolder,
+    'conversations',
+  );
+  fs.mkdirSync(conversationsDir, { recursive: true });
+  const archiveFileName = path.basename(transcriptFile);
+  const archivePath = path.join(conversationsDir, archiveFileName);
+  const tmpPath = `${archivePath}.tmp`;
+  fs.writeFileSync(tmpPath, fs.readFileSync(transcriptPath, 'utf-8'), 'utf-8');
+  fs.renameSync(tmpPath, archivePath);
+  return path.join('conversations', archiveFileName);
+}
+
+export function buildImmediateContinuationSummary(
+  ownerKey: string,
+  transcript: Pick<
+    MemoryTranscriptExport,
+    'workspaceFolder' | 'chatJids' | 'transcriptFile'
+  >,
+): string {
+  const existing = Array.from(
+    new Set(
+      transcript.chatJids
+        .map(
+          (jid) => getContextSummary(transcript.workspaceFolder, jid)?.summary,
+        )
+        .filter((summary): summary is string => !!summary?.trim()),
+    ),
+  );
+  let tail = '';
+  try {
+    const raw = fs.readFileSync(
+      path.join(DATA_DIR, 'memory', ownerKey, transcript.transcriptFile),
+      'utf-8',
+    );
+    tail = raw.slice(-12_000);
+  } catch {
+    /* use existing summaries only */
+  }
+  return [
+    ...existing,
+    existing.length > 0 ? '---' : '',
+    '## 后台归档交接',
+    `来源 transcript: ${transcript.transcriptFile}`,
+    '长期记忆整理与正式 continuation summary 正在后台执行。以下保留最近原始对话，避免新会话丢失当前任务状态。',
+    '',
+    tail,
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+}
+
 /**
- * Export transcripts for the owner's primary Session folder and trigger session_wrapup.
- * Extracted from index.ts so it can be called from both container exit listener and manual trigger.
+ * Export transcripts and durably enqueue their wrapup.
  */
-export async function exportTranscriptsForUser(
+export function exportTranscriptsForUser(
   ownerKey: string,
   folder: string,
   chatJids: string[],
@@ -625,22 +1079,34 @@ export async function exportTranscriptsForUser(
     folder,
     chatJids,
   );
-  if (!transcript) return null;
-  const response = await memoryOrchestrator.send(ownerKey, {
-    type: 'session_wrapup',
+  if (!transcript) return Promise.resolve(null);
+  const continuationSummary = buildImmediateContinuationSummary(
+    ownerKey,
+    transcript,
+  );
+  for (const chatJid of transcript.chatJids) {
+    setContextSummary({
+      group_folder: transcript.workspaceFolder,
+      chat_jid: chatJid,
+      summary: continuationSummary,
+      message_count: 0,
+      created_at: new Date().toISOString(),
+      model_used: 'deterministic-wrapup-handoff',
+    });
+  }
+  const queued = memoryOrchestrator.enqueueSessionWrapup(
+    ownerKey,
+    transcript,
+    true,
+  );
+  return Promise.resolve({
+    requestId: queued.requestId,
+    success: true,
+    response: 'Session wrapup queued',
     transcriptFile: transcript.transcriptFile,
     workspaceFolder: transcript.workspaceFolder,
     chatJids: transcript.chatJids,
   });
-  if (response.success) {
-    commitTranscriptExportSuccess(ownerKey, transcript);
-  }
-  return {
-    ...response,
-    transcriptFile: transcript.transcriptFile,
-    workspaceFolder: transcript.workspaceFolder,
-    chatJids: transcript.chatJids,
-  };
 }
 
 /**
@@ -728,9 +1194,10 @@ const MEMORY_CORE_INSTRUCTIONS = `你现在以 AgentDock memory agent 的身份�
 
 输出要求：
 - 最终回答必须是单个 JSON 对象，不能带额外解释
-- JSON 结构固定为 {"success":true|false,"response":"...","touchedFiles":["..."]}
+- JSON 结构为 {"success":true|false,"response":"...","touchedFiles":["..."],"repairs":[]}
 - response 用自然语言简短总结结果
-- touchedFiles 只放相对 memory 根目录的路径`;
+- touchedFiles 只放相对 memory 根目录的路径
+- repairs 只用于 query，记录发现但未执行的索引修复建议`;
 
 function buildMemorySessionId(ownerKey: string): string {
   return `${MEMORY_SESSION_ID_PREFIX}${ownerKey}`;
@@ -840,13 +1307,14 @@ function parseJsonText<T>(raw: string | null | undefined, fallback: T): T {
 
 function buildMemoryExecutionProfile(
   profile: ReturnType<typeof buildMemoryProfile>,
+  readOnly: boolean,
 ): RuntimeExecutionProfile {
   return {
     profileId: profile.profileId,
     additionalDirectories: profile.allowedDirectories,
     disableUserMcpServers: profile.disableUserMcpServers,
     disabledPlugins: profile.disabledPlugins,
-    toolScope: profile.toolScope,
+    toolScope: readOnly ? 'read-only' : profile.toolScope,
     ephemeralSession: true,
     disableSyntheticArchive: true,
   };
@@ -868,7 +1336,9 @@ function buildMemoryPromptPreamble(
       '- 先查 index.md',
       '- 没命中再查 impressions/，必要时查 archived',
       '- 命中后按需读 knowledge/ 或 transcripts/',
-      '- 找到答案后，顺手做 1 到 3 处轻量索引修复',
+      '- 这是严格只读查询，不得修改、创建或删除任何文件',
+      '- 如果发现索引问题，只能在最终 JSON 的 repairs 数组中报告',
+      '- repairs 每项格式为 {"file":"相对路径","issue":"问题","suggestion":"建议修法"}',
       '- 回答里尽量包含来源、时间、渠道',
       '',
       `查询内容: ${request.query || ''}`,
@@ -910,6 +1380,20 @@ function buildMemoryPromptPreamble(
     if (request.chatJids?.length) {
       lines.push(`涉及渠道: ${request.chatJids.join(', ')}`);
     }
+  } else if (request.type === 'batch_session_wrapup') {
+    lines.push(
+      '',
+      '处理要求：',
+      '- 这是同一用户多个会话的批量增量归档',
+      '- 逐个读取下方 transcriptFile，不得遗漏任何一项',
+      '- 按会话生成或合并 impressions/ 语义索引',
+      '- 跨会话提炼 knowledge/，合并而不是粗暴覆盖',
+      '- 最后统一更新 index.md 与 meta.json',
+      '- 不要修改 state.json',
+      '',
+      '待整理转录：',
+      JSON.stringify(request.transcripts || [], null, 2),
+    );
   } else if (request.type === 'global_sleep') {
     lines.push(
       '',
@@ -937,6 +1421,18 @@ function buildMemoryPromptPreamble(
       '',
       request.userMessage || '',
     );
+  } else if (request.type === 'repair_sweep') {
+    lines.push(
+      '',
+      '处理要求：',
+      '- 核对以下索引修复建议是否仍然成立',
+      '- 只执行仍然正确且必要的修复',
+      '- 不要因为建议存在就盲目修改',
+      '- 保持索引简洁，不删除仍有价值的事实',
+      '',
+      '待核对修复：',
+      JSON.stringify(request.repairs || [], null, 2),
+    );
   }
 
   return lines.join('\n');
@@ -946,6 +1442,7 @@ function parseMemoryAgentResponseText(raw: string | null | undefined): {
   success: boolean;
   response?: string;
   error?: string;
+  repairs?: MemoryRepairSuggestion[];
 } {
   const text = raw?.trim();
   if (!text) {
@@ -956,12 +1453,38 @@ function parseMemoryAgentResponseText(raw: string | null | undefined): {
       success?: boolean;
       response?: string;
       error?: string;
+      repairs?: unknown;
     };
     if (typeof parsed.success === 'boolean') {
       return {
         success: parsed.success,
         response: parsed.response,
         error: parsed.error,
+        repairs: Array.isArray(parsed.repairs)
+          ? parsed.repairs
+              .filter(
+                (repair): repair is Record<string, unknown> =>
+                  !!repair &&
+                  typeof repair === 'object' &&
+                  !Array.isArray(repair),
+              )
+              .map((repair) => ({
+                file:
+                  typeof repair.file === 'string'
+                    ? repair.file.trim().slice(0, 500)
+                    : '',
+                issue:
+                  typeof repair.issue === 'string'
+                    ? repair.issue.trim().slice(0, 2000)
+                    : '',
+                suggestion:
+                  typeof repair.suggestion === 'string'
+                    ? repair.suggestion.trim().slice(0, 2000)
+                    : undefined,
+              }))
+              .filter((repair) => repair.file && repair.issue)
+              .slice(0, 10)
+          : undefined,
       };
     }
   } catch {
@@ -1164,6 +1687,9 @@ const MEMORY_RUNTIME_HOOKS: RuntimeExecutionHook<MemoryRuntimeRunContext>[] = [
 export class MemoryOrchestrator {
   private agents: Map<string, AgentEntry> = new Map();
   private idleCheckTimer: ReturnType<typeof setInterval> | null = null;
+  private writeQueueTimer: ReturnType<typeof setInterval> | null = null;
+  private retentionTimer: ReturnType<typeof setInterval> | null = null;
+  private writeQueueRunning = false;
 
   constructor(
     private readonly requestExecutor: RuntimeRequestExecutor<MemoryRuntimeRunContext> = new RuntimeRequestExecutor(
@@ -1185,37 +1711,292 @@ export class MemoryOrchestrator {
     this.idleCheckTimer = null;
   }
 
+  private startWriteQueue(): void {
+    if (this.writeQueueTimer) return;
+    const recovered = recoverInterruptedMemoryWrites();
+    if (recovered > 0) {
+      logger.warn(
+        { recovered },
+        'Recovered interrupted memory write queue jobs',
+      );
+    }
+    this.writeQueueTimer = setInterval(() => {
+      void this.drainWriteQueue();
+    }, MEMORY_WRITE_QUEUE_POLL_MS);
+    this.writeQueueTimer.unref();
+    void this.drainWriteQueue();
+  }
+
+  private stopWriteQueue(): void {
+    if (!this.writeQueueTimer) return;
+    clearInterval(this.writeQueueTimer);
+    this.writeQueueTimer = null;
+  }
+
+  private runRetentionChecks(): void {
+    const owners = new Set(
+      listSessionRecords()
+        .filter((session) => session.kind === 'memory' && session.owner_key)
+        .map((session) => session.owner_key!),
+    );
+    for (const ownerKey of owners) {
+      try {
+        runMemoryRetention(ownerKey);
+      } catch (error) {
+        logger.warn({ ownerKey, error }, 'Memory retention check failed');
+      }
+    }
+  }
+
+  private wakeWriteQueue(): void {
+    queueMicrotask(() => {
+      void this.drainWriteQueue();
+    });
+  }
+
+  private async processSessionWrapupJobs(
+    jobs: MemoryWriteQueueRecord[],
+  ): Promise<void> {
+    if (jobs.length === 0) return;
+    const ownerKey = jobs[0].owner_key;
+    const queued = jobs.map((job) => {
+      const payload = JSON.parse(job.payload) as Record<string, unknown>;
+      const transcript = payload.transcript as
+        | MemoryTranscriptExport
+        | undefined;
+      if (
+        !transcript ||
+        typeof transcript.transcriptFile !== 'string' ||
+        typeof transcript.workspaceFolder !== 'string' ||
+        !Array.isArray(transcript.chatJids) ||
+        !transcript.wrapupCursors
+      ) {
+        throw new Error(`Invalid queued session wrapup payload: ${job.id}`);
+      }
+      return {
+        job,
+        transcript,
+        archiveConversation: payload.archiveConversation !== false,
+      };
+    });
+
+    await this.runWriteSerialized(ownerKey, async () => {
+      const active = queued.filter(({ job, transcript }) => {
+        if (!isTranscriptCommitObsolete(ownerKey, transcript.wrapupCursors)) {
+          return true;
+        }
+        completeMemoryWrite(job.id, 'obsolete');
+        return false;
+      });
+      if (active.length === 0) return;
+
+      const settings = getSystemSettings();
+      const wrapup = await this.execute(
+        ownerKey,
+        crypto.randomUUID(),
+        {
+          type: 'batch_session_wrapup',
+          transcripts: active.map(({ transcript }) => ({
+            transcriptFile: transcript.transcriptFile,
+            workspaceFolder: transcript.workspaceFolder,
+            chatJids: transcript.chatJids,
+          })),
+        },
+        settings.memorySendTimeout,
+      );
+      if (!wrapup.success) {
+        throw new Error(wrapup.error || 'Memory session wrapup failed');
+      }
+
+      for (const { transcript, archiveConversation } of active) {
+        if (archiveConversation) {
+          writeConversationArchiveFromTranscript(
+            ownerKey,
+            transcript.workspaceFolder,
+            transcript.transcriptFile,
+          );
+        }
+        const continuationSummary = buildImmediateContinuationSummary(
+          ownerKey,
+          transcript,
+        );
+        for (const chatJid of transcript.chatJids) {
+          setContextSummary({
+            group_folder: transcript.workspaceFolder,
+            chat_jid: chatJid,
+            summary: continuationSummary,
+            message_count: 0,
+            created_at: new Date().toISOString(),
+            model_used: 'deterministic-wrapup-handoff',
+          });
+        }
+        commitTranscriptExportSuccess(ownerKey, transcript);
+      }
+    });
+  }
+
+  private async processIndexRepairJobs(
+    jobs: MemoryWriteQueueRecord[],
+  ): Promise<void> {
+    if (jobs.length === 0) return;
+    const repairs = jobs.map((job) => ({
+      id: job.id,
+      ...(JSON.parse(job.payload) as Record<string, unknown>),
+    }));
+    const response = await this.send(jobs[0].owner_key, {
+      type: 'repair_sweep',
+      repairs,
+    });
+    if (!response.success) {
+      throw new Error(response.error || 'Memory repair sweep failed');
+    }
+  }
+
+  private async processQueuedWrite(job: MemoryWriteQueueRecord): Promise<void> {
+    let payload: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(job.payload);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('payload must be an object');
+      }
+      payload = parsed as Record<string, unknown>;
+    } catch (error) {
+      throw new Error(
+        `Invalid memory queue payload: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    let response: MemoryAgentResponse;
+    if (job.kind === 'remember') {
+      response = await this.send(job.owner_key, {
+        type: 'remember',
+        ...payload,
+      });
+    } else if (job.kind === 'index_repair' || job.kind === 'repair_sweep') {
+      response = await this.send(job.owner_key, {
+        type: 'repair_sweep',
+        repairs: [{ id: job.id, ...payload }],
+      });
+    } else if (job.kind === 'global_sleep') {
+      const sleepStartedAt =
+        typeof payload.startedAt === 'string'
+          ? payload.startedAt
+          : job.created_at;
+      response = await this.send(job.owner_key, {
+        type: 'global_sleep',
+      });
+      if (response.success) {
+        const state = readMemoryState(job.owner_key);
+        state.lastGlobalSleep = new Date().toISOString();
+        state.pendingWrapups = [];
+        writeMemoryState(job.owner_key, state);
+        obsoleteMemoryRepairsBefore(job.owner_key, sleepStartedAt);
+      }
+    } else {
+      throw new Error(`Unsupported memory queue kind: ${job.kind}`);
+    }
+    if (!response.success) {
+      throw new Error(response.error || `${job.kind} failed`);
+    }
+  }
+
+  private async drainWriteQueue(): Promise<void> {
+    if (this.writeQueueRunning) return;
+    this.writeQueueRunning = true;
+    try {
+      while (true) {
+        const job = claimNextMemoryWrite();
+        if (!job) break;
+        const jobs = [job];
+        if (job.kind === 'session_wrapup' || job.kind === 'index_repair') {
+          jobs.push(
+            ...claimMemoryWriteBatch(
+              job.owner_key,
+              job.kind,
+              MEMORY_WRITE_BATCH_SIZE - 1,
+            ),
+          );
+        }
+        try {
+          if (job.kind === 'session_wrapup') {
+            await this.processSessionWrapupJobs(jobs);
+          } else if (job.kind === 'index_repair') {
+            await this.processIndexRepairJobs(jobs);
+          } else {
+            await this.processQueuedWrite(job);
+          }
+          for (const queuedJob of jobs) {
+            const current = getMemoryWriteQueueRecord(queuedJob.id);
+            if (current?.status === 'running') {
+              completeMemoryWrite(queuedJob.id);
+            }
+          }
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          for (const queuedJob of jobs) {
+            if (queuedJob.attempts >= MEMORY_WRITE_MAX_ATTEMPTS) {
+              logger.error(
+                {
+                  jobId: queuedJob.id,
+                  kind: queuedJob.kind,
+                  error: message,
+                },
+                'Dropping memory write after retry limit',
+              );
+              completeMemoryWrite(queuedJob.id, 'dropped');
+            } else {
+              const delayMs = 5_000 * 4 ** Math.max(0, queuedJob.attempts - 1);
+              retryMemoryWrite(queuedJob.id, message, delayMs);
+              logger.warn(
+                {
+                  jobId: queuedJob.id,
+                  kind: queuedJob.kind,
+                  attempt: queuedJob.attempts,
+                  delayMs,
+                  error: message,
+                },
+                'Memory write queued for retry',
+              );
+            }
+          }
+        }
+      }
+    } finally {
+      this.writeQueueRunning = false;
+    }
+  }
+
   private ensureAgent(ownerKey: string): AgentEntry {
     const existing = this.agents.get(ownerKey);
     if (existing) {
       existing.lastActivity = Date.now();
       return existing;
     }
-    if (this.agents.size >= MAX_CONCURRENT_MEMORY_AGENTS) {
-      throw new Error(
-        `Memory Agent concurrency limit reached (${MAX_CONCURRENT_MEMORY_AGENTS})`,
-      );
-    }
     const entry: AgentEntry = {
       lastActivity: Date.now(),
-      inFlight: 0,
-      tail: Promise.resolve(),
+      writeInFlight: 0,
+      writeTail: Promise.resolve(),
+      readInFlight: 0,
+      readWaiters: [],
     };
     this.agents.set(ownerKey, entry);
     return entry;
   }
 
-  private async runSerialized<T>(
+  private async runWriteSerialized<T>(
     ownerKey: string,
     task: () => Promise<T>,
   ): Promise<T> {
     const entry = this.ensureAgent(ownerKey);
-    entry.inFlight += 1;
+    entry.writeInFlight += 1;
     entry.lastActivity = Date.now();
 
-    const previous = entry.tail;
+    const previous = entry.writeTail;
     let release!: () => void;
-    entry.tail = new Promise<void>((resolve) => {
+    entry.writeTail = new Promise<void>((resolve) => {
       release = resolve;
     });
 
@@ -1223,13 +2004,38 @@ export class MemoryOrchestrator {
       await previous;
       return await task();
     } finally {
-      entry.inFlight = Math.max(0, entry.inFlight - 1);
+      entry.writeInFlight = Math.max(0, entry.writeInFlight - 1);
       entry.lastActivity = Date.now();
       release();
     }
   }
 
-  private prepareExecutionContext(ownerKey: string): MemoryExecutionContext {
+  private async runReadConcurrent<T>(
+    ownerKey: string,
+    task: () => Promise<T>,
+  ): Promise<T> {
+    const entry = this.ensureAgent(ownerKey);
+    const concurrency = Math.max(1, getSystemSettings().memoryQueryConcurrency);
+    if (entry.readInFlight >= concurrency) {
+      await new Promise<void>((resolve) => {
+        entry.readWaiters.push(resolve);
+      });
+    }
+    entry.readInFlight += 1;
+    entry.lastActivity = Date.now();
+    try {
+      return await task();
+    } finally {
+      entry.readInFlight = Math.max(0, entry.readInFlight - 1);
+      entry.lastActivity = Date.now();
+      entry.readWaiters.shift()?.();
+    }
+  }
+
+  private prepareExecutionContext(
+    ownerKey: string,
+    requestType: MemoryExecutionRequest['type'],
+  ): MemoryExecutionContext {
     const memorySession = getMemorySessionConfig(ownerKey);
     const primarySession = getPrimarySessionForOwner(ownerKey);
     if (!memorySession && !primarySession) {
@@ -1243,18 +2049,30 @@ export class MemoryOrchestrator {
       primarySession,
       memorySession,
     );
+    const executionMemorySession =
+      requestType === 'query'
+        ? {
+            ...effectiveMemorySession,
+            runner_id: resolveReadOnlyMemoryRunnerId(
+              effectiveMemorySession.runner_id,
+            ),
+            runner_profile_id: null,
+            model: null,
+            thinking_effort: null,
+          }
+        : effectiveMemorySession;
     const runnerDescriptor = getRunnerDescriptor(
-      effectiveMemorySession.runner_id,
+      executionMemorySession.runner_id,
     );
     if (!runnerDescriptor) {
       throw new Error(
-        `Unknown memory runner "${effectiveMemorySession.runner_id}"`,
+        `Unknown memory runner "${executionMemorySession.runner_id}"`,
       );
     }
 
     const primaryFolder = resolvePrimarySessionFolder(
       ownerKey,
-      effectiveMemorySession,
+      executionMemorySession,
       primarySession,
     );
     const groupDir = effectiveMemorySession.cwd || memDir;
@@ -1283,7 +2101,7 @@ export class MemoryOrchestrator {
       runtimeKey,
       primaryFolder,
       groupDir,
-      memorySession: effectiveMemorySession,
+      memorySession: executionMemorySession,
     });
 
     return {
@@ -1331,7 +2149,10 @@ export class MemoryOrchestrator {
       responseText: '',
       closeRequested: false,
       parsed: null,
-      executionProfile: buildMemoryExecutionProfile(context.memoryProfile),
+      executionProfile: buildMemoryExecutionProfile(
+        context.memoryProfile,
+        request.type === 'query',
+      ),
     };
   }
 
@@ -1352,22 +2173,26 @@ export class MemoryOrchestrator {
     const runContext = this.createRunContext(context, requestId, request);
 
     try {
-      const result = await this.requestExecutor.run({
-        input,
-        ctx: runContext,
-        executionProfile: runContext.executionProfile,
-        execute: async (effectiveInput, onOutput, executionProfile) =>
-          runSessionAgent(
-            context.memoryProfile.registeredGroup,
-            effectiveInput,
-            () => {},
-            async (runtimeOutput) => {
-              await onOutput(runtimeOutput);
-              await opts?.onOutput?.(runtimeOutput);
-            },
-            context.primaryFolder,
-            executionProfile,
-          ),
+      const result = await runMemoryOperationWithTimeout({
+        timeoutMs,
+        run: (onProcess) =>
+          this.requestExecutor.run({
+            input,
+            ctx: runContext,
+            executionProfile: runContext.executionProfile,
+            execute: async (effectiveInput, onOutput, executionProfile) =>
+              runSessionAgent(
+                context.memoryProfile.registeredGroup,
+                effectiveInput,
+                (process) => onProcess(process),
+                async (runtimeOutput) => {
+                  await onOutput(runtimeOutput);
+                  await opts?.onOutput?.(runtimeOutput);
+                },
+                context.primaryFolder,
+                executionProfile,
+              ),
+          }),
       });
       if (!result.output) {
         throw new Error('Memory runner completed without final output');
@@ -1401,7 +2226,9 @@ export class MemoryOrchestrator {
     request: MemoryExecutionRequest,
     timeoutMs: number,
   ): Promise<MemoryAgentResponse> {
-    const context = this.prepareExecutionContext(ownerKey);
+    const context = this.prepareExecutionContext(ownerKey, request.type);
+    const beforeReadOnlySnapshot =
+      request.type === 'query' ? snapshotMemoryDirectory(context.memDir) : null;
     const result = await this.runRequest(
       context,
       requestId,
@@ -1410,12 +2237,23 @@ export class MemoryOrchestrator {
       undefined,
     );
 
-    return {
+    const response: MemoryAgentResponse = {
       requestId,
       success: result.parsed.success,
       response: result.parsed.response,
       error: result.parsed.error,
+      repairs: result.parsed.repairs,
     };
+    if (
+      beforeReadOnlySnapshot &&
+      beforeReadOnlySnapshot !== snapshotMemoryDirectory(context.memDir)
+    ) {
+      logger.error(
+        { ownerKey, requestId },
+        'Read-only memory query changed the memory directory',
+      );
+    }
+    return response;
   }
 
   async query(
@@ -1431,7 +2269,7 @@ export class MemoryOrchestrator {
     const requestId = crypto.randomUUID();
     const timeoutMs =
       getSystemSettings().memoryQueryTimeout || DEFAULT_QUERY_TIMEOUT_MS;
-    return this.runSerialized(ownerKey, () =>
+    const response = await this.runReadConcurrent(ownerKey, () =>
       this.execute(
         ownerKey,
         requestId,
@@ -1446,6 +2284,10 @@ export class MemoryOrchestrator {
         timeoutMs,
       ),
     );
+    for (const repair of response.repairs || []) {
+      this.enqueueIndexRepair(ownerKey, repair);
+    }
+    return response;
   }
 
   async send(
@@ -1457,7 +2299,8 @@ export class MemoryOrchestrator {
     if (
       msgType !== 'remember' &&
       msgType !== 'session_wrapup' &&
-      msgType !== 'global_sleep'
+      msgType !== 'global_sleep' &&
+      msgType !== 'repair_sweep'
     ) {
       throw new Error(`Unsupported memory message type: ${msgType}`);
     }
@@ -1466,7 +2309,7 @@ export class MemoryOrchestrator {
       msgType === 'global_sleep'
         ? settings.memoryGlobalSleepTimeout
         : settings.memorySendTimeout;
-    return this.runSerialized(ownerKey, () =>
+    return this.runWriteSerialized(ownerKey, () =>
       this.execute(
         ownerKey,
         requestId,
@@ -1490,7 +2333,7 @@ export class MemoryOrchestrator {
     const requestId = crypto.randomUUID();
     const timeoutMs =
       getSystemSettings().memorySendTimeout || DEFAULT_QUERY_TIMEOUT_MS;
-    return this.runSerialized(ownerKey, () =>
+    return this.runWriteSerialized(ownerKey, () =>
       this.execute(
         ownerKey,
         requestId,
@@ -1507,10 +2350,102 @@ export class MemoryOrchestrator {
 
   start(): void {
     this.startIdleChecks();
+    this.startWriteQueue();
+    if (!this.retentionTimer) {
+      this.retentionTimer = setInterval(() => {
+        this.runRetentionChecks();
+      }, MEMORY_RETENTION_INTERVAL_MS);
+      this.retentionTimer.unref();
+      queueMicrotask(() => this.runRetentionChecks());
+    }
   }
 
   stop(): void {
     this.stopIdleChecks();
+    this.stopWriteQueue();
+    if (this.retentionTimer) {
+      clearInterval(this.retentionTimer);
+      this.retentionTimer = null;
+    }
+  }
+
+  enqueueRemember(
+    ownerKey: string,
+    payload: {
+      content: string;
+      importance?: 'high' | 'normal';
+      source?: string;
+      workspaceFolder?: string;
+      chatJid?: string;
+      channelLabel?: string;
+    },
+  ): { requestId: string } {
+    const job = enqueueMemoryWrite({
+      ownerKey,
+      kind: 'remember',
+      payload,
+    });
+    this.wakeWriteQueue();
+    return { requestId: job.id };
+  }
+
+  enqueueIndexRepair(
+    ownerKey: string,
+    repair: MemoryRepairSuggestion,
+  ): { requestId: string } {
+    const normalizedIssue = repair.issue
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .trim();
+    const dedupKey = crypto
+      .createHash('sha256')
+      .update(`${repair.file}\n${normalizedIssue}`)
+      .digest('hex');
+    const job = enqueueMemoryWrite({
+      ownerKey,
+      kind: 'index_repair',
+      payload: repair as unknown as Record<string, unknown>,
+      dedupKey,
+    });
+    this.wakeWriteQueue();
+    return { requestId: job.id };
+  }
+
+  enqueueSessionWrapup(
+    ownerKey: string,
+    transcript: MemoryTranscriptExport,
+    archiveConversation: boolean,
+  ): { requestId: string } {
+    const cursorKey = Object.entries(transcript.wrapupCursors)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([jid, cursor]) => `${jid}:${cursor.rowid}`)
+      .join('|');
+    const dedupKey = crypto
+      .createHash('sha256')
+      .update(`${transcript.workspaceFolder}\n${cursorKey}`)
+      .digest('hex');
+    const job = enqueueMemoryWrite({
+      ownerKey,
+      kind: 'session_wrapup',
+      payload: {
+        transcript,
+        archiveConversation,
+      },
+      dedupKey,
+    });
+    this.wakeWriteQueue();
+    return { requestId: job.id };
+  }
+
+  enqueueGlobalSleep(ownerKey: string): { requestId: string } {
+    const job = enqueueMemoryWrite({
+      ownerKey,
+      kind: 'global_sleep',
+      payload: { startedAt: new Date().toISOString() },
+      dedupKey: 'global_sleep',
+    });
+    this.wakeWriteQueue();
+    return { requestId: job.id };
   }
 
   remember(
@@ -1518,10 +2453,14 @@ export class MemoryOrchestrator {
     content: string,
     source?: string,
   ): Promise<MemoryAgentResponse> {
-    return this.send(ownerKey, {
-      type: 'remember',
+    const queued = this.enqueueRemember(ownerKey, {
       content,
       source,
+    });
+    return Promise.resolve({
+      requestId: queued.requestId,
+      success: true,
+      response: 'Memory write queued',
     });
   }
 
@@ -1536,7 +2475,12 @@ export class MemoryOrchestrator {
   }
 
   globalSleep(ownerKey: string): Promise<MemoryAgentResponse> {
-    return this.send(ownerKey, { type: 'global_sleep' });
+    const queued = this.enqueueGlobalSleep(ownerKey);
+    return Promise.resolve({
+      requestId: queued.requestId,
+      success: true,
+      response: 'Global sleep queued',
+    });
   }
 
   exportSessionTranscripts(
@@ -1558,7 +2502,12 @@ export class MemoryOrchestrator {
   checkIdleAgents(): void {
     const now = Date.now();
     for (const [ownerKey, entry] of this.agents) {
-      if (entry.inFlight === 0 && now - entry.lastActivity > IDLE_TIMEOUT_MS) {
+      if (
+        entry.writeInFlight === 0 &&
+        entry.readInFlight === 0 &&
+        entry.readWaiters.length === 0 &&
+        now - entry.lastActivity > IDLE_TIMEOUT_MS
+      ) {
         logger.info({ ownerKey }, 'Pruning idle memory session coordinator');
         this.agents.delete(ownerKey);
       }
@@ -1566,10 +2515,16 @@ export class MemoryOrchestrator {
   }
 
   async shutdownAll(): Promise<void> {
-    this.stopIdleChecks();
+    this.stop();
+    while (this.writeQueueRunning) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
     for (const entry of this.agents.values()) {
       try {
-        await entry.tail;
+        await entry.writeTail;
+        while (entry.readInFlight > 0 || entry.readWaiters.length > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
       } catch {
         // Ignore tail failures during shutdown
       }
@@ -1579,12 +2534,39 @@ export class MemoryOrchestrator {
 
   get activeCount(): number {
     return Array.from(this.agents.values()).filter(
-      (entry) => entry.inFlight > 0,
+      (entry) => entry.writeInFlight > 0 || entry.readInFlight > 0,
     ).length;
   }
 
   hasAgent(ownerKey: string): boolean {
     return this.agents.has(ownerKey);
+  }
+
+  getMetrics(ownerKey: string): {
+    readLane: {
+      inFlight: number;
+      waiting: number;
+      concurrency: number;
+    };
+    writeLane: {
+      inFlight: number;
+      coordinators: number;
+    };
+    queue: ReturnType<typeof getMemoryWriteQueueMetrics>;
+  } {
+    const entry = this.agents.get(ownerKey);
+    return {
+      readLane: {
+        inFlight: entry?.readInFlight || 0,
+        waiting: entry?.readWaiters.length || 0,
+        concurrency: getSystemSettings().memoryQueryConcurrency,
+      },
+      writeLane: {
+        inFlight: entry?.writeInFlight || 0,
+        coordinators: this.agents.size,
+      },
+      queue: getMemoryWriteQueueMetrics(ownerKey),
+    };
   }
 }
 
@@ -1605,8 +2587,10 @@ const GLOBAL_SLEEP_CHECK_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
  *
  * Conditions per user:
  *   1. lastGlobalSleep > 6 hours ago (or never)
- *   2. No busy or queued primary sessions for this user
- *   3. Has pending wrapups (session_wrapup triggered since last global_sleep)
+ *   2. Has pending wrapups (session_wrapup triggered since last global_sleep)
+ *
+ * The operation is durably queued on the serialized write lane. Active primary
+ * sessions and read-only memory queries do not block it.
  */
 export function runMemoryGlobalSleepIfNeeded(deps: GlobalSleepDeps): void {
   const now = Date.now();
@@ -1616,16 +2600,6 @@ export function runMemoryGlobalSleepIfNeeded(deps: GlobalSleepDeps): void {
   lastGlobalSleepCheck = now;
 
   logger.info('Memory global_sleep: checking eligible users');
-
-  // Build set of runtime folders that are actually busy or have queued work.
-  // A long-lived idle runtime process should not block global_sleep.
-  const queueStatus = deps.queue.getRuntimeStatus();
-  const blockedRuntimeFolders = new Set(
-    queueStatus.groups
-      .filter((g) => g.busy || g.pendingMessages || g.pendingTasks > 0)
-      .map((g) => g.groupFolder || g.sessionKey)
-      .filter((folder): folder is string => !!folder),
-  );
 
   const memoryOwners = new Set(
     listSessionRecords()
@@ -1645,36 +2619,12 @@ export function runMemoryGlobalSleepIfNeeded(deps: GlobalSleepDeps): void {
       if (hoursSince < 6) continue;
     }
 
-    // 3. No busy or queued work for this user's explicit session folders
-    const ownedFolders = new Set(listOwnedPrimaryFolders(ownerKey));
-    const hasBusySession = Array.from(blockedRuntimeFolders).some((folder) =>
-      ownedFolders.has(folder),
-    );
-    if (hasBusySession) continue;
-
-    // 4. Has pending wrapups
+    // 3. Has pending wrapups
     const pendingWrapups = (state.pendingWrapups || []) as string[];
     if (pendingWrapups.length === 0) continue;
 
-    // All conditions met — trigger global_sleep
-    logger.info({ ownerKey }, 'Triggering Memory Agent global_sleep');
-    deps.manager
-      .send(ownerKey, { type: 'global_sleep' })
-      .then(() => {
-        // Main process updates state.json after successful global_sleep
-        // (LLM no longer touches state.json — it only manages meta.json)
-        const updatedState = readMemoryState(ownerKey);
-        updatedState.lastGlobalSleep = new Date().toISOString();
-        updatedState.pendingWrapups = [];
-        writeMemoryState(ownerKey, updatedState);
-        logger.info(
-          { ownerKey },
-          'Memory Agent global_sleep completed, state updated',
-        );
-      })
-      .catch((err) => {
-        logger.warn({ ownerKey, err }, 'Memory Agent global_sleep failed');
-      });
+    logger.info({ ownerKey }, 'Queueing Memory Agent global_sleep');
+    deps.manager.enqueueGlobalSleep(ownerKey);
     triggered++;
   }
 

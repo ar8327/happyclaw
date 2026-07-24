@@ -3,9 +3,6 @@ import {
   type ChildProcessWithoutNullStreams,
   type SpawnOptionsWithoutStdio,
 } from 'child_process';
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
 import readline from 'readline';
 
 import type {
@@ -15,48 +12,9 @@ import type {
   NormalizedMessage,
   QueryConfig,
   QueryResult,
+  RenderedRunnerContext,
 } from '../runner-interface.js';
-
-function buildPromptEnv(config: QueryConfig): {
-  env: Record<string, string>;
-  cleanupDir?: string;
-} | null {
-  const contract = config.promptContract;
-  if (
-    contract?.mode !== 'env' &&
-    contract?.mode !== 'instructions_file'
-  ) {
-    return null;
-  }
-
-  const env: Record<string, string> = {};
-  if (contract.mode === 'env') {
-    const envVar = contract.envVar || 'AGENTDOCK_SYSTEM_PROMPT';
-    env[envVar] = config.systemPrompt;
-    if (envVar !== 'AGENTDOCK_SYSTEM_PROMPT') {
-      env.AGENTDOCK_SYSTEM_PROMPT = config.systemPrompt;
-    }
-    env.HAPPYCLAW_SYSTEM_PROMPT = config.systemPrompt;
-  }
-
-  let cleanupDir: string | undefined;
-  const fileEnvVar =
-    contract.fileEnvVar ||
-    (contract.mode === 'instructions_file'
-      ? 'AGENTDOCK_SYSTEM_PROMPT_FILE'
-      : undefined);
-  if (fileEnvVar) {
-    cleanupDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdock-prompt-'));
-    const promptFile = path.join(cleanupDir, 'system-prompt.md');
-    fs.writeFileSync(promptFile, config.systemPrompt, 'utf-8');
-    env[fileEnvVar] = promptFile;
-    if (fileEnvVar !== 'AGENTDOCK_SYSTEM_PROMPT_FILE') {
-      env.AGENTDOCK_SYSTEM_PROMPT_FILE = promptFile;
-    }
-  }
-
-  return { env, cleanupDir };
-}
+import { combineRenderedContext } from '../runner-interface.js';
 
 export interface CliCommand {
   command: string;
@@ -150,9 +108,14 @@ export abstract class BaseCliRunner implements AgentRunner {
   private activeProcess: ChildProcessWithoutNullStreams | null = null;
   private activeStartedAt = 0;
   private interrupted = false;
+  private renderedContext: RenderedRunnerContext | null = null;
 
   async initialize(): Promise<void> {
     // CLI runners usually do not need eager initialization.
+  }
+
+  async applyContext(context: RenderedRunnerContext): Promise<void> {
+    this.renderedContext = context;
   }
 
   pushMessage(): string[] {
@@ -182,18 +145,17 @@ export abstract class BaseCliRunner implements AgentRunner {
   async *runQuery(
     config: QueryConfig,
   ): AsyncGenerator<NormalizedMessage, QueryResult> {
-    const command = this.adapter.buildCommand(config);
-    const input = this.adapter.buildInput(config);
-    const promptEnv = buildPromptEnv(config);
+    const effectiveConfig = this.renderedContext
+      ? {
+          ...config,
+          systemPrompt: combineRenderedContext(this.renderedContext),
+        }
+      : config;
+    const command = this.adapter.buildCommand(effectiveConfig);
+    const input = this.adapter.buildInput(effectiveConfig);
     const proc = spawn(command.command, command.args || [], {
       cwd: command.cwd,
-      env: promptEnv
-        ? {
-            ...(process.env as Record<string, string>),
-            ...(command.env || {}),
-            ...promptEnv.env,
-          }
-        : command.env,
+      env: command.env,
       stdio: ['pipe', 'pipe', 'pipe'],
       ...command.spawnOptions,
     });
@@ -203,7 +165,7 @@ export abstract class BaseCliRunner implements AgentRunner {
 
     const queue = new AsyncMessageQueue<NormalizedMessage>();
     let exitErrorMessage: string | null = null;
-    let resumeAnchor: string | undefined = config.resumeAt;
+    let resumeAnchor: string | undefined = effectiveConfig.resumeAt;
     let contextOverflow = false;
     let unrecoverableTranscriptError = false;
     let sessionResumeFailed = false;
@@ -230,7 +192,7 @@ export abstract class BaseCliRunner implements AgentRunner {
         queue.push(message);
       }
     };
-    enqueue(this.adapter.beforeRun?.(config) || []);
+    enqueue(this.adapter.beforeRun?.(effectiveConfig) || []);
 
     const enqueueDetectedError = (detected: RunnerError | null | undefined) => {
       if (!detected) return;
@@ -373,9 +335,6 @@ export abstract class BaseCliRunner implements AgentRunner {
     } finally {
       stdoutLines?.close();
       queue.close();
-      if (promptEnv?.cleanupDir) {
-        fs.rmSync(promptEnv.cleanupDir, { recursive: true, force: true });
-      }
       this.activeProcess = null;
       this.activeStartedAt = 0;
       this.interrupted = false;

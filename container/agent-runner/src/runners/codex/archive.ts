@@ -38,38 +38,38 @@ export class CodexArchiveManager {
   }): void {
     if (!snapshot || typeof snapshot !== 'object') return;
     this.lastContextWindowTokens =
-      typeof snapshot.lastContextWindowTokens === 'number'
-      && Number.isFinite(snapshot.lastContextWindowTokens)
+      typeof snapshot.lastContextWindowTokens === 'number' &&
+      Number.isFinite(snapshot.lastContextWindowTokens)
         ? snapshot.lastContextWindowTokens
         : 0;
     this.lastInputTokens =
-      typeof snapshot.lastInputTokens === 'number'
-      && Number.isFinite(snapshot.lastInputTokens)
+      typeof snapshot.lastInputTokens === 'number' &&
+      Number.isFinite(snapshot.lastInputTokens)
         ? snapshot.lastInputTokens
         : 0;
     this.lastOutputTokens =
-      typeof snapshot.lastOutputTokens === 'number'
-      && Number.isFinite(snapshot.lastOutputTokens)
+      typeof snapshot.lastOutputTokens === 'number' &&
+      Number.isFinite(snapshot.lastOutputTokens)
         ? snapshot.lastOutputTokens
         : 0;
     this.lastCacheReadInputTokens =
-      typeof snapshot.lastCacheReadInputTokens === 'number'
-      && Number.isFinite(snapshot.lastCacheReadInputTokens)
+      typeof snapshot.lastCacheReadInputTokens === 'number' &&
+      Number.isFinite(snapshot.lastCacheReadInputTokens)
         ? snapshot.lastCacheReadInputTokens
         : 0;
     this.turnCount =
-      typeof snapshot.turnCount === 'number'
-      && Number.isFinite(snapshot.turnCount)
+      typeof snapshot.turnCount === 'number' &&
+      Number.isFinite(snapshot.turnCount)
         ? snapshot.turnCount
         : 0;
     this.lastCompactedAt =
-      typeof snapshot.lastCompactedAt === 'string'
-      && snapshot.lastCompactedAt.trim().length > 0
+      typeof snapshot.lastCompactedAt === 'string' &&
+      snapshot.lastCompactedAt.trim().length > 0
         ? snapshot.lastCompactedAt
         : null;
     this.nativeCompactCount =
-      typeof snapshot.nativeCompactCount === 'number'
-      && Number.isFinite(snapshot.nativeCompactCount)
+      typeof snapshot.nativeCompactCount === 'number' &&
+      Number.isFinite(snapshot.nativeCompactCount)
         ? snapshot.nativeCompactCount
         : 0;
   }
@@ -139,7 +139,7 @@ export class CodexArchiveManager {
         log(
           `Sent session_wrapup request ${requestId} for ${groupFolder} (${this.turnCount} turns, contextWindow=${this.lastContextWindowTokens} tokens)`,
         );
-        response = await waitForSessionWrapupResponse(requestId);
+        response = await waitForSessionWrapupResponse(requestId, 5_000);
         if (response.success) {
           log(
             `session_wrapup completed for ${groupFolder}${response.conversationArchiveFile ? ` -> ${response.conversationArchiveFile}` : ''}`,
@@ -153,20 +153,16 @@ export class CodexArchiveManager {
         log(`Skipping session_wrapup for ${groupFolder}: missing userId`);
       }
     } catch (err) {
-      log(`Archive failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
-
-    if (response?.success) {
-      if (markAsCompact) {
-        this.lastCompactedAt = new Date().toISOString();
-        this.nativeCompactCount++;
-      }
-      this.reset();
-    } else {
       log(
-        `Preserving archive state for ${groupFolder}; session will not compact until session_wrapup succeeds`,
+        `Archive failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+
+    if (markAsCompact) {
+      this.lastCompactedAt = new Date().toISOString();
+      this.nativeCompactCount++;
+    }
+    this.reset();
     return response;
   }
 

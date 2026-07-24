@@ -86,6 +86,7 @@ import {
   cleanupOldTurns,
   getMessageById,
   getContextSummary,
+  setContextSummary,
   deleteSessionBinding,
   saveSessionBinding,
   upsertSessionRuntimeState,
@@ -170,12 +171,11 @@ import {
   shutdownWebServer,
 } from './web.js';
 import { streamingBlocksManager } from './streaming-blocks.js';
-import { updateContinuationSummaryFromTranscript } from './context-compressor.js';
 import { turnObservabilityManager } from './turn-observability.js';
 import { verifyPairingCode } from './telegram-pairing.js';
 import { MemoryOrchestrator } from './memory-orchestrator.js';
 import {
-  commitTranscriptExportSuccess,
+  buildImmediateContinuationSummary,
   exportTranscriptSnapshotForUser,
 } from './memory-agent.js';
 import { injectMemoryOrchestratorDeps } from './routes/memory-agent.js';
@@ -3836,31 +3836,6 @@ function writeIpcResponseFile(ipcRoot: string, data: object): void {
   fs.renameSync(tmpPath, filePath);
 }
 
-function writeConversationArchiveFromTranscript(
-  ownerKey: string,
-  workspaceFolder: string,
-  transcriptFile: string,
-): string {
-  const transcriptPath = path.join(
-    DATA_DIR,
-    'memory',
-    ownerKey,
-    transcriptFile,
-  );
-  const conversationsDir = path.join(
-    GROUPS_DIR,
-    workspaceFolder,
-    'conversations',
-  );
-  fs.mkdirSync(conversationsDir, { recursive: true });
-  const archiveFileName = path.basename(transcriptFile);
-  const archivePath = path.join(conversationsDir, archiveFileName);
-  const tmpPath = `${archivePath}.tmp`;
-  fs.writeFileSync(tmpPath, fs.readFileSync(transcriptPath, 'utf-8'), 'utf-8');
-  fs.renameSync(tmpPath, archivePath);
-  return path.join('conversations', archiveFileName);
-}
-
 // Module-level reference set after MemoryOrchestrator creation, used by processTaskIpc.
 let memoryOrchestratorRef: MemoryOrchestrator | null = null;
 
@@ -4252,123 +4227,42 @@ async function processTaskIpc(
             const existingSummaryJids = allJids.filter(
               (jid) => !!getContextSummary(workspaceFolder, jid),
             );
-            const hasContinuationSummary = existingSummaryJids.length > 0;
             reply({
-              success: !data.archiveConversation || hasContinuationSummary,
-              error:
-                data.archiveConversation && !hasContinuationSummary
-                  ? 'No new transcript messages available for continuation summary'
+              success: true,
+              continuationSummaryChatJids:
+                existingSummaryJids.length > 0
+                  ? existingSummaryJids
                   : undefined,
-              continuationSummaryChatJids: hasContinuationSummary
-                ? existingSummaryJids
-                : undefined,
               noNewMessages: true,
             });
             break;
           }
 
-          const result = await wrapupOrchestrator.send(ownerKey, {
-            type: 'session_wrapup',
-            transcriptFile: transcript.transcriptFile,
-            workspaceFolder: transcript.workspaceFolder,
-            chatJids: transcript.chatJids,
-          });
-          if (!result.success) {
-            reply({
-              success: false,
-              error: result.error || 'Memory session_wrapup failed',
-              transcriptFile: transcript.transcriptFile,
-              chatJids: transcript.chatJids,
-            });
-            break;
-          }
-
-          let conversationArchiveFile: string | undefined;
-          if (data.archiveConversation) {
-            try {
-              conversationArchiveFile = writeConversationArchiveFromTranscript(
-                ownerKey,
-                workspaceFolder,
-                transcript.transcriptFile,
-              );
-            } catch (err) {
-              logger.warn(
-                {
-                  workspaceFolder,
-                  err,
-                  transcriptFile: transcript.transcriptFile,
-                },
-                'Failed to mirror transcript into conversations archive',
-              );
-              reply({
-                success: false,
-                error: err instanceof Error ? err.message : String(err),
-                transcriptFile: transcript.transcriptFile,
-                chatJids: transcript.chatJids,
-              });
-              break;
-            }
-          }
-
-          const transcriptFilePath = path.join(
-            DATA_DIR,
-            'memory',
+          const continuationSummary = buildImmediateContinuationSummary(
             ownerKey,
-            transcript.transcriptFile,
+            transcript,
           );
-          const continuation = await updateContinuationSummaryFromTranscript({
-            groupFolder: workspaceFolder,
-            chatJids: transcript.chatJids,
-            transcriptFile: transcript.transcriptFile,
-            transcriptFilePath,
-            generateSummary: async ({ systemPrompt, userMessage }) => {
-              const generated = await wrapupOrchestrator.continuationSummary(
-                ownerKey,
-                {
-                  workspaceFolder,
-                  systemPrompt,
-                  userMessage,
-                },
-              );
-              if (!generated.success || !generated.response?.trim()) {
-                throw new Error(
-                  generated.error ||
-                    'Continuation summary runner returned empty response',
-                );
-              }
-              return {
-                summary: generated.response,
-                modelUsed: 'memory-runner',
-              };
-            },
-          });
-          if (!continuation.success) {
-            logger.warn(
-              {
-                workspaceFolder,
-                transcriptFile: transcript.transcriptFile,
-                error: continuation.error,
-              },
-              'Failed to update continuation summary',
-            );
-            reply({
-              success: false,
-              error: continuation.error || 'Continuation summary failed',
-              transcriptFile: transcript.transcriptFile,
-              chatJids: transcript.chatJids,
-              conversationArchiveFile,
+          for (const jid of transcript.chatJids) {
+            setContextSummary({
+              group_folder: workspaceFolder,
+              chat_jid: jid,
+              summary: continuationSummary,
+              message_count: 0,
+              created_at: new Date().toISOString(),
+              model_used: 'deterministic-wrapup-handoff',
             });
-            break;
           }
-
-          commitTranscriptExportSuccess(ownerKey, transcript);
+          wrapupOrchestrator.enqueueSessionWrapup(
+            ownerKey,
+            transcript,
+            data.archiveConversation !== false,
+          );
           reply({
             success: true,
             transcriptFile: transcript.transcriptFile,
             chatJids: transcript.chatJids,
-            conversationArchiveFile,
-            continuationSummary: continuation.summary,
-            continuationSummaryChatJids: continuation.chatJids,
+            continuationSummary,
+            continuationSummaryChatJids: transcript.chatJids,
           });
         } catch (err) {
           logger.warn(
@@ -6043,6 +5937,7 @@ async function main(): Promise<void> {
   // Start Web server early so frontend auth/API isn't blocked by Feishu readiness.
   startWebServer({
     queue,
+    memoryOrchestrator,
     getRegisteredGroups: () => registeredGroups,
     getSessions: () => sessions,
     processGroupMessages,

@@ -26,6 +26,7 @@ export interface CodexSessionConfig {
   builtinMcpServerName?: string;
   /** User-configured MCP servers from settings.json (stdio format only). */
   userMcpServers?: Record<string, unknown>;
+  readOnly?: boolean;
 }
 
 export interface CodexSessionOptions {
@@ -52,7 +53,9 @@ function readEnvNumber(
   return parsePositiveInteger(env?.[key] || process.env[key]);
 }
 
-function buildBuiltinMcpTimeoutConfig(env: Record<string, string> | undefined): {
+function buildBuiltinMcpTimeoutConfig(
+  env: Record<string, string> | undefined,
+): {
   startup_timeout_sec: number;
   tool_timeout_sec: number;
 } {
@@ -135,13 +138,49 @@ export interface CodexUsage {
 export type CodexThreadEvent =
   | { type: 'thread.started'; thread_id: string }
   | { type: 'turn.started'; turn_id?: string; thread_id?: string }
-  | { type: 'turn.completed'; usage: CodexUsage; turn_id?: string; thread_id?: string }
-  | { type: 'turn.failed'; error: { message: string }; turn_id?: string; thread_id?: string }
-  | { type: 'item.started'; item: CodexThreadItem; turn_id?: string; thread_id?: string }
-  | { type: 'item.updated'; item: CodexThreadItem; turn_id?: string; thread_id?: string }
-  | { type: 'item.completed'; item: CodexThreadItem; turn_id?: string; thread_id?: string }
-  | { type: 'compact.completed'; thread_id: string; turn_id: string; item_id?: string; source: 'item' | 'thread' }
-  | { type: 'token_count'; usage: CodexUsage; turn_id?: string; thread_id?: string }
+  | {
+      type: 'turn.completed';
+      usage: CodexUsage;
+      turn_id?: string;
+      thread_id?: string;
+    }
+  | {
+      type: 'turn.failed';
+      error: { message: string };
+      turn_id?: string;
+      thread_id?: string;
+    }
+  | {
+      type: 'item.started';
+      item: CodexThreadItem;
+      turn_id?: string;
+      thread_id?: string;
+    }
+  | {
+      type: 'item.updated';
+      item: CodexThreadItem;
+      turn_id?: string;
+      thread_id?: string;
+    }
+  | {
+      type: 'item.completed';
+      item: CodexThreadItem;
+      turn_id?: string;
+      thread_id?: string;
+    }
+  | {
+      type: 'compact.completed';
+      thread_id: string;
+      turn_id: string;
+      item_id?: string;
+      source: 'item' | 'thread';
+    }
+  | {
+      type: 'token_count';
+      usage: CodexUsage;
+      turn_id?: string;
+      thread_id?: string;
+    }
   | { type: 'error'; message: string };
 
 interface JsonRpcMessage {
@@ -162,9 +201,9 @@ interface AppNotification {
   params: unknown;
 }
 
-export interface PostCompactContextInjection {
-  continuationSummary?: string;
-  activeChannels?: string[];
+export interface CodexContextInjectionSection {
+  id: string;
+  content: string;
 }
 
 interface Waiter<T> {
@@ -224,10 +263,14 @@ function stringValue(value: unknown): string | undefined {
 }
 
 function numberValue(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
-function mapCommandStatus(value: unknown): 'in_progress' | 'completed' | 'failed' {
+function mapCommandStatus(
+  value: unknown,
+): 'in_progress' | 'completed' | 'failed' {
   if (value === 'completed') return 'completed';
   if (value === 'failed' || value === 'declined') return 'failed';
   return 'in_progress';
@@ -262,7 +305,9 @@ function mapAppItem(item: unknown): CodexThreadItem | null {
         type: 'command_execution',
         command: stringValue(item.command) || '',
         aggregated_output: stringValue(item.aggregatedOutput) || '',
-        ...(typeof item.exitCode === 'number' ? { exit_code: item.exitCode } : {}),
+        ...(typeof item.exitCode === 'number'
+          ? { exit_code: item.exitCode }
+          : {}),
         status: mapCommandStatus(item.status),
       };
     case 'fileChange': {
@@ -287,7 +332,9 @@ function mapAppItem(item: unknown): CodexThreadItem | null {
         server: stringValue(item.server) || '',
         tool: stringValue(item.tool) || '',
         arguments: item.arguments,
-        ...(item.result === null || item.result === undefined ? {} : { result: item.result }),
+        ...(item.result === null || item.result === undefined
+          ? {}
+          : { result: item.result }),
         ...(error ? { error } : {}),
         status: mapCommandStatus(item.status),
       };
@@ -330,72 +377,21 @@ function turnIdFromResponse(result: unknown): string | null {
   return stringValue(result.turn.id) || null;
 }
 
-function readMemoryIndex(): { filePath: string; content: string } | null {
-  const memoryIndexRoot =
-    process.env.HAPPYCLAW_WORKSPACE_MEMORY_INDEX || '/workspace/memory-index';
-  const filePath = path.join(memoryIndexRoot, 'index.md');
-  try {
-    if (!fs.existsSync(filePath)) return null;
-    return {
-      filePath,
-      content: fs.readFileSync(filePath, 'utf-8'),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function buildInvariantReminder(activeChannels: string[]): string {
-  return [
-    '## HappyClaw post-compact invariant reminder',
-    '',
-    '- Codex 已完成 native compact。Codex 自己保留下来的 compact 上下文是主上下文，本消息是 HappyClaw 平台补充上下文。',
-    '- stdout 只会显示在 Web UI。最新用户消息来自飞书、Telegram、QQ 等 IM 渠道时，每一轮都必须使用 send_message，并使用最新消息 source 属性里的 channel；寒暄、感谢、确认、短回复也一样，不要只输出 "Done"。',
-    activeChannels.length > 0
-      ? `- 最近活跃 IM channels: ${activeChannels.join(', ')}。完成任务后需要主动向相关 channel 汇报。`
-      : '- 当前没有记录到最近活跃 IM channel。若最新消息带 source 属性，以最新消息 source 为准。',
-    '- memory-index 是快速索引，不是权威事实来源。涉及日期、数字、决策结论、用户偏好等具体事实时，优先调用 memory_query 确认。',
-    '- continuation summary 和 transcript 行号引用描述的是已经处理过的历史，不要重复回复历史消息。只处理 compact 后新到达的用户消息。',
-  ].join('\n');
-}
-
-function buildPostCompactContextItem(
-  input: PostCompactContextInjection,
+function buildContextInjectionItem(
+  sections: CodexContextInjectionSection[],
 ): Record<string, unknown> {
-  const memoryIndex = readMemoryIndex();
-  const activeChannels = Array.from(new Set(input.activeChannels || []));
-  const summary = input.continuationSummary?.trim();
-  const sections = [
-    '[HappyClaw post-compact supplemental context]',
-    '这条 developer message 由 HappyClaw 在 Codex native compact 后注入，用于补足平台不变量、最新 memory index 和外部 transcript continuation summary。',
-    '不要单独回复这条消息。',
-    '',
-    buildInvariantReminder(activeChannels),
-    '',
-    '## 最新完整 memory index.md',
-    '',
-    memoryIndex
-      ? [
-          `path: ${memoryIndex.filePath}`,
-          '',
-          '<memory-index>',
-          memoryIndex.content,
-          '</memory-index>',
-        ].join('\n')
-      : 'index.md 当前不可读或不存在。本次不注入 memory index。',
-    '',
-    '## Continuation summary',
-    '',
-    summary || '本次 session_wrapup 没有返回 continuation summary。',
-  ];
-
   return {
     type: 'message',
     role: 'developer',
     content: [
       {
         type: 'input_text',
-        text: sections.join('\n'),
+        text: sections
+          .map(
+            (section) =>
+              `<happyclaw-context section="${section.id}">\n${section.content}\n</happyclaw-context>`,
+          )
+          .join('\n\n'),
       },
     ],
   };
@@ -464,9 +460,13 @@ export class CodexSession {
       input: this.buildInput(prompt, imagePaths),
       cwd: this.config.workingDirectory,
       approvalPolicy: 'never',
-      sandboxPolicy: { type: 'dangerFullAccess' },
+      sandboxPolicy: {
+        type: this.config.readOnly ? 'readOnly' : 'dangerFullAccess',
+      },
       model: this.config.model,
-      ...(this.config.thinkingEffort ? { effort: this.config.thinkingEffort } : {}),
+      ...(this.config.thinkingEffort
+        ? { effort: this.config.thinkingEffort }
+        : {}),
     });
 
     const turnId = turnIdFromResponse(result);
@@ -504,7 +504,11 @@ export class CodexSession {
     while (true) {
       const notification = await this.notifications.next();
       if (!notification) break;
-      const events = this.mapNotification(notification, this.threadId, compactTurnId);
+      const events = this.mapNotification(
+        notification,
+        this.threadId,
+        compactTurnId,
+      );
       for (const event of events) {
         if (event.type === 'turn.started' && event.turn_id) {
           compactTurnId = event.turn_id;
@@ -535,15 +539,16 @@ export class CodexSession {
     this.activeTurnId = null;
   }
 
-  async injectPostCompactContext(
-    input: PostCompactContextInjection,
+  async injectContextSections(
+    sections: CodexContextInjectionSection[],
   ): Promise<void> {
     if (!this.threadId) {
       throw new Error('CodexSession: thread not started');
     }
+    if (sections.length === 0) return;
     await this.request('thread/inject_items', {
       threadId: this.threadId,
-      items: [buildPostCompactContextItem(input)],
+      items: [buildContextInjectionItem(sections)],
     });
   }
 
@@ -588,7 +593,9 @@ export class CodexSession {
 
     child.on('error', (error) => this.failAll(error));
     child.on('exit', (code, signal) => {
-      this.failAll(new Error(`Codex app-server exited (${code ?? signal ?? 'unknown'})`));
+      this.failAll(
+        new Error(`Codex app-server exited (${code ?? signal ?? 'unknown'})`),
+      );
     });
 
     this.stdoutRl = createInterface({ input: child.stdout });
@@ -630,7 +637,9 @@ export class CodexSession {
       ...(builtinServer
         ? {
             [builtinName]: builtinServer,
-            ...(builtinName === 'happyclaw' ? {} : { happyclaw: builtinServer }),
+            ...(builtinName === 'happyclaw'
+              ? {}
+              : { happyclaw: builtinServer }),
           }
         : {}),
     };
@@ -639,7 +648,7 @@ export class CodexSession {
       model: this.config.model,
       cwd: this.config.workingDirectory,
       approvalPolicy: 'never',
-      sandbox: 'danger-full-access',
+      sandbox: this.config.readOnly ? 'read-only' : 'danger-full-access',
       serviceName: 'happyclaw',
       experimentalRawEvents: false,
       persistExtendedHistory: true,
@@ -652,12 +661,17 @@ export class CodexSession {
           ? { model_reasoning_effort: this.config.thinkingEffort }
           : {}),
         web_search_mode: 'live',
-        ...(Object.keys(mcpServers).length > 0 ? { mcp_servers: mcpServers } : {}),
+        ...(Object.keys(mcpServers).length > 0
+          ? { mcp_servers: mcpServers }
+          : {}),
       },
     };
   }
 
-  private buildInput(prompt: string, imagePaths?: string[]): Array<Record<string, unknown>> {
+  private buildInput(
+    prompt: string,
+    imagePaths?: string[],
+  ): Array<Record<string, unknown>> {
     const input: Array<Record<string, unknown>> = [
       { type: 'text', text: prompt, text_elements: [] },
     ];
@@ -707,7 +721,12 @@ export class CodexSession {
       }
       this.pending.delete(message.id);
       if (message.error) {
-        pending.reject(new Error(message.error.message || `JSON-RPC error ${message.error.code ?? ''}`));
+        pending.reject(
+          new Error(
+            message.error.message ||
+              `JSON-RPC error ${message.error.code ?? ''}`,
+          ),
+        );
       } else {
         pending.resolve(message.result);
       }
@@ -743,14 +762,21 @@ export class CodexSession {
         this.respond(message.id, { answers: {} });
         return;
       case 'mcpServer/elicitation/request':
-        this.respond(message.id, { action: 'decline', content: null, _meta: null });
+        this.respond(message.id, {
+          action: 'decline',
+          content: null,
+          _meta: null,
+        });
         return;
       case 'applyPatchApproval':
       case 'execCommandApproval':
         this.respond(message.id, { decision: 'denied' });
         return;
       default:
-        this.respondError(message.id, `Unsupported Codex server request: ${message.method}`);
+        this.respondError(
+          message.id,
+          `Unsupported Codex server request: ${message.method}`,
+        );
     }
   }
 
@@ -759,13 +785,15 @@ export class CodexSession {
   }
 
   private respondError(id: string | number, message: string): void {
-    this.child?.stdin.write(`${JSON.stringify({
-      id,
-      error: {
-        code: -32601,
-        message,
-      },
-    })}\n`);
+    this.child?.stdin.write(
+      `${JSON.stringify({
+        id,
+        error: {
+          code: -32601,
+          message,
+        },
+      })}\n`,
+    );
   }
 
   private mapNotification(
@@ -790,7 +818,9 @@ export class CodexSession {
         const usage = usageFromTokenUsage(params.tokenUsage);
         if (!usage) return [];
         if (turnId) this.lastUsageByTurn.set(turnId, usage);
-        return [{ type: 'token_count', usage, thread_id: threadId, turn_id: turnId }];
+        return [
+          { type: 'token_count', usage, thread_id: threadId, turn_id: turnId },
+        ];
       }
       case 'item/started':
       case 'item/completed': {
@@ -798,11 +828,24 @@ export class CodexSession {
         if (expectedTurnId && turnId && turnId !== expectedTurnId) return [];
         const item = mapAppItem(params.item);
         if (!item) return [];
-        const eventType = notification.method === 'item/started' ? 'item.started' : 'item.completed';
+        const eventType =
+          notification.method === 'item/started'
+            ? 'item.started'
+            : 'item.completed';
         const events: CodexThreadEvent[] = [
-          { type: eventType, item, thread_id: threadId, turn_id: turnId } as CodexThreadEvent,
+          {
+            type: eventType,
+            item,
+            thread_id: threadId,
+            turn_id: turnId,
+          } as CodexThreadEvent,
         ];
-        if (eventType === 'item.completed' && item.type === 'context_compaction' && threadId && turnId) {
+        if (
+          eventType === 'item.completed' &&
+          item.type === 'context_compaction' &&
+          threadId &&
+          turnId
+        ) {
           events.push({
             type: 'compact.completed',
             thread_id: threadId,
@@ -817,12 +860,14 @@ export class CodexSession {
         const turnId = stringValue(params.turnId);
         if (!threadId || !turnId) return [];
         if (expectedTurnId && turnId !== expectedTurnId) return [];
-        return [{
-          type: 'compact.completed',
-          thread_id: threadId,
-          turn_id: turnId,
-          source: 'thread',
-        }];
+        return [
+          {
+            type: 'compact.completed',
+            thread_id: threadId,
+            turn_id: turnId,
+            source: 'thread',
+          },
+        ];
       }
       case 'turn/completed': {
         const turn = isObject(params.turn) ? params.turn : {};
@@ -832,20 +877,31 @@ export class CodexSession {
           const error = isObject(turn.error)
             ? stringValue(turn.error.message) || 'Codex turn failed'
             : 'Codex turn failed';
-          return [{ type: 'turn.failed', error: { message: error }, thread_id: threadId, turn_id: turnId }];
+          return [
+            {
+              type: 'turn.failed',
+              error: { message: error },
+              thread_id: threadId,
+              turn_id: turnId,
+            },
+          ];
         }
         const usageKey = turnId || expectedTurnId;
-        return [{
-          type: 'turn.completed',
-          usage: (usageKey ? this.lastUsageByTurn.get(usageKey) : undefined) || {
-            input_tokens: 0,
-            cached_input_tokens: 0,
-            output_tokens: 0,
-            reasoning_output_tokens: 0,
+        return [
+          {
+            type: 'turn.completed',
+            usage: (usageKey
+              ? this.lastUsageByTurn.get(usageKey)
+              : undefined) || {
+              input_tokens: 0,
+              cached_input_tokens: 0,
+              output_tokens: 0,
+              reasoning_output_tokens: 0,
+            },
+            thread_id: threadId,
+            turn_id: turnId,
           },
-          thread_id: threadId,
-          turn_id: turnId,
-        }];
+        ];
       }
       case 'error': {
         const message = stringValue(params.message) || 'Codex app-server error';

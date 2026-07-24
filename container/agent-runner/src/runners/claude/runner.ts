@@ -22,7 +22,10 @@ import {
   type CliInput,
   type CliRunnerAdapter,
 } from '../base-cli-runner.js';
-import { DEFAULT_ALLOWED_TOOLS, DEFAULT_CLAUDE_BUILTIN_TOOLS } from './config.js';
+import {
+  DEFAULT_ALLOWED_TOOLS,
+  DEFAULT_CLAUDE_BUILTIN_TOOLS,
+} from './config.js';
 import { PREDEFINED_AGENTS } from './agent-defs.js';
 import { prepareClaudePromptWithImages } from './image-utils.js';
 import { StreamEventProcessor } from './event-adapter.js';
@@ -43,6 +46,7 @@ export interface ClaudeRunnerOptions {
   loadUserMcpServers: () => Record<string, unknown>;
   skillsDir: string;
   builtinMcpServerName?: string;
+  toolScope?: 'default' | 'isolated' | 'read-only';
 }
 
 interface ClaudeRunnerProviderState extends Record<string, unknown> {
@@ -59,8 +63,12 @@ function normalizeMcpToolPrefix(name: string): string {
   return name.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
 
-function listConfiguredMcpAllowedTools(mcpServers: Record<string, unknown>): string[] {
-  return Object.keys(mcpServers).map((name) => `mcp__${normalizeMcpToolPrefix(name)}__*`);
+function listConfiguredMcpAllowedTools(
+  mcpServers: Record<string, unknown>,
+): string[] {
+  return Object.keys(mcpServers).map(
+    (name) => `mcp__${normalizeMcpToolPrefix(name)}__*`,
+  );
 }
 
 function buildMcpConfig(
@@ -88,6 +96,17 @@ function buildMcpConfig(
 function buildSettingsConfig(hookHandlerPath: string): Record<string, unknown> {
   return {
     hooks: {
+      PreToolUse: [
+        {
+          matcher: 'Bash',
+          hooks: [
+            {
+              type: 'command',
+              command: `${shellEscape(process.execPath)} ${shellEscape(hookHandlerPath)} safety-lite`,
+            },
+          ],
+        },
+      ],
       PreCompact: [
         {
           matcher: '*',
@@ -109,7 +128,9 @@ function resolveAdditionalDirectories(defaultDirs: string[]): string[] {
   try {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return defaultDirs;
-    return parsed.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0);
+    return parsed.filter(
+      (entry): entry is string => typeof entry === 'string' && entry.length > 0,
+    );
   } catch {
     return defaultDirs;
   }
@@ -152,8 +173,12 @@ function isContextOverflowError(msg: string): boolean {
 
 function isImageMimeMismatchError(msg: string): boolean {
   return (
-    /image\s+was\s+specified\s+using\s+the\s+image\/[a-z0-9.+-]+\s+media\s+type,\s+but\s+the\s+image\s+appears\s+to\s+be\s+(?:an?\s+)?image\/[a-z0-9.+-]+\s+image/i.test(msg) ||
-    /image\/[a-z0-9.+-]+\s+media\s+type.*appears\s+to\s+be.*image\/[a-z0-9.+-]+/i.test(msg)
+    /image\s+was\s+specified\s+using\s+the\s+image\/[a-z0-9.+-]+\s+media\s+type,\s+but\s+the\s+image\s+appears\s+to\s+be\s+(?:an?\s+)?image\/[a-z0-9.+-]+\s+image/i.test(
+      msg,
+    ) ||
+    /image\/[a-z0-9.+-]+\s+media\s+type.*appears\s+to\s+be.*image\/[a-z0-9.+-]+/i.test(
+      msg,
+    )
   );
 }
 
@@ -272,7 +297,8 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
       HAPPYCLAW_PROJECT_SKILLS_DIR: projectSkillsDir,
     };
 
-    const providerState = opts.state.getProviderState<ClaudeRunnerProviderState>();
+    const providerState =
+      opts.state.getProviderState<ClaudeRunnerProviderState>();
     this.currentSessionId =
       typeof providerState?.currentSessionId === 'string'
         ? providerState.currentSessionId
@@ -287,15 +313,21 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
   private probeCli(commandPath: string): void {
     if (this.probedCommandPaths.has(commandPath)) return;
 
-    const versionResult = spawnSync(commandPath, ['--version'], { encoding: 'utf8' });
+    const versionResult = spawnSync(commandPath, ['--version'], {
+      encoding: 'utf8',
+    });
     if (versionResult.error) {
       throw new Error(`Claude CLI 不可用: ${versionResult.error.message}`);
     }
     if (versionResult.status !== 0) {
-      throw new Error(`Claude CLI 版本探测失败: ${versionResult.stderr || versionResult.stdout}`);
+      throw new Error(
+        `Claude CLI 版本探测失败: ${versionResult.stderr || versionResult.stdout}`,
+      );
     }
 
-    const helpResult = spawnSync(commandPath, ['-p', '--help'], { encoding: 'utf8' });
+    const helpResult = spawnSync(commandPath, ['-p', '--help'], {
+      encoding: 'utf8',
+    });
     if (helpResult.error) {
       throw new Error(`Claude CLI 帮助探测失败: ${helpResult.error.message}`);
     }
@@ -311,9 +343,13 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
       '--agents',
       '--disable-slash-commands',
     ];
-    const missingFlags = requiredFlags.filter((flag) => !helpText.includes(flag));
+    const missingFlags = requiredFlags.filter(
+      (flag) => !helpText.includes(flag),
+    );
     if (missingFlags.length > 0) {
-      throw new Error(`Claude CLI 缺少必需参数支持: ${missingFlags.join(', ')}`);
+      throw new Error(
+        `Claude CLI 缺少必需参数支持: ${missingFlags.join(', ')}`,
+      );
     }
 
     this.probedCommandPaths.add(commandPath);
@@ -321,16 +357,20 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
 
   private createProcessor(): StreamEventProcessor {
     const { state } = this.opts;
-    return new StreamEventProcessor((output) => {
-      if (output.streamEvent) {
-        this.streamEventQueue.push({
-          kind: 'stream_event',
-          event: output.streamEvent,
-        });
-      }
-    }, this.opts.log, (newMode) => {
-      state.currentPermissionMode = newMode;
-    });
+    return new StreamEventProcessor(
+      (output) => {
+        if (output.streamEvent) {
+          this.streamEventQueue.push({
+            kind: 'stream_event',
+            event: output.streamEvent,
+          });
+        }
+      },
+      this.opts.log,
+      (newMode) => {
+        state.currentPermissionMode = newMode;
+      },
+    );
   }
 
   private drainStreamEvents(): NormalizedMessage[] {
@@ -339,11 +379,12 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
     return output;
   }
 
-  private updateSessionFromEvent(event: Record<string, unknown>): NormalizedMessage[] {
+  private updateSessionFromEvent(
+    event: Record<string, unknown>,
+  ): NormalizedMessage[] {
     const messages: NormalizedMessage[] = [];
-    const sessionId = typeof event.session_id === 'string'
-      ? event.session_id
-      : undefined;
+    const sessionId =
+      typeof event.session_id === 'string' ? event.session_id : undefined;
     if (sessionId && sessionId !== this.currentSessionId) {
       this.currentSessionId = sessionId;
       this.currentTranscriptPath = findTranscriptPath(sessionId);
@@ -365,7 +406,9 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
   }
 
   private buildResumeTarget(query: QueryConfig): string | undefined {
-    return query.sessionId || query.resumeAt || this.currentSessionId || undefined;
+    return (
+      query.sessionId || query.resumeAt || this.currentSessionId || undefined
+    );
   }
 
   buildCommand(query: QueryConfig): CliCommand {
@@ -384,18 +427,30 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
       this.mcpServerEnv,
       userMcpServers,
     );
-    fs.writeFileSync(this.mcpConfigPath, JSON.stringify(mergedMcpConfig, null, 2));
+    fs.writeFileSync(
+      this.mcpConfigPath,
+      JSON.stringify(mergedMcpConfig, null, 2),
+    );
     fs.writeFileSync(
       this.settingsPath,
       JSON.stringify(buildSettingsConfig(this.hookHandlerPath), null, 2),
     );
 
-    const allowedTools = Array.from(new Set([
-      ...DEFAULT_ALLOWED_TOOLS,
-      ...listConfiguredMcpAllowedTools(
-        mergedMcpConfig.mcpServers as Record<string, unknown>,
-      ),
-    ]));
+    const builtinTools =
+      this.opts.toolScope === 'read-only'
+        ? ['Glob', 'Grep', 'Read']
+        : DEFAULT_CLAUDE_BUILTIN_TOOLS;
+    const allowedTools =
+      this.opts.toolScope === 'read-only'
+        ? builtinTools
+        : Array.from(
+            new Set([
+              ...DEFAULT_ALLOWED_TOOLS,
+              ...listConfiguredMcpAllowedTools(
+                mergedMcpConfig.mcpServers as Record<string, unknown>,
+              ),
+            ]),
+          );
     const resumeTarget = this.buildResumeTarget(query);
     const args = [
       '-p',
@@ -414,7 +469,7 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
       '--setting-sources',
       'project,user',
       '--tools',
-      DEFAULT_CLAUDE_BUILTIN_TOOLS.join(','),
+      builtinTools.join(','),
       '--allowedTools',
       allowedTools.join(','),
       '--agents',
@@ -422,13 +477,15 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
       '--append-system-prompt',
       query.systemPrompt,
       '--permission-mode',
-      (query.permissionMode ?? this.opts.state.currentPermissionMode) || 'bypassPermissions',
+      (query.permissionMode ?? this.opts.state.currentPermissionMode) ||
+        'bypassPermissions',
       '--allow-dangerously-skip-permissions',
       '--disable-slash-commands',
     ];
     if (resumeTarget) args.push('--resume', resumeTarget);
     if (this.opts.model) args.push('--model', this.opts.model);
-    if (this.opts.thinkingEffort) args.push('--effort', this.opts.thinkingEffort);
+    if (this.opts.thinkingEffort)
+      args.push('--effort', this.opts.thinkingEffort);
     for (const dir of resolveAdditionalDirectories([
       this.opts.globalDir,
       this.opts.memoryDir,
@@ -448,12 +505,18 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
         ...(process.env as Record<string, string>),
         ...this.mcpServerEnv,
         ENABLE_CLAUDEAI_MCP_SERVERS: 'false',
+        CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+        CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
+        CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
       },
     };
   }
 
   buildInput(query: QueryConfig): CliInput {
-    this.opts.state.extractSourceChannels(query.prompt, this.opts.imChannelsFile);
+    this.opts.state.extractSourceChannels(
+      query.prompt,
+      this.opts.imChannelsFile,
+    );
     const prepared = prepareClaudePromptWithImages(
       query.prompt,
       query.images,
@@ -490,11 +553,13 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
     try {
       event = JSON.parse(line) as Record<string, unknown>;
     } catch (err) {
-      return [{
-        kind: 'error',
-        message: `Claude CLI JSON parse error: ${err instanceof Error ? err.message : String(err)}`,
-        recoverable: false,
-      }];
+      return [
+        {
+          kind: 'error',
+          message: `Claude CLI JSON parse error: ${err instanceof Error ? err.message : String(err)}`,
+          recoverable: false,
+        },
+      ];
     }
 
     messages.push(...this.updateSessionFromEvent(event));
@@ -522,6 +587,7 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
     if (event.type === 'system') {
       const subtype = typeof event.subtype === 'string' ? event.subtype : '';
       if (subtype === 'compact_boundary') {
+        this.opts.state.setContextSummary(undefined);
         messages.push({
           kind: 'stream_event',
           event: {
@@ -552,10 +618,7 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
       }
       if (processor.processSystemMessage(event as any)) {
         messages.push(...this.drainStreamEvents());
-        if (
-          subtype === 'hook_started' &&
-          event.hook_event === 'PreCompact'
-        ) {
+        if (subtype === 'hook_started' && event.hook_event === 'PreCompact') {
           messages.push({
             kind: 'stream_event',
             event: {
@@ -564,10 +627,7 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
             },
           });
         }
-        if (
-          subtype === 'hook_response' &&
-          event.hook_event === 'PreCompact'
-        ) {
+        if (subtype === 'hook_response' && event.hook_event === 'PreCompact') {
           messages.push({
             kind: 'stream_event',
             event: {
@@ -624,9 +684,8 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
 
     if (event.type === 'result') {
       const textResult = extractResultText(event);
-      const resultSubtype = typeof event.subtype === 'string'
-        ? event.subtype
-        : undefined;
+      const resultSubtype =
+        typeof event.subtype === 'string' ? event.subtype : undefined;
       const isCliError =
         event.is_error === true ||
         !!(resultSubtype && resultSubtype.startsWith('error'));
@@ -771,7 +830,9 @@ export class ClaudeRunner extends BaseCliRunner {
 
   constructor(opts: ClaudeRunnerOptions) {
     super();
-    this.tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `agentdock-claude-${randomUUID()}-`));
+    this.tmpDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), `agentdock-claude-${randomUUID()}-`),
+    );
     this.adapter = new ClaudeCliAdapter(opts, this.tmpDir);
   }
 
@@ -785,7 +846,10 @@ export class ClaudeRunner extends BaseCliRunner {
 
   getActivityReport(): ActivityReport {
     const adapterReport = this.adapter.getActivityReport();
-    if (adapterReport.hasActiveToolCall || adapterReport.hasPendingBackgroundTasks) {
+    if (
+      adapterReport.hasActiveToolCall ||
+      adapterReport.hasPendingBackgroundTasks
+    ) {
       return adapterReport;
     }
     return super.getActivityReport();

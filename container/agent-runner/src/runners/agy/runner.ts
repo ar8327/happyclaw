@@ -26,8 +26,10 @@ import type {
   NormalizedMessage,
   QueryConfig,
   QueryResult,
+  RenderedRunnerContext,
   RuntimePersistenceSnapshot,
 } from '../../runner-interface.js';
+import { combineRenderedContext } from '../../runner-interface.js';
 import type { ContainerInput, ContainerOutput } from '../../types.js';
 import type { SessionState } from '../../session-state.js';
 import type { IpcPaths } from '../../ipc-handler.js';
@@ -116,10 +118,8 @@ class MessageQueue {
 
 const DEFAULT_STALL_TIMEOUT_MS = 180_000;
 const DEFAULT_PRINT_IDLE_TIMEOUT = '30m';
-const STDERR_TAIL_LIMIT = 8_192;
+const STDERR_TAIL_LIMIT = 64 * 1024;
 export const DEFAULT_COMPACT_THRESHOLD_TOKENS = 250_000;
-/** wrapup 失败后间隔多少轮再重试压缩，避免每轮都等 wrapup 超时 */
-const COMPACT_RETRY_COOLDOWN_TURNS = 3;
 
 function stallTimeoutMs(): number {
   const raw = Number(process.env.HAPPYCLAW_AGY_STALL_TIMEOUT_MS);
@@ -162,13 +162,13 @@ export class AgyRunner implements AgentRunner {
   private activeChild: ChildProcess | null = null;
   private activeStartedAt = 0;
   private interrupted = false;
+  private renderedContext: RenderedRunnerContext | null = null;
   private turnCounter = 0;
   private attachmentBatch = 0;
   private lastConversationId: string | null = null;
   private readonly archiveMgr = new AgyArchiveManager();
   private pendingContinuationSummary: string | null = null;
   private pendingSessionReset = false;
-  private compactCooldownUntilTurn = 0;
   private pendingWrapup = false;
 
   constructor(opts: AgyRunnerOptions) {
@@ -250,10 +250,19 @@ export class AgyRunner implements AgentRunner {
     );
   }
 
+  async applyContext(context: RenderedRunnerContext): Promise<void> {
+    this.renderedContext = context;
+  }
+
   async *runQuery(
     config: QueryConfig,
   ): AsyncGenerator<NormalizedMessage, QueryResult> {
-    writeAgyRules(this.homeDir, config.systemPrompt);
+    writeAgyRules(
+      this.homeDir,
+      this.renderedContext
+        ? combineRenderedContext(this.renderedContext)
+        : config.systemPrompt,
+    );
     const resumeTarget = config.resumeAt || config.sessionId || undefined;
     let effectivePrompt = config.prompt;
     if (!resumeTarget && this.pendingContinuationSummary) {
@@ -329,7 +338,8 @@ export class AgyRunner implements AgentRunner {
           kind: 'stream_event',
           event: {
             eventType: 'status',
-            statusText: 'Antigravity 原会话不存在，已重新开始新会话（上下文已重置）',
+            statusText:
+              'Antigravity 原会话不存在，已重新开始新会话（上下文已重置）',
           },
         };
       }
@@ -359,7 +369,11 @@ export class AgyRunner implements AgentRunner {
         }
       } else {
         yield { kind: 'result', text: outcome!.finalText };
-        if (!resumeTarget && conversationId && this.pendingContinuationSummary) {
+        if (
+          !resumeTarget &&
+          conversationId &&
+          this.pendingContinuationSummary
+        ) {
           // 摘要已随首条消息进入新会话历史，后续轮次无需重复注入
           this.pendingContinuationSummary = null;
         }
@@ -395,11 +409,6 @@ export class AgyRunner implements AgentRunner {
       );
     }
     if (threshold <= 0 || !estimate || estimate.tokens < threshold) return;
-    if (this.turnCounter < this.compactCooldownUntilTurn) {
-      this.opts.log('Agy: 上次 wrapup 失败后的冷却期内，跳过本轮压缩');
-      return;
-    }
-
     yield {
       kind: 'stream_event',
       event: {
@@ -425,61 +434,48 @@ export class AgyRunner implements AgentRunner {
       this.pendingWrapup = false;
     }
 
-    if (response?.success) {
-      this.pendingContinuationSummary =
-        response.continuationSummary?.trim() || null;
-      this.pendingSessionReset = true;
-      this.lastConversationId = null;
-      yield {
-        kind: 'stream_event',
-        event: {
-          eventType: 'lifecycle',
-          phase: 'compact_completed',
-          repairHints: {
-            recentImChannels: this.opts.state.getActiveImChannels(),
-          },
+    this.pendingContinuationSummary =
+      response?.continuationSummary?.trim() ||
+      this.opts.state.getContextSummary()?.trim() ||
+      null;
+    this.opts.state.setContextSummary(this.pendingContinuationSummary);
+    this.pendingSessionReset = true;
+    this.lastConversationId = null;
+    yield {
+      kind: 'stream_event',
+      event: {
+        eventType: 'lifecycle',
+        phase: 'compact_completed',
+        repairHints: {
+          recentImChannels: this.opts.state.getActiveImChannels(),
         },
-      };
-      yield {
-        kind: 'stream_event',
-        event: {
-          eventType: 'lifecycle',
-          phase: 'archive_completed',
-          statusText: this.pendingContinuationSummary
+      },
+    };
+    yield {
+      kind: 'stream_event',
+      event: {
+        eventType: 'lifecycle',
+        phase: 'archive_completed',
+        statusText: response?.success
+          ? this.pendingContinuationSummary
             ? 'agy_synthetic_compact_completed'
-            : 'agy_synthetic_compact_completed_no_summary',
-          archivedFolders: [this.opts.containerInput.groupFolder],
-          transcriptFiles: [
-            response.conversationArchiveFile,
-            response.transcriptFile,
-          ].filter(
-            (file): file is string =>
-              typeof file === 'string' && file.trim().length > 0,
-          ),
-        },
-      };
-      this.opts.log(
-        `Agy 合成压缩完成: 下一轮将开启新会话${this.pendingContinuationSummary ? '并注入延续摘要' : '（无摘要）'}`,
-      );
-    } else {
-      this.compactCooldownUntilTurn =
-        this.turnCounter + COMPACT_RETRY_COOLDOWN_TURNS;
-      yield {
-        kind: 'stream_event',
-        event: {
-          eventType: 'lifecycle',
-          phase: 'archive_completed',
-          statusText: 'session_wrapup_failed',
-        },
-      };
-      yield {
-        kind: 'stream_event',
-        event: {
-          eventType: 'status',
-          statusText: `Antigravity 上下文已达 ~${estimate.tokens} tokens，但归档摘要失败，暂缓压缩（${COMPACT_RETRY_COOLDOWN_TURNS} 轮后重试）`,
-        },
-      };
-    }
+            : 'agy_synthetic_compact_completed_no_summary'
+          : 'agy_synthetic_compact_completed_wrapup_deferred',
+        archivedFolders: response?.success
+          ? [this.opts.containerInput.groupFolder]
+          : undefined,
+        transcriptFiles: [
+          response?.conversationArchiveFile,
+          response?.transcriptFile,
+        ].filter(
+          (file): file is string =>
+            typeof file === 'string' && file.trim().length > 0,
+        ),
+      },
+    };
+    this.opts.log(
+      `Agy 合成压缩完成: 下一轮将开启新会话${response?.success ? '' : '，归档继续由后台补偿'}`,
+    );
   }
 
   /** 跑一轮 agy print，流式产出 text_delta，返回内部结论。 */
@@ -601,7 +597,7 @@ export class AgyRunner implements AgentRunner {
       gotOutput,
       stalled,
       interrupted: this.interrupted,
-      exitCode: spawnError ? exitCode ?? 1 : exitCode,
+      exitCode: spawnError ? (exitCode ?? 1) : exitCode,
       errorText,
     };
   }
@@ -634,7 +630,8 @@ export class AgyRunner implements AgentRunner {
       hasActiveToolCall: false,
       activeToolDurationMs:
         this.activeStartedAt > 0 ? Date.now() - this.activeStartedAt : 0,
-      hasPendingBackgroundTasks: this.activeChild !== null || this.pendingWrapup,
+      hasPendingBackgroundTasks:
+        this.activeChild !== null || this.pendingWrapup,
     };
   }
 

@@ -53,7 +53,11 @@ function sanitizedEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-function collectProcess(child: ChildProcess, timeoutMs: number, signal?: AbortSignal): Promise<{ code: number; stdout: string; stderr: string }> {
+function collectProcess(
+  child: ChildProcess,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     let stdout = '';
     let stderr = '';
@@ -119,9 +123,17 @@ function collectProcess(child: ChildProcess, timeoutMs: number, signal?: AbortSi
   });
 }
 
-async function invokeCodex(input: WorkflowInvokeInput): Promise<WorkflowInvokeResult> {
-  const model = input.model || process.env.HAPPYCLAW_CODEX_MODEL || process.env.OPENAI_MODEL || undefined;
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdock-workflow-codex-'));
+async function invokeCodex(
+  input: WorkflowInvokeInput,
+): Promise<WorkflowInvokeResult> {
+  const model =
+    input.model ||
+    process.env.HAPPYCLAW_CODEX_MODEL ||
+    process.env.OPENAI_MODEL ||
+    undefined;
+  const tmpDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'agentdock-workflow-codex-'),
+  );
   const outFile = path.join(tmpDir, 'last-message.txt');
   const args = buildCodexExecArgs({
     cwd: input.cwd,
@@ -136,7 +148,11 @@ async function invokeCodex(input: WorkflowInvokeInput): Promise<WorkflowInvokeRe
     detached: true,
   });
   const prompt = input.maxTurns
-    ? [`You must complete this task within at most ${input.maxTurns} tool-use turns.`, '', input.prompt].join('\n')
+    ? [
+        `You must complete this task within at most ${input.maxTurns} tool-use turns.`,
+        '',
+        input.prompt,
+      ].join('\n')
     : input.prompt;
   child.stdin?.end(prompt);
   const result = await collectProcess(child, input.timeoutMs, input.signal);
@@ -145,7 +161,9 @@ async function invokeCodex(input: WorkflowInvokeInput): Promise<WorkflowInvokeRe
       ? fs.readFileSync(outFile, 'utf8')
       : result.stdout.trim();
     if (result.code !== 0) {
-      throw new Error(result.stderr.trim() || output || `codex exited with ${result.code}`);
+      throw new Error(
+        result.stderr.trim() || output || `codex exited with ${result.code}`,
+      );
     }
     return {
       provider: 'codex',
@@ -159,8 +177,14 @@ async function invokeCodex(input: WorkflowInvokeInput): Promise<WorkflowInvokeRe
   }
 }
 
-async function invokeClaude(input: WorkflowInvokeInput): Promise<WorkflowInvokeResult> {
-  const model = input.model || process.env.HAPPYCLAW_MODEL || process.env.ANTHROPIC_MODEL || 'sonnet';
+async function invokeClaude(
+  input: WorkflowInvokeInput,
+): Promise<WorkflowInvokeResult> {
+  const model =
+    input.model ||
+    process.env.HAPPYCLAW_MODEL ||
+    process.env.ANTHROPIC_MODEL ||
+    'sonnet';
   const prompt = [
     `You must complete this task within at most ${input.maxTurns || 10} tool-use turns.`,
     '',
@@ -187,10 +211,18 @@ async function invokeClaude(input: WorkflowInvokeInput): Promise<WorkflowInvokeR
   });
   const result = await collectProcess(child, input.timeoutMs, input.signal);
   if (result.code !== 0) {
-    throw new Error(result.stderr.trim() || result.stdout.trim() || `claude exited with ${result.code}`);
+    throw new Error(
+      result.stderr.trim() ||
+        result.stdout.trim() ||
+        `claude exited with ${result.code}`,
+    );
   }
-  const parsed = JSON.parse(result.stdout || '{}') as { result?: string; is_error?: boolean };
-  if (parsed.is_error) throw new Error(parsed.result || 'Claude returned an error');
+  const parsed = JSON.parse(result.stdout || '{}') as {
+    result?: string;
+    is_error?: boolean;
+  };
+  if (parsed.is_error)
+    throw new Error(parsed.result || 'Claude returned an error');
   return {
     provider: 'claude',
     model,
@@ -200,7 +232,52 @@ async function invokeClaude(input: WorkflowInvokeInput): Promise<WorkflowInvokeR
   };
 }
 
-async function invokeEcho(input: WorkflowInvokeInput): Promise<WorkflowInvokeResult> {
+async function invokeAgy(
+  input: WorkflowInvokeInput,
+): Promise<WorkflowInvokeResult> {
+  const model =
+    input.model ||
+    process.env.HAPPYCLAW_AGY_MODEL ||
+    process.env.GEMINI_MODEL ||
+    'default';
+  const prompt = [
+    `You must complete this task within at most ${input.maxTurns || 10} tool-use turns.`,
+    '',
+    input.prompt,
+  ].join('\n');
+  const args = [
+    `--print=${prompt}`,
+    '--dangerously-skip-permissions',
+    '--print-timeout',
+    `${Math.max(60, Math.ceil(input.timeoutMs / 1000))}s`,
+  ];
+  if (model !== 'default') args.push('--model', model);
+  const child = spawn('agy', args, {
+    cwd: input.cwd,
+    env: sanitizedEnv(),
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
+  });
+  const result = await collectProcess(child, input.timeoutMs, input.signal);
+  if (result.code !== 0) {
+    throw new Error(
+      result.stderr.trim() ||
+        result.stdout.trim() ||
+        `agy exited with ${result.code}`,
+    );
+  }
+  return {
+    provider: 'agy',
+    model: model === 'default' ? null : model,
+    output: result.stdout.trim(),
+    stdout: result.stdout,
+    stderr: result.stderr,
+  };
+}
+
+async function invokeEcho(
+  input: WorkflowInvokeInput,
+): Promise<WorkflowInvokeResult> {
   return {
     provider: 'echo',
     model: input.model || null,
@@ -216,15 +293,29 @@ export function listWorkflowProviders(): WorkflowProviderInfo[] {
       id: 'codex',
       label: 'Codex CLI',
       available: commandExists('codex'),
-      defaultModel: process.env.HAPPYCLAW_CODEX_MODEL || process.env.OPENAI_MODEL || 'Codex CLI default',
+      defaultModel:
+        process.env.HAPPYCLAW_CODEX_MODEL ||
+        process.env.OPENAI_MODEL ||
+        'Codex CLI default',
       description: 'Runs `codex exec` with no AgentDock MCP tools injected.',
     },
     {
       id: 'claude',
       label: 'Claude CLI',
       available: commandExists('claude'),
-      defaultModel: process.env.HAPPYCLAW_MODEL || process.env.ANTHROPIC_MODEL || 'sonnet',
+      defaultModel:
+        process.env.HAPPYCLAW_MODEL || process.env.ANTHROPIC_MODEL || 'sonnet',
       description: 'Runs `claude -p` with code/file tools only.',
+    },
+    {
+      id: 'agy',
+      label: 'Antigravity CLI',
+      available: commandExists('agy'),
+      defaultModel:
+        process.env.HAPPYCLAW_AGY_MODEL ||
+        process.env.GEMINI_MODEL ||
+        'Antigravity CLI default',
+      description: 'Runs `agy --print` with no HappyClaw tools injected.',
     },
     {
       id: 'echo',
@@ -236,15 +327,23 @@ export function listWorkflowProviders(): WorkflowProviderInfo[] {
   ];
 }
 
-export async function invokeWorkflowNode(input: WorkflowInvokeInput): Promise<WorkflowInvokeResult> {
-  const provider = input.provider || (commandExists('codex') ? 'codex' : 'echo');
+export async function invokeWorkflowNode(
+  input: WorkflowInvokeInput,
+): Promise<WorkflowInvokeResult> {
+  const provider =
+    input.provider || (commandExists('codex') ? 'codex' : 'echo');
   if (provider === 'codex') {
     if (!commandExists('codex')) throw new Error('codex CLI is not available');
     return invokeCodex(input);
   }
   if (provider === 'claude') {
-    if (!commandExists('claude')) throw new Error('claude CLI is not available');
+    if (!commandExists('claude'))
+      throw new Error('claude CLI is not available');
     return invokeClaude(input);
+  }
+  if (provider === 'agy') {
+    if (!commandExists('agy')) throw new Error('agy CLI is not available');
+    return invokeAgy(input);
   }
   if (provider === 'echo') return invokeEcho(input);
   throw new Error(`Unknown workflow provider "${provider}"`);

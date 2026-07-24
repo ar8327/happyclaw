@@ -7,9 +7,12 @@ import type {
   NormalizedMessage,
   QueryResult,
 } from '../src/runner-interface.js';
-import type { RunnerPromptContract } from '../src/runner-descriptor.types.js';
 import { listRunnerManifests } from '../src/runners/index.js';
 import { fakeJsonManifest } from '../src/runners/fake-json/manifest.js';
+import { isCodexSessionResumeFailedError } from '../src/runners/codex/runner.js';
+import { convertThreadEvent } from '../src/runners/codex/event-adapter.js';
+import { evaluateSafetyLite } from '../src/runners/claude/hooks.js';
+import { readMcpServersFromCodexToml } from '../src/mcp-config-loader.js';
 import {
   evaluateRunnerAuthProbe,
   modelsForDescriptor,
@@ -21,7 +24,6 @@ async function collectRun(
   prompt = 'hello',
   opts?: {
     systemPrompt?: string;
-    promptContract?: RunnerPromptContract;
   },
 ): Promise<{
   messages: NormalizedMessage[];
@@ -52,7 +54,6 @@ async function collectRun(
   const generator = runner.runQuery({
     prompt,
     systemPrompt: opts?.systemPrompt || 'system',
-    promptContract: opts?.promptContract,
   });
   const messages: NormalizedMessage[] = [];
   let next = await generator.next();
@@ -91,6 +92,20 @@ function assertProductionManifestDescriptors(): void {
       `missing listModels for ${manifest.descriptor.id}`,
     );
   }
+}
+
+function assertCodexResumeFailureClassification(): void {
+  assert.equal(
+    isCodexSessionResumeFailedError(
+      'JSON-RPC error: thread 0199 does not exist',
+    ),
+    true,
+  );
+  assert.equal(
+    isCodexSessionResumeFailedError('failed to resume thread abc'),
+    true,
+  );
+  assert.equal(isCodexSessionResumeFailedError('rate limit exceeded'), false);
 }
 
 function assertBackendRunnerManifests(): void {
@@ -294,6 +309,11 @@ function assertClaudeRunnerIsOneShotCli(): void {
     true,
   );
   assert.equal(claudeRunner.includes('ClaudeSession'), false);
+  assert.equal(
+    claudeRunner.includes('CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS'),
+    true,
+  );
+  assert.equal(claudeRunner.includes('safety-lite'), true);
 
   assert.equal(
     fs.existsSync(path.resolve('container/agent-runner/src/providers')),
@@ -314,6 +334,133 @@ function assertClaudeRunnerIsOneShotCli(): void {
     oneShotInvokers.includes('process.env.CLAUDE_CONFIG_DIR'),
     false,
   );
+}
+
+function assertClaudeSafetyLite(): void {
+  const blocked = evaluateSafetyLite({
+    hook_event_name: 'PreToolUse',
+    tool_name: 'Bash',
+    tool_input: { command: 'rm -rf /' },
+  });
+  assert.equal(blocked.blocked, true);
+  assert.equal(
+    evaluateSafetyLite({
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'rm -rf /tmp/fixture' },
+    }).blocked,
+    false,
+  );
+}
+
+function assertCodexEventDetail(): void {
+  const tool = convertThreadEvent({
+    type: 'item.started',
+    item: {
+      id: 'command-1',
+      type: 'command_execution',
+      command: 'npm test',
+      aggregated_output: '',
+      status: 'in_progress',
+    },
+  })[0];
+  assert.equal(tool.eventType, 'tool_use_start');
+  assert.equal(tool.toolInputSummary, 'npm test');
+  assert.deepEqual(tool.toolInput, { command: 'npm test' });
+
+  const todo = convertThreadEvent({
+    type: 'item.updated',
+    item: {
+      id: 'todo-1',
+      type: 'todo_list',
+      items: [
+        { text: '完成上下文改造', completed: true },
+        { text: '跑系统测试', completed: false },
+      ],
+    },
+  })[0];
+  assert.equal(todo.eventType, 'todo_update');
+  assert.deepEqual(
+    todo.todos?.map((item) => item.status),
+    ['completed', 'pending'],
+  );
+}
+
+function assertRemediationWiring(): void {
+  const runtimeRunner = fs.readFileSync(
+    path.resolve('src/runtime-runner.ts'),
+    'utf-8',
+  );
+  assert.equal(
+    runtimeRunner.includes("path.join(groupDir, '.claude', 'skills')"),
+    true,
+  );
+  assert.equal(runtimeRunner.includes('REQUIRED_SETTINGS_ENV'), false);
+
+  const claudeHooks = fs.readFileSync(
+    path.resolve('container/agent-runner/src/runners/claude/hooks.ts'),
+    'utf-8',
+  );
+  assert.equal(claudeHooks.includes('waitForSessionWrapupResponse'), false);
+
+  const oneShot = fs.readFileSync(
+    path.resolve('container/agent-runner/src/runners/one-shot-invokers.ts'),
+    'utf-8',
+  );
+  assert.equal(
+    (oneShot.match(/HAPPYCLAW_INVOKE_DEPTH/g) || []).length >= 3,
+    true,
+  );
+
+  const workflow = fs.readFileSync(
+    path.resolve('src/workflow-invokers.ts'),
+    'utf-8',
+  );
+  assert.equal(workflow.includes("provider === 'agy'"), true);
+
+  const runnerEntry = fs.readFileSync(
+    path.resolve('container/agent-runner/src/index.ts'),
+    'utf-8',
+  );
+  assert.equal(runnerEntry.includes("'config.toml'"), true);
+  assert.equal(runnerEntry.includes("'config.json'"), false);
+}
+
+function assertCodexMcpTomlParsing(): void {
+  const dir = fs.mkdtempSync(path.join(process.cwd(), '.tmp-codex-mcp-'));
+  const configFile = path.join(dir, 'config.toml');
+  fs.writeFileSync(
+    configFile,
+    [
+      '[mcp_servers.local]',
+      'command = "node"',
+      'args = ["server.js", "--stdio"]',
+      'enabled = true',
+      '',
+      '[mcp_servers.local.env]',
+      'MODE = "test"',
+      '',
+      '[mcp_servers."remote-api"]',
+      'url = "https://example.invalid/mcp"',
+      'headers = { Authorization = "Bearer test", Version = "1" }',
+    ].join('\n'),
+  );
+  try {
+    assert.deepEqual(readMcpServersFromCodexToml(configFile), {
+      local: {
+        command: 'node',
+        args: ['server.js', '--stdio'],
+        enabled: true,
+        env: { MODE: 'test' },
+      },
+      'remote-api': {
+        url: 'https://example.invalid/mcp',
+        headers: { Authorization: 'Bearer test', Version: '1' },
+      },
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 function assertRunnerProfileSchemaValidation(): void {
@@ -512,45 +659,8 @@ async function assertBaseCliRunnerGenericError(): Promise<void> {
   assert.equal(result.genericError, 'GENERIC_ERROR: fake provider error');
 }
 
-async function assertBaseCliRunnerEnvPromptContract(): Promise<void> {
-  const { messages } = await collectRun('hello', {
-    systemPrompt: 'env-system-prompt',
-    promptContract: {
-      mode: 'env',
-      dynamicContextReload: 'turn',
-    },
-  });
-  const textDelta = messages.find(
-    (message) =>
-      message.kind === 'stream_event' &&
-      message.event.eventType === 'text_delta',
-  );
-  assert.equal(
-    textDelta?.kind === 'stream_event' ? textDelta.event.text : null,
-    'env-system-prompt',
-  );
-}
-
-async function assertBaseCliRunnerInstructionFilePromptContract(): Promise<void> {
-  const { messages } = await collectRun('hello', {
-    systemPrompt: 'file-system-prompt',
-    promptContract: {
-      mode: 'instructions_file',
-      dynamicContextReload: 'turn',
-    },
-  });
-  const textDelta = messages.find(
-    (message) =>
-      message.kind === 'stream_event' &&
-      message.event.eventType === 'text_delta',
-  );
-  assert.equal(
-    textDelta?.kind === 'stream_event' ? textDelta.event.text : null,
-    'file-system-prompt',
-  );
-}
-
 assertProductionManifestDescriptors();
+assertCodexResumeFailureClassification();
 assertBackendRunnerManifests();
 assertSharedRunnerHealthIsSynced();
 assertProviderStateOpaque();
@@ -558,6 +668,10 @@ assertBackendRunnerChecksAreDescriptorDriven();
 assertLegacyProviderSettingsSurfaceRemoved();
 assertRuntimeProfileInjectionContract();
 assertClaudeRunnerIsOneShotCli();
+assertClaudeSafetyLite();
+assertCodexEventDetail();
+assertRemediationWiring();
+assertCodexMcpTomlParsing();
 assertRunnerProfileSchemaValidation();
 assertInvokeAgentIsRegistryDriven();
 assertDescriptorAuthProbeWorks();
@@ -566,7 +680,5 @@ assertMemoryRouteUsesDynamicRunnerModels();
 await assertFakeRunnerContract();
 await assertBaseCliRunnerRecoverableError();
 await assertBaseCliRunnerGenericError();
-await assertBaseCliRunnerEnvPromptContract();
-await assertBaseCliRunnerInstructionFilePromptContract();
 
 console.log('runner contract tests passed');

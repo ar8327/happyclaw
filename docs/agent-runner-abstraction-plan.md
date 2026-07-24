@@ -5,6 +5,8 @@
 目标不是为了最小变更接入某一个新命令行工具，而是把 runner 做成项目内的一等扩展对象。改造完成后，新增一个命令行类 agent 工具时，主要工作应集中在实现该工具的 runner adapter，而不是在后端、前端、memory、prompt、invoke_agent 等多个位置补硬编码分支。
 
 > 实施状态：核心改造已落地。当前生产 runner 实现集中在 `container/agent-runner/src/runners/{id}/`，descriptor、health helper、StreamEvent 和图片检测逻辑通过 `shared/` 同步到各子项目。
+>
+> 后续上下文投递与记忆系统改造已经由 [context-parity-and-memory-remediation.md](context-parity-and-memory-remediation.md) 接续。当前实现以 `ContextBundle + applyContext()` 为准，本文件中由 `PromptMode` 直接驱动投递的设计仅保留为历史背景。
 
 ## 1. 当前结论
 

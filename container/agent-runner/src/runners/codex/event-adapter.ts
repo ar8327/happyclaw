@@ -5,10 +5,7 @@
  * query-loop and frontend.
  */
 
-import type {
-  CodexThreadEvent,
-  CodexThreadItem,
-} from './session.js';
+import type { CodexThreadEvent, CodexThreadItem } from './session.js';
 import type { StreamEvent } from '../../types.js';
 
 /**
@@ -26,6 +23,9 @@ export function convertThreadEvent(event: CodexThreadEvent): StreamEvent[] {
       return handleItemStarted(event);
 
     case 'item.updated':
+      if (event.item.type === 'todo_list') {
+        return [buildTodoEvent(event.item)];
+      }
       // Codex item.updated carries the latest full snapshot instead of a true
       // delta. Downstream consumers append text_delta payloads, so emitting the
       // snapshot here would duplicate content in streaming views.
@@ -55,36 +55,62 @@ export function convertThreadEvent(event: CodexThreadEvent): StreamEvent[] {
   }
 }
 
-function handleItemStarted(event: Extract<CodexThreadEvent, { type: 'item.started' }>): StreamEvent[] {
+function handleItemStarted(
+  event: Extract<CodexThreadEvent, { type: 'item.started' }>,
+): StreamEvent[] {
   const item = event.item;
   switch (item.type) {
     case 'command_execution':
-      return [{
-        eventType: 'tool_use_start',
-        toolUseId: item.id,
-        toolName: 'Bash',
-      }];
+      return [
+        {
+          eventType: 'tool_use_start',
+          toolUseId: item.id,
+          toolName: 'Bash',
+          toolInputSummary: item.command.slice(0, 500),
+          toolInput: { command: item.command },
+        },
+      ];
 
     case 'mcp_tool_call':
-      return [{
-        eventType: 'tool_use_start',
-        toolUseId: item.id,
-        toolName: `mcp__${item.server}__${item.tool}`,
-      }];
+      return [
+        {
+          eventType: 'tool_use_start',
+          toolUseId: item.id,
+          toolName: `mcp__${item.server}__${item.tool}`,
+          toolInputSummary: summarizeToolInput(item.arguments),
+          toolInput:
+            item.arguments &&
+            typeof item.arguments === 'object' &&
+            !Array.isArray(item.arguments)
+              ? (item.arguments as Record<string, unknown>)
+              : { input: item.arguments },
+        },
+      ];
 
     case 'file_change':
-      return [{
-        eventType: 'tool_use_start',
-        toolUseId: item.id,
-        toolName: 'Edit',
-      }];
+      return [
+        {
+          eventType: 'tool_use_start',
+          toolUseId: item.id,
+          toolName: 'Edit',
+          toolInputSummary: item.changes
+            .map((change) => `${change.kind}: ${change.path}`)
+            .join(', ')
+            .slice(0, 500),
+          toolInput: { changes: item.changes },
+        },
+      ];
 
     case 'web_search':
-      return [{
-        eventType: 'tool_use_start',
-        toolUseId: item.id,
-        toolName: 'WebSearch',
-      }];
+      return [
+        {
+          eventType: 'tool_use_start',
+          toolUseId: item.id,
+          toolName: 'WebSearch',
+          toolInputSummary: item.query.slice(0, 500),
+          toolInput: { query: item.query },
+        },
+      ];
 
     case 'context_compaction':
       return [];
@@ -93,18 +119,16 @@ function handleItemStarted(event: Extract<CodexThreadEvent, { type: 'item.starte
       return [];
 
     case 'todo_list':
-      // Emit as a status update
-      return [{
-        eventType: 'status',
-        statusText: `Todo: ${item.items.length} items`,
-      }];
+      return [buildTodoEvent(item)];
 
     default:
       return [];
   }
 }
 
-function handleItemCompleted(event: Extract<CodexThreadEvent, { type: 'item.completed' }>): StreamEvent[] {
+function handleItemCompleted(
+  event: Extract<CodexThreadEvent, { type: 'item.completed' }>,
+): StreamEvent[] {
   const item = event.item;
   const events: StreamEvent[] = [];
 
@@ -153,7 +177,7 @@ function handleItemCompleted(event: Extract<CodexThreadEvent, { type: 'item.comp
       break;
 
     case 'todo_list':
-      // Nothing to emit on completion
+      events.push(buildTodoEvent(item));
       break;
 
     case 'error':
@@ -170,18 +194,48 @@ function handleItemCompleted(event: Extract<CodexThreadEvent, { type: 'item.comp
   return events;
 }
 
-function handleTurnFailed(event: Extract<CodexThreadEvent, { type: 'turn.failed' }>): StreamEvent[] {
-  return [{
-    eventType: 'status',
-    statusText: `Turn failed: ${event.error.message}`,
-  }];
+function summarizeToolInput(input: unknown): string {
+  if (typeof input === 'string') return input.slice(0, 500);
+  try {
+    return JSON.stringify(input).slice(0, 500);
+  } catch {
+    return String(input).slice(0, 500);
+  }
 }
 
-function handleError(event: Extract<CodexThreadEvent, { type: 'error' }>): StreamEvent[] {
-  return [{
-    eventType: 'status',
-    statusText: `Error: ${event.message}`,
-  }];
+function buildTodoEvent(
+  item: Extract<CodexThreadItem, { type: 'todo_list' }>,
+): StreamEvent {
+  return {
+    eventType: 'todo_update',
+    todos: item.items.map((todo, index) => ({
+      id: `${item.id}:${index}`,
+      content: todo.text,
+      status: todo.completed ? 'completed' : 'pending',
+    })),
+  };
+}
+
+function handleTurnFailed(
+  event: Extract<CodexThreadEvent, { type: 'turn.failed' }>,
+): StreamEvent[] {
+  return [
+    {
+      eventType: 'status',
+      statusText: `Turn failed: ${event.error.message}`,
+    },
+  ];
+}
+
+function handleError(
+  event: Extract<CodexThreadEvent, { type: 'error' }>,
+): StreamEvent[] {
+  return [
+    {
+      eventType: 'status',
+      statusText: `Error: ${event.message}`,
+    },
+  ];
 }
 
 export type { CodexThreadEvent, CodexThreadItem };

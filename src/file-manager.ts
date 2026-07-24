@@ -25,7 +25,6 @@ export interface FileEntry {
 export const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 const SYSTEM_PATHS = [
   'logs',
-  'AGENTS.md',
   'CLAUDE.md',
   '.Codex',
   '.codex',

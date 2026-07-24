@@ -15,7 +15,7 @@
 当前 AgentDock 更接近一个自托管的本地 Agent 工作台：
 
 - **输入**：飞书 / Telegram / QQ / Web 界面消息，统一绑定到同一个本地操作者名下的 Session
-- **执行**：本地 runtime 启动 `container/agent-runner` 中的 Claude 或 Codex provider，不再区分 Docker 与宿主机双执行模式
+- **执行**：本地 runtime 启动 `container/agent-runner` 中的 Claude、Codex 或 Antigravity runner，不再区分 Docker 与宿主机双执行模式
 - **输出**：Web 实时流式推送（stdout）；IM 渠道通过 Agent 显式调用 `send_message` 发送
 - **记忆**：Memory Orchestrator 管理持久记忆与 wrapup 流程，记忆能力通过 `memory:{ownerKey}` Session 暴露
 
@@ -40,8 +40,8 @@
 | `src/routes/config.ts` | Claude / 飞书配置、system settings、Session env、当前 operator 的 IM 通道配置 |
 | `src/routes/monitor.ts` | 系统状态：Session runtime 列表、队列状态、健康检查（`GET /api/health` 无需认证） |
 | `src/routes/memory.ts` | 记忆文件读写、全文检索、Memory Agent 状态/手动触发（`/api/memory/status`、`trigger-wrapup`、`trigger-global-sleep`） |
-| `src/routes/memory-agent.ts` | Memory Agent 内部 HTTP 端点（`/api/internal/memory/query`、`remember`、`session-wrapup`），agent-runner 通过 Bearer token 调用 |
-| `src/memory-agent.ts` | `MemoryOrchestrator`：复用共享 session-launcher 发起 one-shot memory request、串行化同一用户请求、落盘轻量 runtime state、idle 清理与 global_sleep 调度 |
+| `src/routes/memory-agent.ts` | Memory Agent 内部 HTTP 端点（`search`、`query`、`remember`、`session-wrapup`），agent-runner 通过 Bearer token 调用 |
+| `src/memory-agent.ts` | `MemoryOrchestrator`：并行只读查询车道、串行写入车道、SQLite 持久队列、批量 wrapup、保留策略与 global_sleep 调度 |
 | `src/routes/tasks.ts` | 定时任务 CRUD + 执行日志查询 |
 | `src/routes/skills.ts` | Skills 文件系统发现、启用/禁用、主机同步 |
 | `src/routes/browse.ts` | 目录浏览 API（`GET/POST /api/browse/directories`，受挂载白名单约束） |
@@ -114,7 +114,7 @@
 
 ### 2.3 本地 Runtime 执行
 
-当前主链路只有**本地 unified runtime**。`src/session-launcher.ts` 提供启动门面，`src/runtime-runner.ts` 负责准备环境、目录边界、子进程与日志处理，然后启动 `container/agent-runner/` 中的 Claude 或 Codex provider。
+当前主链路只有**本地 unified runtime**。`src/session-launcher.ts` 提供启动门面，`src/runtime-runner.ts` 负责准备环境、目录边界、子进程与日志处理，然后启动 `container/agent-runner/` 中的 Claude、Codex 或 Antigravity runner。
 
 更细的 runner 契约说明见 `docs/agent-runner-contract.md`。
 
@@ -127,6 +127,7 @@
 - **消息路由**：stdout 仅输出到 Web 端；IM 消息必须通过 `send_message(channel=...)` 显式发送
 - **敏感数据过滤**：StreamEvent 中的 `toolInputSummary` 会过滤 `ANTHROPIC_API_KEY` 等环境变量名
 - **能力声明校验**：container 启动时会用 `declaredIpcCapabilities` 对拍 runner 实例的 `ipcCapabilities`，声明和实现不一致直接 fail-fast
+- **上下文投递**：`ContextBundle` 按 `static / session / turn` 组织 canonical section；query-loop 每轮调用 `applyContext()`。descriptor 的 `nativeProvides` 用于过滤 runner 原生内容，conformance 测试保证 section 不重不漏
 - **Codex 升级约束**：`container/agent-runner/package.json` 里的 `@openai/codex-sdk` 已锁定精确版本。升级前必须复验 `model_instructions_file` 逐 turn 重读仍然成立
 - **Antigravity (agy) runner**：`runners/agy/`，print 模式逐轮 spawn `agy --print=...`，`--conversation <uuid>` 续接。关键机制：
   - **会话隔离 HOME**：agy 无 config-dir 环境变量，runner 用 `HAPPYCLAW_AGY_HOME`（descriptor `configDirEnv`，宿主机自动指向 session 的 `.agy/`）作为子进程 `$HOME`；macOS 认证 token 在 login keychain（service=`gemini`），keychain 路径按 `$HOME` 推导，因此 `prepareAgyHome` 会把 `Library/Keychains` 软链回真实 HOME
@@ -134,7 +135,7 @@
   - **MCP 工具**：写会话 HOME 的 `~/.gemini/config/mcp_config.json`（stdio: `command/args/env`，SSE: `serverUrl`），内置 happyclaw MCP server 全链路可用
   - **resume 锚点**：从 `--log-file` 解析 `Print mode: conversation=<uuid>`，兜底读 `cache/last_conversations.json`；对未知 conversation id agy 会**静默新建会话**（不报错），runner 检测锚点不一致并发 status 事件提醒
   - **图片输入**：print 模式无直接附图入口（CLI 无 media 参数），runner 把 base64 图片落盘到临时目录，提示词附绝对路径清单，由 agent 用自带文件查看工具读取（实测可正确识别，含工作区外路径）
-  - **合成压缩**：agy 无原生 compact（print 模式 `/compact` 会被当普通消息）。runner 每轮后从 conversation SQLite 的 `gen_metadata` protobuf（路径 f1→f4→f2）解出各请求 prompt tokens 取最大值作为上下文估算（`context-tracker.ts`，回落 `step_payload` 字节/4），超过阈值（默认 25 万，profile `compactThresholdTokens` / env `HAPPYCLAW_AGY_COMPACT_THRESHOLD_TOKENS`，0 关闭）即触发 `session_wrapup` 归档，成功后经 `sessionControl` 清除 resume 锚点、下一轮开新会话并把 `continuationSummary` 注入首条消息；wrapup 失败则保持原会话并冷却 3 轮再试。注意 agy 基线（自身系统提示词+工具）约 1.8 万 tokens
+  - **合成压缩**：agy 无原生 compact。runner 超过 token 阈值后提交 `session_wrapup`，最多等待 5 秒获取确定性交接摘要，无论归档响应是否成功都会清除 resume 锚点并在下一轮开启新会话；未完成归档由宿主持久队列补偿。注意 agy 基线约 1.8 万 tokens
   - **已知抖动**：agy 偶发启动期死挂（零输出、零日志、`--print-timeout` 不触发），runner 内置活性看门狗（stdout/stderr + 日志文件 + conversations SQLite WAL mtime，默认 180s，`HAPPYCLAW_AGY_STALL_TIMEOUT_MS` 可调），未产出任何输出且未建会话时自动重试一次
 
 **Agent Runner 模块结构**（`container/agent-runner/src/`）：
@@ -143,13 +144,13 @@
 |------|------|
 | `index.ts` | 主入口：stdin 读取、provider 选择、query loop 启动 |
 | `types.ts` | 共享类型定义（Runtime 输入输出等），re-export StreamEvent |
-| `runner-interface.ts` | AgentRunner 抽象接口、`QueryConfig.systemPrompt` 和 runtime 行为边界 |
-| `system-prompt.ts` | 共享的 system prompt builder，负责每 turn 刷新动态上下文与 source channel 提取 |
+| `runner-interface.ts` | AgentRunner 抽象接口、`applyContext()`、`QueryConfig` 和 runtime 行为边界 |
+| `system-prompt.ts` | `ContextBundle` builder，负责按 descriptor 过滤原生 section 并每 turn 刷新动态上下文 |
 | `utils.ts` | 纯工具函数（字符串截断、敏感数据脱敏、文件名清理等） |
 | `query-loop.ts` | provider 无关的查询编排、IPC polling、overflow / interrupt / drain 处理 |
-| `happyclaw-mcp-server.ts` | Claude / Codex 共用的 stdio MCP server 入口 |
-| `providers/claude/claude-stream-processor.ts` | StreamEventProcessor 类：流式事件缓冲、工具状态追踪、SubAgent 消息转换 |
-| `providers/claude/claude-agent-defs.ts` | 预定义 SubAgent（code-reviewer、web-researcher） |
+| `happyclaw-mcp-server.ts` | 各 runner 共用的 stdio MCP server 入口，按 native capability 过滤插件 |
+| `runners/claude/event-adapter.ts` | Claude 流式事件缓冲、工具状态追踪与 SubAgent 消息转换 |
+| `runners/claude/agent-defs.ts` | Claude 独有的预定义 SubAgent（code-reviewer、web-researcher） |
 | `image-detector.ts` | 图片 MIME 检测（由 `shared/image-detector.ts` 构建时同步生成，勿直接编辑） |
 | `stream-event.types.ts` | StreamEvent 类型（由 `shared/stream-event.ts` 构建时同步生成，勿直接编辑） |
 
@@ -171,26 +172,31 @@
 记忆能力现在由 `MemoryOrchestrator`、`RuntimeRequestExecutor`、memory hooks 和 `MemoryProfile` 共同承接。Memory 不再是独立于 Session 模型之外的特殊系统，而是一个带特殊 orchestration 语义的 `memory:{ownerKey}` Session 配置投影。
 
 **架构**：
-- `MemoryOrchestrator` 只负责串行化同一用户的 memory 请求，并在空闲 10 分钟后清理内存里的协调器条目
+- `MemoryOrchestrator` 使用两个语义车道：`query` 在可配置并行度的只读车道运行；`remember`、wrapup、索引修复与 `global_sleep` 在严格互斥的写车道运行
+- 写请求先进入 SQLite `memory_write_queue`，支持去重、进程重启恢复、三次退避重试、失败查询和已完成记录清理
 - `RuntimeRequestExecutor` 负责统一执行管线，memory 通过 `MemoryPromptBuilderHook`、`RuntimeStatePersistenceHook`、`OneShotCloseHook` 等 hook 拼装 prompt、收集响应、落盘轻量 runtime state
-- `MemoryProfile` 在 runtime 侧下沉工具白名单、额外目录和禁用 user MCP 的约束
+- query 只选择可强制只读的 runner。Claude 只开放 Read、Grep、Glob；Codex 使用 read-only sandbox；Antigravity 不参与 query runner 选择
 - 每个 memory 请求都会复用共享 `session-launcher` 启动一次性 runtime turn，不复用上一次的 `providerSessionId`、`resumeAnchor`、`providerState`
 - memory 的真实状态只保存在 `data/memory/{ownerKey}/` 的文件系统里，不参与 AgentDock 的 synthetic compact
-- 仓库里仍保留 `container/memory-agent/` 旧实验实现，但当前主链路已经不再依赖它
+- query 完成后会校验 memory 目录快照。发现意外写入时记录告警；索引问题以 dedup repair backlog 延迟处理
+- 同一波最多八个 session wrapup 合并为一次 LLM 调用。folder 与 cursor 在入队和提交时双重去重
 
-**四种操作**：
+**主要操作**：
 
 | 操作 | 触发方式 | 语义 |
 |------|---------|------|
+| `search` | Agent 调用 `memory_search` MCP 工具 → HTTP | 直接对 Markdown 和 gzip transcript 做关键词打分，毫秒级只读返回 |
 | `query` | Agent 调用 `memory_query` MCP 工具 → HTTP → Manager | 同步查询记忆，返回结果 |
-| `remember` | Agent 调用 `memory_remember` MCP 工具 → HTTP → Manager | 异步存储信息 |
-| `session_wrapup` | Session runtime 收尾时自动触发 | 导出对话转录，生成印象/知识，更新索引 |
-| `global_sleep` | 定时调度（30min 检查间隔，需满足三个条件） | 备份索引、压缩合并、归档旧印象、knowledge 拆分维护、更新 personality |
+| `remember` | Agent 调用 `memory_remember` MCP 工具 → HTTP → journal | 持久入队后异步存储 |
+| `session_wrapup` | Session runtime 收尾时自动触发 | 导出转录、立即生成确定性交接摘要，再批量生成印象与知识 |
+| `repair_sweep` | query 报告索引问题 | 批量核验并执行仍然有效的建议 |
+| `global_sleep` | 每 30 分钟检查并持久入队 | 压缩索引、归档旧印象、维护 knowledge 与 personality |
 
 **global_sleep 触发条件**：
 1. 距上次 global_sleep 超过 6 小时（或从未执行过）
-2. 该用户没有活跃的 Agent 会话
-3. 有待处理的 wrapup（`state.json` 中 `pendingWrapups` 非空）
+2. 有待处理的 wrapup（`state.json` 中 `pendingWrapups` 非空）
+
+主会话是否活跃不再参与条件。global_sleep 进入写队列后按写车道互斥执行，不阻塞只读 query。
 
 **数据目录**（`data/memory/{ownerKey}/`）：
 ```
@@ -202,18 +208,21 @@ impressions/          # 每次 session_wrapup 生成的语义索引
   archived/           #   超过 6 个月的旧索引（global_sleep 归档，query 兜底检索）
 transcripts/          # 原始对话记录
   {YYYY-MM-DD}/       #   按日期分目录
-    {folder}-{ts}.md  #   每次 session_wrapup 导出的转录
+    {folder}-{ts}.md  #   每次 session_wrapup 导出的转录，30 天后压缩为 .md.gz
 ```
+
+宿主保留策略每 6 小时检查一次：transcript 30 天后 gzip；`backups/` 保留最近 10 份；memory 日志和已完成队列保留 30 天；`lastSessionWrapups` 只保留活跃 Session 的 JID。
 
 **可配置超时**（Web 设置页 `/api/config/system`）：
 
 | 设置 | 默认 | 范围 |
 |------|------|------|
 | `memoryQueryTimeout` | 60s | 10s ~ 600s |
+| `memoryQueryConcurrency` | 3 | 1 ~ 10 |
 | `memoryGlobalSleepTimeout` | 300s | 60s ~ 3600s |
 | `memorySendTimeout` | 120s | 30s ~ 3600s |
 
-**Web UI**（`/memory` 页面）：Memory Agent 状态面板（上次 wrapup/sleep 时间、待处理数）、手动触发按钮、超时设置。
+**Web UI**（`/memory` 页面）：状态面板展示读写车道在途数、查询等待数、持久队列 pending/running/failed、上次 wrapup/sleep 时间；深度整理可在主会话活跃时直接入队。
 
 ## 3. 数据流
 
@@ -475,12 +484,12 @@ scripts/                      # 构建辅助脚本
 ### 记忆
 - `GET /api/memory/sources` · `GET /api/memory/search`（全文检索）
 - `GET|PUT /api/memory/file`
-- `GET /api/memory/status` — Memory Agent 状态（上次 wrapup/sleep、待处理数）
+- `GET /api/memory/status` — Memory 状态、读写车道与持久队列指标
 - `POST /api/memory/trigger-wrapup` · `POST /api/memory/trigger-global-sleep` — 手动触发
-- `POST /api/memory/stop-active-sessions` — 停止活跃会话（深度整理前置操作）
+- `POST /api/memory/stop-active-sessions` — 运维用途；不再是深度整理前置条件
 
 ### 记忆（内部端点，agent-runner 调用）
-- `POST /api/internal/memory/query` · `POST /api/internal/memory/remember` · `POST /api/internal/memory/session-wrapup`
+- `POST /api/internal/memory/search` · `POST /api/internal/memory/query` · `POST /api/internal/memory/remember` · `POST /api/internal/memory/session-wrapup`
 
 ### 配置
 - `GET|PUT /api/config/claude` · `PUT /api/config/claude/secrets`
@@ -589,18 +598,21 @@ scripts/                      # 构建辅助脚本
 ### 8.10 Memory Agent 生命周期（Fork 特有）
 
 ```
-Session runtime 启动 → Agent 对话中调用 memory_query/memory_remember
-         → HTTP → MemoryOrchestrator.runSerialized()
-         → prepareExecutionContext() + runSessionAgent() 发起 one-shot runtime turn
-         → 当前请求结束后立刻关闭 provider 会话，不保留 resume 入口
+Session runtime 启动 → Agent 普通查找先调用 memory_search
+         → HTTP → 宿主直接检索 Markdown / gzip transcript
+
+复杂回忆调用 memory_query → MemoryOrchestrator 只读并行车道
+         → prepareExecutionContext() + runSessionAgent() 发起只读 one-shot turn
+         → query 只报告 repair suggestion，不写 memory 目录
 
 Session runtime 收尾 → export transcripts
-         → orchestrator.send(session_wrapup) → one-shot runtime 生成印象/更新索引
+         → 立即写 continuation handoff + memory_write_queue
+         → 同 owner 最多 8 项批量 one-shot runtime 生成印象/更新索引
          → folder 加入 pendingWrapups
 
 每 30 分钟 → runMemoryGlobalSleepIfNeeded() 检查当前 operator
-          → 满足条件（6h+未 sleep、无活跃会话、有 pending）
-          → orchestrator.send(global_sleep) → one-shot runtime 压缩/归档旧印象/knowledge 拆分/备份
+          → 满足条件（6h+未 sleep、有 pending）后持久入队
+          → 写车道执行 global_sleep；主会话与 query 车道不阻塞
 
 协调器空闲 10 分钟 → 从内存 map 中移除，下次请求重新创建
 ```
@@ -694,14 +706,14 @@ make help          # 列出所有可用的 make 命令
 - 后端：3000（Hono + WebSocket）
 - 前端开发服务器：5173（Vite，代理 `/api` 和 `/ws` 到后端）
 
-### 三个主链路项目和一个历史实验项目
+### 四个活跃项目
 
 | 项目 | 目录 | 用途 |
 |------|------|------|
 | 主服务 | `/`（根目录） | 后端服务 |
 | Web 前端 | `web/` | React SPA |
+| Agent Runner Core | `container/agent-runner-core/` | ContextBundle、共享 prompt 与 MCP 插件 |
 | Agent Runner | `container/agent-runner/` | 本地 runtime 执行引擎 |
-| Legacy Memory Agent | `container/memory-agent/` | 历史实验实现，当前 Memory 主链路不依赖 |
 
 每个项目有独立的 `package.json`、`tsconfig.json`、`node_modules/`。此外，`shared/` 目录存放跨项目的共享类型定义（如 `stream-event.ts`），构建时通过 `make sync-types` 同步到各项目。
 
@@ -749,7 +761,7 @@ make help          # 列出所有可用的 make 命令
 
 1. `shared/stream-event.ts` — 在 `StreamEventType` 联合类型中添加新成员，在 `StreamEvent` 接口中添加对应字段
 2. 运行 `make sync-types` 同步到三个子项目
-3. `container/agent-runner/src/providers/claude/claude-stream-processor.ts` 或对应 provider 的事件适配层中添加发射逻辑
+3. `container/agent-runner/src/runners/{id}/event-adapter.ts` 或对应 runner 的事件适配层中添加发射逻辑
 4. `web/src/stores/chat.ts` — 在 `handleStreamEvent()` / `applyStreamEvent()` 中添加处理分支
 
 ### 新增 IM 集成渠道

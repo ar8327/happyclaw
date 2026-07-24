@@ -7,6 +7,7 @@
 
 import type { StreamEvent } from './types.js';
 import type { RunnerPromptContract } from './runner-descriptor.types.js';
+import type { ContextSection } from 'agentdock-agent-runner-core';
 
 // ─── 归一化消息类型 ─────────────────────────────────────
 
@@ -22,7 +23,10 @@ export type NormalizedMessage =
       kind: 'error';
       message: string;
       recoverable: boolean;
-      errorType?: 'context_overflow' | 'unrecoverable_transcript' | 'session_resume_failed';
+      errorType?:
+        | 'context_overflow'
+        | 'unrecoverable_transcript'
+        | 'session_resume_failed';
     }
   | { kind: 'resume_anchor'; anchor: string };
 
@@ -34,7 +38,10 @@ export interface UsageInfo {
   costUSD: number;
   durationMs: number;
   numTurns: number;
-  modelUsage?: Record<string, { inputTokens: number; outputTokens: number; costUSD: number }>;
+  modelUsage?: Record<
+    string,
+    { inputTokens: number; outputTokens: number; costUSD: number }
+  >;
 }
 
 // ─── Query 配置 ─────────────────────────────────────────
@@ -53,6 +60,20 @@ export interface QueryConfig {
   resumeAt?: string;
   images?: Array<{ data: string; mimeType?: string }>;
   permissionMode?: string;
+}
+
+export interface RenderedRunnerContext {
+  sessionStatic: string;
+  turnDynamic: string;
+  sections: ContextSection[];
+}
+
+export function combineRenderedContext(
+  context: Pick<RenderedRunnerContext, 'sessionStatic' | 'turnDynamic'>,
+): string {
+  return [context.sessionStatic, context.turnDynamic]
+    .filter(Boolean)
+    .join('\n');
 }
 
 // ─── Query 结果 ─────────────────────────────────────────
@@ -123,6 +144,12 @@ export interface AgentRunner {
   initialize(): Promise<void>;
 
   /**
+   * Apply freshly rendered HappyClaw context for the next turn.
+   * query-loop invokes this before every runQuery call.
+   */
+  applyContext(context: RenderedRunnerContext): Promise<void>;
+
+  /**
    * 执行一次查询。
    *
    * 实现须：
@@ -146,7 +173,10 @@ export interface AgentRunner {
    * Codex 实现应将消息累积到 pendingMessages。
    * @returns 被拒绝的图片原因列表（空 = 全部通过）
    */
-  pushMessage(text: string, images?: Array<{ data: string; mimeType?: string }>): string[];
+  pushMessage(
+    text: string,
+    images?: Array<{ data: string; mimeType?: string }>,
+  ): string[];
 
   /** 中断当前查询 */
   interrupt(): Promise<void>;

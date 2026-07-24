@@ -9,12 +9,14 @@ import {
   getWebDeps,
 } from '../web-context.js';
 import {
+  getMemoryWriteQueueMetrics,
   getRegisteredGroup,
   getRouterState,
   getSessionRecord,
   getWorkerSessionRecord,
   getJidsByFolder,
 } from '../db.js';
+import { readMemoryState } from '../memory-agent.js';
 import { getSystemSettings } from '../runtime-config.js';
 import { logger } from '../logger.js';
 import { getDefaultRunnerId } from '../runner-registry.js';
@@ -75,9 +77,7 @@ async function getClaudeCodeVersion(): Promise<string | null> {
   return null;
 }
 
-function resolveRuntimeAccess(
-  runtimeJid: string,
-): {
+function resolveRuntimeAccess(runtimeJid: string): {
   accessJid: string | null;
   sessionId: string | null;
   sessionName: string | null;
@@ -93,15 +93,18 @@ function resolveRuntimeAccess(
     const folder = parentSession?.id?.startsWith('main:')
       ? parentSession.id.slice('main:'.length)
       : null;
-    const accessJid = workerMeta?.source_chat_jid || (folder
-      ? getJidsByFolder(folder).find((jid) => jid.startsWith('web:')) || ''
-      : '');
+    const accessJid =
+      workerMeta?.source_chat_jid ||
+      (folder
+        ? getJidsByFolder(folder).find((jid) => jid.startsWith('web:')) || ''
+        : '');
     if (!workerSession || !accessJid) return null;
     return {
       accessJid,
       sessionId: workerSession.id,
       sessionName: workerSession.name,
-      runnerId: workerSession.runner_id || parentSession?.runner_id || defaultRunnerId,
+      runnerId:
+        workerSession.runner_id || parentSession?.runner_id || defaultRunnerId,
     };
   }
 
@@ -110,7 +113,9 @@ function resolveRuntimeAccess(
     const accessJid = runtimeJid.slice(0, agentSep);
     const agentId = runtimeJid.slice(agentSep + '#agent:'.length);
     const group = getRegisteredGroup(accessJid);
-    const workerSession = agentId ? getSessionRecord(`worker:${agentId}`) : undefined;
+    const workerSession = agentId
+      ? getSessionRecord(`worker:${agentId}`)
+      : undefined;
     const parentSession = workerSession?.parent_session_id
       ? getSessionRecord(workerSession.parent_session_id)
       : undefined;
@@ -119,7 +124,8 @@ function resolveRuntimeAccess(
       accessJid,
       sessionId: workerSession.id,
       sessionName: workerSession.name,
-      runnerId: workerSession.runner_id || parentSession?.runner_id || defaultRunnerId,
+      runnerId:
+        workerSession.runner_id || parentSession?.runner_id || defaultRunnerId,
     };
   }
 
@@ -134,7 +140,8 @@ function resolveRuntimeAccess(
                 ? directSession.parent_session_id.slice('main:'.length)
                 : null;
             return folder
-              ? getJidsByFolder(folder).find((jid) => jid.startsWith('web:')) || null
+              ? getJidsByFolder(folder).find((jid) => jid.startsWith('web:')) ||
+                  null
               : null;
           })()
         : null;
@@ -160,7 +167,8 @@ function resolveRuntimeAccess(
 function normalizeRuntimeLabel(raw: string | null | undefined): string | null {
   if (!raw) return null;
   if (raw.startsWith('host-')) return `local-${raw.slice('host-'.length)}`;
-  if (raw.startsWith('container-')) return `local-${raw.slice('container-'.length)}`;
+  if (raw.startsWith('container-'))
+    return `local-${raw.slice('container-'.length)}`;
   return raw;
 }
 
@@ -282,6 +290,31 @@ monitorRoutes.get('/status', authMiddleware, async (c) => {
     queueLength,
     uptime: Math.floor(process.uptime()),
     sessions: runtimeSessions,
+    memory: (() => {
+      const metrics = deps.memoryOrchestrator?.getMetrics(authUser.id) || {
+        readLane: {
+          inFlight: 0,
+          waiting: 0,
+          concurrency: getSystemSettings().memoryQueryConcurrency,
+        },
+        writeLane: { inFlight: 0, coordinators: 0 },
+        queue: getMemoryWriteQueueMetrics(authUser.id),
+      };
+      const lastGlobalSleep = readMemoryState(authUser.id).lastGlobalSleep as
+        | string
+        | null;
+      return {
+        ...metrics,
+        lastGlobalSleep: lastGlobalSleep || null,
+        hoursSinceGlobalSleep: lastGlobalSleep
+          ? Math.max(
+              0,
+              (Date.now() - new Date(lastGlobalSleep).getTime()) /
+                (60 * 60 * 1000),
+            )
+          : null,
+      };
+    })(),
     claudeCodeVersion: isAdmin ? await getClaudeCodeVersion() : undefined,
   });
 });

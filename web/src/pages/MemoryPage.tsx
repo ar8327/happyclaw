@@ -18,7 +18,6 @@ interface MemorySource {
   size: number;
   ownerName?: string;
 }
-
 interface MemoryFile {
   path: string;
   content: string;
@@ -121,6 +120,16 @@ export function MemoryPage() {
     wrapupInProgress: boolean;
     globalSleepInProgress: boolean;
     ownedSessionFolders: string[];
+    lanes: {
+      readLane: { inFlight: number; waiting: number; concurrency: number };
+      writeLane: { inFlight: number; coordinators: number };
+      queue: {
+        pending: number;
+        running: number;
+        failed: number;
+        oldestPendingAt: string | null;
+      };
+    } | null;
   } | null>(null);
   const [triggeringWrapup, setTriggeringWrapup] = useState(false);
   const [triggeringGlobalSleep, setTriggeringGlobalSleep] = useState(false);
@@ -133,6 +142,7 @@ export function MemoryPage() {
   const [showTimeouts, setShowTimeouts] = useState(false);
   const [timeoutValues, setTimeoutValues] = useState<{
     memoryQueryTimeout: number;
+    memoryQueryConcurrency: number;
     memoryGlobalSleepTimeout: number;
     memorySendTimeout: number;
   } | null>(null);
@@ -247,6 +257,16 @@ export function MemoryPage() {
         wrapupInProgress: boolean;
         globalSleepInProgress: boolean;
         ownedSessionFolders: string[];
+        lanes: {
+          readLane: { inFlight: number; waiting: number; concurrency: number };
+          writeLane: { inFlight: number; coordinators: number };
+          queue: {
+            pending: number;
+            running: number;
+            failed: number;
+            oldestPendingAt: string | null;
+          };
+        } | null;
       }>('/api/memory/status');
       setMemoryStatus(data);
     } catch {
@@ -287,31 +307,18 @@ export function MemoryPage() {
   };
 
   const handleTriggerGlobalSleep = async () => {
-    if (!confirm('深度整理可能需要几分钟，确定要执行吗？')) return;
+    if (!confirm('确定把深度整理提交到后台写入队列吗？')) return;
     setTriggeringGlobalSleep(true);
     setError(null);
     setNotice(null);
     try {
-      await api.post<{ success: boolean; message: string }>('/api/memory/trigger-global-sleep', undefined, 360000);
-      setNotice('深度整理已完成');
+      const result = await api.post<{ success: boolean; message: string }>('/api/memory/trigger-global-sleep');
+      setNotice(result.message);
       await loadMemoryStatus();
     } catch (err) {
       setError(getErrorMessage(err, '深度整理失败'));
     } finally {
       setTriggeringGlobalSleep(false);
-    }
-  };
-
-  const handleStopActiveSessions = async () => {
-    if (!confirm('这将停止所有活跃的 Agent 会话，确定吗？')) return;
-    setError(null);
-    setNotice(null);
-    try {
-      const result = await api.post<{ stopped: number; message: string }>('/api/memory/stop-active-sessions');
-      setNotice(result.message);
-      await loadMemoryStatus();
-    } catch (err) {
-      setError(getErrorMessage(err, '停止会话失败'));
     }
   };
 
@@ -346,11 +353,13 @@ export function MemoryPage() {
     try {
       const data = await api.get<{
         memoryQueryTimeout: number;
+        memoryQueryConcurrency: number;
         memoryGlobalSleepTimeout: number;
         memorySendTimeout: number;
       }>('/api/config/system');
       setTimeoutValues({
         memoryQueryTimeout: data.memoryQueryTimeout,
+        memoryQueryConcurrency: data.memoryQueryConcurrency,
         memoryGlobalSleepTimeout: data.memoryGlobalSleepTimeout,
         memorySendTimeout: data.memorySendTimeout,
       });
@@ -369,11 +378,13 @@ export function MemoryPage() {
     try {
       const data = await api.put<{
         memoryQueryTimeout: number;
+        memoryQueryConcurrency: number;
         memoryGlobalSleepTimeout: number;
         memorySendTimeout: number;
       }>('/api/config/system', timeoutValues);
       setTimeoutValues({
         memoryQueryTimeout: data.memoryQueryTimeout,
+        memoryQueryConcurrency: data.memoryQueryConcurrency,
         memoryGlobalSleepTimeout: data.memoryGlobalSleepTimeout,
         memorySendTimeout: data.memorySendTimeout,
       });
@@ -725,6 +736,26 @@ export function MemoryPage() {
                           {memoryStatus.pendingWrapupsCount} 个
                         </div>
                       </div>
+                      {memoryStatus.lanes && (
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs text-slate-500">
+                          <div>
+                            <span className="text-slate-400">查询车道：</span>
+                            {memoryStatus.lanes.readLane.inFlight} 运行，
+                            {memoryStatus.lanes.readLane.waiting} 等待，
+                            并行 {memoryStatus.lanes.readLane.concurrency}
+                          </div>
+                          <div>
+                            <span className="text-slate-400">写入车道：</span>
+                            {memoryStatus.lanes.writeLane.inFlight} 运行
+                          </div>
+                          <div>
+                            <span className="text-slate-400">持久队列：</span>
+                            {memoryStatus.lanes.queue.pending} 待处理，
+                            {memoryStatus.lanes.queue.running} 运行，
+                            {memoryStatus.lanes.queue.failed} 失败
+                          </div>
+                        </div>
+                      )}
                       {memoryStatus.ownedSessionFolders.length > 0 && (
                         <div className="text-[11px] text-slate-500">
                           当前会检查这些会话: {memoryStatus.ownedSessionFolders.join('、')}
@@ -758,16 +789,12 @@ export function MemoryPage() {
                           {memoryStatus.globalSleepInProgress && !triggeringGlobalSleep ? '深度整理中…' : '深度整理'}
                         </Button>
                         {memoryStatus.hasActiveSession && (
-                          <button
-                            onClick={handleStopActiveSessions}
-                            className="text-[11px] text-amber-500 hover:text-amber-600 underline underline-offset-2 cursor-pointer"
-                            title="点击停止活跃会话以进行深度整理"
-                          >
-                            有活跃会话（点击停止）
-                          </button>
+                          <span className="text-[11px] text-slate-400">
+                            活跃会话不会阻塞后台整理
+                          </span>
                         )}
                         {triggeringGlobalSleep && (
-                          <span className="text-[11px] text-slate-400">深度整理中，可能需要几分钟……</span>
+                          <span className="text-[11px] text-slate-400">正在提交后台整理……</span>
                         )}
                       </div>
                     </div>
@@ -794,6 +821,28 @@ export function MemoryPage() {
                           </div>
                         ) : timeoutValues ? (
                           <>
+                            <div>
+                              <label className="block text-xs font-medium text-slate-600 mb-1">
+                                查询并行度
+                              </label>
+                              <div className="flex items-center gap-2">
+                                <Input
+                                  type="number"
+                                  value={timeoutValues.memoryQueryConcurrency}
+                                  onChange={(e) => {
+                                    const v = parseInt(e.target.value, 10);
+                                    if (Number.isFinite(v)) {
+                                      setTimeoutValues((prev) => prev ? { ...prev, memoryQueryConcurrency: v } : prev);
+                                    }
+                                  }}
+                                  min={1}
+                                  max={10}
+                                  step={1}
+                                  className="max-w-24 text-xs"
+                                />
+                                <span className="text-xs text-slate-400">个（1-10）</span>
+                              </div>
+                            </div>
                             <div>
                               <label className="block text-xs font-medium text-slate-600 mb-1">
                                 记忆查询超时

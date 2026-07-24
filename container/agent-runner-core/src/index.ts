@@ -47,11 +47,20 @@ export type {
   ToolDefinition,
   ContextPlugin,
 } from './plugin.js';
+export type {
+  ContextBundle,
+  ContextSection,
+  ContextStability,
+  SectionId,
+  RenderContextBundleOptions,
+} from './context-bundle.js';
+export { renderContextBundle, splitRenderedContext } from './context-bundle.js';
 export { ContextManager } from './context.js';
 
 // Prompt builder
 export {
   buildBasePrompt,
+  buildContextBundle,
   buildAppendPrompt,
   buildFullPrompt,
   buildChannelRoutingReminder,

@@ -2,7 +2,7 @@
  * Internal HTTP endpoints for Memory Agent communication.
  *
  * These endpoints are called by agent-runner (inside containers or host processes)
- * to interact with the per-user memory orchestration runtime.
+ * to interact with the local memory orchestration runtime.
  *
  * Authentication: Bearer token (HAPPYCLAW_INTERNAL_TOKEN), generated at startup.
  * Only accepts requests from localhost.
@@ -10,10 +10,10 @@
 
 import { Hono } from 'hono';
 import type { Variables } from '../web-context.js';
-import { getChatNamesByJids } from '../db.js';
+import { getChatNamesByJids, getJidsByFolder } from '../db.js';
 import { logger } from '../logger.js';
 import type { MemoryOrchestrator } from '../memory-orchestrator.js';
-import { resolveChannelLabel } from '../memory-agent.js';
+import { resolveChannelLabel, searchMemoryMarkdown } from '../memory-agent.js';
 let orchestrator: MemoryOrchestrator | null = null;
 let internalToken: string | null = null;
 
@@ -47,6 +47,33 @@ function checkInternalAuth(c: {
   return token === internalToken;
 }
 
+// POST /api/internal/memory/search
+memoryAgentRoutes.post('/search', async (c) => {
+  if (!checkInternalAuth(c)) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+  const body = await c.req.json().catch(() => null);
+  if (
+    !body ||
+    typeof body.userId !== 'string' ||
+    typeof body.query !== 'string'
+  ) {
+    return c.json({ error: 'Invalid request: userId and query required' }, 400);
+  }
+  try {
+    const hits = searchMemoryMarkdown(
+      body.userId,
+      body.query,
+      typeof body.limit === 'number' ? body.limit : 8,
+    );
+    return c.json({ hits });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err, userId: body.userId }, 'Memory search error');
+    return c.json({ error: message }, 500);
+  }
+});
+
 // POST /api/internal/memory/query
 memoryAgentRoutes.post('/query', async (c) => {
   if (!checkInternalAuth(c)) {
@@ -70,8 +97,8 @@ memoryAgentRoutes.post('/query', async (c) => {
     let channelLabel: string | undefined;
     const chatJid = body.chatJid as string | undefined;
     const workspaceFolder =
-      (body.workspaceFolder as string | undefined)
-      || (body.groupFolder as string | undefined);
+      (body.workspaceFolder as string | undefined) ||
+      (body.groupFolder as string | undefined);
     if (chatJid) {
       const names = getChatNamesByJids([chatJid]);
       channelLabel = resolveChannelLabel(chatJid, names.get(chatJid));
@@ -137,24 +164,21 @@ memoryAgentRoutes.post('/remember', async (c) => {
     let channelLabel: string | undefined;
     const chatJid = body.chatJid as string | undefined;
     const workspaceFolder =
-      (body.workspaceFolder as string | undefined)
-      || (body.groupFolder as string | undefined);
+      (body.workspaceFolder as string | undefined) ||
+      (body.groupFolder as string | undefined);
     if (chatJid) {
       const names = getChatNamesByJids([chatJid]);
       channelLabel = resolveChannelLabel(chatJid, names.get(chatJid));
     }
 
-    void orchestrator.send(body.userId, {
-      type: 'remember',
+    const queued = orchestrator.enqueueRemember(body.userId, {
       content: body.content,
       importance: body.importance || 'normal',
       chatJid,
       workspaceFolder,
       channelLabel,
-    }).catch((err) => {
-      logger.error({ err, userId: body.userId }, 'Memory remember background task failed');
     });
-    return c.json({ accepted: true });
+    return c.json({ accepted: true, requestId: queued.requestId });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err, userId: body.userId }, 'Memory remember error');
@@ -178,15 +202,29 @@ memoryAgentRoutes.post('/session-wrapup', async (c) => {
 
   try {
     const workspaceFolder =
-      (body.workspaceFolder as string | undefined)
-      || (body.groupFolder as string | undefined);
-    await orchestrator.send(body.userId, {
-      type: 'session_wrapup',
-      transcriptFile: body.transcriptFile,
+      (body.workspaceFolder as string | undefined) ||
+      (body.groupFolder as string | undefined);
+    if (!workspaceFolder) {
+      return c.json(
+        { error: 'Invalid request: workspaceFolder required' },
+        400,
+      );
+    }
+    const chatJids = Array.isArray(body.chatJids)
+      ? body.chatJids.filter(
+          (chatJid: unknown): chatJid is string => typeof chatJid === 'string',
+        )
+      : getJidsByFolder(workspaceFolder);
+    const result = await orchestrator.exportTranscripts(
+      body.userId,
       workspaceFolder,
-      chatJids: body.chatJids,
+      chatJids,
+    );
+    return c.json({
+      accepted: true,
+      requestId: result?.requestId,
+      noNewMessages: result === null,
     });
-    return c.json({ accepted: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err, userId: body.userId }, 'Memory session-wrapup error');
