@@ -151,11 +151,11 @@ function migrateLegacyRegisteredGroupBindings(): void {
   const hasTargetAgent = hasColumn('registered_groups', 'target_agent_id');
   const hasTargetMain = hasColumn('registered_groups', 'target_main_jid');
   if (
-    !hasReplyPolicy
-    && !hasActivationMode
-    && !hasRequireMention
-    && !hasTargetAgent
-    && !hasTargetMain
+    !hasReplyPolicy &&
+    !hasActivationMode &&
+    !hasRequireMention &&
+    !hasTargetAgent &&
+    !hasTargetMain
   ) {
     return;
   }
@@ -166,29 +166,29 @@ function migrateLegacyRegisteredGroupBindings(): void {
         hasReplyPolicy ? ', reply_policy' : ", 'source_only' AS reply_policy"
       }${
         hasActivationMode ? ', activation_mode' : ", 'auto' AS activation_mode"
-      }${
-        hasRequireMention ? ', require_mention' : ', 0 AS require_mention'
-      }${
-        hasTargetAgent ? ', target_agent_id' : ", NULL AS target_agent_id"
-      }${hasTargetMain ? ', target_main_jid' : ", NULL AS target_main_jid"}
+      }${hasRequireMention ? ', require_mention' : ', 0 AS require_mention'}${
+        hasTargetAgent ? ', target_agent_id' : ', NULL AS target_agent_id'
+      }${hasTargetMain ? ', target_main_jid' : ', NULL AS target_main_jid'}
        FROM registered_groups`,
     )
     .all() as Array<{
-      jid: string;
-      name: string;
-      folder: string;
-      added_at: string;
-      reply_policy: string | null;
-      activation_mode: string | null;
-      require_mention: number | null;
-      target_agent_id: string | null;
-      target_main_jid: string | null;
-    }>;
+    jid: string;
+    name: string;
+    folder: string;
+    added_at: string;
+    reply_policy: string | null;
+    activation_mode: string | null;
+    require_mention: number | null;
+    target_agent_id: string | null;
+    target_main_jid: string | null;
+  }>;
 
   const tx = db.transaction(() => {
     for (const row of rows) {
       if (row.jid.startsWith('web:')) {
-        db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(row.jid);
+        db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(
+          row.jid,
+        );
         continue;
       }
 
@@ -198,14 +198,15 @@ function migrateLegacyRegisteredGroupBindings(): void {
       const current = getSessionBinding(row.jid);
       const sessionId = targetAgentId
         ? buildWorkerSessionId(targetAgentId)
-        : resolveLegacyMainSessionId(targetMainJid || '')
-          || current?.session_id
-          || defaultSessionId;
+        : resolveLegacyMainSessionId(targetMainJid || '') ||
+          current?.session_id ||
+          defaultSessionId;
       if (!sessionId) continue;
 
       const session = getSessionRecord(sessionId);
       const now = new Date().toISOString();
-      const replyPolicy = row.reply_policy === 'mirror' ? 'mirror' : 'source_only';
+      const replyPolicy =
+        row.reply_policy === 'mirror' ? 'mirror' : 'source_only';
       saveSessionBinding({
         channel_jid: row.jid,
         session_id: sessionId,
@@ -215,8 +216,8 @@ function migrateLegacyRegisteredGroupBindings(): void {
             : targetAgentId
               ? 'direct'
               : session?.kind === 'worker'
-              ? 'direct'
-              : 'source_only',
+                ? 'direct'
+                : 'source_only',
         activation_mode: parseActivationMode(row.activation_mode),
         require_mention: row.require_mention === 1,
         display_name: row.name,
@@ -239,9 +240,7 @@ function backfillLegacyGroupOwnersIntoSessions(): void {
       `SELECT jid, name, folder, added_at, container_config, custom_cwd,
               init_source_path, init_git_url, created_by, selected_skills,
               mcp_mode, selected_mcps, model, thinking_effort,
-              context_compression${
-                hasIsHome ? ', is_home' : ', 0 AS is_home'
-              }
+              context_compression${hasIsHome ? ', is_home' : ', 0 AS is_home'}
        FROM registered_groups
        WHERE jid LIKE 'web:%'`,
     )
@@ -295,8 +294,7 @@ function backfillLegacyGroupOwnersIntoSessions(): void {
     const nextSession: SessionRecord = existing || {
       id: sessionId,
       name: fallbackGroup.name,
-      kind:
-        legacyIsPrimarySession || folder === 'main' ? 'main' : 'workspace',
+      kind: legacyIsPrimarySession || folder === 'main' ? 'main' : 'workspace',
       parent_session_id: null,
       cwd: deriveSessionCwd(fallbackGroup),
       runner_id: deriveRunnerId(fallbackGroup),
@@ -345,9 +343,7 @@ function migrateRegisteredGroupsToSessionChannels(): void {
         hasCustomCwd ? ', custom_cwd' : ', NULL AS custom_cwd'
       }${
         hasInitSourcePath ? ', init_source_path' : ', NULL AS init_source_path'
-      }${
-        hasInitGitUrl ? ', init_git_url' : ', NULL AS init_git_url'
-      }${
+      }${hasInitGitUrl ? ', init_git_url' : ', NULL AS init_git_url'}${
         hasSelectedSkills ? ', selected_skills' : ', NULL AS selected_skills'
       }${hasMcpMode ? ', mcp_mode' : ", 'inherit' AS mcp_mode"}${
         hasSelectedMcps ? ', selected_mcps' : ', NULL AS selected_mcps'
@@ -361,21 +357,21 @@ function migrateRegisteredGroupsToSessionChannels(): void {
        FROM registered_groups`,
     )
     .all() as Array<{
-      jid: string;
-      name: string;
-      folder: string;
-      added_at: string;
-      container_config: string | null;
-      custom_cwd: string | null;
-      init_source_path: string | null;
-      init_git_url: string | null;
-      selected_skills: string | null;
-      mcp_mode: string | null;
-      selected_mcps: string | null;
-      model: string | null;
-      thinking_effort: string | null;
-      context_compression: string | null;
-    }>;
+    jid: string;
+    name: string;
+    folder: string;
+    added_at: string;
+    container_config: string | null;
+    custom_cwd: string | null;
+    init_source_path: string | null;
+    init_git_url: string | null;
+    selected_skills: string | null;
+    mcp_mode: string | null;
+    selected_mcps: string | null;
+    model: string | null;
+    thinking_effort: string | null;
+    context_compression: string | null;
+  }>;
 
   const tx = db.transaction(() => {
     for (const row of rows) {
@@ -996,6 +992,19 @@ export function initDatabase(): void {
       value_json TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS memory_write_queue (
+      id TEXT PRIMARY KEY,
+      owner_key TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      dedup_key TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      available_at TEXT NOT NULL,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
     CREATE INDEX IF NOT EXISTS idx_sessions_kind ON sessions(kind);
     CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
     CREATE INDEX IF NOT EXISTS idx_bindings_session ON session_bindings(session_id);
@@ -1005,6 +1014,13 @@ export function initDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow ON workflow_runs(workflow_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_workflow_node_runs_run ON workflow_node_runs(run_id, node_id);
     CREATE INDEX IF NOT EXISTS idx_profiles_runner ON runner_profiles(runner_id);
+    CREATE INDEX IF NOT EXISTS idx_memory_write_queue_ready
+      ON memory_write_queue(status, available_at, created_at);
+    CREATE INDEX IF NOT EXISTS idx_memory_write_queue_owner
+      ON memory_write_queue(owner_key, status, created_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_write_queue_pending_dedup
+      ON memory_write_queue(owner_key, kind, dedup_key)
+      WHERE dedup_key IS NOT NULL AND status IN ('pending', 'running');
   `);
 
   dropLegacySessionRuntimeModeColumn();
@@ -1109,48 +1125,49 @@ export function initDatabase(): void {
     'created_by',
     'model',
   ]);
-  assertSchema(
-    'session_channels',
-    [
-      'jid',
-      'session_id',
-      'name',
-      'created_at',
-      'container_config',
-      'custom_cwd',
-      'init_source_path',
-      'init_git_url',
-      'selected_skills',
-      'mcp_mode',
-      'selected_mcps',
-      'model',
-      'thinking_effort',
-      'context_compression',
-    ],
-  );
-
-  assertSchema('users', [
-    'id',
-    'username',
-    'password_hash',
-    'display_name',
-    'role',
-    'status',
-    'permissions',
-    'must_change_password',
-    'disable_reason',
-    'notes',
-    'avatar_emoji',
-    'avatar_color',
-    'ai_name',
-    'ai_avatar_emoji',
-    'ai_avatar_color',
-    'ai_avatar_url',
+  assertSchema('session_channels', [
+    'jid',
+    'session_id',
+    'name',
     'created_at',
-    'updated_at',
-    'last_login_at',
-    'deleted_at',
-  ], ['subscription_plan_id']);
+    'container_config',
+    'custom_cwd',
+    'init_source_path',
+    'init_git_url',
+    'selected_skills',
+    'mcp_mode',
+    'selected_mcps',
+    'model',
+    'thinking_effort',
+    'context_compression',
+  ]);
+
+  assertSchema(
+    'users',
+    [
+      'id',
+      'username',
+      'password_hash',
+      'display_name',
+      'role',
+      'status',
+      'permissions',
+      'must_change_password',
+      'disable_reason',
+      'notes',
+      'avatar_emoji',
+      'avatar_color',
+      'ai_name',
+      'ai_avatar_emoji',
+      'ai_avatar_color',
+      'ai_avatar_url',
+      'created_at',
+      'updated_at',
+      'last_login_at',
+      'deleted_at',
+    ],
+    ['subscription_plan_id'],
+  );
   // Store schema version after all migrations complete.
 
   // v25→v26 migration: cost_usd on messages
@@ -1314,7 +1331,7 @@ export function initDatabase(): void {
 
   syncSessionWorkbenchProjection();
 
-  const SCHEMA_VERSION = '46';
+  const SCHEMA_VERSION = '47';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -1459,21 +1476,23 @@ export function storeMessageDirect(
   sourceJid?: string,
   replyToId?: string,
 ): number {
-  const result = db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage, reply_to_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    msgId,
-    chatJid,
-    sourceJid ?? chatJid,
-    sender,
-    senderName,
-    content,
-    timestamp,
-    isFromMe ? 1 : 0,
-    attachments ?? null,
-    tokenUsage ?? null,
-    replyToId ?? null,
-  );
+  const result = db
+    .prepare(
+      `INSERT OR REPLACE INTO messages (id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage, reply_to_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      msgId,
+      chatJid,
+      sourceJid ?? chatJid,
+      sender,
+      senderName,
+      content,
+      timestamp,
+      isFromMe ? 1 : 0,
+      attachments ?? null,
+      tokenUsage ?? null,
+      replyToId ?? null,
+    );
   return Number(result.lastInsertRowid);
 }
 
@@ -1989,8 +2008,12 @@ export function getLastInboundMessage(
     ? `SELECT id, sender FROM messages WHERE chat_jid = ? AND source_jid = ? AND is_from_me = 0 ORDER BY timestamp DESC, id DESC LIMIT 1`
     : `SELECT id, sender FROM messages WHERE chat_jid = ? AND is_from_me = 0 ORDER BY timestamp DESC, id DESC LIMIT 1`;
   const row = sourceJid
-    ? (db.prepare(sql).get(chatJid, sourceJid) as { id: string; sender: string } | undefined)
-    : (db.prepare(sql).get(chatJid) as { id: string; sender: string } | undefined);
+    ? (db.prepare(sql).get(chatJid, sourceJid) as
+        | { id: string; sender: string }
+        | undefined)
+    : (db.prepare(sql).get(chatJid) as
+        | { id: string; sender: string }
+        | undefined);
   return row || null;
 }
 
@@ -2012,12 +2035,7 @@ export function getNewMessages(
     ORDER BY rowid ASC
   `;
 
-  const rows = db
-    .prepare(sql)
-    .all(
-      cursor.rowid,
-      ...jids,
-    ) as DbMessage[];
+  const rows = db.prepare(sql).all(cursor.rowid, ...jids) as DbMessage[];
   const last = rows[rows.length - 1];
   return {
     messages: rows,
@@ -2039,12 +2057,7 @@ export function getMessagesSince(
       AND is_from_me = 0
     ORDER BY rowid ASC
   `;
-  return db
-    .prepare(sql)
-    .all(
-      chatJid,
-      cursor.rowid,
-    ) as DbMessage[];
+  return db.prepare(sql).all(chatJid, cursor.rowid) as DbMessage[];
 }
 
 /**
@@ -2063,9 +2076,7 @@ export function getTranscriptMessagesSince(
       AND rowid > ?
     ORDER BY rowid ASC
   `;
-  return db
-    .prepare(sql)
-    .all(chatJid, cursor.rowid) as Array<
+  return db.prepare(sql).all(chatJid, cursor.rowid) as Array<
     DbMessage & { is_from_me: boolean }
   >;
 }
@@ -2596,6 +2607,307 @@ export function deleteContextSummary(
   ).run(groupFolder, chatJid);
 }
 
+// ── Memory write queue ──────────────────────────────────────
+
+export type MemoryWriteQueueKind =
+  | 'remember'
+  | 'index_repair'
+  | 'session_wrapup'
+  | 'repair_sweep'
+  | 'global_sleep';
+
+export type MemoryWriteQueueStatus =
+  | 'pending'
+  | 'running'
+  | 'done'
+  | 'obsolete'
+  | 'dropped';
+
+export interface MemoryWriteQueueRecord {
+  id: string;
+  owner_key: string;
+  kind: MemoryWriteQueueKind;
+  payload: string;
+  dedup_key: string | null;
+  status: MemoryWriteQueueStatus;
+  attempts: number;
+  available_at: string;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export function getMemoryWriteQueueRecord(
+  id: string,
+): MemoryWriteQueueRecord | undefined {
+  return db.prepare('SELECT * FROM memory_write_queue WHERE id = ?').get(id) as
+    | MemoryWriteQueueRecord
+    | undefined;
+}
+
+export function enqueueMemoryWrite(input: {
+  ownerKey: string;
+  kind: MemoryWriteQueueKind;
+  payload: Record<string, unknown>;
+  dedupKey?: string | null;
+  availableAt?: string;
+}): MemoryWriteQueueRecord {
+  const now = new Date().toISOString();
+  const id = crypto.randomUUID();
+  const dedupKey = input.dedupKey?.trim() || null;
+  const result = db
+    .prepare(
+      `INSERT OR IGNORE INTO memory_write_queue
+        (id, owner_key, kind, payload, dedup_key, status, attempts,
+         available_at, last_error, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?)`,
+    )
+    .run(
+      id,
+      input.ownerKey,
+      input.kind,
+      JSON.stringify(input.payload),
+      dedupKey,
+      input.availableAt || now,
+      now,
+      now,
+    );
+  if (result.changes > 0) {
+    return getMemoryWriteQueueRecord(id)!;
+  }
+  if (dedupKey) {
+    const existing = db
+      .prepare(
+        `SELECT * FROM memory_write_queue
+         WHERE owner_key = ? AND kind = ? AND dedup_key = ?
+           AND status IN ('pending', 'running')
+         ORDER BY created_at ASC
+         LIMIT 1`,
+      )
+      .get(input.ownerKey, input.kind, dedupKey) as
+      | MemoryWriteQueueRecord
+      | undefined;
+    if (existing) return existing;
+  }
+  throw new Error('Failed to enqueue memory write');
+}
+
+export function claimNextMemoryWrite(
+  ownerKey?: string,
+): MemoryWriteQueueRecord | null {
+  return db.transaction(() => {
+    const now = new Date().toISOString();
+    const record = (
+      ownerKey
+        ? db
+            .prepare(
+              `SELECT * FROM memory_write_queue
+               WHERE status = 'pending' AND available_at <= ?
+                 AND owner_key = ?
+               ORDER BY
+                 CASE kind
+                   WHEN 'global_sleep' THEN 0
+                   WHEN 'session_wrapup' THEN 1
+                   WHEN 'remember' THEN 2
+                   WHEN 'repair_sweep' THEN 3
+                   ELSE 4
+                 END,
+                 created_at ASC
+               LIMIT 1`,
+            )
+            .get(now, ownerKey)
+        : db
+            .prepare(
+              `SELECT * FROM memory_write_queue
+               WHERE status = 'pending' AND available_at <= ?
+               ORDER BY
+                 CASE kind
+                   WHEN 'global_sleep' THEN 0
+                   WHEN 'session_wrapup' THEN 1
+                   WHEN 'remember' THEN 2
+                   WHEN 'repair_sweep' THEN 3
+                   ELSE 4
+                 END,
+                 created_at ASC
+               LIMIT 1`,
+            )
+            .get(now)
+    ) as MemoryWriteQueueRecord | undefined;
+    if (!record) return null;
+    const updated = db
+      .prepare(
+        `UPDATE memory_write_queue
+         SET status = 'running', attempts = attempts + 1, updated_at = ?
+         WHERE id = ? AND status = 'pending'`,
+      )
+      .run(now, record.id);
+    if (updated.changes === 0) return null;
+    return getMemoryWriteQueueRecord(record.id) || null;
+  })();
+}
+
+export function claimMemoryWriteBatch(
+  ownerKey: string,
+  kind: MemoryWriteQueueKind,
+  limit: number,
+): MemoryWriteQueueRecord[] {
+  return db.transaction(() => {
+    const now = new Date().toISOString();
+    const records = db
+      .prepare(
+        `SELECT * FROM memory_write_queue
+         WHERE status = 'pending' AND available_at <= ?
+           AND owner_key = ? AND kind = ?
+         ORDER BY created_at ASC
+         LIMIT ?`,
+      )
+      .all(
+        now,
+        ownerKey,
+        kind,
+        Math.max(0, Math.min(50, Math.floor(limit))),
+      ) as MemoryWriteQueueRecord[];
+    if (records.length === 0) return [];
+    const update = db.prepare(
+      `UPDATE memory_write_queue
+       SET status = 'running', attempts = attempts + 1, updated_at = ?
+       WHERE id = ? AND status = 'pending'`,
+    );
+    const claimed: MemoryWriteQueueRecord[] = [];
+    for (const record of records) {
+      if (update.run(now, record.id).changes === 0) continue;
+      const current = getMemoryWriteQueueRecord(record.id);
+      if (current) claimed.push(current);
+    }
+    return claimed;
+  })();
+}
+
+export function completeMemoryWrite(
+  id: string,
+  status: Extract<
+    MemoryWriteQueueStatus,
+    'done' | 'obsolete' | 'dropped'
+  > = 'done',
+): void {
+  db.prepare(
+    `UPDATE memory_write_queue
+     SET status = ?, last_error = NULL, updated_at = ?
+     WHERE id = ?`,
+  ).run(status, new Date().toISOString(), id);
+}
+
+export function retryMemoryWrite(
+  id: string,
+  error: string,
+  delayMs: number,
+): void {
+  const now = new Date();
+  db.prepare(
+    `UPDATE memory_write_queue
+     SET status = 'pending', last_error = ?, available_at = ?, updated_at = ?
+     WHERE id = ?`,
+  ).run(
+    error.slice(0, 4000),
+    new Date(now.getTime() + Math.max(0, delayMs)).toISOString(),
+    now.toISOString(),
+    id,
+  );
+}
+
+export function recoverInterruptedMemoryWrites(): number {
+  const now = new Date().toISOString();
+  return db
+    .prepare(
+      `UPDATE memory_write_queue
+       SET status = 'pending',
+           last_error = COALESCE(last_error, 'Recovered after process restart'),
+           available_at = ?,
+           updated_at = ?
+       WHERE status = 'running'`,
+    )
+    .run(now, now).changes;
+}
+
+export function listMemoryWriteQueue(
+  ownerKey: string,
+  options?: {
+    statuses?: MemoryWriteQueueStatus[];
+    limit?: number;
+  },
+): MemoryWriteQueueRecord[] {
+  const statuses: MemoryWriteQueueStatus[] = options?.statuses?.length
+    ? options.statuses
+    : ['pending', 'running'];
+  const placeholders = statuses.map(() => '?').join(', ');
+  return db
+    .prepare(
+      `SELECT * FROM memory_write_queue
+       WHERE owner_key = ? AND status IN (${placeholders})
+       ORDER BY created_at ASC
+       LIMIT ?`,
+    )
+    .all(
+      ownerKey,
+      ...statuses,
+      options?.limit ?? 200,
+    ) as MemoryWriteQueueRecord[];
+}
+
+export function getMemoryWriteQueueMetrics(ownerKey: string): {
+  pending: number;
+  running: number;
+  failed: number;
+  oldestPendingAt: string | null;
+} {
+  const counts = db
+    .prepare(
+      `SELECT
+         SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+         SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,
+         SUM(CASE WHEN status = 'dropped' THEN 1 ELSE 0 END) AS failed,
+         MIN(CASE WHEN status = 'pending' THEN created_at END) AS oldestPendingAt
+       FROM memory_write_queue
+       WHERE owner_key = ?`,
+    )
+    .get(ownerKey) as {
+    pending: number | null;
+    running: number | null;
+    failed: number | null;
+    oldestPendingAt: string | null;
+  };
+  return {
+    pending: counts.pending || 0,
+    running: counts.running || 0,
+    failed: counts.failed || 0,
+    oldestPendingAt: counts.oldestPendingAt || null,
+  };
+}
+
+export function obsoleteMemoryRepairsBefore(
+  ownerKey: string,
+  before: string,
+): number {
+  return db
+    .prepare(
+      `UPDATE memory_write_queue
+       SET status = 'obsolete', updated_at = ?
+       WHERE owner_key = ? AND kind = 'index_repair'
+         AND status = 'pending' AND created_at <= ?`,
+    )
+    .run(new Date().toISOString(), ownerKey, before).changes;
+}
+
+export function pruneMemoryWriteQueue(before: string): number {
+  return db
+    .prepare(
+      `DELETE FROM memory_write_queue
+       WHERE status IN ('done', 'obsolete', 'dropped')
+         AND updated_at < ?`,
+    )
+    .run(before).changes;
+}
+
 /**
  * Count messages in a chat since a given timestamp.
  * Used to check if enough new messages accumulated since last compression.
@@ -2688,8 +3000,7 @@ function parseRunnerProfileRecord(
     id: String(row.id),
     runner_id: normalizeStoredRunnerId(row.runner_id),
     name: String(row.name),
-    config_json:
-      typeof row.config_json === 'string' ? row.config_json : '{}',
+    config_json: typeof row.config_json === 'string' ? row.config_json : '{}',
     is_default: Number(row.is_default || 0) === 1,
     created_at: String(row.created_at),
     updated_at: String(row.updated_at),
@@ -2743,7 +3054,9 @@ function parseSessionStateRow(
         ? row.current_permission_mode
         : null,
     last_message_cursor:
-      typeof row.last_message_cursor === 'string' ? row.last_message_cursor : null,
+      typeof row.last_message_cursor === 'string'
+        ? row.last_message_cursor
+        : null,
     updated_at: String(row.updated_at),
   };
 }
@@ -2773,9 +3086,7 @@ function extractAgentIdFromWorkerSessionId(sessionId: string): string {
     : sessionId;
 }
 
-function deriveWorkerGroupFolder(
-  row: Record<string, unknown>,
-): string {
+function deriveWorkerGroupFolder(row: Record<string, unknown>): string {
   const parentSessionId =
     typeof row.parent_session_id === 'string' ? row.parent_session_id : '';
   if (parentSessionId.startsWith(MAIN_SESSION_ID_PREFIX)) {
@@ -2783,7 +3094,9 @@ function deriveWorkerGroupFolder(
   }
   const sourceChatJid =
     typeof row.source_chat_jid === 'string' ? row.source_chat_jid : '';
-  const sourceGroup = sourceChatJid ? getRegisteredGroup(sourceChatJid) : undefined;
+  const sourceGroup = sourceChatJid
+    ? getRegisteredGroup(sourceChatJid)
+    : undefined;
   return sourceGroup?.folder || '';
 }
 
@@ -2833,7 +3146,8 @@ function isCompatibilityHomeGroup(jid: string, folder: string): boolean {
 }
 
 function deriveSessionCwd(group: RegisteredGroup): string {
-  if (group.customCwd && path.isAbsolute(group.customCwd)) return group.customCwd;
+  if (group.customCwd && path.isAbsolute(group.customCwd))
+    return group.customCwd;
   return path.join(GROUPS_DIR, group.folder);
 }
 
@@ -2850,10 +3164,13 @@ function resolveSessionRuntimeProjection(
   | 'context_compression'
 > {
   const runnerId = existing?.runner_id || deriveRunnerId(group || null);
-  const primarySession = ownerKey ? getPrimarySessionForOwner(ownerKey) : undefined;
+  const primarySession = ownerKey
+    ? getPrimarySessionForOwner(ownerKey)
+    : undefined;
   const existingMatchesRunner = existing?.runner_id === runnerId;
   const primaryMatchesRunner =
-    primarySession?.id !== existing?.id && primarySession?.runner_id === runnerId;
+    primarySession?.id !== existing?.id &&
+    primarySession?.runner_id === runnerId;
 
   return {
     runner_id: runnerId,
@@ -2887,7 +3204,9 @@ function findPrimarySessionChannelForFolder(
   if (primary) return primary;
   const candidates = getJidsByFolder(groupFolder)
     .map((jid) => getRegisteredGroup(jid))
-    .filter((group): group is RegisteredGroup & { jid: string } => group != null);
+    .filter(
+      (group): group is RegisteredGroup & { jid: string } => group != null,
+    );
   return candidates.find((group) => group.name.length > 0) || candidates[0];
 }
 
@@ -2991,7 +3310,9 @@ function ensureSessionRecordForLegacyKey(
   ).run(
     sessionId,
     groupFolder,
-    folderGroup ? deriveSessionCwd(folderGroup) : path.join(GROUPS_DIR, groupFolder),
+    folderGroup
+      ? deriveSessionCwd(folderGroup)
+      : path.join(GROUPS_DIR, groupFolder),
     runtimeConfig.runner_id,
     runtimeConfig.runner_profile_id,
     runtimeConfig.model,
@@ -3015,7 +3336,9 @@ function deleteSessionProjectionForGroup(jid: string): void {
   const group = getRegisteredGroup(jid);
   if (jid.startsWith('web:') && group) {
     const sessionId = buildMainSessionId(group.folder);
-    db.prepare('DELETE FROM session_bindings WHERE session_id = ?').run(sessionId);
+    db.prepare('DELETE FROM session_bindings WHERE session_id = ?').run(
+      sessionId,
+    );
     db.prepare('DELETE FROM session_state WHERE session_id = ?').run(sessionId);
     db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
   }
@@ -3068,9 +3391,9 @@ function deleteWorkerArtifactsForFolderRows(groupFolder: string): void {
        WHERE parent_session_id = ?`,
     )
     .all(mainSessionId) as Array<{
-      session_id: string;
-      source_chat_jid: string;
-    }>;
+    session_id: string;
+    source_chat_jid: string;
+  }>;
   const sessionIds = new Set<string>();
   const virtualChatJids = new Set<string>();
 
@@ -3095,9 +3418,9 @@ function deleteWorkerArtifactsForFolderRows(groupFolder: string): void {
     db.prepare(
       `DELETE FROM worker_sessions WHERE session_id IN (${placeholders})`,
     ).run(...sessionIdList);
-    db.prepare(
-      `DELETE FROM sessions WHERE id IN (${placeholders})`,
-    ).run(...sessionIdList);
+    db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(
+      ...sessionIdList,
+    );
   }
 
   const virtualChatJidList = Array.from(virtualChatJids);
@@ -3122,8 +3445,12 @@ export function clearWorkerArtifactsForFolder(groupFolder: string): void {
 export function deleteAllSessionsForFolder(groupFolder: string): void {
   const mainSessionId = buildMainSessionId(groupFolder);
   deleteWorkerArtifactsForFolderRows(groupFolder);
-  db.prepare('DELETE FROM session_bindings WHERE session_id = ?').run(mainSessionId);
-  db.prepare('DELETE FROM session_state WHERE session_id = ?').run(mainSessionId);
+  db.prepare('DELETE FROM session_bindings WHERE session_id = ?').run(
+    mainSessionId,
+  );
+  db.prepare('DELETE FROM session_state WHERE session_id = ?').run(
+    mainSessionId,
+  );
   db.prepare('DELETE FROM sessions WHERE id = ? OR parent_session_id = ?').run(
     mainSessionId,
     mainSessionId,
@@ -3136,9 +3463,9 @@ export function getAllSessions(): Record<string, string> {
       'SELECT session_id, provider_session_id FROM session_state WHERE session_id LIKE ? AND provider_session_id IS NOT NULL',
     )
     .all(`${MAIN_SESSION_ID_PREFIX}%`) as Array<{
-      session_id: string;
-      provider_session_id: string;
-    }>;
+    session_id: string;
+    provider_session_id: string;
+  }>;
   const result: Record<string, string> = {};
   for (const row of rows) {
     result[row.session_id.slice(MAIN_SESSION_ID_PREFIX.length)] =
@@ -3148,9 +3475,9 @@ export function getAllSessions(): Record<string, string> {
 }
 
 export function getSessionRecord(id: string): SessionRecord | undefined {
-  const row = db
-    .prepare('SELECT * FROM sessions WHERE id = ?')
-    .get(id) as Record<string, unknown> | undefined;
+  const row = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as
+    | Record<string, unknown>
+    | undefined;
   return row ? parseSessionRecord(row) : undefined;
 }
 
@@ -3215,7 +3542,9 @@ export function saveSessionRecord(session: SessionRecord): void {
 
 export function listSessionRecords(): SessionRecord[] {
   const rows = db
-    .prepare('SELECT * FROM sessions WHERE archived = 0 ORDER BY kind, name, id')
+    .prepare(
+      'SELECT * FROM sessions WHERE archived = 0 ORDER BY kind, name, id',
+    )
     .all() as Array<Record<string, unknown>>;
   return rows.map(parseSessionRecord);
 }
@@ -3315,7 +3644,9 @@ export function saveSessionBinding(binding: SessionBindingRecord): void {
 }
 
 export function deleteSessionBinding(channelJid: string): void {
-  db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(channelJid);
+  db.prepare('DELETE FROM session_bindings WHERE channel_jid = ?').run(
+    channelJid,
+  );
 }
 
 export function updateSessionBindingPolicies(
@@ -3510,7 +3841,9 @@ function resolveRegisteredGroupOwnerKey(
   fallbackGroup?: RegisteredGroup,
 ): string | null {
   const binding = getSessionBinding(jid);
-  const boundOwnerKey = resolveSessionOwnerKeyFromSessionId(binding?.session_id);
+  const boundOwnerKey = resolveSessionOwnerKeyFromSessionId(
+    binding?.session_id,
+  );
   if (boundOwnerKey) return boundOwnerKey;
 
   const group = fallbackGroup ?? getRegisteredGroup(jid);
@@ -3553,11 +3886,14 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   );
   if (!jid.startsWith('web:')) {
     const currentBinding = getSessionBinding(jid);
-    const sessionId = currentBinding?.session_id || buildMainSessionId(group.folder);
+    const sessionId =
+      currentBinding?.session_id || buildMainSessionId(group.folder);
     const session = getSessionRecord(sessionId);
     const now = new Date().toISOString();
-    const replyPolicy = group.reply_policy ?? currentBinding?.reply_policy ?? 'source_only';
-    const activationMode = group.activation_mode ?? currentBinding?.activation_mode ?? 'auto';
+    const replyPolicy =
+      group.reply_policy ?? currentBinding?.reply_policy ?? 'source_only';
+    const activationMode =
+      group.activation_mode ?? currentBinding?.activation_mode ?? 'auto';
     const requireMention =
       group.require_mention ?? currentBinding?.require_mention ?? false;
     saveSessionBinding({
@@ -3621,7 +3957,7 @@ function syncSessionWorkbenchProjection(): void {
     const rows = db
       .prepare(
         legacyHasAgentId
-          ? 'SELECT group_folder, session_id, COALESCE(agent_id, \'\') AS agent_id FROM provider_sessions_legacy'
+          ? "SELECT group_folder, session_id, COALESCE(agent_id, '') AS agent_id FROM provider_sessions_legacy"
           : "SELECT group_folder, session_id, '' AS agent_id FROM provider_sessions_legacy",
       )
       .all() as Array<{
@@ -3695,9 +4031,9 @@ function syncMemorySessionProjectionForOwner(ownerKey: string): void {
         ? primarySession.thinking_effort
         : null;
   const contextCompression =
-    existing?.context_compression
-      || primarySession?.context_compression
-      || 'off';
+    existing?.context_compression ||
+    primarySession?.context_compression ||
+    'off';
   db.prepare(
     `INSERT INTO sessions (
       id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
@@ -4118,7 +4454,9 @@ export function searchMessages(
   // e.g. "kill" matches "kill 2035" but NOT "skill"; "e33" matches "e33ecs".
   const terms = sanitized.split(/\s+/).filter(Boolean);
   const likeConditions = terms
-    .map(() => '(m.content LIKE ? ESCAPE \'\\\' AND word_match(m.content, ?) = 1)')
+    .map(
+      () => "(m.content LIKE ? ESCAPE '\\' AND word_match(m.content, ?) = 1)",
+    )
     .join(' AND ');
   const likeParams = terms.flatMap((t) => [
     `%${t.replace(/%/g, '\\%').replace(/_/g, '\\_')}%`,
@@ -4170,7 +4508,9 @@ export function countSearchResults(
 
   const terms = sanitized.split(/\s+/).filter(Boolean);
   const likeConditions = terms
-    .map(() => '(m.content LIKE ? ESCAPE \'\\\' AND word_match(m.content, ?) = 1)')
+    .map(
+      () => "(m.content LIKE ? ESCAPE '\\' AND word_match(m.content, ?) = 1)",
+    )
     .join(' AND ');
   const likeParams = terms.flatMap((t) => [
     `%${t.replace(/%/g, '\\%').replace(/_/g, '\\_')}%`,
@@ -4805,13 +5145,15 @@ export function updateAgentStatus(
   ).run(status, completedAt, resultSummary ?? null, sessionId);
 }
 
-export function updateAgentInfo(id: string, name: string, prompt: string): void {
+export function updateAgentInfo(
+  id: string,
+  name: string,
+  prompt: string,
+): void {
   const sessionId = buildWorkerSessionId(id);
-  db.prepare('UPDATE worker_sessions SET name = ?, prompt = ? WHERE session_id = ?').run(
-    name,
-    prompt,
-    sessionId,
-  );
+  db.prepare(
+    'UPDATE worker_sessions SET name = ?, prompt = ? WHERE session_id = ?',
+  ).run(name, prompt, sessionId);
   db.prepare('UPDATE sessions SET name = ?, updated_at = ? WHERE id = ?').run(
     name,
     new Date().toISOString(),
@@ -4886,7 +5228,9 @@ export function markAllRunningTaskAgentsAsError(
 
 export function deleteAgent(id: string): void {
   const sessionId = buildWorkerSessionId(id);
-  db.prepare('DELETE FROM session_bindings WHERE session_id = ?').run(sessionId);
+  db.prepare('DELETE FROM session_bindings WHERE session_id = ?').run(
+    sessionId,
+  );
   db.prepare('DELETE FROM session_state WHERE session_id = ?').run(sessionId);
   db.prepare('DELETE FROM worker_sessions WHERE session_id = ?').run(sessionId);
   db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
@@ -5070,9 +5414,7 @@ export function getTurnByResultMessageId(
     .get(messageId) as TurnRow | undefined;
 }
 
-export function getMessageIdsWithTrace(
-  messageIds: string[],
-): Set<string> {
+export function getMessageIdsWithTrace(messageIds: string[]): Set<string> {
   if (messageIds.length === 0) return new Set();
   const placeholders = messageIds.map(() => '?').join(',');
   const rows = db

@@ -100,7 +100,7 @@ export class AgyArchiveManager {
         log(
           `Sent session_wrapup request ${requestId} for ${groupFolder} (${this.turnCount} turns, ~${this.lastEstimatedTokens} tokens)`,
         );
-        response = await waitForSessionWrapupResponse(requestId);
+        response = await waitForSessionWrapupResponse(requestId, 5_000);
         if (response.success) {
           log(
             `session_wrapup completed for ${groupFolder}${response.conversationArchiveFile ? ` -> ${response.conversationArchiveFile}` : ''}`,
@@ -119,18 +119,12 @@ export class AgyArchiveManager {
       );
     }
 
-    if (response?.success) {
-      if (markAsCompact) {
-        this.lastCompactedAt = new Date().toISOString();
-        this.syntheticCompactCount++;
-      }
-      this.turnCount = 0;
-      this.lastEstimatedTokens = 0;
-    } else {
-      log(
-        `Preserving archive state for ${groupFolder}; conversation will not reset until session_wrapup succeeds`,
-      );
+    if (markAsCompact) {
+      this.lastCompactedAt = new Date().toISOString();
+      this.syntheticCompactCount++;
     }
+    this.turnCount = 0;
+    this.lastEstimatedTokens = 0;
     return response;
   }
 }

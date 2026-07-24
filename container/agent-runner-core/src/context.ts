@@ -9,12 +9,23 @@
 
 import fs from 'fs';
 import type { ContainerInput } from './types.js';
-import type { ContextPlugin, PluginContext, ToolDefinition, ToolResult } from './plugin.js';
+import type {
+  ContextPlugin,
+  PluginContext,
+  ToolDefinition,
+  ToolResult,
+} from './plugin.js';
 import {
   buildBasePrompt,
   buildAppendPrompt as buildAppendPromptImpl,
+  buildContextBundle as buildContextBundleImpl,
   buildFullPrompt as buildFullPromptImpl,
 } from './prompt-builder.js';
+import {
+  renderContextBundle,
+  type ContextBundle,
+  type RenderContextBundleOptions,
+} from './context-bundle.js';
 
 export class ContextManager {
   private plugins: ContextPlugin[] = [];
@@ -49,7 +60,10 @@ export class ContextManager {
   }
 
   /** Route a tool call to the correct plugin's execute(). */
-  async executeTool(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+  async executeTool(
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<ToolResult> {
     const tool = this.toolMap.get(name);
     if (!tool) {
       return { content: `Unknown tool: ${name}`, isError: true };
@@ -91,6 +105,14 @@ export class ContextManager {
    */
   buildFullPrompt(): string {
     return buildFullPromptImpl(this.ctx, this.plugins);
+  }
+
+  buildContextBundle(): ContextBundle {
+    return buildContextBundleImpl(this.ctx, this.plugins);
+  }
+
+  renderContext(options?: RenderContextBundleOptions): string {
+    return renderContextBundle(this.buildContextBundle(), options);
   }
 
   /**

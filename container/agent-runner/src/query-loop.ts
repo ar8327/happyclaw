@@ -16,7 +16,9 @@ import type {
   QueryConfig,
   QueryResult,
   NormalizedMessage,
+  RenderedRunnerContext,
 } from './runner-interface.js';
+import { combineRenderedContext } from './runner-interface.js';
 import type { RunnerPromptContract } from './runner-descriptor.types.js';
 import type { ContainerOutput } from './types.js';
 import type { SessionState } from './session-state.js';
@@ -40,7 +42,7 @@ import {
 
 export interface QueryLoopConfig {
   runner: AgentRunner;
-  buildSystemPrompt: (prompt: string) => string;
+  buildContext: (prompt: string) => RenderedRunnerContext;
   promptContract?: RunnerPromptContract;
   initialPrompt: string;
   initialImages?: Array<{ data: string; mimeType?: string }>;
@@ -86,7 +88,9 @@ function createUnifiedIpcPoller(opts: IpcPollerOptions): IpcPollerState {
     closedDuringQuery: false,
     interruptedDuringQuery: false,
     drainDetectedDuringQuery: false,
-    stop() { this.isActive = false; },
+    stop() {
+      this.isActive = false;
+    },
   };
 
   const poll = () => {
@@ -125,7 +129,9 @@ function createUnifiedIpcPoller(opts: IpcPollerOptions): IpcPollerState {
       opts.onModeChange?.(modeChange);
     }
     for (const msg of messages) {
-      opts.log(`IPC message (${msg.text.length} chars, ${msg.images?.length || 0} images)`);
+      opts.log(
+        `IPC message (${msg.text.length} chars, ${msg.images?.length || 0} images)`,
+      );
       opts.state.extractSourceChannels(msg.text, opts.imChannelsFile);
       opts.writeOutput({
         status: 'stream',
@@ -159,9 +165,9 @@ async function consumeQueryStream(
     10,
   );
   const TOOL_HARD_TIMEOUT_MS = parseInt(
-    process.env.HAPPYCLAW_TOOL_CALL_HARD_TIMEOUT_MS
-      || process.env.TOOL_CALL_HARD_TIMEOUT_MS
-      || '1200000',
+    process.env.HAPPYCLAW_TOOL_CALL_HARD_TIMEOUT_MS ||
+      process.env.TOOL_CALL_HARD_TIMEOUT_MS ||
+      '1200000',
     10,
   ); // 20 minutes
 
@@ -187,7 +193,9 @@ async function consumeQueryStream(
     // already stopped.  Race the generator against this watchdog so the process
     // can exit and the host can retry queued messages with a fresh runtime.
     runner.interrupt().catch((err) => {
-      log(`Interrupt after activity timeout failed: ${err instanceof Error ? err.message : String(err)}`);
+      log(
+        `Interrupt after activity timeout failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     });
     watchdogReject?.(new Error(message));
   };
@@ -224,9 +232,13 @@ async function consumeQueryStream(
           resetActivityTimer();
           return;
         }
-        triggerWatchdog(`Tool call hard timeout: ${Math.round(report.activeToolDurationMs / 1000)}s exceeds ${TOOL_HARD_TIMEOUT_MS / 1000}s`);
+        triggerWatchdog(
+          `Tool call hard timeout: ${Math.round(report.activeToolDurationMs / 1000)}s exceeds ${TOOL_HARD_TIMEOUT_MS / 1000}s`,
+        );
       } else {
-        triggerWatchdog(`Activity timeout: no events for ${ACTIVITY_TIMEOUT_MS}ms`);
+        triggerWatchdog(
+          `Activity timeout: no events for ${ACTIVITY_TIMEOUT_MS}ms`,
+        );
       }
     }, ACTIVITY_TIMEOUT_MS);
   };
@@ -238,7 +250,9 @@ async function consumeQueryStream(
   let genericError: string | undefined;
 
   let iterResult: IteratorResult<NormalizedMessage, QueryResult>;
-  while (!(iterResult = await Promise.race([gen.next(), watchdogPromise])).done) {
+  while (
+    !(iterResult = await Promise.race([gen.next(), watchdogPromise])).done
+  ) {
     resetActivityTimer();
     const msg = iterResult.value;
 
@@ -289,7 +303,8 @@ async function consumeQueryStream(
         writeOutput({ status: 'success', result: msg.text, newSessionId });
         if (msg.usage && !sawUsageStreamEvent) {
           writeOutput({
-            status: 'stream', result: null,
+            status: 'stream',
+            result: null,
             streamEvent: { eventType: 'usage', usage: msg.usage },
           });
         }
@@ -297,11 +312,7 @@ async function consumeQueryStream(
 
       case 'error':
         log(`Query error: ${msg.message} (${msg.errorType || 'generic'})`);
-        if (
-          !msg.recoverable &&
-          !msg.errorType &&
-          !genericError
-        ) {
+        if (!msg.recoverable && !msg.errorType && !genericError) {
           genericError = msg.message;
         }
         break;
@@ -328,15 +339,17 @@ async function consumeQueryStream(
 // ---------------------------------------------------------------------------
 
 function sleep(ms: number): Promise<void> {
-  return new Promise(r => setTimeout(r, ms));
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 function mergeMessages(messages: IpcMessage[]): string {
-  return messages.map(m => m.text).join('\n');
+  return messages.map((m) => m.text).join('\n');
 }
 
-function mergeImages(messages: IpcMessage[]): Array<{ data: string; mimeType?: string }> | undefined {
-  const all = messages.flatMap(m => m.images || []);
+function mergeImages(
+  messages: IpcMessage[],
+): Array<{ data: string; mimeType?: string }> | undefined {
+  const all = messages.flatMap((m) => m.images || []);
   return all.length > 0 ? all : undefined;
 }
 
@@ -356,21 +369,28 @@ function emitRuntimeState(
     lastMessageCursor?: string | null;
   } = {};
   const providerSnapshot = runner.getRuntimePersistenceSnapshot?.();
-  if (overrides && Object.prototype.hasOwnProperty.call(overrides, 'providerState')) {
+  if (
+    overrides &&
+    Object.prototype.hasOwnProperty.call(overrides, 'providerState')
+  ) {
     runtimeSnapshot.providerState = overrides.providerState;
   } else if (
-    providerSnapshot
-    && Object.prototype.hasOwnProperty.call(providerSnapshot, 'providerState')
+    providerSnapshot &&
+    Object.prototype.hasOwnProperty.call(providerSnapshot, 'providerState')
   ) {
     runtimeSnapshot.providerState = providerSnapshot.providerState;
   }
-  if (overrides && Object.prototype.hasOwnProperty.call(overrides, 'lastMessageCursor')) {
+  if (
+    overrides &&
+    Object.prototype.hasOwnProperty.call(overrides, 'lastMessageCursor')
+  ) {
     runtimeSnapshot.lastMessageCursor = overrides.lastMessageCursor;
   } else if (
-    providerSnapshot
-    && Object.prototype.hasOwnProperty.call(providerSnapshot, 'lastMessageCursor')
+    providerSnapshot &&
+    Object.prototype.hasOwnProperty.call(providerSnapshot, 'lastMessageCursor')
   ) {
-    runtimeSnapshot.lastMessageCursor = providerSnapshot.lastMessageCursor ?? null;
+    runtimeSnapshot.lastMessageCursor =
+      providerSnapshot.lastMessageCursor ?? null;
   }
   state.applyRuntimeSnapshot(runtimeSnapshot);
   writeOutput({
@@ -381,7 +401,10 @@ function emitRuntimeState(
       ...(Object.prototype.hasOwnProperty.call(runtimeSnapshot, 'providerState')
         ? { providerState: runtimeSnapshot.providerState }
         : {}),
-      ...(Object.prototype.hasOwnProperty.call(runtimeSnapshot, 'lastMessageCursor')
+      ...(Object.prototype.hasOwnProperty.call(
+        runtimeSnapshot,
+        'lastMessageCursor',
+      )
         ? { lastMessageCursor: runtimeSnapshot.lastMessageCursor }
         : {}),
     }),
@@ -389,15 +412,17 @@ function emitRuntimeState(
 }
 
 function shouldClearProviderSession(runner: AgentRunner): boolean {
-  return runner.getRuntimePersistenceSnapshot?.()
-    ?.sessionControl
-    ?.clearProviderSession === true;
+  return (
+    runner.getRuntimePersistenceSnapshot?.()?.sessionControl
+      ?.clearProviderSession === true
+  );
 }
 
 function shouldClearResumeAnchor(runner: AgentRunner): boolean {
-  return runner.getRuntimePersistenceSnapshot?.()
-    ?.sessionControl
-    ?.clearResumeAnchor === true;
+  return (
+    runner.getRuntimePersistenceSnapshot?.()?.sessionControl
+      ?.clearResumeAnchor === true
+  );
 }
 
 export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
@@ -422,7 +447,11 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
 
   while (true) {
     // Clear stale interrupt sentinel
-    try { fs.unlinkSync(ipcPaths.interruptSentinel); } catch { /* ignore */ }
+    try {
+      fs.unlinkSync(ipcPaths.interruptSentinel);
+    } catch {
+      /* ignore */
+    }
     state.clearInterruptRequested();
     log(`Starting query (session: ${sessionId || 'new'})...`);
 
@@ -439,7 +468,11 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
         ? (msg) => {
             const rejected = runner.pushMessage(msg.text, msg.images);
             for (const reason of rejected) {
-              writeOutput({ status: 'success', result: `⚠️ ${reason}`, newSessionId: undefined });
+              writeOutput({
+                status: 'success',
+                result: `⚠️ ${reason}`,
+                newSessionId: undefined,
+              });
             }
           }
         : (msg) => pendingMessages.push(msg),
@@ -455,9 +488,11 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
       pendingRoutingRecentImChannels !== null
         ? `${buildChannelRoutingReminder(pendingRoutingRecentImChannels)}\n\n${prompt}`
         : prompt;
+    const renderedContext = config.buildContext(prompt);
+    await runner.applyContext(renderedContext);
     const queryConfig: QueryConfig = {
       prompt: effectivePrompt,
-      systemPrompt: config.buildSystemPrompt(prompt),
+      systemPrompt: combineRenderedContext(renderedContext),
       promptContract: config.promptContract,
       sessionId: config.ephemeralSession ? undefined : sessionId,
       resumeAt: config.ephemeralSession ? undefined : resumeAnchor,
@@ -510,7 +545,8 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
     }
     if (result.unrecoverableTranscriptError) {
       writeOutput({
-        status: 'error', result: null,
+        status: 'error',
+        result: null,
         error: 'unrecoverable_transcript: 会话历史包含无法处理的数据，需要重置',
         newSessionId: sessionId,
       });
@@ -534,7 +570,8 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
     if (result.contextOverflow) {
       if (++overflowRetryCount >= MAX_RETRIES) {
         writeOutput({
-          status: 'error', result: null,
+          status: 'error',
+          result: null,
           error: `context_overflow: 已重试 ${MAX_RETRIES} 次仍失败`,
         });
         process.exit(1);
@@ -552,10 +589,15 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
     }
     if (result.interruptedDuringQuery) {
       writeOutput({
-        status: 'stream', result: null,
+        status: 'stream',
+        result: null,
         streamEvent: { eventType: 'status', statusText: 'interrupted' },
       });
-      try { fs.unlinkSync(ipcPaths.interruptSentinel); } catch { /* ignore */ }
+      try {
+        fs.unlinkSync(ipcPaths.interruptSentinel);
+      } catch {
+        /* ignore */
+      }
       if (pendingMessages.length > 0) {
         prompt = mergeMessages(pendingMessages);
         images = mergeImages(pendingMessages);
@@ -605,7 +647,9 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
       prompt = mergeMessages(pendingMessages);
       images = mergeImages(pendingMessages);
       pendingMessages = [];
-      log('Query ended with buffered IPC follow-ups, starting next turn immediately');
+      log(
+        'Query ended with buffered IPC follow-ups, starting next turn immediately',
+      );
       continue;
     }
 

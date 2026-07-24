@@ -49,18 +49,9 @@ import {
 } from './db.js';
 import { runnerAuthAvailable } from './runner-health.js';
 import { validateRunnerProfileConfig } from './runner-profile-schema.js';
+import { nativePluginCapabilitiesForRunner } from './runner-descriptor.types.js';
 
-/**
- * Required env flags for settings.json — 每次 Runtime 启动时强制写入，不可被用户覆盖。
- * 合并模式：仅覆盖这些 key，保留用户自定义的其他 key。
- */
-const REQUIRED_SETTINGS_ENV: Record<string, string> = {
-  CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-  CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-  CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
-};
-
-/** Read existing settings.json, deep-merge required env keys and mcpServers, write only if changed */
+/** Read existing settings.json, merge MCP servers, and write only if changed. */
 function ensureSettingsJson(
   settingsFile: string,
   mcpServers?: Record<string, Record<string, unknown>>,
@@ -74,9 +65,7 @@ function ensureSettingsJson(
     /* ignore parse errors, overwrite */
   }
 
-  const existingEnv = (existing.env as Record<string, string>) || {};
-  const mergedEnv = { ...existingEnv, ...REQUIRED_SETTINGS_ENV };
-  const merged: Record<string, unknown> = { ...existing, env: mergedEnv };
+  const merged: Record<string, unknown> = { ...existing };
 
   // Merge user-configured MCP servers into settings
   if (mcpServers && Object.keys(mcpServers).length > 0) {
@@ -128,7 +117,7 @@ export interface RuntimeExecutionProfile {
   additionalDirectories?: string[];
   disableUserMcpServers?: boolean;
   disabledPlugins?: string[];
-  toolScope?: 'default' | 'isolated';
+  toolScope?: 'default' | 'isolated' | 'read-only';
   ephemeralSession?: boolean;
   disableSyntheticArchive?: boolean;
 }
@@ -527,13 +516,7 @@ export async function runHostAgent(
   });
 
   const sessionBaseDir = input.agentId
-    ? path.join(
-        DATA_DIR,
-        'sessions',
-        group.folder,
-        'agents',
-        input.agentId,
-      )
+    ? path.join(DATA_DIR, 'sessions', group.folder, 'agents', input.agentId)
     : path.join(DATA_DIR, 'sessions', group.folder);
   const groupSessionsDir = path.join(sessionBaseDir, '.claude');
   fs.mkdirSync(groupSessionsDir, { recursive: true });
@@ -550,7 +533,7 @@ export async function runHostAgent(
   // 链接顺序：项目级 → 宿主机级(admin only, 覆盖同名项目级) → 用户级(覆盖同名)
   // selected_skills 过滤：仅链接选中的 skills
   try {
-    const skillsDir = path.join(groupSessionsDir, 'skills');
+    const skillsDir = path.join(groupDir, '.claude', 'skills');
     fs.mkdirSync(skillsDir, { recursive: true });
     // 清空已有符号链接
     for (const entry of fs.readdirSync(skillsDir, { withFileTypes: true })) {
@@ -620,7 +603,9 @@ export async function runHostAgent(
   const explicitThinkingEffort =
     sessionRecord?.thinking_effort ?? group.thinking_effort;
   const effectiveModel =
-    explicitModel ?? profileModel ?? storedProfileBundle.descriptor?.defaultModel;
+    explicitModel ??
+    profileModel ??
+    storedProfileBundle.descriptor?.defaultModel;
   const effectiveThinkingEffort =
     explicitThinkingEffort ?? profileThinkingEffort;
   const inferredModelRunner = inferRunnerIdFromModel(effectiveModel);
@@ -643,7 +628,9 @@ export async function runHostAgent(
   }
   const effectiveProfileBundle = resolveRunnerProfileBundle(
     effectiveRunnerId,
-    effectiveRunnerId === storedRunnerId ? sessionRecord?.runner_profile_id : null,
+    effectiveRunnerId === storedRunnerId
+      ? sessionRecord?.runner_profile_id
+      : null,
   );
   const effectiveRunnerDescriptor = effectiveProfileBundle.descriptor;
   const runnerConfigDir = path.join(sessionBaseDir, `.${effectiveRunnerId}`);
@@ -756,6 +743,11 @@ export async function runHostAgent(
   if (executionProfile?.toolScope) {
     hostEnv['HAPPYCLAW_TOOL_SCOPE'] = executionProfile.toolScope;
   }
+  if (effectiveRunnerDescriptor) {
+    hostEnv['HAPPYCLAW_NATIVE_CAPABILITIES'] = JSON.stringify(
+      nativePluginCapabilitiesForRunner(effectiveRunnerDescriptor),
+    );
+  }
   if (executionProfile?.ephemeralSession) {
     hostEnv['HAPPYCLAW_EPHEMERAL_SESSION'] = '1';
   }
@@ -858,8 +850,8 @@ export async function runHostAgent(
       `缺少 ${runnerSubdir} 依赖（${missing}）。请先执行：${installHint}`,
     );
   }
-  const versionArgs =
-    effectiveRunnerDescriptor?.runtimeContract.versionArgs || ['--version'];
+  const versionArgs = effectiveRunnerDescriptor?.runtimeContract
+    .versionArgs || ['--version'];
   const declaredCommands =
     effectiveRunnerDescriptor?.runtimeContract.requiredCommands || [];
   const requiredCommands = [

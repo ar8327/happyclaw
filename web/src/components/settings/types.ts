@@ -75,6 +75,7 @@ export interface SystemSettings {
   scriptTimeout: number;
   queryActivityTimeoutMs: number;
   toolCallHardTimeoutMs: number;
+  memoryQueryConcurrency: number;
   memoryQueryTimeout: number;
   memoryGlobalSleepTimeout: number;
   memorySendTimeout: number;

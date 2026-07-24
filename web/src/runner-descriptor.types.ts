@@ -22,13 +22,18 @@ export type BeforeToolExecutionGuardMode =
   | 'none';
 export type HookStreamingMode = 'none' | 'begin_end' | 'progress';
 export type PostCompactRepairMode = 'native' | 'synthetic' | 'none';
-export type PromptMode =
-  | 'append'
-  | 'full_prompt'
-  | 'instructions_file'
-  | 'system_stdin'
-  | 'env';
+export type PromptMode = 'append' | 'instructions_file';
 export type DynamicContextReloadMode = 'none' | 'turn' | 'mid_turn';
+export type NativeContextSectionId =
+  | 'identity'
+  | 'environment'
+  | 'workspace-instructions'
+  | 'global-instructions'
+  | 'platform-guidelines'
+  | 'context-summary'
+  | 'channel-routing'
+  | 'memory-index'
+  | 'skills-catalog';
 export type ToolInjectionMode =
   | 'mcp_stdio'
   | 'mcp_http'
@@ -36,7 +41,6 @@ export type ToolInjectionMode =
   | 'none';
 export type UserMcpSource =
   | 'agentdock'
-  | 'happyclaw'
   | 'claude_settings'
   | 'codex_config'
   | 'profile';
@@ -79,6 +83,7 @@ export interface RunnerCapabilities {
   skills: SkillsMode[];
   ephemeralSession: boolean;
   filesystemAccess: boolean;
+  predefinedSubagents: boolean;
 }
 
 export interface RunnerLifecycleCapabilities {
@@ -93,17 +98,6 @@ export interface RunnerLifecycleCapabilities {
 export interface RunnerPromptContract {
   mode: PromptMode;
   dynamicContextReload: DynamicContextReloadMode;
-  /**
-   * Used when mode is "env". Runners can override the default system prompt
-   * environment variable without adding host-side branches.
-   */
-  envVar?: string;
-  /**
-   * Optional environment variable for runners that want the system prompt
-   * written to a file. Defaults to AGENTDOCK_SYSTEM_PROMPT_FILE for
-   * instructions_file mode.
-   */
-  fileEnvVar?: string;
 }
 
 export interface RunnerRuntimeContract {
@@ -149,6 +143,7 @@ export interface RunnerDescriptor {
   capabilities: RunnerCapabilities;
   lifecycle: RunnerLifecycleCapabilities;
   promptContract: RunnerPromptContract;
+  nativeProvides: NativeContextSectionId[];
   runtimeContract: RunnerRuntimeContract;
   toolContract: RunnerToolContract;
   profileSchema?: Record<string, unknown>;
@@ -171,6 +166,31 @@ export interface RunnerModel {
   id: string;
   label?: string;
   description?: string;
+}
+
+const HAPPYCLAW_PLUGIN_CAPABILITIES = [
+  'messaging',
+  'tasks',
+  'groups',
+  'skills',
+  'memory',
+  'invoke-agent',
+];
+
+export function nativePluginCapabilitiesForRunner(
+  descriptor: RunnerDescriptor,
+): string[] {
+  const nativeCapabilities: string[] = [];
+  if (
+    descriptor.toolContract.mode === 'none' ||
+    descriptor.capabilities.customTools === 'none'
+  ) {
+    nativeCapabilities.push(...HAPPYCLAW_PLUGIN_CAPABILITIES);
+  }
+  if (descriptor.capabilities.skills.includes('native')) {
+    nativeCapabilities.push('skills');
+  }
+  return [...new Set(nativeCapabilities)];
 }
 
 export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
@@ -196,6 +216,7 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       skills: ['native', 'tool-loader'],
       ephemeralSession: true,
       filesystemAccess: true,
+      predefinedSubagents: true,
     },
     lifecycle: {
       turnBoundary: 'simulated',
@@ -209,6 +230,12 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       mode: 'append',
       dynamicContextReload: 'turn',
     },
+    nativeProvides: [
+      'identity',
+      'environment',
+      'workspace-instructions',
+      'skills-catalog',
+    ],
     runtimeContract: {
       requiredCommands: ['claude'],
       modelEnv: ['HAPPYCLAW_MODEL'],
@@ -291,6 +318,7 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       skills: ['tool-loader'],
       ephemeralSession: true,
       filesystemAccess: true,
+      predefinedSubagents: false,
     },
     lifecycle: {
       turnBoundary: 'native',
@@ -304,6 +332,7 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       mode: 'instructions_file',
       dynamicContextReload: 'turn',
     },
+    nativeProvides: [],
     runtimeContract: {
       requiredNodePackages: [],
       requiredCommands: ['codex'],
@@ -367,7 +396,7 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
     compatibility: {
       chat: 'full',
       im: 'degraded',
-      observability: 'degraded',
+      observability: 'full',
     },
   },
   agy: {
@@ -392,6 +421,7 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       skills: ['tool-loader'],
       ephemeralSession: true,
       filesystemAccess: true,
+      predefinedSubagents: false,
     },
     lifecycle: {
       turnBoundary: 'native',
@@ -405,6 +435,7 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       mode: 'instructions_file',
       dynamicContextReload: 'turn',
     },
+    nativeProvides: [],
     runtimeContract: {
       requiredCommands: ['agy'],
       configDirEnv: 'HAPPYCLAW_AGY_HOME',

@@ -22,7 +22,7 @@ import {
   isInterruptRelatedError,
 } from './ipc-handler.js';
 import { runQueryLoop } from './query-loop.js';
-import { createSystemPromptBuilder } from './system-prompt.js';
+import { createContextBuilder } from './system-prompt.js';
 import type { AgentRunner } from './runner-interface.js';
 import { getRunnerManifest, getSupportedRunnerIds } from './runners/index.js';
 import type { RunnerManifest } from './runners/types.js';
@@ -30,6 +30,7 @@ import type {
   RunnerDescriptor,
   UserMcpSource,
 } from './runner-descriptor.types.js';
+import { readMcpServersFromCodexToml } from './mcp-config-loader.js';
 
 type ContainerInputWire = Omit<ContainerInput, 'groupFolder'> & {
   groupFolder?: string;
@@ -59,6 +60,12 @@ const EPHEMERAL_SESSION = isEnabledEnv(process.env.HAPPYCLAW_EPHEMERAL_SESSION);
 const DISABLE_SYNTHETIC_ARCHIVE = isEnabledEnv(
   process.env.HAPPYCLAW_DISABLE_SYNTHETIC_ARCHIVE,
 );
+const TOOL_SCOPE =
+  process.env.HAPPYCLAW_TOOL_SCOPE === 'read-only'
+    ? 'read-only'
+    : process.env.HAPPYCLAW_TOOL_SCOPE === 'isolated'
+      ? 'isolated'
+      : 'default';
 
 const ipcPaths = buildIpcPaths(WORKSPACE_IPC);
 const IM_CHANNELS_FILE = path.join(WORKSPACE_IPC, '.recent-im-channels.json');
@@ -141,7 +148,7 @@ function loadMcpServersFromSource(
   source: UserMcpSource,
   input: ContainerInput,
 ): Record<string, unknown> {
-  if (source === 'agentdock' || source === 'happyclaw') {
+  if (source === 'agentdock') {
     return readMcpServersFromEnv('HAPPYCLAW_USER_MCP_SERVERS');
   }
   if (source === 'profile') {
@@ -165,17 +172,20 @@ function loadMcpServersFromSource(
   if (source === 'codex_config') {
     const candidateFiles = [
       process.env.CODEX_CONFIG_DIR
-        ? path.join(process.env.CODEX_CONFIG_DIR, 'config.json')
+        ? path.join(process.env.CODEX_CONFIG_DIR, 'config.toml')
         : null,
       process.env.HAPPYCLAW_WORKSPACE_SESSION
         ? path.join(
             process.env.HAPPYCLAW_WORKSPACE_SESSION,
             '.codex',
-            'config.json',
+            'config.toml',
           )
         : null,
     ].filter((value): value is string => !!value);
-    return Object.assign({}, ...candidateFiles.map(readMcpServersFromJsonFile));
+    return Object.assign(
+      {},
+      ...candidateFiles.map(readMcpServersFromCodexToml),
+    );
   }
   return {};
 }
@@ -400,13 +410,14 @@ async function main(): Promise<void> {
     ),
     skillsDir: WORKSPACE_SKILLS,
     disableSyntheticArchive: DISABLE_SYNTHETIC_ARCHIVE,
+    toolScope: TOOL_SCOPE,
   });
   validateDeclaredIpcCapabilities(runnerId, containerInput, runner);
   await runner.initialize();
 
   await runQueryLoop({
     runner,
-    buildSystemPrompt: createSystemPromptBuilder({
+    buildContext: createContextBuilder({
       descriptor: runnerManifest.descriptor,
       containerInput,
       state,

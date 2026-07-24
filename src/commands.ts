@@ -5,6 +5,7 @@
 import crypto from 'crypto';
 import {
   deleteSession,
+  deleteContextSummary,
   getJidsByFolder,
   listSessionRecords,
   storeMessageDirect,
@@ -37,9 +38,9 @@ function getWorkerRuntimeJidsForFolder(folder: string): string[] {
       listSessionRecords()
         .filter(
           (session) =>
-            session.parent_session_id === parentSessionId
-            && session.kind === 'worker'
-            && isWorkerSessionId(session.id),
+            session.parent_session_id === parentSessionId &&
+            session.kind === 'worker' &&
+            isWorkerSessionId(session.id),
         )
         .map((session) => session.id),
     ),
@@ -54,15 +55,20 @@ export async function executeSessionReset(
   deps: CommandDeps,
   agentId?: string,
 ): Promise<void> {
+  const contextJids = agentId
+    ? [buildWorkerConversationJid(chatJid, agentId)]
+    : Array.from(new Set([...getJidsByFolder(folder), chatJid]));
   if (agentId) {
-    await deps.queue.stopSession(buildWorkerSessionId(agentId), { force: true });
+    await deps.queue.stopSession(buildWorkerSessionId(agentId), {
+      force: true,
+    });
   } else {
     // Main session reset: stop all processes for this folder
     const siblingJids = getJidsByFolder(folder);
     const workerRuntimeJids = getWorkerRuntimeJidsForFolder(folder);
     await Promise.all(
       [...siblingJids, ...workerRuntimeJids].map((j) =>
-        deps.queue.stopSession(j, { force: true })
+        deps.queue.stopSession(j, { force: true }),
       ),
     );
   }
@@ -72,6 +78,9 @@ export async function executeSessionReset(
 
   // 3. Delete session from DB (+ in-memory cache for main session)
   deleteSession(folder, agentId);
+  for (const contextJid of contextJids) {
+    deleteContextSummary(folder, contextJid);
+  }
   if (!agentId) {
     delete deps.sessions[folder];
   }

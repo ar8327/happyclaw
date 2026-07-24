@@ -25,6 +25,7 @@ const fakeDescriptor: RunnerDescriptor = {
     skills: ['tool-loader'],
     ephemeralSession: true,
     filesystemAccess: false,
+    predefinedSubagents: false,
   },
   lifecycle: {
     turnBoundary: 'simulated',
@@ -35,9 +36,10 @@ const fakeDescriptor: RunnerDescriptor = {
     postCompactRepair: 'none',
   },
   promptContract: {
-    mode: 'system_stdin',
+    mode: 'append',
     dynamicContextReload: 'turn',
   },
+  nativeProvides: [],
   runtimeContract: {
     requiredCommands: [process.execPath],
     auth: 'none',

@@ -10,10 +10,12 @@
  */
 
 import fs from 'fs';
+import crypto from 'crypto';
 import path from 'path';
 import os from 'os';
 import {
   normalizeHomeFlags,
+  type ContextSection,
 } from 'agentdock-agent-runner-core';
 
 import type {
@@ -24,8 +26,10 @@ import type {
   NormalizedMessage,
   ActivityReport,
   RuntimePersistenceSnapshot,
+  RenderedRunnerContext,
   UsageInfo,
 } from '../../runner-interface.js';
+import { combineRenderedContext } from '../../runner-interface.js';
 import type { ContainerInput, ContainerOutput } from '../../types.js';
 import type { SessionState } from '../../session-state.js';
 import type { IpcPaths } from '../../ipc-handler.js';
@@ -60,6 +64,7 @@ export interface CodexRunnerOptions {
   skillsDir: string;
   disableSyntheticArchive?: boolean;
   builtinMcpServerName?: string;
+  toolScope?: 'default' | 'isolated' | 'read-only';
 }
 
 function resolveAdditionalDirectories(defaultDirs: string[]): string[] {
@@ -68,7 +73,9 @@ function resolveAdditionalDirectories(defaultDirs: string[]): string[] {
   try {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return defaultDirs;
-    return parsed.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0);
+    return parsed.filter(
+      (entry): entry is string => typeof entry === 'string' && entry.length > 0,
+    );
   } catch {
     return defaultDirs;
   }
@@ -91,7 +98,9 @@ function usageFromCodexTokenCount(event: CodexThreadEvent): UsageInfo | null {
   };
 }
 
-function usageFromCodexTurnCompleted(event: CodexThreadEvent): UsageInfo | null {
+function usageFromCodexTurnCompleted(
+  event: CodexThreadEvent,
+): UsageInfo | null {
   if (event.type !== 'turn.completed') return null;
   return {
     inputTokens: event.usage.input_tokens,
@@ -151,13 +160,71 @@ function subtractUsage(current: UsageInfo, previous: UsageInfo): UsageInfo {
   };
 }
 
+export function isCodexSessionResumeFailedError(message: string): boolean {
+  return [
+    /thread.*not found/i,
+    /unknown.*thread/i,
+    /invalid.*thread/i,
+    /thread.*does not exist/i,
+    /failed to (?:load|resume).*thread/i,
+    /conversation.*not found/i,
+  ].some((pattern) => pattern.test(message));
+}
+
+export function planCodexContextInjection(
+  previousHashes: ReadonlyMap<string, string>,
+  sections: ContextSection[],
+  options: {
+    threadChanged: boolean;
+    freshThread: boolean;
+  },
+): {
+  changed: Array<{ id: string; content: string }>;
+  nextHashes: Map<string, string>;
+} {
+  const nextHashes = new Map<string, string>(
+    sections.map((section) => [
+      section.id,
+      crypto.createHash('sha256').update(section.content).digest('hex'),
+    ]),
+  );
+  const changed: Array<{ id: string; content: string }> = sections
+    .filter((section) => {
+      if (
+        options.freshThread &&
+        options.threadChanged &&
+        section.stability !== 'turn'
+      ) {
+        return false;
+      }
+      return (
+        options.threadChanged ||
+        previousHashes.get(section.id) !== nextHashes.get(section.id)
+      );
+    })
+    .map((section) => ({
+      id: section.id,
+      content: section.content,
+    }));
+  if (!options.freshThread) {
+    for (const previousId of previousHashes.keys()) {
+      if (nextHashes.has(previousId)) continue;
+      changed.push({
+        id: previousId,
+        content: `The previous HappyClaw context section "${previousId}" no longer applies. Ignore its earlier content.`,
+      });
+    }
+  }
+  return { changed, nextHashes };
+}
+
 // ---------------------------------------------------------------------------
 // CodexRunner
 // ---------------------------------------------------------------------------
 
 export class CodexRunner implements AgentRunner {
   readonly ipcCapabilities: IpcCapabilities = {
-    supportsMidQueryPush: false,  // Codex turns are independent processes
+    supportsMidQueryPush: false, // Codex turns are independent processes
     supportsRuntimeModeSwitch: false,
   };
 
@@ -168,6 +235,9 @@ export class CodexRunner implements AgentRunner {
   private archiveMgr = new CodexArchiveManager();
   private providerCumulativeUsage: UsageInfo | null = null;
   private activeToolCalls = new Map<string, number>();
+  private renderedContext: RenderedRunnerContext | null = null;
+  private contextHashes = new Map<string, string>();
+  private contextThreadId: string | null = null;
   private pendingPostCompact = false;
   private seenCompactKeys = new Set<string>();
   private readonly opts: CodexRunnerOptions;
@@ -221,11 +291,14 @@ export class CodexRunner implements AgentRunner {
 
     // Build MCP server environment
     const mcpEnv: Record<string, string> = {
-      ...process.env as Record<string, string>,
+      ...(process.env as Record<string, string>),
       HAPPYCLAW_WORKSPACE_GROUP: groupDir,
       HAPPYCLAW_WORKSPACE_GLOBAL: globalDir,
       HAPPYCLAW_WORKSPACE_MEMORY: memoryDir,
-      HAPPYCLAW_WORKSPACE_IPC: this.opts.ipcPaths.inputDir.replace('/input', ''),
+      HAPPYCLAW_WORKSPACE_IPC: this.opts.ipcPaths.inputDir.replace(
+        '/input',
+        '',
+      ),
       HAPPYCLAW_GROUP_FOLDER: containerInput.groupFolder,
       HAPPYCLAW_CHAT_JID: containerInput.chatJid,
       HAPPYCLAW_USER_ID: containerInput.userId || '',
@@ -250,12 +323,37 @@ export class CodexRunner implements AgentRunner {
       modelInstructionsFile: this.instructionsFile,
       builtinMcpServerName: this.opts.builtinMcpServerName,
       userMcpServers,
+      readOnly: this.opts.toolScope === 'read-only',
     };
 
     this.session = new CodexSession(sessionConfig, {
       codexPathOverride: this.opts.command,
       apiKey: process.env.OPENAI_API_KEY,
     });
+  }
+
+  async applyContext(context: RenderedRunnerContext): Promise<void> {
+    this.renderedContext = context;
+  }
+
+  private async injectChangedContext(isFreshThread: boolean): Promise<void> {
+    if (!this.renderedContext) return;
+    const threadId = this.session.getThreadId();
+    if (!threadId) return;
+    const threadChanged = this.contextThreadId !== threadId;
+    const plan = planCodexContextInjection(
+      this.contextHashes,
+      this.renderedContext.sections,
+      {
+        threadChanged,
+        freshThread: isFreshThread,
+      },
+    );
+    if (plan.changed.length > 0) {
+      await this.session.injectContextSections(plan.changed);
+    }
+    this.contextHashes = plan.nextHashes;
+    this.contextThreadId = threadId;
   }
 
   private buildCompactStartedMessage(): NormalizedMessage {
@@ -282,20 +380,6 @@ export class CodexRunner implements AgentRunner {
     };
   }
 
-  private buildResumeInstructions(): string {
-    const activeChannels = this.opts.state.getActiveImChannels();
-    return [
-      'Continue the existing AgentDock conversation thread.',
-      'Follow the system, workspace, memory, and routing instructions already established earlier in this thread.',
-      'Focus on the latest user message. Do not repeat old replies.',
-      'Your stdout is only visible in the Web UI. For every latest user message from an IM channel, call send_message with the channel from that message source attribute. This also applies to greetings, thanks, acknowledgements, and short confirmations; do not only output "Done".',
-      activeChannels.length > 0
-        ? `Recently active IM channels: ${activeChannels.join(', ')}.`
-        : '',
-      'If exact long-term memory is needed, call memory_query instead of guessing.',
-    ].filter(Boolean).join('\n');
-  }
-
   private normalizeProviderUsage(cumulativeUsage: UsageInfo): UsageInfo {
     const previous = this.providerCumulativeUsage;
     this.providerCumulativeUsage = cumulativeUsage;
@@ -304,7 +388,9 @@ export class CodexRunner implements AgentRunner {
   }
 
   private buildArchiveCompletedMessage(
-    archiveResult: Awaited<ReturnType<CodexArchiveManager['archiveAfterNativeCompact']>>,
+    archiveResult: Awaited<
+      ReturnType<CodexArchiveManager['archiveAfterNativeCompact']>
+    >,
     statusText: string,
   ): NormalizedMessage {
     return {
@@ -325,30 +411,10 @@ export class CodexRunner implements AgentRunner {
     };
   }
 
-  private async injectPostCompactContextWithRetry(
-    continuationSummary?: string,
-  ): Promise<boolean> {
-    const maxAttempts = 3;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        await this.session.injectPostCompactContext({
-          continuationSummary,
-          activeChannels: this.opts.state.getActiveImChannels(),
-        });
-        return true;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        this.opts.log(`Codex post-compact context injection failed (${attempt}/${maxAttempts}): ${msg}`);
-        if (attempt < maxAttempts) {
-          await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
-        }
-      }
-    }
-    return false;
-  }
-
   private async runPostCompactArchive(): Promise<{
-    archiveResult: Awaited<ReturnType<CodexArchiveManager['archiveAfterNativeCompact']>>;
+    archiveResult: Awaited<
+      ReturnType<CodexArchiveManager['archiveAfterNativeCompact']>
+    >;
     statusText: string;
   }> {
     this.pendingPostCompact = true;
@@ -361,34 +427,34 @@ export class CodexRunner implements AgentRunner {
         return { archiveResult, statusText: 'session_wrapup_failed' };
       }
       const summary = archiveResult.continuationSummary?.trim();
-      const injected = await this.injectPostCompactContextWithRetry(summary);
+      this.opts.state.setContextSummary(summary);
       return {
         archiveResult,
-        statusText: injected
-          ? summary
-            ? 'session_wrapup_completed_post_compact_context_injected'
-            : 'session_wrapup_completed_post_compact_context_injected_no_summary'
-          : 'session_wrapup_completed_post_compact_context_injection_failed',
+        statusText: summary
+          ? 'session_wrapup_queued_context_ready_for_next_turn'
+          : 'session_wrapup_queued_without_summary',
       };
     } finally {
       this.pendingPostCompact = false;
     }
   }
 
-  async *runQuery(config: QueryConfig): AsyncGenerator<NormalizedMessage, QueryResult> {
+  async *runQuery(
+    config: QueryConfig,
+  ): AsyncGenerator<NormalizedMessage, QueryResult> {
     const { opts } = this;
     const { log } = opts;
 
     const composedPrompt = config.prompt;
     const isManualCompact = composedPrompt.trim() === '/compact';
     const resumeTarget = config.resumeAt || config.sessionId || undefined;
-    const systemPrompt = resumeTarget
-      ? this.buildResumeInstructions()
+    const systemPrompt = this.renderedContext
+      ? this.renderedContext.sessionStatic
       : config.systemPrompt;
 
     fs.writeFileSync(this.instructionsFile, systemPrompt, 'utf-8');
     log(
-      `Codex instructions prepared: mode=${resumeTarget ? 'resume-minimal' : 'fresh-full'}, chars=${systemPrompt.length}, promptChars=${composedPrompt.length}`,
+      `Codex instructions prepared: mode=session-static, chars=${systemPrompt.length}, promptChars=${composedPrompt.length}`,
     );
 
     // Prepare images (base64 → temp files)
@@ -398,7 +464,29 @@ export class CodexRunner implements AgentRunner {
     }
 
     // Start or resume thread
-    await this.session.startOrResume(resumeTarget);
+    try {
+      await this.session.startOrResume(resumeTarget);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (resumeTarget && isCodexSessionResumeFailedError(message)) {
+        log(`Codex thread resume failed, rebuilding session: ${message}`);
+        this.session.resetThread();
+        yield {
+          kind: 'error',
+          message,
+          recoverable: true,
+          errorType: 'session_resume_failed',
+        };
+        return {
+          closedDuringQuery: false,
+          interruptedDuringQuery: false,
+          drainDetectedDuringQuery: false,
+          sessionResumeFailed: true,
+        };
+      }
+      throw err;
+    }
+    await this.injectChangedContext(!resumeTarget);
     if (!resumeTarget) {
       this.providerCumulativeUsage = null;
     }
@@ -438,7 +526,10 @@ export class CodexRunner implements AgentRunner {
         }
 
         // Extract final response text from agent_message items
-        if (event.type === 'item.completed' && event.item.type === 'agent_message') {
+        if (
+          event.type === 'item.completed' &&
+          event.item.type === 'agent_message'
+        ) {
           finalText = event.item.text;
         }
 
@@ -523,7 +614,10 @@ export class CodexRunner implements AgentRunner {
     };
   }
 
-  pushMessage(_text: string, _images?: Array<{ data: string; mimeType?: string }>): string[] {
+  pushMessage(
+    _text: string,
+    _images?: Array<{ data: string; mimeType?: string }>,
+  ): string[] {
     // Codex doesn't support mid-query push.
     // query-loop handles this via pendingMessages accumulation.
     return [];
@@ -542,7 +636,8 @@ export class CodexRunner implements AgentRunner {
     }
     return {
       hasActiveToolCall: oldestStartedAt > 0,
-      activeToolDurationMs: oldestStartedAt > 0 ? Date.now() - oldestStartedAt : 0,
+      activeToolDurationMs:
+        oldestStartedAt > 0 ? Date.now() - oldestStartedAt : 0,
       hasPendingBackgroundTasks: this.pendingPostCompact,
     };
   }
@@ -575,7 +670,9 @@ export class CodexRunner implements AgentRunner {
     // Clean up temp directory
     try {
       fs.rmSync(this.tmpDir, { recursive: true, force: true });
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   private trackActivityEvent(event: CodexThreadEvent): void {
@@ -583,19 +680,28 @@ export class CodexRunner implements AgentRunner {
       this.activeToolCalls.set(event.item.id, Date.now());
       return;
     }
-    if (event.type === 'item.completed' && this.isToolLikeItem(event.item.type)) {
+    if (
+      event.type === 'item.completed' &&
+      this.isToolLikeItem(event.item.type)
+    ) {
       this.activeToolCalls.delete(event.item.id);
       return;
     }
-    if (event.type === 'turn.completed' || event.type === 'turn.failed' || event.type === 'error') {
+    if (
+      event.type === 'turn.completed' ||
+      event.type === 'turn.failed' ||
+      event.type === 'error'
+    ) {
       this.activeToolCalls.clear();
     }
   }
 
   private isToolLikeItem(itemType: CodexItemType): boolean {
-    return itemType === 'command_execution'
-      || itemType === 'mcp_tool_call'
-      || itemType === 'file_change'
-      || itemType === 'web_search';
+    return (
+      itemType === 'command_execution' ||
+      itemType === 'mcp_tool_call' ||
+      itemType === 'file_change' ||
+      itemType === 'web_search'
+    );
   }
 }

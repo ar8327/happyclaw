@@ -2,11 +2,10 @@ import {
   RUNNER_DESCRIPTORS,
   type RunnerDescriptor,
 } from './runner-descriptor.types.js';
+import { runnerAuthAvailable } from './runner-health.js';
 
-export const RUNNER_REGISTRY: Record<
-  RunnerDescriptor['id'],
-  RunnerDescriptor
-> = RUNNER_DESCRIPTORS;
+export const RUNNER_REGISTRY: Record<RunnerDescriptor['id'], RunnerDescriptor> =
+  RUNNER_DESCRIPTORS;
 
 export function getRunnerDescriptor(id: string): RunnerDescriptor | undefined {
   return RUNNER_REGISTRY[id];
@@ -88,7 +87,9 @@ export function getDefaultMemoryRunnerDescriptor(
 export function getDefaultMemoryRunnerId(
   preferredId?: RunnerDescriptor['id'] | null,
 ): RunnerDescriptor['id'] {
-  return getDefaultMemoryRunnerDescriptor(preferredId)?.id || getDefaultRunnerId();
+  return (
+    getDefaultMemoryRunnerDescriptor(preferredId)?.id || getDefaultRunnerId()
+  );
 }
 
 export function resolveMemoryRunnerId(
@@ -102,6 +103,31 @@ export function resolveMemoryRunnerId(
     return candidate.id;
   }
   return getDefaultMemoryRunnerId(candidateId);
+}
+
+export function resolveReadOnlyMemoryRunnerId(
+  candidateId?: RunnerDescriptor['id'] | null,
+): RunnerDescriptor['id'] {
+  const candidates = [
+    candidateId ? getRunnerDescriptor(candidateId) : undefined,
+    ...listMemoryRunnerDescriptors(),
+  ].filter(
+    (descriptor, index, all): descriptor is RunnerDescriptor =>
+      !!descriptor &&
+      all.findIndex((item) => item?.id === descriptor.id) === index,
+  );
+  const selected = candidates.find(
+    (descriptor) =>
+      canServeAsMemoryRunner(descriptor) &&
+      descriptor.lifecycle.beforeToolExecutionGuard !== 'none' &&
+      runnerAuthAvailable(descriptor),
+  );
+  if (!selected) {
+    throw new Error(
+      'No authenticated runner can enforce read-only memory queries',
+    );
+  }
+  return selected.id;
 }
 
 export function explainRunnerDegradation(

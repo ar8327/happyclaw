@@ -69,7 +69,6 @@ import {
   listRunnerDescriptors,
 } from '../runner-registry.js';
 import { serializeRunnerDescriptor } from '../runner-catalog.js';
-import { compressContext, isCompressing } from '../context-compressor.js';
 import { DATA_DIR, GROUPS_DIR } from '../config.js';
 import { executeSessionReset } from '../commands.js';
 import { loadTurnTrace } from '../turn-trace.js';
@@ -252,9 +251,7 @@ function normalizeActivationMode(
   return undefined;
 }
 
-function resolveBackingGroupForSession(
-  session: SessionRecord,
-): {
+function resolveBackingGroupForSession(session: SessionRecord): {
   backingJid: string;
   backingGroup: NonNullable<ReturnType<typeof getRegisteredGroup>>;
 } | null {
@@ -709,9 +706,7 @@ function getRelevantChatJids(
     const folderJids = getJidsByFolder(folder).filter(
       (jid) => !boundElsewhere.has(jid),
     );
-    return Array.from(
-      new Set([...folderJids, ...sessionBindings]),
-    );
+    return Array.from(new Set([...folderJids, ...sessionBindings]));
   }
 
   return sessionBindings;
@@ -2011,26 +2006,24 @@ sessionRoutes.post('/:id/compress', authMiddleware, async (c) => {
   if (deps.queue.hasDirectActiveRunner(backingJid)) {
     return c.json({ error: 'Agent 正在运行中，请等待完成后再压缩' }, 409);
   }
-  if (isCompressing(backingGroup.folder)) {
-    return c.json({ error: '压缩正在进行中，请稍后再试' }, 409);
+  if (!deps.triggerSessionWrapup) {
+    return c.json({ error: '记忆整理管线未初始化' }, 503);
   }
 
   const sessions = deps.getSessions();
   const sessionIdBefore = sessions[backingGroup.folder];
-  const result = await compressContext(backingGroup.folder, backingJid, {
-    beforeTimestamp: new Date().toISOString(),
-  });
-  if (!result.success) {
-    return c.json({ error: result.error }, 400);
-  }
+  await deps.triggerSessionWrapup(backingGroup.folder);
+  deleteSession(backingGroup.folder);
   if (sessions[backingGroup.folder] === sessionIdBefore) {
     delete sessions[backingGroup.folder];
   }
+  const summary = getContextSummary(backingGroup.folder, backingJid);
 
   return c.json({
     success: true,
-    summary: result.summary,
-    messageCount: result.messageCount,
+    queued: true,
+    summary: summary?.summary || null,
+    messageCount: summary?.message_count || 0,
   });
 });
 

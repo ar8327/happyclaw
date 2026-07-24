@@ -19,13 +19,14 @@ import {
   getRunnerProfile,
   getSessionRecord,
   getUserById,
+  listMemoryWriteQueue,
   listSessionRecords,
   saveSessionRecord,
 } from '../db.js';
 import { logger } from '../logger.js';
 import { GROUPS_DIR, DATA_DIR } from '../config.js';
 import type { AuthUser } from '../types.js';
-import { readMemoryState, writeMemoryState } from '../memory-agent.js';
+import { readMemoryState } from '../memory-agent.js';
 import type { MemoryOrchestrator } from '../memory-orchestrator.js';
 import {
   canServeAsMemoryRunner,
@@ -39,10 +40,9 @@ import type { SessionRuntimeManager } from '../session-runtime-manager.js';
 
 const memoryRoutes = new Hono<{ Variables: Variables }>();
 
-// --- Per-user operation locks (prevent duplicate trigger-wrapup / trigger-global-sleep) ---
+// --- Operation locks (prevent duplicate trigger-wrapup / trigger-global-sleep) ---
 
 const activeWrapups = new Set<string>();
-const activeGlobalSleeps = new Set<string>();
 
 // --- Constants ---
 
@@ -791,6 +791,10 @@ memoryRoutes.get('/status', authMiddleware, (c) => {
   const ownedFolders = listOwnedSessionFolders(user.id);
   const activeRuntimeJids = listOwnedActiveRuntimeJids(injectedQueue, user.id);
   const hasActiveSession = activeRuntimeJids.length > 0;
+  const memoryMetrics = injectedOrchestrator?.getMetrics(user.id) || null;
+  const globalSleepQueued = listMemoryWriteQueue(user.id).some(
+    (job) => job.kind === 'global_sleep',
+  );
 
   const pendingWrapups = (state.pendingWrapups || []) as string[];
 
@@ -803,13 +807,11 @@ memoryRoutes.get('/status', authMiddleware, (c) => {
     canTriggerWrapup:
       (ownedFolders.length > 0 || !!primaryFolder) &&
       !activeWrapups.has(user.id),
-    canTriggerGlobalSleep:
-      pendingWrapups.length > 0 &&
-      !activeGlobalSleeps.has(user.id) &&
-      !hasActiveSession,
+    canTriggerGlobalSleep: pendingWrapups.length > 0 && !globalSleepQueued,
     hasActiveSession,
     wrapupInProgress: activeWrapups.has(user.id),
-    globalSleepInProgress: activeGlobalSleeps.has(user.id),
+    globalSleepInProgress: globalSleepQueued,
+    lanes: memoryMetrics,
   });
 });
 
@@ -935,7 +937,7 @@ memoryRoutes.post('/trigger-wrapup', authMiddleware, async (c) => {
     }
     return c.json({
       success: true,
-      message: `会话整理完成，共处理 ${touchedFolders} 个会话`,
+      message: `已提交 ${touchedFolders} 个会话到后台批量整理`,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -952,38 +954,22 @@ memoryRoutes.post('/trigger-global-sleep', authMiddleware, async (c) => {
   if (!injectedOrchestrator) {
     return c.json({ error: '记忆系统未初始化' }, 503);
   }
-  if (activeGlobalSleeps.has(user.id)) {
-    return c.json({ error: '深度整理正在进行中，请勿重复触发' }, 409);
-  }
-
   const state = readMemoryState(user.id);
   const pendingWrapups = (state.pendingWrapups || []) as string[];
   if (pendingWrapups.length === 0) {
     return c.json({ error: '没有待整理的会话记录，无需执行深度整理' }, 400);
   }
-  const activeRuntimeJids = listOwnedActiveRuntimeJids(injectedQueue, user.id);
-  if (activeRuntimeJids.length > 0) {
-    return c.json(
-      { error: '仍有活跃会话运行中，请先停止相关主会话或 worker 会话' },
-      409,
-    );
-  }
-
-  activeGlobalSleeps.add(user.id);
   try {
-    await injectedOrchestrator.globalSleep(user.id);
-    // Main process updates state.json after successful global_sleep
-    const updatedState = readMemoryState(user.id);
-    updatedState.lastGlobalSleep = new Date().toISOString();
-    updatedState.pendingWrapups = [];
-    writeMemoryState(user.id, updatedState);
-    return c.json({ success: true, message: '深度整理已完成' });
+    const queued = injectedOrchestrator.enqueueGlobalSleep(user.id);
+    return c.json({
+      success: true,
+      requestId: queued.requestId,
+      message: '深度整理已进入后台写队列',
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err, userId: user.id }, 'Manual global_sleep failed');
     return c.json({ error: `深度整理失败: ${message}` }, 500);
-  } finally {
-    activeGlobalSleeps.delete(user.id);
   }
 });
 
