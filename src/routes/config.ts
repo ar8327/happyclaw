@@ -170,7 +170,8 @@ function isImplicitDefaultSessionBinding(
     binding.binding_mode === 'source_only' &&
     binding.reply_policy === 'source_only' &&
     binding.activation_mode === 'auto' &&
-    binding.require_mention !== true
+    binding.require_mention !== true &&
+    binding.conversation_mode !== 'thread'
   );
 }
 
@@ -192,6 +193,7 @@ function applyExplicitSessionBinding(
     reply_policy?: 'source_only' | 'mirror';
     activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
     require_mention?: boolean;
+    conversation_mode?: 'chat' | 'thread';
   },
 ): void {
   const now = new Date().toISOString();
@@ -204,10 +206,16 @@ function applyExplicitSessionBinding(
     updates.require_mention !== undefined
       ? updates.require_mention
       : imGroup.require_mention === true;
+  const nextConversationMode =
+    updates.conversation_mode ??
+    imGroup.conversation_mode ??
+    currentBinding?.conversation_mode ??
+    'chat';
   const isDefaultPolicy =
     nextReplyPolicy === 'source_only' &&
     nextActivationMode === 'auto' &&
-    !nextRequireMention;
+    !nextRequireMention &&
+    nextConversationMode !== 'thread';
 
   if (
     !sessionId ||
@@ -233,6 +241,7 @@ function applyExplicitSessionBinding(
     require_mention: nextRequireMention,
     display_name: imGroup.name,
     reply_policy: nextReplyPolicy,
+    conversation_mode: nextConversationMode,
     created_at: currentBinding?.created_at || imGroup.added_at || now,
     updated_at: now,
   });
@@ -1630,6 +1639,12 @@ configRoutes.put('/im/bindings/:imJid', authMiddleware, async (c) => {
     typeof body.require_mention === 'boolean'
       ? body.require_mention
       : undefined;
+  const conversationMode =
+    imJid.startsWith('feishu:') && body.conversation_mode === 'thread'
+      ? 'thread'
+      : body.conversation_mode === 'chat'
+        ? 'chat'
+        : undefined;
   const requestedSessionId =
     typeof body.session_id === 'string' && body.session_id.trim()
       ? body.session_id.trim()
@@ -1641,7 +1656,8 @@ configRoutes.put('/im/bindings/:imJid', authMiddleware, async (c) => {
     !targetSessionId &&
     (activationMode !== undefined ||
       requireMention !== undefined ||
-      body.reply_policy !== undefined)
+      body.reply_policy !== undefined ||
+      conversationMode !== undefined)
   ) {
     const updated: RegisteredGroup = {
       ...imGroup,
@@ -1649,6 +1665,8 @@ configRoutes.put('/im/bindings/:imJid', authMiddleware, async (c) => {
       activation_mode: activationMode ?? imGroup.activation_mode,
       require_mention:
         requireMention !== undefined ? requireMention : imGroup.require_mention,
+      conversation_mode:
+        conversationMode ?? imGroup.conversation_mode ?? 'chat',
     };
     applyBindingUpdate(imJid, updated);
     applyExplicitSessionBinding(
@@ -1656,7 +1674,7 @@ configRoutes.put('/im/bindings/:imJid', authMiddleware, async (c) => {
       getExplicitSessionBinding(imJid, imGroup)?.session_id ||
         resolveDefaultBindingSessionId(updated),
       updated,
-      {},
+      { conversation_mode: conversationMode },
     );
     return c.json({ success: true });
   }
@@ -1669,13 +1687,15 @@ configRoutes.put('/im/bindings/:imJid', authMiddleware, async (c) => {
       activation_mode: activationMode ?? 'disabled',
       require_mention:
         requireMention !== undefined ? requireMention : imGroup.require_mention,
+      conversation_mode:
+        conversationMode ?? imGroup.conversation_mode ?? 'chat',
     };
     applyBindingUpdate(imJid, updated);
     applyExplicitSessionBinding(
       imJid,
       resolveDefaultBindingSessionId(updated),
       updated,
-      {},
+      { conversation_mode: conversationMode },
     );
     logger.info({ imJid, userId: user.id }, 'IM group unbound (bindings page)');
     return c.json({ success: true });
@@ -1727,9 +1747,13 @@ configRoutes.put('/im/bindings/:imJid', authMiddleware, async (c) => {
           : imGroup.activation_mode),
       require_mention:
         requireMention !== undefined ? requireMention : imGroup.require_mention,
+      conversation_mode:
+        conversationMode ?? imGroup.conversation_mode ?? 'chat',
     };
     applyBindingUpdate(imJid, updated);
-    applyExplicitSessionBinding(imJid, targetSessionId, updated, {});
+    applyExplicitSessionBinding(imJid, targetSessionId, updated, {
+      conversation_mode: conversationMode,
+    });
     logger.info(
       { imJid, agentId, userId: user.id },
       'IM group bound to agent (bindings page)',
@@ -1762,9 +1786,12 @@ configRoutes.put('/im/bindings/:imJid', authMiddleware, async (c) => {
         : imGroup.activation_mode),
     require_mention:
       requireMention !== undefined ? requireMention : imGroup.require_mention,
+    conversation_mode: conversationMode ?? imGroup.conversation_mode ?? 'chat',
   };
   applyBindingUpdate(imJid, updated);
-  applyExplicitSessionBinding(imJid, targetSessionId, updated, {});
+  applyExplicitSessionBinding(imJid, targetSessionId, updated, {
+    conversation_mode: conversationMode,
+  });
   logger.info(
     { imJid, sessionId: targetSessionId, userId: user.id },
     'IM group bound to session (bindings page)',

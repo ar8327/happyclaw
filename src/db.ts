@@ -148,12 +148,17 @@ function migrateLegacyRegisteredGroupBindings(): void {
   const hasReplyPolicy = hasColumn('registered_groups', 'reply_policy');
   const hasActivationMode = hasColumn('registered_groups', 'activation_mode');
   const hasRequireMention = hasColumn('registered_groups', 'require_mention');
+  const hasConversationMode = hasColumn(
+    'registered_groups',
+    'conversation_mode',
+  );
   const hasTargetAgent = hasColumn('registered_groups', 'target_agent_id');
   const hasTargetMain = hasColumn('registered_groups', 'target_main_jid');
   if (
     !hasReplyPolicy &&
     !hasActivationMode &&
     !hasRequireMention &&
+    !hasConversationMode &&
     !hasTargetAgent &&
     !hasTargetMain
   ) {
@@ -167,6 +172,10 @@ function migrateLegacyRegisteredGroupBindings(): void {
       }${
         hasActivationMode ? ', activation_mode' : ", 'auto' AS activation_mode"
       }${hasRequireMention ? ', require_mention' : ', 0 AS require_mention'}${
+        hasConversationMode
+          ? ', conversation_mode'
+          : ", 'chat' AS conversation_mode"
+      }${
         hasTargetAgent ? ', target_agent_id' : ', NULL AS target_agent_id'
       }${hasTargetMain ? ', target_main_jid' : ', NULL AS target_main_jid'}
        FROM registered_groups`,
@@ -179,6 +188,7 @@ function migrateLegacyRegisteredGroupBindings(): void {
     reply_policy: string | null;
     activation_mode: string | null;
     require_mention: number | null;
+    conversation_mode: string | null;
     target_agent_id: string | null;
     target_main_jid: string | null;
   }>;
@@ -222,6 +232,9 @@ function migrateLegacyRegisteredGroupBindings(): void {
         require_mention: row.require_mention === 1,
         display_name: row.name,
         reply_policy: replyPolicy,
+        conversation_mode:
+          current?.conversation_mode ??
+          parseConversationMode(row.conversation_mode),
         created_at: current?.created_at || row.added_at || now,
         updated_at: now,
       });
@@ -913,6 +926,7 @@ export function initDatabase(): void {
       require_mention INTEGER NOT NULL DEFAULT 0,
       display_name TEXT,
       reply_policy TEXT NOT NULL DEFAULT 'source_only',
+      conversation_mode TEXT NOT NULL DEFAULT 'chat',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -1050,6 +1064,11 @@ export function initDatabase(): void {
   `);
 
   dropLegacySessionRuntimeModeColumn();
+  ensureColumn(
+    'session_bindings',
+    'conversation_mode',
+    "TEXT NOT NULL DEFAULT 'chat'",
+  );
   migrateLegacyRegisteredGroupBindings();
   backfillLegacyGroupOwnersIntoSessions();
   migrateRegisteredGroupsToSessionChannels();
@@ -1374,7 +1393,7 @@ export function initDatabase(): void {
      WHERE status = 'sending'`,
   ).run(Date.now(), new Date().toISOString());
 
-  const SCHEMA_VERSION = '50';
+  const SCHEMA_VERSION = '51';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -2260,17 +2279,19 @@ export function getLastInboundMessage(
 ): {
   id: string;
   sender: string;
+  reply_to_id?: string;
   thread_id?: string;
   root_id?: string;
 } | null {
   const sql = sourceJid
-    ? `SELECT id, sender, thread_id, root_id FROM messages WHERE chat_jid = ? AND source_jid = ? AND is_from_me = 0 ORDER BY rowid DESC LIMIT 1`
-    : `SELECT id, sender, thread_id, root_id FROM messages WHERE chat_jid = ? AND is_from_me = 0 ORDER BY rowid DESC LIMIT 1`;
+    ? `SELECT id, sender, reply_to_id, thread_id, root_id FROM messages WHERE chat_jid = ? AND source_jid = ? AND is_from_me = 0 ORDER BY rowid DESC LIMIT 1`
+    : `SELECT id, sender, reply_to_id, thread_id, root_id FROM messages WHERE chat_jid = ? AND is_from_me = 0 ORDER BY rowid DESC LIMIT 1`;
   const row = sourceJid
     ? (db.prepare(sql).get(chatJid, sourceJid) as
         | {
             id: string;
             sender: string;
+            reply_to_id?: string;
             thread_id?: string;
             root_id?: string;
           }
@@ -2279,6 +2300,7 @@ export function getLastInboundMessage(
         | {
             id: string;
             sender: string;
+            reply_to_id?: string;
             thread_id?: string;
             root_id?: string;
           }
@@ -2293,13 +2315,14 @@ export function getLastInboundMessageInThread(
 ): {
   id: string;
   sender: string;
+  reply_to_id?: string;
   thread_id?: string;
   root_id?: string;
 } | null {
   return (
     (db
       .prepare(
-        `SELECT id, sender, thread_id, root_id
+        `SELECT id, sender, reply_to_id, thread_id, root_id
            FROM messages
           WHERE chat_jid = ?
             AND source_jid = ?
@@ -2312,6 +2335,7 @@ export function getLastInboundMessageInThread(
       | {
           id: string;
           sender: string;
+          reply_to_id?: string;
           thread_id?: string;
           root_id?: string;
         }
@@ -3361,6 +3385,9 @@ function parseSessionBindingRecord(
     display_name:
       typeof row.display_name === 'string' ? row.display_name : null,
     reply_policy: row.reply_policy === 'mirror' ? 'mirror' : 'source_only',
+    conversation_mode: parseConversationMode(
+      typeof row.conversation_mode === 'string' ? row.conversation_mode : null,
+    ),
     created_at: String(row.created_at),
     updated_at: String(row.updated_at),
   };
@@ -3960,8 +3987,8 @@ export function saveSessionBinding(binding: SessionBindingRecord): void {
   db.prepare(
     `INSERT INTO session_bindings (
       channel_jid, session_id, binding_mode, activation_mode, require_mention,
-      display_name, reply_policy, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      display_name, reply_policy, conversation_mode, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(channel_jid) DO UPDATE SET
       session_id = excluded.session_id,
       binding_mode = excluded.binding_mode,
@@ -3969,6 +3996,7 @@ export function saveSessionBinding(binding: SessionBindingRecord): void {
       require_mention = excluded.require_mention,
       display_name = excluded.display_name,
       reply_policy = excluded.reply_policy,
+      conversation_mode = excluded.conversation_mode,
       updated_at = excluded.updated_at`,
   ).run(
     binding.channel_jid,
@@ -3978,6 +4006,7 @@ export function saveSessionBinding(binding: SessionBindingRecord): void {
     binding.require_mention ? 1 : 0,
     binding.display_name,
     binding.reply_policy,
+    binding.conversation_mode,
     binding.created_at,
     binding.updated_at,
   );
@@ -4132,6 +4161,7 @@ function parseGroupRow(
     group.reply_policy = binding?.reply_policy ?? 'source_only';
     group.require_mention = binding?.require_mention === true;
     group.activation_mode = binding?.activation_mode ?? 'auto';
+    group.conversation_mode = binding?.conversation_mode ?? 'chat';
   }
   return group;
 }
@@ -4164,6 +4194,10 @@ function parseActivationMode(
   if (raw && VALID_ACTIVATION_MODES.has(raw))
     return raw as 'auto' | 'always' | 'when_mentioned' | 'disabled';
   return 'auto';
+}
+
+function parseConversationMode(raw: string | null): 'chat' | 'thread' {
+  return raw === 'thread' ? 'thread' : 'chat';
 }
 
 function resolveSessionOwnerKeyFromSessionId(
@@ -4236,6 +4270,8 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
       group.activation_mode ?? currentBinding?.activation_mode ?? 'auto';
     const requireMention =
       group.require_mention ?? currentBinding?.require_mention ?? false;
+    const conversationMode =
+      group.conversation_mode ?? currentBinding?.conversation_mode ?? 'chat';
     saveSessionBinding({
       channel_jid: jid,
       session_id: sessionId,
@@ -4249,6 +4285,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
       require_mention: requireMention,
       display_name: group.name,
       reply_policy: replyPolicy,
+      conversation_mode: conversationMode,
       created_at: currentBinding?.created_at || group.added_at || now,
       updated_at: now,
     });

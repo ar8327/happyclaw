@@ -4,6 +4,10 @@ import path from 'path';
 
 import { ASSISTANT_NAME, DATA_DIR } from './config.js';
 import { logger } from './logger.js';
+import {
+  normalizeFeishuConversationMode,
+  type FeishuConversationMode,
+} from './feishu-conversation-mode.js';
 
 const MAX_FIELD_LENGTH = 2000;
 const CLAUDE_CONFIG_DIR = path.join(DATA_DIR, 'config');
@@ -1325,6 +1329,7 @@ export interface SystemSettings {
   // Feishu
   feishuApiDomain: string;
   feishuDocDomain: string;
+  defaultImConversationMode: FeishuConversationMode;
   // Web
   webPublicUrl: string;
   // Global default models (workspace-level overrides these)
@@ -1350,6 +1355,7 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   traceRetentionDays: 7,
   feishuApiDomain: 'open.feishu.cn',
   feishuDocDomain: 'bytedance.larkoffice.com',
+  defaultImConversationMode: 'chat',
   webPublicUrl: '',
   defaultClaudeModel: '',
 };
@@ -1473,6 +1479,9 @@ function readSystemSettingsFromFile(): SystemSettings | null {
       typeof raw.feishuDocDomain === 'string' && raw.feishuDocDomain
         ? raw.feishuDocDomain
         : DEFAULT_SYSTEM_SETTINGS.feishuDocDomain,
+    defaultImConversationMode: normalizeFeishuConversationMode(
+      raw.defaultImConversationMode,
+    ),
     webPublicUrl:
       typeof raw.webPublicUrl === 'string'
         ? raw.webPublicUrl
@@ -1566,6 +1575,9 @@ function buildEnvFallbackSettings(): SystemSettings {
       process.env.FEISHU_API_DOMAIN || DEFAULT_SYSTEM_SETTINGS.feishuApiDomain,
     feishuDocDomain:
       process.env.FEISHU_DOC_DOMAIN || DEFAULT_SYSTEM_SETTINGS.feishuDocDomain,
+    defaultImConversationMode: normalizeFeishuConversationMode(
+      process.env.DEFAULT_IM_CONVERSATION_MODE,
+    ),
     webPublicUrl:
       process.env.WEB_PUBLIC_URL || DEFAULT_SYSTEM_SETTINGS.webPublicUrl,
     defaultClaudeModel:
@@ -1679,6 +1691,9 @@ export function saveSystemSettings(
       merged[key] = DEFAULT_SYSTEM_SETTINGS[key];
     }
   }
+  merged.defaultImConversationMode = normalizeFeishuConversationMode(
+    merged.defaultImConversationMode,
+  );
 
   fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
   const tmp = `${SYSTEM_SETTINGS_FILE}.tmp`;

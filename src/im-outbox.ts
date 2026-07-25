@@ -26,6 +26,7 @@ export type ImDeliveryPayload =
       fileName?: string;
       replyToMsgId?: string;
       threadId?: string;
+      replyInThread?: boolean;
     }
   | {
       filePath: string;
@@ -106,6 +107,7 @@ async function deliver(record: ImOutboxRecord): Promise<string | undefined> {
       const session = imManager.createStreamingSession(record.target_jid, {
         replyToMsgId: options.replyToMsgId,
         threadId: options.threadId,
+        replyInThread: options.replyInThread,
         idempotencyKey: record.id,
         cardKit: true,
       });
@@ -132,6 +134,7 @@ async function deliver(record: ImOutboxRecord): Promise<string | undefined> {
         : undefined,
       typeof payload.threadId === 'string' ? payload.threadId : undefined,
       record.id,
+      payload.replyInThread === true,
     );
     return undefined;
   }

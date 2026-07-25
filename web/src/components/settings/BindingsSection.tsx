@@ -65,6 +65,7 @@ export function BindingsSection() {
       reply_policy?: 'source_only' | 'mirror';
       activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
       require_mention?: boolean;
+      conversation_mode?: 'chat' | 'thread';
     },
   ) => {
     setActioningJid(group.jid);

@@ -84,6 +84,7 @@ export interface SystemSettings {
   traceRetentionDays: number;
   feishuApiDomain: string;
   feishuDocDomain: string;
+  defaultImConversationMode: 'chat' | 'thread';
   webPublicUrl: string;
   defaultClaudeModel: string;
 }

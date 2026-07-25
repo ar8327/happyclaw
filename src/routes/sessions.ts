@@ -59,7 +59,6 @@ import {
   setRegisteredGroup,
   storeMessageDirect,
   upsertSessionRuntimeState,
-  updateSessionBindingPolicies,
   updateChatName,
 } from '../db.js';
 import {
@@ -443,6 +442,27 @@ function syncRegisteredGroupCache(jid: string, group: RegisteredGroup): void {
   if (groups[jid]) groups[jid] = group;
 }
 
+function syncSessionActivationModeToImChannels(
+  session: SessionRecord,
+  activationMode: NonNullable<RegisteredGroup['activation_mode']>,
+): void {
+  const bindings = listSessionBindings();
+  const relevantJids = getRelevantChatJids(session, bindings);
+  for (const channelJid of relevantJids) {
+    if (channelJid.startsWith('web:')) continue;
+    const imGroup = getRegisteredGroup(channelJid);
+    if (!imGroup) continue;
+    const updatedImGroup: RegisteredGroup = {
+      ...imGroup,
+      activation_mode: activationMode,
+    };
+    syncExplicitSessionBinding(channelJid, updatedImGroup, session.id, {
+      activationMode,
+    });
+    syncRegisteredGroupCache(channelJid, updatedImGroup);
+  }
+}
+
 function buildCompatibilityGroupForSession(
   session: SessionRecord,
   options: {
@@ -491,6 +511,7 @@ function buildUpdatedImGroupForSessionBinding(
     replyPolicy?: 'source_only' | 'mirror';
     activationMode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
     requireMention?: boolean;
+    conversationMode?: 'chat' | 'thread';
   },
 ): RegisteredGroup {
   const nextActivationMode =
@@ -509,6 +530,8 @@ function buildUpdatedImGroupForSessionBinding(
       options.requireMention !== undefined
         ? options.requireMention
         : imGroup.require_mention,
+    conversation_mode:
+      options.conversationMode ?? imGroup.conversation_mode ?? 'chat',
   };
 
   const defaultSessionId = `main:${imGroup.folder}`;
@@ -540,7 +563,8 @@ function isImplicitDefaultSessionBinding(
     binding.binding_mode === 'source_only' &&
     binding.reply_policy === 'source_only' &&
     binding.activation_mode === 'auto' &&
-    binding.require_mention !== true
+    binding.require_mention !== true &&
+    binding.conversation_mode !== 'thread'
   );
 }
 
@@ -562,6 +586,7 @@ function syncExplicitSessionBinding(
     replyPolicy?: 'source_only' | 'mirror';
     activationMode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
     requireMention?: boolean;
+    conversationMode?: 'chat' | 'thread';
   },
 ): void {
   const now = new Date().toISOString();
@@ -574,11 +599,17 @@ function syncExplicitSessionBinding(
     options.requireMention !== undefined
       ? options.requireMention
       : imGroup.require_mention === true;
+  const nextConversationMode =
+    options.conversationMode ??
+    imGroup.conversation_mode ??
+    current?.conversation_mode ??
+    'chat';
   const defaultSessionId = `main:${imGroup.folder}`;
   const isDefaultPolicy =
     nextReplyPolicy === 'source_only' &&
     nextActivationMode === 'auto' &&
-    !nextRequireMention;
+    !nextRequireMention &&
+    nextConversationMode !== 'thread';
 
   if (!sessionId || (sessionId === defaultSessionId && isDefaultPolicy)) {
     deleteSessionBinding(channelJid);
@@ -599,6 +630,7 @@ function syncExplicitSessionBinding(
     require_mention: nextRequireMention,
     display_name: imGroup.name,
     reply_policy: nextReplyPolicy,
+    conversation_mode: nextConversationMode,
     created_at: current?.created_at || imGroup.added_at || now,
     updated_at: now,
   });
@@ -945,6 +977,12 @@ sessionRoutes.put('/bindings/:channelJid', authMiddleware, async (c) => {
     typeof body.require_mention === 'boolean'
       ? body.require_mention
       : undefined;
+  const conversationMode =
+    body.conversation_mode === 'thread'
+      ? 'thread'
+      : body.conversation_mode === 'chat'
+        ? 'chat'
+        : undefined;
   const currentBinding = getExplicitSessionBinding(channelJid, imGroup);
 
   let targetSession: SessionRecord | null = null;
@@ -967,6 +1005,9 @@ sessionRoutes.put('/bindings/:channelJid', authMiddleware, async (c) => {
         replyPolicy,
         activationMode,
         requireMention,
+        conversationMode: channelJid.startsWith('feishu:')
+          ? conversationMode
+          : 'chat',
       },
     );
     setRegisteredGroup(channelJid, updated);
@@ -976,6 +1017,9 @@ sessionRoutes.put('/bindings/:channelJid', authMiddleware, async (c) => {
       replyPolicy,
       activationMode,
       requireMention,
+      conversationMode: channelJid.startsWith('feishu:')
+        ? conversationMode
+        : 'chat',
     });
     return c.json({
       success: true,
@@ -1674,9 +1718,7 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
     setRegisteredGroup(backingJid, updatedGroup);
     deps.getRegisteredGroups()[backingJid] = updatedGroup;
     if (nextActivationMode !== undefined) {
-      updateSessionBindingPolicies(existing.id, {
-        activation_mode: nextActivationMode,
-      });
+      syncSessionActivationModeToImChannels(existing, nextActivationMode);
     }
     updateChatName(backingJid, nextName);
   }

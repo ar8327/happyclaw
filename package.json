@@ -23,6 +23,7 @@
     "test:context-conformance": "tsx container/agent-runner/tests/context-conformance.test.ts",
     "test:runner-contracts": "tsx container/agent-runner/tests/runner-contract.test.ts",
     "test:steering-feishu": "tsx src/steering-feishu-improvements.test.ts",
+    "test:feishu-conversation-mode": "tsx src/feishu-conversation-mode.test.ts",
     "test:im-outbox": "tsx src/im-outbox.test.ts",
     "dev:all": "npx concurrently --timestamp-format \"yyyy-MM-dd HH:mm:ss.SSS\" -n backend,frontend -c blue,green \"npm run dev\" \"npm run dev:web\"",
     "dev:web": "cd web && npm run dev",

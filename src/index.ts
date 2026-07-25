@@ -98,8 +98,20 @@ import { imManager } from './im-manager.js';
 import {
   getChannelType,
   extractChatId,
+  type IMRouteContext,
   type IMSendOptions,
 } from './im-channel.js';
+import {
+  applyFeishuConversationMode,
+  hasFeishuThreadContext,
+  type FeishuConversationMode,
+  type FeishuThreadSource,
+} from './feishu-conversation-mode.js';
+import {
+  buildFeishuTopicIdentity,
+  resolveFeishuTopicAnchor,
+} from './feishu-topic-session.js';
+import { buildFeishuTopicNameSuffix } from './feishu-topic-title.js';
 import { abortAllStreamingSessions } from './feishu-streaming-card.js';
 import {
   type ProgressCardController,
@@ -243,18 +255,81 @@ function getIdleShutdownTimeoutMs(group?: RegisteredGroup): number {
  * This avoids querying DB for "last inbound" which may return a message
  * the agent hasn't seen (arrived after agent started).
  */
+interface RuntimeTriggerMessage {
+  id: string;
+  sender: string;
+  replyToId?: string;
+  threadId?: string;
+  rootId?: string;
+}
+
 const triggerMessagesByFolder = new Map<
   string,
-  Map<
-    string,
-    {
-      id: string;
-      sender: string;
-      threadId?: string;
-      rootId?: string;
-    }
-  >
+  Map<string, RuntimeTriggerMessage>
 >();
+
+function asFeishuThreadSource(
+  trigger?: RuntimeTriggerMessage | FeishuThreadSource | null,
+): FeishuThreadSource | null {
+  if (!trigger) return null;
+  if ('threadId' in trigger || 'rootId' in trigger || 'replyToId' in trigger) {
+    const runtimeTrigger = trigger as RuntimeTriggerMessage;
+    return {
+      id: runtimeTrigger.id,
+      reply_to_id: runtimeTrigger.replyToId,
+      root_id: runtimeTrigger.rootId,
+      thread_id: runtimeTrigger.threadId,
+    };
+  }
+  return trigger;
+}
+
+function applyFeishuThreadModeForTarget(params: {
+  targetChannel?: string | null;
+  sourceGroup?: string;
+  base?: IMSendOptions;
+  trigger?: RuntimeTriggerMessage | FeishuThreadSource | null;
+}): IMSendOptions {
+  const base = params.base ?? {};
+  if (!params.targetChannel?.startsWith('feishu:')) return base;
+  const source = asFeishuThreadSource(params.trigger);
+  const conversationMode = hasFeishuThreadContext(source)
+    ? 'thread'
+    : resolveEffectiveImConversationMode(params.targetChannel);
+  const next = applyFeishuConversationMode(
+    conversationMode,
+    base,
+    source,
+  ) as IMSendOptions;
+  if (conversationMode === 'thread' && next.threadFallbackReason) {
+    logger.info(
+      {
+        targetChannel: params.targetChannel,
+        sourceGroup: params.sourceGroup,
+        reason: next.threadFallbackReason,
+      },
+      'Feishu thread mode has no reply target; falling back to chat root',
+    );
+  }
+  return next;
+}
+
+function buildFeishuCardOptionsForSource(params: {
+  chatJid: string;
+  sourceChannel: string | null;
+  folder: string;
+}): IMSendOptions | undefined {
+  if (!params.sourceChannel?.startsWith('feishu:')) return undefined;
+  const trigger =
+    triggerMessagesByFolder.get(params.folder)?.get(params.sourceChannel) ??
+    getLastInboundMessage(params.chatJid, params.sourceChannel);
+  const options = applyFeishuThreadModeForTarget({
+    targetChannel: params.sourceChannel,
+    sourceGroup: params.folder,
+    trigger,
+  });
+  return Object.keys(options).length > 0 ? options : undefined;
+}
 
 // Monotonic per-runtime-folder counter advanced only after the host has
 // durably accepted a send_message/send_image/send_file IPC request. This is
@@ -592,8 +667,21 @@ function isImplicitDefaultSessionBinding(
     binding.binding_mode === 'source_only' &&
     binding.reply_policy === 'source_only' &&
     binding.activation_mode === 'auto' &&
-    binding.require_mention !== true
+    binding.require_mention !== true &&
+    binding.conversation_mode !== 'thread'
   );
+}
+
+function resolveEffectiveImConversationMode(
+  chatJid: string | undefined,
+  fallbackGroup?: RegisteredGroup,
+): FeishuConversationMode {
+  if (!chatJid?.startsWith('feishu:')) return 'chat';
+  const binding = getSessionBinding(chatJid);
+  if (binding?.conversation_mode) return binding.conversation_mode;
+  const group =
+    fallbackGroup ?? registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  return group?.conversation_mode === 'thread' ? 'thread' : 'chat';
 }
 
 function getExplicitSessionBinding(
@@ -763,6 +851,12 @@ function applyExplicitChatBinding(
   const now = new Date().toISOString();
   const nextActivationMode = group.activation_mode ?? 'auto';
   const nextRequireMention = group.require_mention === true;
+  const nextConversationMode =
+    group.conversation_mode ??
+    current?.conversation_mode ??
+    (chatJid.startsWith('feishu:')
+      ? getSystemSettings().defaultImConversationMode
+      : 'chat');
   const defaultSessionId = chatJid.startsWith('web:')
     ? null
     : `main:${group.folder}`;
@@ -770,7 +864,8 @@ function applyExplicitChatBinding(
   const isDefaultPolicy =
     nextActivationMode === 'auto' &&
     !nextRequireMention &&
-    replyPolicy === 'source_only';
+    replyPolicy === 'source_only' &&
+    nextConversationMode !== 'thread';
   if (!sessionId || (isDefaultBinding && isDefaultPolicy)) {
     deleteSessionBinding(chatJid);
     return;
@@ -789,9 +884,162 @@ function applyExplicitChatBinding(
     require_mention: nextRequireMention,
     display_name: group.name,
     reply_policy: replyPolicy,
+    conversation_mode: nextConversationMode,
     created_at: current?.created_at || group.added_at || now,
     updated_at: now,
   });
+}
+
+function resolveLegacyFeishuTopicJid(
+  baseChatJid: string,
+  context: IMRouteContext | undefined,
+  currentAnchor: string,
+): string | null {
+  const legacyAnchor =
+    typeof context?.rootId === 'string' && context.rootId.trim()
+      ? context.rootId.trim()
+      : null;
+  if (!legacyAnchor || legacyAnchor === currentAnchor) return null;
+
+  const legacyIdentity = buildFeishuTopicIdentity(baseChatJid, legacyAnchor);
+  const legacyTopic =
+    registeredGroups[legacyIdentity.jid] ??
+    getRegisteredGroup(legacyIdentity.jid);
+  if (!legacyTopic) return null;
+
+  registeredGroups[legacyIdentity.jid] = legacyTopic;
+  return legacyIdentity.jid;
+}
+
+function shouldSplitFeishuSessionByTopic(
+  chatJid: string,
+  context?: IMRouteContext,
+): boolean {
+  if (!chatJid.startsWith('feishu:')) return false;
+  if (context?.chatType === 'p2p') return false;
+  if (hasFeishuThreadContext({ thread_id: context?.threadId })) return true;
+  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  return resolveEffectiveImConversationMode(chatJid, group) === 'thread';
+}
+
+function ensureFeishuTopicSession(
+  baseChatJid: string,
+  context?: IMRouteContext,
+): string | null {
+  const anchor = resolveFeishuTopicAnchor(context);
+  if (!anchor) return null;
+
+  const identity = buildFeishuTopicIdentity(baseChatJid, anchor);
+  const existing =
+    registeredGroups[identity.jid] ?? getRegisteredGroup(identity.jid);
+  if (existing) {
+    registeredGroups[identity.jid] = existing;
+    return identity.jid;
+  }
+
+  // Older HappyClaw builds keyed an existing topic by root_id. Reuse that
+  // projection after upgrading to the more stable thread_id anchor.
+  const legacyTopicJid = resolveLegacyFeishuTopicJid(
+    baseChatJid,
+    context,
+    anchor,
+  );
+  if (legacyTopicJid) return legacyTopicJid;
+
+  const baseGroup =
+    registeredGroups[baseChatJid] ?? getRegisteredGroup(baseChatJid);
+  if (!baseGroup) return null;
+  const ownerKey = resolveChatOwnerKey(baseChatJid, baseGroup);
+  if (!ownerKey) return null;
+
+  const boundTarget = resolveBoundSessionTarget(baseChatJid, baseGroup);
+  if (boundTarget.boundAgentId) return null;
+  const parentSession = boundTarget.sessionId
+    ? getSessionRecord(boundTarget.sessionId)
+    : getSessionRecord(`main:${boundTarget.folder || baseGroup.folder}`);
+  const parentJid =
+    boundTarget.effectiveJid ||
+    findWebJidForFolder(boundTarget.folder || baseGroup.folder);
+  const parentGroup = parentJid
+    ? (registeredGroups[parentJid] ?? getRegisteredGroup(parentJid))
+    : undefined;
+  const inherited = getInheritedWorkspaceRuntimeConfig(ownerKey);
+  const now = new Date().toISOString();
+  const baseName = context?.chatName || baseGroup.name || '飞书话题';
+  const topicName = `${baseName} / 话题 ${buildFeishuTopicNameSuffix(
+    anchor,
+    context?.messageText,
+  )}`;
+  const topicStateDir = path.join(GROUPS_DIR, identity.folder);
+  const sharedCwd =
+    parentGroup?.customCwd ||
+    parentSession?.cwd ||
+    path.join(GROUPS_DIR, boundTarget.folder || baseGroup.folder);
+
+  fs.mkdirSync(topicStateDir, { recursive: true });
+  saveSessionRecord({
+    id: `main:${identity.folder}`,
+    name: topicName,
+    kind: 'workspace',
+    parent_session_id:
+      boundTarget.sessionId?.startsWith('main:') === true
+        ? boundTarget.sessionId
+        : null,
+    cwd: sharedCwd,
+    runner_id: parentSession?.runner_id || inherited.runner_id,
+    runner_profile_id:
+      parentSession?.runner_profile_id ?? inherited.runner_profile_id,
+    model: parentSession?.model ?? inherited.model,
+    thinking_effort:
+      parentSession?.thinking_effort ?? inherited.thinking_effort,
+    context_compression:
+      parentSession?.context_compression ||
+      parentGroup?.context_compression ||
+      inherited.context_compression,
+    is_pinned: false,
+    archived: false,
+    owner_key: ownerKey,
+    created_at: now,
+    updated_at: now,
+  });
+
+  const topicGroup: RegisteredGroup = {
+    name: topicName,
+    folder: identity.folder,
+    added_at: now,
+    customCwd: sharedCwd,
+    selected_skills: parentGroup?.selected_skills ?? baseGroup.selected_skills,
+    mcp_mode: parentGroup?.mcp_mode ?? baseGroup.mcp_mode,
+    selected_mcps: parentGroup?.selected_mcps ?? baseGroup.selected_mcps,
+    model: parentSession?.model ?? parentGroup?.model ?? baseGroup.model,
+    thinking_effort:
+      parentSession?.thinking_effort ??
+      parentGroup?.thinking_effort ??
+      baseGroup.thinking_effort,
+    context_compression:
+      parentSession?.context_compression ||
+      parentGroup?.context_compression ||
+      baseGroup.context_compression ||
+      inherited.context_compression,
+    activation_mode: baseGroup.activation_mode ?? 'auto',
+    require_mention: baseGroup.require_mention,
+    reply_policy: 'source_only',
+  };
+  registerGroup(identity.jid, topicGroup);
+  ensureChatExists(identity.jid);
+  updateChatName(identity.jid, topicName);
+  logger.info(
+    {
+      baseChatJid,
+      topicJid: identity.jid,
+      folder: identity.folder,
+      anchor,
+      parentSessionId: boundTarget.sessionId,
+      sharedCwd,
+    },
+    'Created Feishu topic-scoped session',
+  );
+  return identity.jid;
 }
 
 function resolveDefaultSessionBinding(
@@ -1753,6 +2001,13 @@ interface SendMessageOptions {
   localImagePaths?: string[];
   /** External message ID from IM platform (e.g. Feishu om_xxx). Used as DB message ID for reply matching. */
   externalMsgId?: string;
+  /** Explicit IM delivery semantics for direct sends. */
+  imOptions?: IMSendOptions;
+  /** Original IM channel and thread metadata for the Web copy. */
+  sourceJid?: string;
+  replyToId?: string;
+  threadId?: string;
+  rootId?: string;
 }
 
 /**
@@ -2516,21 +2771,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // Build per-sourceJid trigger message map so IPC handler can thread
   // replies to the correct triggering message (not whatever DB says is latest).
-  const triggerMap = new Map<
-    string,
-    {
-      id: string;
-      sender: string;
-      threadId?: string;
-      rootId?: string;
-    }
-  >();
+  const triggerMap = new Map<string, RuntimeTriggerMessage>();
   for (const m of missedMessages) {
     const srcJid = m.source_jid || m.chat_jid;
     // Last message per source wins (chronological order)
     triggerMap.set(srcJid, {
       id: m.id,
       sender: m.sender,
+      replyToId: m.reply_to_id,
       threadId: m.thread_id,
       rootId: m.root_id,
     });
@@ -2545,6 +2793,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const sourceChannel = resolveChannel(missedMessages);
   const sourceChannelType = getChannelType(sourceChannel);
   const feishuConfig = ownerUserId ? getImFeishuConfig() : null;
+  const sourceFeishuOptions = buildFeishuCardOptionsForSource({
+    chatJid,
+    sourceChannel,
+    folder: effectiveGroup.folder,
+  });
   if (
     ownerUserId &&
     sourceChannelType === 'feishu' &&
@@ -2557,10 +2810,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       );
     const titleSource = progressTrigger?.content.replace(/\s+/g, ' ').trim();
     progressCard = imManager.createProgressCard(sourceChannel, {
-      // A chat-root message must create at the root. Only an explicit thread
-      // trigger is eligible for reply_in_thread.
-      replyToMsgId: progressTrigger?.thread_id ? progressTrigger.id : undefined,
-      threadId: progressTrigger?.thread_id,
+      ...sourceFeishuOptions,
       title: titleSource
         ? titleSource.length > 48
           ? `${titleSource.slice(0, 47)}…`
@@ -2869,6 +3119,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             // Web 存储 + 广播，不发 IM（模型通过 send_message 工具主动发 IM）
             lastReplyMsgId = await sendMessage(chatJid, text, {
               sendToIM: false,
+              sourceJid: sourceChannelType ? sourceChannel : undefined,
+              replyToId: sourceFeishuOptions?.replyToMsgId,
+              threadId: sourceFeishuOptions?.threadId,
+              rootId: sourceFeishuOptions?.threadRootMsgId,
             });
             deliveredUserVisibleReply = true;
             // Persist cursor as soon as a visible reply is emitted.
@@ -3113,6 +3367,21 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     const errorImChannel = getChannelType(errorSourceJid)
       ? errorSourceJid
       : null;
+    const errorTrigger = errorImChannel
+      ? [...missedMessages]
+          .reverse()
+          .find(
+            (message) =>
+              (message.source_jid || message.chat_jid) === errorImChannel,
+          )
+      : undefined;
+    const errorSendOptions = errorImChannel
+      ? applyFeishuThreadModeForTarget({
+          targetChannel: errorImChannel,
+          sourceGroup: effectiveGroup.folder,
+          trigger: errorTrigger,
+        })
+      : undefined;
 
     // 上下文溢出错误：跳过重试，提交游标，通知用户
     if (errorDetail.startsWith('context_overflow:')) {
@@ -3123,6 +3392,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           errorImChannel,
           `⚠️ 上下文溢出：${overflowMsg}`,
           [],
+          errorSendOptions,
         );
       }
       logger.warn(
@@ -3141,12 +3411,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       errorDetail,
     );
     if (errorImChannel) {
-      const sendOpts: IMSendOptions = {};
       sendImWithFailTracking(
         errorImChannel,
         `⚠️ Agent 错误：${errorDetail}${isRateLimit ? '\n\n> 💡 请检查当前 runner 的凭据、额度或上游限流状态。' : ''}`,
         [],
-        Object.keys(sendOpts).length > 0 ? sendOpts : undefined,
+        errorSendOptions && Object.keys(errorSendOptions).length > 0
+          ? errorSendOptions
+          : undefined,
       );
     }
     logger.warn(
@@ -3187,12 +3458,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (!isErrorExit && latestSourceChannel && !sawSendMessageTool) {
     const fallbackText = latestSubstantiveAssistantReply?.content || '收到啦。';
     const fallbackOutboxId = crypto.randomUUID();
-    const fallbackOptions: IMSendOptions = latestConsumedMessage.thread_id
-      ? {
-          replyToMsgId: latestConsumedMessage.id,
-          threadId: latestConsumedMessage.thread_id,
-        }
-      : {};
+    const fallbackOptions = applyFeishuThreadModeForTarget({
+      targetChannel: latestSourceChannel,
+      sourceGroup: effectiveGroup.folder,
+      trigger: latestConsumedMessage,
+    });
     enqueueImDelivery({
       id: fallbackOutboxId,
       sourceChatJid: chatJid,
@@ -3206,6 +3476,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!latestSubstantiveAssistantReply) {
       lastReplyMsgId = await sendMessage(chatJid, fallbackText, {
         sendToIM: false,
+        sourceJid: latestSourceChannel,
+        replyToId: fallbackOptions.replyToMsgId,
+        threadId: fallbackOptions.threadId,
+        rootId: fallbackOptions.threadRootMsgId,
       });
     }
     deliveredUserVisibleReply = true;
@@ -3492,7 +3766,7 @@ async function sendMessage(
         sourceChatJid: jid,
         targetJid: jid,
         kind: 'text',
-        payload: { text, localImagePaths },
+        payload: { text, localImagePaths, options: options.imOptions },
       });
     }
 
@@ -3508,6 +3782,12 @@ async function sendMessage(
       text,
       timestamp,
       true,
+      undefined,
+      undefined,
+      options.sourceJid,
+      options.replyToId,
+      options.threadId,
+      options.rootId,
     );
 
     broadcastNewMessage(jid, {
@@ -3518,6 +3798,10 @@ async function sendMessage(
       content: text,
       timestamp,
       is_from_me: true,
+      source_jid: options.sourceJid,
+      reply_to_id: options.replyToId,
+      thread_id: options.threadId,
+      root_id: options.rootId,
     });
     logger.info({ jid, length: text.length, sendToIM }, 'Message sent');
     broadcastToWebClients(jid, text);
@@ -3700,6 +3984,12 @@ function startIpcWatcher(): void {
                         sendOptions.urgent = true;
                         sendOptions.urgentUserIds = [lastInbound.sender];
                       }
+                      const finalSendOptions = applyFeishuThreadModeForTarget({
+                        targetChannel: data.targetChannel,
+                        sourceGroup,
+                        base: sendOptions,
+                        trigger: lastInbound,
+                      });
                       enqueueImDelivery({
                         id:
                           typeof data.requestId === 'string'
@@ -3712,8 +4002,8 @@ function startIpcWatcher(): void {
                           text: data.text,
                           localImagePaths,
                           options:
-                            Object.keys(sendOptions).length > 0
-                              ? sendOptions
+                            Object.keys(finalSendOptions).length > 0
+                              ? finalSendOptions
                               : undefined,
                         },
                       });
@@ -3730,6 +4020,10 @@ function startIpcWatcher(): void {
                           {
                             sendToIM: false,
                             externalMsgId: webCopyId,
+                            sourceJid: data.targetChannel,
+                            replyToId: finalSendOptions.replyToMsgId,
+                            threadId: finalSendOptions.threadId,
+                            rootId: finalSendOptions.threadRootMsgId,
                           },
                         );
                         if (!storedId) {
@@ -3813,12 +4107,11 @@ function startIpcWatcher(): void {
                       const mimeType = data.mimeType || 'image/png';
                       const caption = data.caption || undefined;
                       const fileName = data.fileName || undefined;
+                      let imageSendOptions: IMSendOptions = {};
 
                       // 只在有 targetChannel 时发送到 IM
                       if (data.targetChannel) {
                         // Resolve reply target for Feishu images (same logic as send_message)
-                        let imageReplyToMsgId: string | undefined;
-                        let imageThreadId: string | undefined;
                         const isFeishuTarget =
                           data.targetChannel.startsWith('feishu:');
                         if (isFeishuTarget) {
@@ -3837,23 +4130,35 @@ function startIpcWatcher(): void {
                             data.threadId.trim()
                               ? data.threadId.trim()
                               : undefined;
-                          imageThreadId =
+                          const imageThreadId =
                             requestedThread || triggerMsg?.threadId;
+                          const lastInbound = imageThreadId
+                            ? triggerMsg?.threadId === imageThreadId
+                              ? triggerMsg
+                              : getLastInboundMessageInThread(
+                                  data.chatJid,
+                                  data.targetChannel,
+                                  imageThreadId,
+                                )
+                            : triggerMsg ||
+                              getLastInboundMessage(
+                                data.chatJid,
+                                data.targetChannel,
+                              );
                           if (agentReplyMode && data.replyToMsgId) {
-                            imageReplyToMsgId = data.replyToMsgId;
-                          } else if (imageThreadId) {
-                            const lastInbound =
-                              triggerMsg?.threadId === imageThreadId
-                                ? triggerMsg
-                                : getLastInboundMessageInThread(
-                                    data.chatJid,
-                                    data.targetChannel,
-                                    imageThreadId,
-                                  );
-                            if (lastInbound?.id) {
-                              imageReplyToMsgId = lastInbound.id;
-                            }
+                            imageSendOptions.replyToMsgId = data.replyToMsgId;
+                          } else if (imageThreadId && lastInbound?.id) {
+                            imageSendOptions.replyToMsgId = lastInbound.id;
                           }
+                          if (imageThreadId) {
+                            imageSendOptions.threadId = imageThreadId;
+                          }
+                          imageSendOptions = applyFeishuThreadModeForTarget({
+                            targetChannel: data.targetChannel,
+                            sourceGroup,
+                            base: imageSendOptions,
+                            trigger: lastInbound,
+                          });
                         }
                         enqueueImDelivery({
                           id:
@@ -3868,8 +4173,9 @@ function startIpcWatcher(): void {
                             mimeType,
                             caption,
                             fileName,
-                            replyToMsgId: imageReplyToMsgId,
-                            threadId: imageThreadId,
+                            replyToMsgId: imageSendOptions.replyToMsgId,
+                            threadId: imageSendOptions.threadId,
+                            replyInThread: imageSendOptions.replyInThread,
                           },
                         });
                       }
@@ -3893,6 +4199,12 @@ function startIpcWatcher(): void {
                           displayText,
                           imgTimestamp,
                           true,
+                          undefined,
+                          undefined,
+                          data.targetChannel,
+                          imageSendOptions.replyToMsgId,
+                          imageSendOptions.threadId,
+                          imageSendOptions.threadRootMsgId,
                         );
                         broadcastNewMessage(data.chatJid, {
                           id: imgMsgId,
@@ -3902,6 +4214,10 @@ function startIpcWatcher(): void {
                           content: displayText,
                           timestamp: imgTimestamp,
                           is_from_me: true,
+                          source_jid: data.targetChannel,
+                          reply_to_id: imageSendOptions.replyToMsgId,
+                          thread_id: imageSendOptions.threadId,
+                          root_id: imageSendOptions.threadRootMsgId,
                         });
                         broadcastToWebClients(data.chatJid, displayText);
                       }
@@ -4421,15 +4737,27 @@ async function processTaskIpc(
             .get(sourceGroup)
             ?.get(data.targetChannel);
           const fileThreadId = requestedFileThread || fileTrigger?.threadId;
-          const fileReplyToMsgId = fileThreadId
+          const fileLastInbound = fileThreadId
             ? fileTrigger?.threadId === fileThreadId
-              ? fileTrigger.id
+              ? fileTrigger
               : getLastInboundMessageInThread(
                   data.chatJid,
                   data.targetChannel,
                   fileThreadId,
-                )?.id
-            : undefined;
+                )
+            : fileTrigger ||
+              getLastInboundMessage(data.chatJid, data.targetChannel);
+          const fileOptions = applyFeishuThreadModeForTarget({
+            targetChannel: data.targetChannel,
+            sourceGroup,
+            base: fileThreadId
+              ? {
+                  threadId: fileThreadId,
+                  replyToMsgId: fileLastInbound?.id,
+                }
+              : {},
+            trigger: fileLastInbound,
+          });
 
           enqueueImDelivery({
             id: data.requestId || crypto.randomUUID(),
@@ -4439,12 +4767,8 @@ async function processTaskIpc(
             payload: {
               filePath: resolvedPath,
               fileName: safeFileName,
-              options: fileThreadId
-                ? {
-                    threadId: fileThreadId,
-                    replyToMsgId: fileReplyToMsgId,
-                  }
-                : undefined,
+              options:
+                Object.keys(fileOptions).length > 0 ? fileOptions : undefined,
             },
           });
           markDurableOutboundAcceptance(runtimeAcceptanceKey);
@@ -5045,6 +5369,7 @@ async function startMessageLoop(): Promise<void> {
                 existingTrigger.set(srcJid, {
                   id: m.id,
                   sender: m.sender,
+                  replyToId: m.reply_to_id,
                   threadId: m.thread_id,
                   rootId: m.root_id,
                 });
@@ -5159,11 +5484,13 @@ async function startMessageLoop(): Promise<void> {
                   const titleSource = progressTrigger?.content
                     .replace(/\s+/g, ' ')
                     .trim();
+                  const feishuCardOptions = buildFeishuCardOptionsForSource({
+                    chatJid,
+                    sourceChannel: channel,
+                    folder,
+                  });
                   const card = imManager.createProgressCard(channel, {
-                    replyToMsgId: progressTrigger?.thread_id
-                      ? progressTrigger.id
-                      : undefined,
-                    threadId: progressTrigger?.thread_id,
+                    ...feishuCardOptions,
                     title: titleSource
                       ? titleSource.length > 48
                         ? `${titleSource.slice(0, 47)}…`
@@ -5426,6 +5753,9 @@ function buildOnNewChat(
 
     // Auto-create independent workspace for group chats if preference is on
     const prefs = getImPreferences();
+    const conversationMode = chatJid.startsWith('feishu:')
+      ? getSystemSettings().defaultImConversationMode
+      : 'chat';
     const shouldAutoCreate =
       chatType === 'group' && prefs.autoCreateWorkspaceForGroups === true;
 
@@ -5443,6 +5773,7 @@ function buildOnNewChat(
         folder,
         added_at: now,
         reply_policy: 'source_only',
+        conversation_mode: conversationMode,
       });
       applyExplicitChatBinding(
         chatJid,
@@ -5478,6 +5809,7 @@ function buildOnNewChat(
         name: chatName,
         folder: primarySessionFolder,
         added_at: new Date().toISOString(),
+        conversation_mode: conversationMode,
       });
       applyExplicitChatBinding(
         chatJid,
@@ -5563,9 +5895,19 @@ function buildOnPairAttempt(
  */
 function buildResolveEffectiveChatJid(): (
   chatJid: string,
+  context?: IMRouteContext,
 ) => { effectiveJid: string; agentId: string | null } | null {
-  return (chatJid: string) => {
+  return (chatJid: string, context?: IMRouteContext) => {
     const target = resolveBoundSessionTarget(chatJid);
+    if (
+      !target.boundAgentId &&
+      shouldSplitFeishuSessionByTopic(chatJid, context)
+    ) {
+      const topicJid = ensureFeishuTopicSession(chatJid, context);
+      if (topicJid) {
+        return { effectiveJid: topicJid, agentId: null };
+      }
+    }
     if (target.sessionId && target.effectiveJid) {
       return {
         effectiveJid: target.effectiveJid,
@@ -5573,6 +5915,33 @@ function buildResolveEffectiveChatJid(): (
       };
     }
     return null;
+  };
+}
+
+function buildResolveGroupFolder(): (
+  chatJid: string,
+  context?: IMRouteContext,
+) => string | undefined {
+  const resolveDownloadFolder = (targetJid: string): string | undefined => {
+    const group = registeredGroups[targetJid] ?? getRegisteredGroup(targetJid);
+    if (
+      targetJid.startsWith('web:feishu-topic-') &&
+      group?.folder.startsWith('flow-feishu-topic-')
+    ) {
+      const topicSession = getSessionRecord(`main:${group.folder}`);
+      if (topicSession?.parent_session_id?.startsWith('main:')) {
+        return topicSession.parent_session_id.slice('main:'.length);
+      }
+    }
+    return resolveEffectiveFolder(targetJid);
+  };
+
+  return (chatJid: string, context?: IMRouteContext) => {
+    if (shouldSplitFeishuSessionByTopic(chatJid, context)) {
+      const topicJid = ensureFeishuTopicSession(chatJid, context);
+      if (topicJid) return resolveDownloadFolder(topicJid);
+    }
+    return resolveDownloadFolder(chatJid);
   };
 }
 
@@ -5718,9 +6087,7 @@ async function connectUserIMChannels(
   wechat: boolean;
 }> {
   const onNewChat = buildOnNewChat(userId, primarySessionFolder);
-  const resolveGroupFolder = (chatJid: string): string | undefined => {
-    return resolveEffectiveFolder(chatJid);
-  };
+  const resolveGroupFolder = buildResolveGroupFolder();
   const resolveEffectiveChatJid = buildResolveEffectiveChatJid();
   const onAgentMessage = buildOnAgentMessage();
   const onBotAddedToGroup = (chatJid: string, chatName: string) =>
@@ -6064,8 +6431,7 @@ async function main(): Promise<void> {
         {
           ignoreMessagesBefore: Date.now(),
           onCommand: handleCommand,
-          resolveGroupFolder: (chatJid: string) =>
-            resolveEffectiveFolder(chatJid),
+          resolveGroupFolder: buildResolveGroupFolder(),
           resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
           onAgentMessage: buildOnAgentMessage(),
           onBotAddedToGroup: (chatJid: string, chatName: string) =>
@@ -6113,7 +6479,7 @@ async function main(): Promise<void> {
         buildOnPairAttempt(operator.id),
         {
           onCommand: handleCommand,
-          resolveGroupFolder: (chatJid) => resolveEffectiveFolder(chatJid),
+          resolveGroupFolder: buildResolveGroupFolder(),
           resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
           onAgentMessage: buildOnAgentMessage(),
           onBotAddedToGroup: buildTelegramBotAddedHandler(
@@ -6164,8 +6530,7 @@ async function main(): Promise<void> {
           {
             ignoreMessagesBefore,
             onCommand: handleCommand,
-            resolveGroupFolder: (chatJid: string) =>
-              resolveEffectiveFolder(chatJid),
+            resolveGroupFolder: buildResolveGroupFolder(),
             resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
             onAgentMessage: buildOnAgentMessage(),
             onBotAddedToGroup: (chatJid: string, chatName: string) =>
@@ -6199,8 +6564,7 @@ async function main(): Promise<void> {
           buildOnPairAttempt(userId),
           {
             onCommand: handleCommand,
-            resolveGroupFolder: (chatJid: string) =>
-              resolveEffectiveFolder(chatJid),
+            resolveGroupFolder: buildResolveGroupFolder(),
             resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
             onAgentMessage: buildOnAgentMessage(),
             onBotAddedToGroup: buildTelegramBotAddedHandler(
@@ -6236,8 +6600,7 @@ async function main(): Promise<void> {
           buildOnPairAttempt(userId),
           {
             onCommand: handleCommand,
-            resolveGroupFolder: (chatJid: string) =>
-              resolveEffectiveFolder(chatJid),
+            resolveGroupFolder: buildResolveGroupFolder(),
             resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
             onAgentMessage: buildOnAgentMessage(),
             onInterruptRequest: handleIMInterruptRequest,
@@ -6270,8 +6633,7 @@ async function main(): Promise<void> {
           onNewChat,
           {
             onCommand: handleCommand,
-            resolveGroupFolder: (chatJid: string) =>
-              resolveEffectiveFolder(chatJid),
+            resolveGroupFolder: buildResolveGroupFolder(),
             resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
             onAgentMessage: buildOnAgentMessage(),
           },

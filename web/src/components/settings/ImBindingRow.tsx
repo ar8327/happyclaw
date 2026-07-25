@@ -14,6 +14,7 @@ interface ImBindingRowProps {
       reply_policy?: 'source_only' | 'mirror';
       activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
       require_mention?: boolean;
+      conversation_mode?: 'chat' | 'thread';
     },
   ) => void;
 }
@@ -118,6 +119,22 @@ export function ImBindingRow({
             <option value="when_mentioned">仅 @mention</option>
             <option value="disabled">禁用</option>
           </select>
+          {group.channel_type === 'feishu' && (
+            <select
+              value={group.conversation_mode || 'chat'}
+              onChange={(event) =>
+                onUpdatePolicy(group, {
+                  conversation_mode:
+                    event.target.value === 'thread' ? 'thread' : 'chat',
+                })
+              }
+              disabled={isActioning}
+              className="h-7 rounded border border-border bg-background px-2 text-[11px]"
+            >
+              <option value="chat">群聊上下文</option>
+              <option value="thread">话题上下文</option>
+            </select>
+          )}
           <label className="flex items-center gap-1 text-[11px] text-muted-foreground">
             <input
               type="checkbox"

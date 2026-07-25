@@ -8,6 +8,7 @@
 import {
   type IMChannel,
   type IMChannelConnectOpts,
+  type IMRouteContext,
   type IMSendOptions,
   getChannelType,
   extractChatId,
@@ -65,9 +66,13 @@ export interface WeChatConnectConfig {
 export interface ConnectFeishuOptions {
   ignoreMessagesBefore?: number;
   onCommand?: (chatJid: string, command: string) => Promise<string | null>;
-  resolveGroupFolder?: (chatJid: string) => string | undefined;
+  resolveGroupFolder?: (
+    chatJid: string,
+    context?: IMRouteContext,
+  ) => string | undefined;
   resolveEffectiveChatJid?: (
     chatJid: string,
+    context?: IMRouteContext,
   ) => { effectiveJid: string; agentId: string | null } | null;
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
   onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
@@ -158,6 +163,7 @@ class IMConnectionManager {
     replyToMsgId?: string,
     threadId?: string,
     idempotencyKey?: string,
+    replyInThread?: boolean,
   ): Promise<void> {
     const channelType = getChannelType(jid);
     if (!channelType) {
@@ -176,6 +182,7 @@ class IMConnectionManager {
         replyToMsgId,
         threadId,
         idempotencyKey,
+        replyInThread,
       );
       return;
     }

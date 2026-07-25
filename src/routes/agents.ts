@@ -66,6 +66,7 @@ function upsertImBinding(
     require_mention: imGroup.require_mention === true,
     display_name: imGroup.name,
     reply_policy: replyPolicy,
+    conversation_mode: imGroup.conversation_mode ?? 'chat',
     created_at: current?.created_at || imGroup.added_at || now,
     updated_at: now,
   });
@@ -80,7 +81,8 @@ function isImplicitDefaultSessionBinding(
     && binding.binding_mode === 'source_only'
     && binding.reply_policy === 'source_only'
     && binding.activation_mode === 'auto'
-    && binding.require_mention !== true;
+    && binding.require_mention !== true
+    && binding.conversation_mode !== 'thread';
 }
 
 function getExplicitSessionBinding(
@@ -393,6 +395,7 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
     reply_policy: 'source_only' | 'mirror';
     activation_mode: 'auto' | 'always' | 'when_mentioned' | 'disabled';
     require_mention: boolean;
+    conversation_mode: 'chat' | 'thread';
     bound_target_name: string | null;
     bound_workspace_name: string | null;
     avatar?: string;
@@ -443,6 +446,8 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
       reply_policy: binding?.reply_policy || 'source_only',
       activation_mode: binding?.activation_mode || g.activation_mode || 'auto',
       require_mention: binding?.require_mention ?? g.require_mention === true,
+      conversation_mode:
+        binding?.conversation_mode ?? g.conversation_mode ?? 'chat',
       bound_target_name: boundTargetName,
       bound_workspace_name: boundWorkspaceName,
       channel_type: getChannelType(j) ?? 'unknown',

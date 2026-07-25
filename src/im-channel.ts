@@ -37,6 +37,16 @@ import {
 
 // ─── Unified Interface ──────────────────────────────────────────
 
+export interface IMRouteContext {
+  messageId?: string;
+  parentId?: string;
+  rootId?: string;
+  threadId?: string;
+  chatType?: 'p2p' | 'group';
+  chatName?: string;
+  messageText?: string;
+}
+
 export interface IMChannelConnectOpts {
   onReady: () => void;
   onNewChat: (
@@ -55,10 +65,14 @@ export interface IMChannelConnectOpts {
   /** Slash command callback (e.g. /clear). Returns reply text or null. */
   onCommand?: (chatJid: string, command: string) => Promise<string | null>;
   /** 根据 jid 解析群组 folder，用于下载文件/图片到工作区 */
-  resolveGroupFolder?: (jid: string) => string | undefined;
+  resolveGroupFolder?: (
+    jid: string,
+    context?: IMRouteContext,
+  ) => string | undefined;
   /** 将 IM chatJid 解析为绑定目标 JID（conversation agent 或工作区主会话） */
   resolveEffectiveChatJid?: (
     chatJid: string,
+    context?: IMRouteContext,
   ) => { effectiveJid: string; agentId: string | null } | null;
   /** 当 IM 消息被路由到 conversation agent 后调用，触发 agent 处理 */
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
@@ -85,6 +99,12 @@ export interface IMSendOptions {
   idempotencyKey?: string;
   /** Explicit Feishu thread scope. Omit for the chat root. */
   threadId?: string;
+  /** Create the reply inside a Feishu thread, including a new thread from a root message. */
+  replyInThread?: boolean;
+  /** Stable root message used for diagnostics and topic-aware persistence. */
+  threadRootMsgId?: string;
+  /** Why thread mode fell back to chat mode. */
+  threadFallbackReason?: string;
 }
 
 export interface IMChannel {
@@ -113,6 +133,7 @@ export interface IMChannel {
     replyToMsgId?: string,
     threadId?: string,
     idempotencyKey?: string,
+    replyInThread?: boolean,
   ): Promise<void>;
   setTyping(chatId: string, isTyping: boolean): Promise<void>;
   isConnected(): boolean;
@@ -227,6 +248,7 @@ export function createFeishuChannel(config: FeishuConnectionConfig): IMChannel {
       replyToMsgId?: string,
       threadId?: string,
       idempotencyKey?: string,
+      replyInThread?: boolean,
     ): Promise<void> {
       if (!inner) {
         throw new Error('Feishu channel is not connected');
@@ -240,6 +262,7 @@ export function createFeishuChannel(config: FeishuConnectionConfig): IMChannel {
         replyToMsgId,
         threadId,
         idempotencyKey,
+        replyInThread,
       );
     },
 

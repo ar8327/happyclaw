@@ -13,6 +13,7 @@ import * as path from 'path';
 import { randomUUID } from 'node:crypto';
 import { DATA_DIR } from './config.js';
 import { logger } from './logger.js';
+import { shouldReplyInFeishuThread } from './feishu-conversation-mode.js';
 import type { StreamEvent } from './stream-event.types.js';
 import {
   buildProgressCard,
@@ -113,6 +114,7 @@ export interface ProgressCardOptions {
   chatId: string;
   replyToMsgId?: string;
   threadId?: string;
+  replyInThread?: boolean;
   title?: string;
   modelLabel?: string;
   /** Stop handler exposed through the Feishu persistent-connection callback. */
@@ -216,6 +218,7 @@ export class ProgressCardController {
   private readonly chatId: string;
   private readonly replyToMsgId?: string;
   private readonly threadId?: string;
+  private readonly replyInThread?: boolean;
   private readonly title?: string;
   private readonly modelLabel?: string;
   private readonly onStop?: () => boolean | Promise<boolean>;
@@ -227,6 +230,7 @@ export class ProgressCardController {
     this.chatId = opts.chatId;
     this.replyToMsgId = opts.replyToMsgId;
     this.threadId = opts.threadId;
+    this.replyInThread = opts.replyInThread;
     this.title = opts.title;
     this.modelLabel = opts.modelLabel;
     this.onStop = opts.onStop;
@@ -551,7 +555,10 @@ export class ProgressCardController {
           data: {
             content,
             msg_type: 'interactive',
-            reply_in_thread: Boolean(this.threadId),
+            reply_in_thread: shouldReplyInFeishuThread({
+              threadId: this.threadId,
+              replyInThread: this.replyInThread,
+            }),
           },
         });
       } else {

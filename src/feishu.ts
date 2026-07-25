@@ -23,6 +23,8 @@ import { analyzeIntent } from './intent-analyzer.js';
 import { getSystemSettings } from './runtime-config.js';
 import { buildStaticReplyCard } from './feishu-card-builder.js';
 import { handleProgressCardAction } from './feishu-progress-card.js';
+import type { IMRouteContext } from './im-channel.js';
+import { shouldReplyInFeishuThread } from './feishu-conversation-mode.js';
 
 // ─── FeishuConnection Interface ────────────────────────────────
 
@@ -52,10 +54,14 @@ export interface ConnectOptions {
   /** 斜杠指令回调（如 /clear），返回回复文本或 null */
   onCommand?: (chatJid: string, command: string) => Promise<string | null>;
   /** 根据 chatJid 解析群组 folder，用于下载文件/图片到工作区 */
-  resolveGroupFolder?: (chatJid: string) => string | undefined;
+  resolveGroupFolder?: (
+    chatJid: string,
+    context?: IMRouteContext,
+  ) => string | undefined;
   /** 将 IM chatJid 解析为绑定目标 JID（conversation agent 或工作区主会话） */
   resolveEffectiveChatJid?: (
     chatJid: string,
+    context?: IMRouteContext,
   ) => { effectiveJid: string; agentId: string | null } | null;
   /** 当 IM 消息被路由到 conversation agent 后调用 */
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
@@ -90,6 +96,12 @@ export interface FeishuSendOptions {
   idempotencyKey?: string;
   /** Explicit thread scope. Omit for chat root. */
   threadId?: string;
+  /** Create the reply inside a thread, including a new thread from a root message. */
+  replyInThread?: boolean;
+  /** Stable root message used for diagnostics and persistence. */
+  threadRootMsgId?: string;
+  /** Why thread mode fell back to chat mode. */
+  threadFallbackReason?: string;
 }
 
 export interface FeishuConnection {
@@ -110,6 +122,7 @@ export interface FeishuConnection {
     replyToMsgId?: string,
     threadId?: string,
     idempotencyKey?: string,
+    replyInThread?: boolean,
   ): Promise<void>;
   sendFile(
     chatId: string,
@@ -781,9 +794,25 @@ export function createFeishuConnection(
     }
   }
 
-  async function sendTextToChat(chatId: string, text: string): Promise<void> {
+  async function sendTextToChat(
+    chatId: string,
+    text: string,
+    replyToMsgId?: string,
+    replyInThread?: boolean,
+  ): Promise<void> {
     if (!client) return;
     try {
+      if (replyToMsgId) {
+        await client.im.message.reply({
+          path: { message_id: replyToMsgId },
+          data: {
+            msg_type: 'text',
+            content: JSON.stringify({ text }),
+            reply_in_thread: replyInThread === true,
+          },
+        });
+        return;
+      }
       await client.im.message.create({
         data: {
           receive_id: chatId,
@@ -1001,6 +1030,22 @@ export function createFeishuConnection(
       chatType === 'p2p' ? 'p2p' : 'group',
     );
 
+    const routeContext: IMRouteContext = {
+      messageId,
+      parentId,
+      rootId,
+      threadId,
+      chatType: chatType === 'p2p' ? 'p2p' : 'group',
+      chatName: resolvedChatName,
+      messageText: text,
+    };
+    const agentRouting = resolveEffectiveChatJid?.(chatJid, routeContext);
+    const targetJid = agentRouting?.effectiveJid ?? chatJid;
+    const targetAgentId = agentRouting?.agentId;
+    const targetGroupFolder =
+      resolveGroupFolder?.(targetJid, routeContext) ??
+      resolveGroupFolder?.(chatJid, routeContext);
+
     let attachmentsJson: string | undefined;
 
     if (extracted.imageKeys && extracted.imageKeys.length > 0) {
@@ -1008,7 +1053,7 @@ export function createFeishuConnection(
       // 1. Vision 通道：base64 附件供模型看图
       // 2. 存盘通道：写入工作区文件，agent 可直接操作（压缩、发送等）
       const attachments = [];
-      const groupFolder = resolveGroupFolder?.(chatJid);
+      const groupFolder = targetGroupFolder;
       const savedPaths: string[] = [];
 
       for (const imageKey of extracted.imageKeys) {
@@ -1071,7 +1116,7 @@ export function createFeishuConnection(
         },
         'Processing Feishu file download',
       );
-      const groupFolder = resolveGroupFolder?.(chatJid);
+      const groupFolder = targetGroupFolder;
       if (!groupFolder) {
         logger.warn(
           { chatJid },
@@ -1130,7 +1175,12 @@ export function createFeishuConnection(
           'Feishu slash command processed',
         );
         if (reply) {
-          await sendTextToChat(chatId, reply);
+          await sendTextToChat(
+            chatId,
+            reply,
+            messageId,
+            targetJid.startsWith('web:feishu-topic-') || Boolean(threadId),
+          );
           return; // 已知命令，拦截
         }
         // reply 为 null 表示未知命令，继续作为普通消息处理
@@ -1140,7 +1190,12 @@ export function createFeishuConnection(
           'Feishu slash command failed',
         );
         try {
-          await sendTextToChat(chatId, '⚠️ 命令执行失败，请稍后重试');
+          await sendTextToChat(
+            chatId,
+            '⚠️ 命令执行失败，请稍后重试',
+            messageId,
+            targetJid.startsWith('web:feishu-topic-') || Boolean(threadId),
+          );
         } catch (sendErr) {
           logger.error(
             { chatJid, sendErr },
@@ -1175,10 +1230,6 @@ export function createFeishuConnection(
       })
       .catch(() => {});
 
-    // Store message and broadcast to WebSocket clients
-    const agentRouting = resolveEffectiveChatJid?.(chatJid);
-    const targetJid = agentRouting?.effectiveJid ?? chatJid;
-
     // ── 中断 fast-path：消息到达时立即检测中断意图，绕过轮询延迟 ──
     // 使用路由后的 targetJid 确保中断命中正确的 queue key
     if (onInterruptRequest && text.length <= 50) {
@@ -1191,8 +1242,6 @@ export function createFeishuConnection(
         );
       }
     }
-    const targetAgentId = agentRouting?.agentId;
-
     storeChatMetadata(targetJid, timestamp);
     storeMessageDirect(
       messageId,
@@ -1704,7 +1753,7 @@ export function createFeishuConnection(
                   content: cardContent,
                   msg_type: 'interactive',
                   uuid: options?.idempotencyKey,
-                  reply_in_thread: Boolean(options?.threadId),
+                  reply_in_thread: shouldReplyInFeishuThread(options),
                 },
               });
               return (res as any)?.data?.message_id || (res as any)?.message_id;
@@ -1719,7 +1768,7 @@ export function createFeishuConnection(
                   content: JSON.stringify({ text: msgText }),
                   msg_type: 'text',
                   uuid: options?.idempotencyKey,
-                  reply_in_thread: Boolean(options?.threadId),
+                  reply_in_thread: shouldReplyInFeishuThread(options),
                 },
               });
               return (res as any)?.data?.message_id || (res as any)?.message_id;
@@ -1847,7 +1896,7 @@ export function createFeishuConnection(
                 data: {
                   msg_type: 'image',
                   content: imageContent,
-                  reply_in_thread: Boolean(options.threadId),
+                  reply_in_thread: shouldReplyInFeishuThread(options),
                   uuid: imageUuid,
                 },
               });
@@ -1887,6 +1936,7 @@ export function createFeishuConnection(
       replyToMsgId?: string,
       threadId?: string,
       idempotencyKey?: string,
+      replyInThread?: boolean,
     ): Promise<void> {
       if (!client) {
         throw new Error('Feishu client is not initialized');
@@ -1927,7 +1977,10 @@ export function createFeishuConnection(
             data: {
               content,
               msg_type: 'image',
-              reply_in_thread: Boolean(threadId),
+              reply_in_thread: shouldReplyInFeishuThread({
+                threadId,
+                replyInThread,
+              }),
               uuid: idempotencyKey,
             },
           });
@@ -1953,7 +2006,10 @@ export function createFeishuConnection(
               data: {
                 msg_type: 'text',
                 content: captionContent,
-                reply_in_thread: Boolean(threadId),
+                reply_in_thread: shouldReplyInFeishuThread({
+                  threadId,
+                  replyInThread,
+                }),
                 uuid: captionUuid,
               },
             });
@@ -2057,7 +2113,7 @@ export function createFeishuConnection(
             data: {
               msg_type: 'file',
               content,
-              reply_in_thread: Boolean(options.threadId),
+              reply_in_thread: shouldReplyInFeishuThread(options),
               uuid: options.idempotencyKey,
             },
           });

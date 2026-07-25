@@ -9,6 +9,7 @@
 import * as lark from '@larksuiteoapi/node-sdk';
 import { randomUUID } from 'node:crypto';
 import { logger } from './logger.js';
+import { shouldReplyInFeishuThread } from './feishu-conversation-mode.js';
 import {
   buildCardKitStreamingCard,
   buildStaticReplyCard,
@@ -30,6 +31,7 @@ export interface StreamingCardOptions {
   chatId: string;
   replyToMsgId?: string;
   threadId?: string;
+  replyInThread?: boolean;
   idempotencyKey?: string;
   /** Force the whole-card JSON 2.0 patch transport. */
   cardKit?: boolean;
@@ -78,6 +80,7 @@ export class StreamingCardController {
   private readonly chatId: string;
   private readonly replyToMsgId?: string;
   private readonly threadId?: string;
+  private readonly replyInThread?: boolean;
   private readonly idempotencyKey?: string;
   private readonly cardKit: boolean;
   private readonly onFallback?: () => void;
@@ -87,6 +90,7 @@ export class StreamingCardController {
     this.chatId = opts.chatId;
     this.replyToMsgId = opts.replyToMsgId;
     this.threadId = opts.threadId;
+    this.replyInThread = opts.replyInThread;
     this.idempotencyKey = opts.idempotencyKey;
     this.cardKit = opts.cardKit !== false;
     this.legacyPatch = !this.cardKit;
@@ -284,7 +288,10 @@ export class StreamingCardController {
           content,
           msg_type: 'interactive',
           uuid: this.idempotencyKey,
-          reply_in_thread: Boolean(this.threadId),
+          reply_in_thread: shouldReplyInFeishuThread({
+            threadId: this.threadId,
+            replyInThread: this.replyInThread,
+          }),
         },
       });
     }

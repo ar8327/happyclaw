@@ -81,6 +81,7 @@ export interface RegisteredGroup {
   reply_policy?: 'source_only' | 'mirror'; // IM 绑定的回复策略
   require_mention?: boolean; // 群聊是否需要 @机器人 才响应（默认 false）
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled'; // 消息门控模式（默认 'auto'，兼容 require_mention）
+  conversation_mode?: 'chat' | 'thread'; // 飞书会话模式：群聊上下文或独立话题上下文
   mcp_mode?: 'inherit' | 'custom'; // MCP 模式：继承全局或自定义（默认 'inherit'）
   selected_mcps?: string[] | null; // 自定义模式下选中的 MCP 列表（null = 使用全局全部）
   model?: string; // 模型标识符覆盖（如 'opus', 'sonnet', 'haiku'），空=使用全局配置
@@ -381,6 +382,7 @@ export interface SessionBindingRecord {
   require_mention: boolean;
   display_name: string | null;
   reply_policy: 'source_only' | 'mirror';
+  conversation_mode: 'chat' | 'thread';
   created_at: string;
   updated_at: string;
 }

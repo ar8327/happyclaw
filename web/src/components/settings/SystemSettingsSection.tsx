@@ -166,6 +166,9 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
   const [displayValues, setDisplayValues] = useState<Record<string, number>>({});
   const [feishuApiDomain, setFeishuApiDomain] = useState('');
   const [feishuDocDomain, setFeishuDocDomain] = useState('');
+  const [defaultImConversationMode, setDefaultImConversationMode] = useState<
+    'chat' | 'thread'
+  >('chat');
   const [webPublicUrl, setWebPublicUrl] = useState('');
   const [defaultClaudeModel, setDefaultClaudeModel] = useState('');
   const [loading, setLoading] = useState(true);
@@ -185,6 +188,9 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
         setDisplayValues(display);
         setFeishuApiDomain(data.feishuApiDomain ?? '');
         setFeishuDocDomain(data.feishuDocDomain ?? '');
+        setDefaultImConversationMode(
+          data.defaultImConversationMode === 'thread' ? 'thread' : 'chat',
+        );
         setWebPublicUrl(data.webPublicUrl ?? '');
         setDefaultClaudeModel(data.defaultClaudeModel ?? '');
       } catch (err) {
@@ -203,6 +209,7 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
       const payload: Partial<SystemSettings> = {
         feishuApiDomain,
         feishuDocDomain,
+        defaultImConversationMode,
         webPublicUrl,
         defaultClaudeModel,
       };
@@ -221,6 +228,9 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
       setDisplayValues(display);
       setFeishuApiDomain(data.feishuApiDomain ?? '');
       setFeishuDocDomain(data.feishuDocDomain ?? '');
+      setDefaultImConversationMode(
+        data.defaultImConversationMode === 'thread' ? 'thread' : 'chat',
+      );
       setWebPublicUrl(data.webPublicUrl ?? '');
       setDefaultClaudeModel(data.defaultClaudeModel ?? '');
       setNotice('系统参数已保存，新参数将对后续启动的 runtime 生效');
@@ -315,6 +325,26 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
           />
           <p className="text-xs text-muted-foreground mt-1">
             文档链接与卡片跳转拼接使用的域名。只填域名，不要带协议。
+          </p>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-foreground mb-1">
+            新建飞书绑定默认会话模式
+          </label>
+          <select
+            value={defaultImConversationMode}
+            onChange={(event) =>
+              setDefaultImConversationMode(
+                event.target.value === 'thread' ? 'thread' : 'chat',
+              )
+            }
+            className="h-9 rounded-md border border-border bg-background px-3 text-sm"
+          >
+            <option value="chat">群聊共享上下文</option>
+            <option value="thread">每个话题独立上下文</option>
+          </select>
+          <p className="text-xs text-muted-foreground mt-1">
+            只影响之后创建的飞书绑定；现有绑定可在“IM 绑定”页面单独调整。
           </p>
         </div>
       </div>

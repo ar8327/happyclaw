@@ -170,6 +170,7 @@ export const SystemSettingsSchema = z.object({
   traceRetentionDays: z.number().int().min(1).max(90).optional(),
   feishuApiDomain: z.string().min(1).max(100).optional(),
   feishuDocDomain: z.string().min(1).max(100).optional(),
+  defaultImConversationMode: z.enum(['chat', 'thread']).optional(),
   webPublicUrl: z.string().max(200).optional(),
   defaultClaudeModel: z.string().max(100).optional(),
 });
