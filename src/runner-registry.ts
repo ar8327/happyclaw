@@ -23,35 +23,48 @@ export function getDefaultRunnerId(): RunnerDescriptor['id'] {
   return getDefaultRunnerDescriptor()?.id || 'claude';
 }
 
-export function inferRunnerIdFromModel(
+function matchingRunnerIdsFromModel(
   model: string | null | undefined,
-): RunnerDescriptor['id'] | null {
+): Set<RunnerDescriptor['id']> {
   const normalized = model?.trim().toLowerCase();
-  if (!normalized) return null;
+  if (!normalized) return new Set();
 
+  const matches = new Set<RunnerDescriptor['id']>();
   for (const descriptor of listRunnerDescriptors()) {
     for (const pattern of descriptor.modelPatterns || []) {
       try {
         if (new RegExp(pattern, 'i').test(normalized)) {
-          return descriptor.id;
+          matches.add(descriptor.id);
+          break;
         }
       } catch {
         if (normalized === pattern.toLowerCase()) {
-          return descriptor.id;
+          matches.add(descriptor.id);
+          break;
         }
       }
     }
   }
+  return matches;
+}
 
-  return null;
+export function inferRunnerIdFromModel(
+  model: string | null | undefined,
+  preferredRunnerId?: RunnerDescriptor['id'] | null,
+): RunnerDescriptor['id'] | null {
+  const matches = matchingRunnerIdsFromModel(model);
+  if (preferredRunnerId && matches.has(preferredRunnerId)) {
+    return preferredRunnerId;
+  }
+  return matches.values().next().value || null;
 }
 
 export function isModelCompatibleWithRunner(
   runnerId: RunnerDescriptor['id'],
   model: string | null | undefined,
 ): boolean {
-  const inferredRunnerId = inferRunnerIdFromModel(model);
-  return !inferredRunnerId || inferredRunnerId === runnerId;
+  const matches = matchingRunnerIdsFromModel(model);
+  return matches.size === 0 || matches.has(runnerId);
 }
 
 export function canServeAsMemoryRunner(descriptor: RunnerDescriptor): boolean {

@@ -18,7 +18,12 @@ import {
   evaluateRunnerAuthProbe,
   modelsForDescriptor,
 } from '../../../src/runner-health.js';
+import {
+  inferRunnerIdFromModel,
+  isModelCompatibleWithRunner,
+} from '../../../src/runner-registry.js';
 import { listRunnerServerManifests } from '../../../src/runners/index.js';
+import { normalizeTraexCliModels } from '../../../src/runners/traex/manifest.js';
 import { validateRunnerProfileConfig } from '../../../src/runner-profile-schema.js';
 
 async function collectRun(
@@ -605,6 +610,50 @@ function assertCodexModelCacheCatalogWorks(): void {
   }
 }
 
+function assertOverlappingRunnerModelPatterns(): void {
+  assert.equal(inferRunnerIdFromModel('gpt-5.4', 'codex'), 'codex');
+  assert.equal(inferRunnerIdFromModel('gpt-5.4', 'traex'), 'traex');
+  assert.equal(inferRunnerIdFromModel('gpt-5.4', 'claude'), 'codex');
+  assert.equal(inferRunnerIdFromModel('c_seed_2_0', 'codex'), 'traex');
+  assert.equal(isModelCompatibleWithRunner('codex', 'gpt-5.4'), true);
+  assert.equal(isModelCompatibleWithRunner('traex', 'gpt-5.4'), true);
+  assert.equal(isModelCompatibleWithRunner('claude', 'gpt-5.4'), false);
+}
+
+function assertTraexModelCatalogNormalization(): void {
+  const models = normalizeTraexCliModels(
+    JSON.stringify([
+      {
+        name: 'Doubao-Seed-2.1-Pro',
+        provider: 'trae',
+        description: '184K context window',
+      },
+      {
+        name: 'Doubao-Seed-2.1-Pro',
+        description: 'duplicate',
+      },
+      {
+        name: 'c_gpt_5_4',
+        real_name: 'GPT-5.4',
+      },
+      { name: '' },
+      null,
+    ]),
+  );
+  assert.deepEqual(models, [
+    {
+      id: 'Doubao-Seed-2.1-Pro',
+      label: 'Doubao-Seed-2.1-Pro',
+      description: '184K context window',
+    },
+    {
+      id: 'c_gpt_5_4',
+      label: 'GPT-5.4',
+      description: undefined,
+    },
+  ]);
+}
+
 function assertMemoryRouteUsesDynamicRunnerModels(): void {
   const memoryRoute = fs.readFileSync(
     path.resolve('src/routes/memory.ts'),
@@ -706,6 +755,8 @@ assertRunnerProfileSchemaValidation();
 assertInvokeAgentIsRegistryDriven();
 assertDescriptorAuthProbeWorks();
 assertCodexModelCacheCatalogWorks();
+assertOverlappingRunnerModelPatterns();
+assertTraexModelCatalogNormalization();
 assertMemoryRouteUsesDynamicRunnerModels();
 assertIpcDeliveryAcknowledgement();
 await assertFakeRunnerContract();

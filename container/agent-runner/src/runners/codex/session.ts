@@ -22,15 +22,36 @@ export interface CodexSessionConfig {
   mcpServerEnv?: Record<string, string>;
   /** Path to model instructions file. Kept for compatibility with existing config wiring. */
   modelInstructionsFile?: string;
+  /** How to pass host-provided instructions to the app-server. */
+  instructionsMode?: 'model_instructions_file' | 'developer_instructions';
+  /** Whether to enable Codex live web search in the thread config. */
+  includeWebSearchMode?: boolean;
   /** Built-in AgentDock MCP server name. A happyclaw alias is kept for old prompts. */
   builtinMcpServerName?: string;
+  /** Whether to expose the built-in MCP server under the legacy happyclaw alias. */
+  aliasBuiltinMcpServer?: boolean;
   /** User-configured MCP servers from settings.json (stdio format only). */
   userMcpServers?: Record<string, unknown>;
+  /** Whether MCP servers should be injected through the thread config. */
+  mcpServersMode?: 'thread_config' | 'none';
+  /** App-server-native tool declarations used by runners without MCP support. */
+  dynamicTools?: Array<{
+    name: string;
+    description: string;
+    inputSchema: unknown;
+    deferLoading?: boolean;
+  }>;
+  dynamicToolHandler?: (
+    tool: string,
+    args: unknown,
+  ) => Promise<{ success: boolean; content: string }>;
   readOnly?: boolean;
 }
 
 export interface CodexSessionOptions {
   codexPathOverride?: string;
+  commandDefault?: string;
+  displayName?: string;
   apiKey?: string;
   config?: Record<string, unknown>;
 }
@@ -340,6 +361,23 @@ function mapAppItem(item: unknown): CodexThreadItem | null {
         status: mapCommandStatus(item.status),
       };
     }
+    case 'dynamicToolCall': {
+      const contentItems = Array.isArray(item.contentItems)
+        ? item.contentItems
+            .filter(isObject)
+            .map((content) => stringValue(content.text) || '')
+            .filter((text) => text.length > 0)
+        : [];
+      return {
+        id,
+        type: 'mcp_tool_call',
+        server: 'dynamic',
+        tool: stringValue(item.tool) || '',
+        arguments: item.arguments,
+        ...(contentItems.length > 0 ? { result: contentItems.join('\n') } : {}),
+        status: mapCommandStatus(item.status),
+      };
+    }
     case 'webSearch':
       return { id, type: 'web_search', query: stringValue(item.query) || '' };
     case 'plan':
@@ -602,7 +640,9 @@ export class CodexSession {
 
   private async ensureServer(): Promise<void> {
     if (this.initialized) return;
-    const command = this.options.codexPathOverride || 'codex';
+    const command =
+      this.options.codexPathOverride || this.options.commandDefault || 'codex';
+    const displayName = this.options.displayName || 'Codex';
     const child = spawn(command, ['app-server'], {
       env: {
         ...(process.env as Record<string, string>),
@@ -615,7 +655,9 @@ export class CodexSession {
     child.on('error', (error) => this.failAll(error));
     child.on('exit', (code, signal) => {
       this.failAll(
-        new Error(`Codex app-server exited (${code ?? signal ?? 'unknown'})`),
+        new Error(
+          `${displayName} app-server exited (${code ?? signal ?? 'unknown'})`,
+        ),
       );
     });
 
@@ -625,7 +667,7 @@ export class CodexSession {
     this.stderrRl = createInterface({ input: child.stderr });
     this.stderrRl.on('line', (line) => {
       if (line.trim().length > 0) {
-        console.error(`[codex-app-server] ${line}`);
+        console.error(`[${displayName.toLowerCase()}-app-server] ${line}`);
       }
     });
 
@@ -643,7 +685,7 @@ export class CodexSession {
     this.initialized = true;
   }
 
-  private buildThreadParams(): Record<string, unknown> {
+  private buildMcpServers(): Record<string, unknown> {
     const builtinName = this.config.builtinMcpServerName || 'agentdock';
     const builtinServer = this.config.mcpServerPath
       ? {
@@ -658,12 +700,26 @@ export class CodexSession {
       ...(builtinServer
         ? {
             [builtinName]: builtinServer,
-            ...(builtinName === 'happyclaw'
+            ...(this.config.aliasBuiltinMcpServer === false ||
+            builtinName === 'happyclaw'
               ? {}
               : { happyclaw: builtinServer }),
           }
         : {}),
     };
+    return mcpServers;
+  }
+
+  private buildThreadParams(): Record<string, unknown> {
+    const instructionsMode =
+      this.config.instructionsMode || 'model_instructions_file';
+    const developerInstructions =
+      instructionsMode === 'developer_instructions' &&
+      this.config.modelInstructionsFile
+        ? fs.readFileSync(this.config.modelInstructionsFile, 'utf-8')
+        : undefined;
+    const mcpServers =
+      this.config.mcpServersMode === 'none' ? {} : this.buildMcpServers();
 
     return {
       model: this.config.model,
@@ -671,17 +727,24 @@ export class CodexSession {
       approvalPolicy: 'never',
       sandbox: this.config.readOnly ? 'read-only' : 'danger-full-access',
       serviceName: 'happyclaw',
+      ...(developerInstructions !== undefined ? { developerInstructions } : {}),
       experimentalRawEvents: false,
       persistExtendedHistory: true,
+      ...(this.config.dynamicTools && this.config.dynamicTools.length > 0
+        ? { dynamicTools: this.config.dynamicTools }
+        : {}),
       config: {
         ...(this.options.config || {}),
-        ...(this.config.modelInstructionsFile
+        ...(instructionsMode === 'model_instructions_file' &&
+        this.config.modelInstructionsFile
           ? { model_instructions_file: this.config.modelInstructionsFile }
           : {}),
         ...(this.config.thinkingEffort
           ? { model_reasoning_effort: this.config.thinkingEffort }
           : {}),
-        web_search_mode: 'live',
+        ...(this.config.includeWebSearchMode === false
+          ? {}
+          : { web_search_mode: 'live' }),
         ...(Object.keys(mcpServers).length > 0
           ? { mcp_servers: mcpServers }
           : {}),
@@ -805,6 +868,9 @@ export class CodexSession {
           _meta: null,
         });
         return;
+      case 'item/tool/call':
+        void this.handleDynamicToolCall(message);
+        return;
       case 'applyPatchApproval':
       case 'execCommandApproval':
         this.respond(message.id, { decision: 'denied' });
@@ -831,6 +897,39 @@ export class CodexSession {
         },
       })}\n`,
     );
+  }
+
+  private async handleDynamicToolCall(message: JsonRpcMessage): Promise<void> {
+    if (message.id === undefined) return;
+    if (!this.config.dynamicToolHandler || !isObject(message.params)) {
+      this.respondError(message.id, 'Dynamic tools are not configured');
+      return;
+    }
+    const tool = stringValue(message.params.tool);
+    if (!tool) {
+      this.respondError(message.id, 'Dynamic tool call is missing tool name');
+      return;
+    }
+    try {
+      const result = await this.config.dynamicToolHandler(
+        tool,
+        message.params.arguments,
+      );
+      this.respond(message.id, {
+        success: result.success,
+        contentItems: [{ type: 'inputText', text: result.content }],
+      });
+    } catch (err) {
+      this.respond(message.id, {
+        success: false,
+        contentItems: [
+          {
+            type: 'inputText',
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+      });
+    }
   }
 
   private mapNotification(

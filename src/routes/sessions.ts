@@ -635,7 +635,10 @@ function buildSessionPayload(
   }
 
   const backingJid = resolveBackingJid(session, context);
-  const inferredRunnerId = inferRunnerIdFromModel(session.model);
+  const inferredRunnerId = inferRunnerIdFromModel(
+    session.model,
+    session.runner_id,
+  );
   const effectiveRunnerId =
     session.model && inferredRunnerId && inferredRunnerId !== session.runner_id
       ? inferredRunnerId
@@ -1499,7 +1502,6 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
       : body.model === null
         ? null
         : existing.model;
-  const inferredRunnerId = inferRunnerIdFromModel(nextModel);
   try {
     nextRunnerId = normalizeRunnerId(body.runner_id, existing.runner_id);
     nextRunnerProfileId =
@@ -1511,6 +1513,7 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
           : existing.runner_profile_id;
     nextSelectedSkills = normalizeSelectedSkills(body.selected_skills);
     nextActivationMode = normalizeActivationMode(body.activation_mode);
+    const inferredRunnerId = inferRunnerIdFromModel(nextModel, nextRunnerId);
     if (inferredRunnerId && inferredRunnerId !== nextRunnerId) {
       if (runnerProvided) {
         throw new Error(

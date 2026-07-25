@@ -332,6 +332,65 @@ function thinkingEffortConfigValue(
     : undefined;
 }
 
+function copyTraexSeedPath(source: string, target: string): boolean {
+  if (!fs.existsSync(source)) return false;
+  try {
+    const sourceStat = fs.statSync(source);
+    if (
+      sourceStat.isFile() &&
+      fs.existsSync(target) &&
+      fs.statSync(target).mtimeMs >= sourceStat.mtimeMs
+    ) {
+      return false;
+    }
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.cpSync(source, target, {
+      recursive: true,
+      force: true,
+      errorOnExist: false,
+    });
+    return true;
+  } catch (err) {
+    logger.warn({ source, target, err }, 'Failed to seed TraeX runtime state');
+    return false;
+  }
+}
+
+function prepareTraexRuntimeHome(
+  runnerConfigDir: string,
+  hostEnv: Record<string, string>,
+): void {
+  const inheritedTraeHome = hostEnv.TRAE_HOME?.trim();
+  const homeDir = hostEnv.HOME || process.env.HOME;
+  const sourceDir =
+    inheritedTraeHome &&
+    path.resolve(inheritedTraeHome) !== path.resolve(runnerConfigDir)
+      ? inheritedTraeHome
+      : homeDir
+        ? path.join(homeDir, '.trae')
+        : null;
+  if (!sourceDir || !fs.existsSync(sourceDir)) return;
+
+  const relativePaths = [
+    path.join('cli', 'auth.json'),
+    path.join('cli', 'models_cache.json'),
+    path.join('cli', 'model-catalog'),
+    'model-provider',
+  ];
+  const copiedPaths = relativePaths.filter((relativePath) =>
+    copyTraexSeedPath(
+      path.join(sourceDir, relativePath),
+      path.join(runnerConfigDir, relativePath),
+    ),
+  );
+  if (copiedPaths.length > 0) {
+    logger.info(
+      { runnerConfigDir, copiedPaths },
+      'Seeded isolated TraeX runtime state',
+    );
+  }
+}
+
 function resolveRunnerProfileBundle(
   runnerId: string,
   selectedProfileId?: string | null,
@@ -608,7 +667,10 @@ export async function runHostAgent(
     storedProfileBundle.descriptor?.defaultModel;
   const effectiveThinkingEffort =
     explicitThinkingEffort ?? profileThinkingEffort;
-  const inferredModelRunner = inferRunnerIdFromModel(effectiveModel);
+  const inferredModelRunner = inferRunnerIdFromModel(
+    effectiveModel,
+    storedRunnerId,
+  );
   const effectiveRunnerId =
     effectiveModel &&
     inferredModelRunner &&
@@ -638,6 +700,9 @@ export async function runHostAgent(
   const runnerProfileConfig = effectiveProfileBundle.config;
   const activeProfile = effectiveProfileBundle.activeProfile;
   const runnerCommand = stringConfigValue(runnerProfileConfig, 'command');
+  if (effectiveRunnerId === 'traex') {
+    prepareTraexRuntimeHome(runnerConfigDir, hostEnv);
+  }
   // Per-workspace model override takes priority over global and runtime-env config.
   if (
     effectiveModel &&

@@ -43,6 +43,7 @@ import {
 import { convertThreadEvent } from './event-adapter.js';
 import { saveImagesToTempFiles } from './image-utils.js';
 import { CodexArchiveManager } from './archive.js';
+import { createContextManager } from '../../context-manager-factory.js';
 
 // ---------------------------------------------------------------------------
 // Options
@@ -58,9 +59,18 @@ export interface CodexRunnerOptions {
   groupDir: string;
   globalDir: string;
   memoryDir: string;
-  model: string;
+  model?: string;
   thinkingEffort?: string;
   command?: string;
+  commandDefault?: string;
+  runnerId?: string;
+  runnerLabel?: string;
+  instructionsMode?: CodexSessionConfig['instructionsMode'];
+  includeWebSearchMode?: boolean;
+  mcpServersMode?: CodexSessionConfig['mcpServersMode'];
+  aliasBuiltinMcpServer?: boolean;
+  useDynamicTools?: boolean;
+  supportsMidQueryPush?: boolean;
   loadUserMcpServers: () => Record<string, unknown>;
   skillsDir: string;
   disableSyntheticArchive?: boolean;
@@ -224,10 +234,7 @@ export function planCodexContextInjection(
 // ---------------------------------------------------------------------------
 
 export class CodexRunner implements AgentRunner {
-  readonly ipcCapabilities: IpcCapabilities = {
-    supportsMidQueryPush: true,
-    supportsRuntimeModeSwitch: false,
-  };
+  readonly ipcCapabilities: IpcCapabilities;
 
   private session!: CodexSession;
   private instructionsFile!: string;
@@ -241,10 +248,16 @@ export class CodexRunner implements AgentRunner {
   private contextThreadId: string | null = null;
   private pendingPostCompact = false;
   private seenCompactKeys = new Set<string>();
+  private dynamicTools: CodexSessionConfig['dynamicTools'];
+  private dynamicToolHandler: CodexSessionConfig['dynamicToolHandler'];
   private readonly opts: CodexRunnerOptions;
 
   constructor(opts: CodexRunnerOptions) {
     this.opts = opts;
+    this.ipcCapabilities = {
+      supportsMidQueryPush: opts.supportsMidQueryPush ?? true,
+      supportsRuntimeModeSwitch: false,
+    };
   }
 
   async initialize(): Promise<void> {
@@ -279,7 +292,13 @@ export class CodexRunner implements AgentRunner {
     }
 
     // Create temp directory for instructions file and images
-    this.tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'happyclaw-codex-'));
+    const tempPrefix = (this.opts.runnerId || 'codex').replace(
+      /[^a-z0-9_-]/gi,
+      '-',
+    );
+    this.tmpDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), `happyclaw-${tempPrefix}-`),
+    );
 
     this.instructionsFile = path.join(this.tmpDir, 'instructions.md');
     fs.writeFileSync(this.instructionsFile, '', 'utf-8');
@@ -309,6 +328,9 @@ export class CodexRunner implements AgentRunner {
 
     // Load user MCP servers (stdio only — SSE/HTTP not supported by Codex CLI)
     const userMcpServers = this.opts.loadUserMcpServers();
+    if (this.opts.useDynamicTools) {
+      this.initializeDynamicTools(isHome, isAdminHome);
+    }
 
     // Initialize CodexSession
     const sessionConfig: CodexSessionConfig = {
@@ -322,15 +344,62 @@ export class CodexRunner implements AgentRunner {
       mcpServerPath: this.mcpServerPath,
       mcpServerEnv: mcpEnv,
       modelInstructionsFile: this.instructionsFile,
+      instructionsMode: this.opts.instructionsMode,
+      includeWebSearchMode: this.opts.includeWebSearchMode,
       builtinMcpServerName: this.opts.builtinMcpServerName,
+      aliasBuiltinMcpServer: this.opts.aliasBuiltinMcpServer,
       userMcpServers,
+      mcpServersMode: this.opts.mcpServersMode,
+      dynamicTools: this.dynamicTools,
+      dynamicToolHandler: this.dynamicToolHandler,
       readOnly: this.opts.toolScope === 'read-only',
     };
 
     this.session = new CodexSession(sessionConfig, {
       codexPathOverride: this.opts.command,
+      commandDefault: this.opts.commandDefault,
+      displayName: this.opts.runnerLabel,
       apiKey: process.env.OPENAI_API_KEY,
     });
+  }
+
+  private initializeDynamicTools(isHome: boolean, isAdminHome: boolean): void {
+    const { containerInput, groupDir, globalDir, memoryDir } = this.opts;
+    const contextManager = createContextManager({
+      chatJid: containerInput.chatJid,
+      groupFolder: containerInput.groupFolder,
+      isHome,
+      isAdminHome,
+      workspaceIpc: this.opts.ipcPaths.inputDir.replace('/input', ''),
+      workspaceGroup: groupDir,
+      workspaceGlobal: globalDir,
+      workspaceMemory: memoryDir,
+      userId: containerInput.userId || undefined,
+      skillsDirs: [
+        process.env.HAPPYCLAW_PROJECT_SKILLS_DIR || '/workspace/project-skills',
+        this.opts.skillsDir,
+      ].filter(Boolean),
+    });
+    const tools = contextManager.getActiveTools();
+    const toolMap = new Map(tools.map((tool) => [tool.name, tool]));
+    this.dynamicTools = tools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.parameters,
+      deferLoading: false,
+    }));
+    this.dynamicToolHandler = async (toolName, args) => {
+      const tool = toolMap.get(toolName);
+      if (!tool) {
+        return { success: false, content: `Unknown tool: ${toolName}` };
+      }
+      const result = await tool.execute(
+        args && typeof args === 'object' && !Array.isArray(args)
+          ? (args as Record<string, unknown>)
+          : {},
+      );
+      return { success: !result.isError, content: result.content };
+    };
   }
 
   async applyContext(context: RenderedRunnerContext): Promise<void> {
@@ -620,6 +689,12 @@ export class CodexRunner implements AgentRunner {
     images?: Array<{ data: string; mimeType?: string }>,
     deliveryId?: string,
   ): Promise<PushMessageResult> {
+    if (!this.ipcCapabilities.supportsMidQueryPush) {
+      return {
+        status: 'buffer',
+        reason: `${this.opts.runnerLabel || 'Runner'} 不支持 turn 内消息推送`,
+      };
+    }
     const imagePaths =
       images && images.length > 0
         ? saveImagesToTempFiles(images, this.tmpDir)

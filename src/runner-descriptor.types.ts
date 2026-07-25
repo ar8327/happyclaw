@@ -399,6 +399,103 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       observability: 'full',
     },
   },
+  traex: {
+    id: 'traex',
+    label: 'TraeX',
+    description:
+      'TraeX app-server runner with native HappyClaw tool injection.',
+    modelPatterns: [
+      '^c_[a-z0-9._-]+$',
+      '^gpt-[a-z0-9._-]+$',
+      '^o[1-9](?:$|[-._])',
+    ],
+    capabilities: {
+      sessionResume: 'weak',
+      interrupt: 'weak',
+      imageInput: true,
+      usage: 'approx',
+      midQueryPush: false,
+      runtimeModeSwitch: false,
+      toolStreaming: 'coarse',
+      backgroundTasks: false,
+      subAgent: 'tool-only',
+      customTools: 'native',
+      mcpTransport: [],
+      skills: ['tool-loader'],
+      ephemeralSession: true,
+      filesystemAccess: true,
+      predefinedSubagents: false,
+    },
+    lifecycle: {
+      turnBoundary: 'native',
+      archivalTrigger: ['post_compact', 'cleanup_only'],
+      contextShrinkTrigger: 'native_event',
+      beforeToolExecutionGuard: 'sandbox_only',
+      hookStreaming: 'none',
+      postCompactRepair: 'native',
+    },
+    promptContract: {
+      mode: 'instructions_file',
+      dynamicContextReload: 'turn',
+    },
+    nativeProvides: [],
+    runtimeContract: {
+      requiredNodePackages: [],
+      requiredCommands: ['traex'],
+      configDirEnv: 'TRAE_HOME',
+      modelEnv: ['HAPPYCLAW_TRAEX_MODEL'],
+      availabilityEnv: 'HAPPYCLAW_TRAEX_AVAILABLE',
+      auth: 'external_cli',
+      authProbe: {
+        type: 'json_file',
+        anyEnv: ['OPENAI_API_KEY'],
+        files: [
+          {
+            envPath: 'TRAE_HOME',
+            relativeToEnv: 'cli/auth.json',
+            relativeToHome: '.trae/cli/auth.json',
+            requiredJsonPaths: [['auth_mode']],
+            detailJsonFields: [
+              { name: 'authMode', path: ['auth_mode'] },
+              { name: 'userId', path: ['trae', 'user_id'] },
+              { name: 'lastRefresh', path: ['last_refresh'] },
+            ],
+          },
+        ],
+      },
+      versionArgs: ['--version'],
+    },
+    toolContract: {
+      mode: 'native_adapter',
+      supportsUserMcp: false,
+    },
+    profileSchema: {
+      type: 'object',
+      properties: {
+        model: {
+          type: 'string',
+          title: '模型',
+          description: '覆盖 TraeX CLI 使用的模型；留空时使用 CLI 默认模型',
+        },
+        thinkingEffort: {
+          type: 'string',
+          enum: ['low', 'medium', 'high'],
+          title: '推理强度',
+        },
+        command: {
+          type: 'string',
+          title: '命令路径',
+          description: '默认使用 PATH 中的 traex',
+        },
+      },
+      additionalProperties: true,
+    },
+    compatibility: {
+      chat: 'full',
+      im: 'degraded',
+      observability: 'degraded',
+    },
+  },
   agy: {
     id: 'agy',
     label: 'Antigravity',
