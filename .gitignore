@@ -46,5 +46,11 @@ Thumbs.db
 *.swp
 *.swo
 
+# Desktop app (Electron)
+desktop/dist/
+desktop/release/
+desktop/node_modules/
+desktop/.native-cache/
+
 /log/
 nohup.out

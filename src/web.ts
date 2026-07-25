@@ -1257,6 +1257,11 @@ export function startWebServer(webDeps: WebDeps): void {
     },
     (info) => {
       logger.info({ port: info.port }, 'Web server started');
+      if (process.env.AGENTDOCK_DESKTOP_MODE === '1') {
+        process.stdout.write(
+          `[agentdock] listening on http://127.0.0.1:${info.port}\n`,
+        );
+      }
     },
   );
 

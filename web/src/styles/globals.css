@@ -304,6 +304,36 @@ pre code.hljs {
   }
 }
 
+/* Electron hiddenInset traffic lights are painted over the web surface. */
+html.agentdock-desktop {
+  --desktop-traffic-light-top: 34px;
+}
+
+html.agentdock-desktop .desktop-titlebar-navrail {
+  padding-top: calc(var(--desktop-traffic-light-top) + 0.5rem);
+  -webkit-app-region: drag;
+}
+
+html.agentdock-desktop .desktop-titlebar-navrail::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: -1px;
+  width: 1px;
+  height: calc(var(--desktop-traffic-light-top) + 0.5rem);
+  background: var(--sidebar-background);
+  pointer-events: none;
+}
+
+html.agentdock-desktop button,
+html.agentdock-desktop a,
+html.agentdock-desktop input,
+html.agentdock-desktop textarea,
+html.agentdock-desktop select,
+html.agentdock-desktop [role='button'] {
+  -webkit-app-region: no-drag;
+}
+
 /* =====================================================
    iOS PWA: 防止底部 TabBar 触发 Safari 工具栏
 

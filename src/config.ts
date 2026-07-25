@@ -6,8 +6,12 @@ export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || 'AgentDock';
 export const POLL_INTERVAL = 1000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
-// Absolute paths needed for container mounts
+// Absolute paths needed for runtime state. Desktop wrappers may override the
+// default project-local data directory.
 const PROJECT_ROOT = process.cwd();
+const DATA_DIR_FROM_ENV = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : null;
 
 // Mount security: allowlist in project config/ directory
 export const MOUNT_ALLOWLIST_PATH = path.resolve(
@@ -15,7 +19,7 @@ export const MOUNT_ALLOWLIST_PATH = path.resolve(
   'config',
   'mount-allowlist.json',
 );
-export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
+export const DATA_DIR = DATA_DIR_FROM_ENV ?? path.resolve(PROJECT_ROOT, 'data');
 export const STORE_DIR = path.join(DATA_DIR, 'db');
 export const GROUPS_DIR = path.join(DATA_DIR, 'groups');
 export const MAIN_GROUP_FOLDER = 'main';

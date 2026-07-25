@@ -58,9 +58,13 @@ function syncMetaThemeColor() {
 export function applyTheme(mode: ThemeMode, skin: string) {
   if (typeof document === 'undefined') return;
   const root = document.documentElement;
-  root.classList.toggle('dark', resolveMode(mode) === 'dark');
+  const resolvedMode = resolveMode(mode);
+  root.classList.toggle('dark', resolvedMode === 'dark');
   root.dataset.skin = isValidSkin(skin) ? skin : DEFAULT_SKIN;
   syncMetaThemeColor();
+  if (typeof window !== 'undefined' && window.__AGENTDOCK_DESKTOP__) {
+    window.agentdockNative?.reportTheme?.(resolvedMode).catch(() => {});
+  }
 }
 
 /** 切换瞬间加一层短过渡，避免生硬跳变 */

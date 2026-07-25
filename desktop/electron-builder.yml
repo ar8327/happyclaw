@@ -1,0 +1,91 @@
+appId: org.argos.agentdock
+productName: AgentDock
+artifactName: '${productName}-${version}-${arch}.${ext}'
+directories:
+  output: release
+  buildResources: build
+
+afterPack: scripts/after-pack-native-modules.cjs
+
+files:
+  - dist/**/*
+  - build/icon.png
+  - package.json
+
+extraResources:
+  - from: ../dist
+    to: backend
+    filter:
+      - '**/*'
+  - from: ../package.json
+    to: backend/package.json
+  - from: ../node_modules
+    to: backend/node_modules
+    filter:
+      - '**/*'
+      - '!**/.package-lock.json'
+  - from: ../web/dist
+    to: web/dist
+    filter:
+      - '**/*'
+  - from: ../container
+    to: container
+    filter:
+      - '**/*.js'
+      - '**/*.json'
+      - '**/*.md'
+      - '!**/node_modules/**'
+      - '!**/.package-lock.json'
+  - from: ../container/agent-runner/node_modules
+    to: container/agent-runner/node_modules
+    filter:
+      - '**/*'
+      - '!**/.package-lock.json'
+  - from: ../config
+    to: config
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+    - target: zip
+      arch:
+        - arm64
+        - x64
+  icon: build/icon.icns
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    CFBundleURLTypes:
+      - CFBundleURLSchemes:
+          - agentdock
+        CFBundleURLName: AgentDock Deep Link
+    NSUserNotificationAlertStyle: alert
+    NSHumanReadableCopyright: 'Copyright © 2026 AgentDock'
+
+dmg:
+  title: 'AgentDock ${version}'
+  icon: build/icon.icns
+  backgroundColor: '#ffffff'
+  window:
+    width: 540
+    height: 380
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+electronDownload:
+  mirror: https://npmmirror.com/mirrors/electron/
+
+publish:
+  provider: generic
+  url: https://agentdock.invalid/updates/mac/

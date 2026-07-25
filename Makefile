@@ -1,7 +1,8 @@
 .PHONY: dev dev-backend dev-web build build-backend build-web start \
        typecheck typecheck-backend typecheck-web typecheck-agent-runner-core typecheck-agent-runner test-runner-contracts test-steering-feishu test-im-outbox test-prompt-characterization test-memory-timeout test-memory-lanes test-memory-write-queue test-memory-search test-memory-retention test-context-conformance \
        format format-check install clean reset-init sync-types ensure-deps \
-       backup restore help
+       backup restore help \
+       install-desktop dev-desktop build-desktop pack-desktop dist-desktop dist-desktop-arm64
 
 # ─── Development ─────────────────────────────────────────────
 
@@ -111,6 +112,8 @@ clean: ## 清理构建产物
 	rm -rf web/dist
 	rm -rf container/agent-runner-core/dist
 	rm -rf container/agent-runner/dist
+	rm -rf desktop/dist
+	rm -rf desktop/release
 
 reset-init: ## 完全重置为首装状态（清空所有运行时数据）
 	rm -rf data store groups
@@ -164,6 +167,31 @@ restore: ## 从 agentdock-backup-*.tar.gz 恢复数据（用法：make restore �
 	echo ""; \
 	echo "后续步骤："; \
 	echo "  1. 启动服务：make start"
+
+# ─── macOS 桌面应用 ─────────────────────────────────────────────────────────
+
+install-desktop: ## 安装桌面端依赖（Electron）
+	npm run install:desktop
+
+dev-desktop: ensure-deps ## 编译并运行桌面应用
+	@if [ ! -d desktop/node_modules ]; then $(MAKE) install-desktop; fi
+	npm run dev:desktop
+
+build-desktop: ensure-deps ## 编译桌面端及其后端资源
+	@if [ ! -d desktop/node_modules ]; then $(MAKE) install-desktop; fi
+	npm run build:desktop
+
+pack-desktop: ensure-deps ## 打包为未签名的 .app 目录
+	@if [ ! -d desktop/node_modules ]; then $(MAKE) install-desktop; fi
+	npm run pack:desktop
+
+dist-desktop: ensure-deps ## 生成 macOS DMG 与 ZIP
+	@if [ ! -d desktop/node_modules ]; then $(MAKE) install-desktop; fi
+	npm run dist:desktop
+
+dist-desktop-arm64: ensure-deps ## 仅生成 arm64 macOS DMG 与 ZIP
+	@if [ ! -d desktop/node_modules ]; then $(MAKE) install-desktop; fi
+	npm run dist:desktop:arm64
 
 # ─── Help ────────────────────────────────────────────────────
 

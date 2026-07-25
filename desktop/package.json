@@ -1,0 +1,27 @@
+{
+  "name": "agentdock-desktop",
+  "version": "1.0.0",
+  "description": "AgentDock macOS desktop app (Electron wrapper)",
+  "private": true,
+  "main": "dist/main/app.js",
+  "author": "AgentDock",
+  "license": "MIT",
+  "scripts": {
+    "dev": "tsc -w",
+    "build": "tsc",
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:mac:arm64": "electron-builder --mac dmg zip --arm64"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  }
+}

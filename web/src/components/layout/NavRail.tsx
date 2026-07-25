@@ -24,7 +24,7 @@ export function NavRail() {
 
   return (
     <TooltipProvider delayDuration={200}>
-      <nav className="w-16 h-full bg-sidebar border-r border-sidebar-border flex flex-col items-center py-4 gap-1.5">
+      <nav className="desktop-titlebar-navrail relative w-16 h-full bg-sidebar border-r border-sidebar-border flex flex-col items-center py-4 gap-1.5">
         {/* Logo */}
         <div className="w-10 h-10 rounded-xl overflow-hidden mb-2 flex-shrink-0 shadow-sm">
           <img

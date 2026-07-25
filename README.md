@@ -67,7 +67,8 @@ AgentDock 源自 [HappyClaw](https://github.com/riba2534/happyclaw) 的实验性
 
 - **单用户多 Session** — 当前主模型是一个本地操作者配合多个 Session，会话可独立选择 runner、工作目录、压缩策略和 IM 绑定
 - **统一本地 Runtime** — Session 统一走本地 runtime，旧的 `host` 和 `container` 双执行模式只保留兼容痕迹，不再是产品能力
-- **多 Runner 主链路** — runner registry 统一暴露 Claude、Codex 与 Antigravity，兼容能力差异会在界面中明确展示
+- **多 Runner 主链路** — runner registry 统一暴露 Claude、Codex、TraeX 与 Antigravity，兼容能力差异会在界面中明确展示
+- **macOS Desktop** — Electron 桌面壳提供菜单栏、全局快捷键、浮动对话窗口、自动更新和本机后端托管
 - **移动端 PWA** — 针对移动端深度优化，支持一键安装到桌面，iOS / Android 均已适配，随时随地通过手机访问 AI Agent
 - **四端消息统一路由** — 飞书 WebSocket 长连接（富文本卡片、Reaction 反馈）、Telegram Bot API、QQ Bot API v2（私聊 + 群聊 @Bot）、Web 界面，四端消息统一路由
 
@@ -91,7 +92,7 @@ AgentDock 源自 [HappyClaw](https://github.com/riba2534/happyclaw) 的实验性
 
 ### Agent 执行引擎
 
-主运行链路由 `src/runtime-runner.ts` 驱动，本地启动 `container/agent-runner` 中的 Claude、Codex 或 Antigravity runner，并统一向外暴露 Session 语义。
+主运行链路由 `src/runtime-runner.ts` 驱动，本地启动 `container/agent-runner` 中的 Claude、Codex、TraeX 或 Antigravity runner，并统一向外暴露 Session 语义。
 
 更细的 runner 契约说明见 [docs/agent-runner-contract.md](docs/agent-runner-contract.md)。
 
@@ -212,6 +213,7 @@ Agent 在运行时可通过内置 MCP Server 与主进程通信：
 - **至少一个可用 Runner**
   - Claude 路线：本机可用 Claude Code CLI，并完成本地登录或兼容配置
   - Codex 路线：本机具备 Codex 所需认证，或在 Web 中配置兼容的 Base URL / 默认模型
+  - TraeX 路线：本机可用 `traex` CLI，并已完成登录
   - 不必启用所有 runner，但至少需要一个能跑通
 
 **可选**
@@ -236,6 +238,22 @@ make start
 
 如需公网访问，可以自行使用 nginx/caddy 配置反向代理
 ```
+
+### macOS Desktop
+
+```bash
+# 安装 Electron 依赖并启动开发版
+make install-desktop
+make dev-desktop
+
+# 编译验证，或在 macOS 上生成 DMG + ZIP
+make build-desktop
+make dist-desktop
+```
+
+桌面应用在开发态复用仓库 `data/`，打包后使用
+`~/Library/Application Support/AgentDock/data/`。更多打包、自动更新和快捷键说明见
+[desktop/README.md](desktop/README.md)。
 
 按照设置向导完成初始化：
 
