@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
-import { PanelLeftOpen } from 'lucide-react';
+import { Loader2, PanelLeftOpen, RefreshCw } from 'lucide-react';
 import { useChatStore } from '../stores/chat';
 import { useAuthStore } from '../stores/auth';
 import { ChatSidebar } from '../components/chat/ChatSidebar';
@@ -14,7 +14,11 @@ export function ChatPage() {
     groups: sessions,
     currentGroup: currentSession,
     selectGroup: selectSession,
+    ensureGroupLoaded,
   } = useChatStore();
+  const [resolvingSlug, setResolvingSlug] = useState(false);
+  const [resolveError, setResolveError] = useState<string | null>(null);
+  const [resolveAttempt, setResolveAttempt] = useState(0);
   const routeSessionId = useMemo(() => {
     if (!sessionSlug) return null;
     const entry =
@@ -36,26 +40,57 @@ export function ChatPage() {
   const highlightId = searchParams.get('highlightId');
   const highlightTs = searchParams.get('ts');
   const appearance = useAuthStore((s) => s.appearance);
-  const hasSessions = Object.keys(sessions).length > 0;
 
-  // Sync URL param to store selection. No auto-redirect to the main session.
-  // Users land on the welcome screen and choose a session manually.
   useEffect(() => {
     if (!sessionSlug) return;
     if (routeSessionId && currentSession !== routeSessionId) {
       selectSession(routeSessionId);
+    }
+  }, [sessionSlug, routeSessionId, currentSession, selectSession]);
+
+  // The requested session may be outside the sidebar's currently loaded page.
+  useEffect(() => {
+    if (!sessionSlug || routeSessionId) {
+      setResolvingSlug(false);
+      setResolveError(null);
       return;
     }
-    if (hasSessions && !routeSessionId) {
-      navigate('/chat', { replace: true });
-    }
+
+    let cancelled = false;
+    setResolvingSlug(true);
+    setResolveError(null);
+    ensureGroupLoaded(sessionSlug)
+      .then((resolvedId) => {
+        if (cancelled) return;
+        setResolvingSlug(false);
+        if (!resolvedId) {
+          navigate('/chat', { replace: true });
+          return;
+        }
+        selectSession(resolvedId);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setResolvingSlug(false);
+        const message =
+          typeof error === 'object' &&
+          error !== null &&
+          'message' in error &&
+          typeof error.message === 'string'
+            ? error.message
+            : '会话加载失败，请检查服务状态后重试';
+        setResolveError(message);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [
     sessionSlug,
     routeSessionId,
-    hasSessions,
-    currentSession,
-    selectSession,
+    resolveAttempt,
+    ensureGroupLoaded,
     navigate,
+    selectSession,
   ]);
 
   const activeSessionId = sessionSlug ? routeSessionId : currentSession;
@@ -109,7 +144,7 @@ export function ChatPage() {
           />
         </div>
       ) : (
-        <div className="hidden lg:flex flex-1 items-center justify-center bg-background relative">
+        <div className={`${sessionSlug ? 'flex' : 'hidden lg:flex'} flex-1 items-center justify-center bg-background relative`}>
           {sidebarCollapsed && (
             <button
               onClick={() => setSidebarCollapsed(false)}
@@ -119,6 +154,24 @@ export function ChatPage() {
               <PanelLeftOpen className="w-4 h-4" />
             </button>
           )}
+          {resolvingSlug ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" />
+              正在加载会话…
+            </div>
+          ) : resolveError ? (
+            <div className="max-w-sm px-6 text-center">
+              <p className="mb-3 text-sm text-destructive">{resolveError}</p>
+              <button
+                type="button"
+                onClick={() => setResolveAttempt((attempt) => attempt + 1)}
+                className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-accent"
+              >
+                <RefreshCw className="size-4" />
+                重试
+              </button>
+            </div>
+          ) : (
           <div className="text-center max-w-sm">
             {/* Logo */}
             <div className="w-16 h-16 rounded-2xl overflow-hidden mx-auto mb-6">
@@ -131,6 +184,7 @@ export function ChatPage() {
               从左侧选择一个会话开始对话
             </p>
           </div>
+          )}
         </div>
       )}
     </div>

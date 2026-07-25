@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useLogsStore, type LogEntry, type LogSection } from '../stores/logs';
-import { useChatStore } from '../stores/chat';
+import { useSessionOptionsStore } from '../stores/session-options';
 import { RefreshCw, ScrollText, Download, ChevronDown, ChevronRight, X, ArrowLeft } from 'lucide-react';
 import { PageHeader } from '@/components/common/PageHeader';
 import { SkeletonCardList } from '@/components/common/Skeletons';
@@ -228,13 +228,13 @@ export function LogsPage() {
     clearDetail,
     setSelectedFolder,
   } = useLogsStore();
-  const { groups, loadGroups } = useChatStore();
+  const { options: sessionOptions, loadOptions } = useSessionOptionsStore();
 
-  // Derive unique folders from groups
-  const folders = Object.entries(groups).reduce(
-    (acc, [, group]) => {
-      if (!acc.find((f) => f.folder === group.folder)) {
-        acc.push({ folder: group.folder, name: group.name });
+  // Multiple projected sessions can share one workspace folder.
+  const folders = sessionOptions.reduce(
+    (acc, session) => {
+      if (!acc.find((item) => item.folder === session.folder)) {
+        acc.push({ folder: session.folder, name: session.name });
       }
       return acc;
     },
@@ -242,8 +242,8 @@ export function LogsPage() {
   );
 
   useEffect(() => {
-    loadGroups();
-  }, [loadGroups]);
+    loadOptions(true);
+  }, [loadOptions]);
 
   // Auto-select first folder
   useEffect(() => {

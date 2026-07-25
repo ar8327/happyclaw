@@ -4,7 +4,12 @@ import { wsManager } from '../api/ws';
 import { useFileStore } from './files';
 import { useAuthStore } from './auth';
 import { showToast, notifyIfHidden, shouldEmitBackgroundTaskNotice } from '../utils/toast';
-import type { SessionInfo, AgentInfo, AvailableImGroup } from '../types';
+import type {
+  SessionInfo,
+  SessionListResponse,
+  AgentInfo,
+  AvailableImGroup,
+} from '../types';
 
 export type { SessionInfo, AgentInfo };
 
@@ -165,18 +170,51 @@ export function resolveStoreJid(
 function remapGroupScopedRecord<T>(
   record: Record<string, T>,
   keyMap: Record<string, string>,
-  allowedKeys: Set<string>,
 ): Record<string, T> {
   const next: Record<string, T> = {};
   for (const [key, value] of Object.entries(record)) {
     const mappedKey = keyMap[key] || key;
-    if (!allowedKeys.has(mappedKey)) continue;
     next[mappedKey] = value;
   }
   return next;
 }
 
 const MAX_THINKING_CACHE_SIZE = 500;
+const GROUP_PAGE_SIZE = 40;
+const GROUP_MESSAGE_PREVIEW_LENGTH = 500;
+let groupLoadRequestSequence = 0;
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'message' in error &&
+    typeof error.message === 'string'
+  ) {
+    return error.message;
+  }
+  return String(error);
+}
+
+function withLatestGroupPreview(
+  groups: Record<string, SessionInfo>,
+  sessionId: string,
+  message: Pick<Message, 'content' | 'timestamp'>,
+): Record<string, SessionInfo> {
+  const group = groups[sessionId];
+  if (!group) return groups;
+  const currentTimestamp = group.lastMessageTime;
+  if (currentTimestamp && currentTimestamp > message.timestamp) return groups;
+  return {
+    ...groups,
+    [sessionId]: {
+      ...group,
+      lastMessage: message.content.slice(0, GROUP_MESSAGE_PREVIEW_LENGTH),
+      lastMessageTime: message.timestamp,
+    },
+  };
+}
 
 /** Evict oldest entries when cache exceeds capacity (relies on insertion order) */
 function capThinkingCache(cache: Record<string, string>): Record<string, string> {
@@ -204,8 +242,21 @@ function retainThinkingCacheForMessages(
   return capThinkingCache(next);
 }
 
+interface LoadGroupsOptions {
+  query?: string;
+  reset?: boolean;
+}
+
 interface ChatState {
   groups: Record<string, SessionInfo>;
+  groupOrder: string[];
+  groupQuery: string;
+  groupPage: number;
+  groupTotal: number;
+  groupsHasMore: boolean;
+  groupsLoading: boolean;
+  groupsLoadingMore: boolean;
+  groupsError: string | null;
   currentGroup: string | null;
   messages: Record<string, Message[]>;
   waiting: Record<string, boolean>;
@@ -247,7 +298,9 @@ interface ChatState {
   loadTurns: (jid: string) => Promise<void>;
   handleRunnerState: (chatJid: string, state: string, detail?: string) => void;
   loadActiveTurnState: (jid: string) => Promise<void>;
-  loadGroups: () => Promise<void>;
+  loadGroups: (options?: LoadGroupsOptions) => Promise<void>;
+  loadMoreGroups: () => Promise<void>;
+  ensureGroupLoaded: (identifier: string) => Promise<string | null>;
   selectGroup: (jid: string) => void;
   loadMessages: (jid: string, loadMore?: boolean) => Promise<void>;
   refreshMessages: (jid: string) => Promise<void>;
@@ -697,6 +750,14 @@ function restoreStreamingFromSnapshot(snapshot?: StreamingState | null): Streami
 
 export const useChatStore = create<ChatState>((set, get) => ({
   groups: {},
+  groupOrder: [],
+  groupQuery: '',
+  groupPage: 0,
+  groupTotal: 0,
+  groupsHasMore: false,
+  groupsLoading: false,
+  groupsLoadingMore: false,
+  groupsError: null,
   currentGroup: null,
   messages: {},
   waiting: {},
@@ -856,110 +917,225 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  loadGroups: async () => {
-    if (get().loading) return;
-    set({ loading: true });
+  loadGroups: async (options = {}) => {
+    const state = get();
+    const query = (options.query ?? state.groupQuery).trim();
+    const reset = options.reset ?? true;
+    if (
+      !reset &&
+      (state.groupsLoading ||
+        state.groupsLoadingMore ||
+        !state.groupsHasMore)
+    )
+      return;
+
+    const page = reset ? 1 : state.groupPage + 1;
+    const requestId = ++groupLoadRequestSequence;
+    if (reset) {
+      set({
+        loading: state.groupOrder.length === 0,
+        groupsLoading: true,
+        groupsLoadingMore: false,
+        groupsError: null,
+        groupQuery: query,
+      });
+    } else {
+      set({ groupsLoadingMore: true, groupsError: null });
+    }
+
     try {
-      const data = await api.get<{
-        sessions: Record<string, SessionInfo>;
-      }>('/api/sessions?kinds=main%2Cworkspace');
-      const sessionMap = data.sessions;
-      const groups = Object.fromEntries(
-        Object.entries(sessionMap)
-          .filter(([, info]) => info.kind === 'main' || info.kind === 'workspace')
+      const params = new URLSearchParams({
+        kinds: 'main,workspace',
+        page: String(page),
+        page_size: String(GROUP_PAGE_SIZE),
+      });
+      if (query) params.set('q', query);
+      const data = await api.get<SessionListResponse>(
+        `/api/sessions?${params}`,
+      );
+      if (requestId !== groupLoadRequestSequence) return;
+
+      const pageGroups = Object.fromEntries(
+        Object.entries(data.sessions)
+          .filter(
+            ([, info]) => info.kind === 'main' || info.kind === 'workspace',
+          )
           .map(([sessionId, info]) => [
             sessionId,
             { ...info, id: info.id || sessionId },
           ]),
       );
-      set((state) => {
-        const allowedKeys = new Set(Object.keys(groups));
+
+      set((current) => {
         const keyMap: Record<string, string> = {};
-        for (const [sessionId, info] of Object.entries(groups)) {
-          if (state.groups[sessionId]) {
-            keyMap[sessionId] = sessionId;
-            continue;
+        for (const [oldKey, oldGroup] of Object.entries(current.groups)) {
+          const stableId = oldGroup.id;
+          if (stableId && pageGroups[stableId] && oldKey !== stableId) {
+            keyMap[oldKey] = stableId;
           }
-          if (info.backing_jid && state.groups[info.backing_jid]) {
+        }
+        for (const [sessionId, info] of Object.entries(pageGroups)) {
+          if (
+            info.backing_jid &&
+            current.groups[info.backing_jid] &&
+            info.backing_jid !== sessionId
+          ) {
             keyMap[info.backing_jid] = sessionId;
           }
         }
 
-        const nextCurrent =
-          (state.currentGroup && allowedKeys.has(keyMap[state.currentGroup] || state.currentGroup))
-            ? (keyMap[state.currentGroup] || state.currentGroup)
-            : null;
+        const nextGroups = { ...current.groups };
+        for (const [oldKey, newKey] of Object.entries(keyMap)) {
+          if (oldKey === newKey) continue;
+          delete nextGroups[oldKey];
+        }
+        Object.assign(nextGroups, pageGroups);
 
-        let selectedCurrent = nextCurrent;
-        const nextGroups = groups;
-        const nextMessages = remapGroupScopedRecord(state.messages, keyMap, allowedKeys);
-        const nextWaiting = remapGroupScopedRecord(state.waiting, keyMap, allowedKeys);
-        const nextHasMore = remapGroupScopedRecord(state.hasMore, keyMap, allowedKeys);
-        const nextStreaming = remapGroupScopedRecord(state.streaming, keyMap, allowedKeys);
-        const nextPendingThinking = remapGroupScopedRecord(state.pendingThinking, keyMap, allowedKeys);
-        const nextClearing = remapGroupScopedRecord(state.clearing, keyMap, allowedKeys);
-        const nextAgents = remapGroupScopedRecord(state.agents, keyMap, allowedKeys);
-        const nextActiveAgentTab = remapGroupScopedRecord(state.activeAgentTab, keyMap, allowedKeys);
-        const nextHighlight = remapGroupScopedRecord(state.highlightMessageId, keyMap, allowedKeys);
-        const nextRunnerState = remapGroupScopedRecord(state.runnerState, keyMap, allowedKeys);
-        const nextActiveTurn = remapGroupScopedRecord(state.activeTurn, keyMap, allowedKeys);
-        const nextPendingBuffer = remapGroupScopedRecord(state.pendingBuffer, keyMap, allowedKeys);
-        const nextTurns = remapGroupScopedRecord(state.turns, keyMap, allowedKeys);
-        const nextSdkTasks = Object.fromEntries(
-          Object.entries(state.sdkTasks)
-            .map(([taskId, task]) => [
-              taskId,
-              { ...task, chatJid: keyMap[task.chatJid] || task.chatJid },
-            ] as const)
-            .filter(([, task]) => allowedKeys.has(task.chatJid)),
+        const pageIds = Object.keys(pageGroups);
+        const existingOrder = current.groupOrder.map(
+          (sessionId) => keyMap[sessionId] || sessionId,
         );
-
-        const currentStillExists =
-          selectedCurrent && !!nextGroups[selectedCurrent];
-        if (!currentStillExists) {
-          selectedCurrent = null;
-        }
-
-        let nextCurrentFinal = selectedCurrent;
-        if (!nextCurrentFinal) {
-          const homeEntry = Object.entries(nextGroups).find(
-            ([, group]) => group.kind === 'main',
+        let nextOrder = reset
+          ? pageIds
+          : Array.from(new Set([...existingOrder, ...pageIds]));
+        let nextCurrent = current.currentGroup
+          ? keyMap[current.currentGroup] || current.currentGroup
+          : null;
+        if (nextCurrent && !nextGroups[nextCurrent]) nextCurrent = null;
+        if (!nextCurrent) {
+          const mainEntry = pageIds.find(
+            (sessionId) => nextGroups[sessionId]?.kind === 'main',
           );
-          if (homeEntry) {
-            nextCurrentFinal = homeEntry[0];
-          } else {
-            nextCurrentFinal = Object.keys(nextGroups)[0] || null;
-          }
+          nextCurrent = mainEntry || nextOrder[0] || null;
         }
+        if (
+          !query &&
+          nextCurrent &&
+          nextGroups[nextCurrent] &&
+          !nextOrder.includes(nextCurrent)
+        ) {
+          nextOrder = [nextCurrent, ...nextOrder];
+        }
+
+        const nextSdkTasks = Object.fromEntries(
+          Object.entries(current.sdkTasks).map(([taskId, task]) => [
+            taskId,
+            { ...task, chatJid: keyMap[task.chatJid] || task.chatJid },
+          ]),
+        );
 
         return {
           groups: nextGroups,
-          currentGroup: nextCurrentFinal,
-          messages: nextMessages,
-          waiting: nextWaiting,
-          hasMore: nextHasMore,
-          streaming: nextStreaming,
-          pendingThinking: nextPendingThinking,
-          clearing: nextClearing,
-          agents: nextAgents,
-          activeAgentTab: nextActiveAgentTab,
-          highlightMessageId: nextHighlight,
-          runnerState: nextRunnerState,
-          activeTurn: nextActiveTurn,
-          pendingBuffer: nextPendingBuffer,
-          turns: nextTurns,
+          groupOrder: nextOrder,
+          groupQuery: data.query,
+          groupPage: data.pagination.page,
+          groupTotal: data.pagination.total,
+          groupsHasMore: data.pagination.has_next,
+          groupsLoading: false,
+          groupsLoadingMore: false,
+          groupsError: null,
+          currentGroup: nextCurrent,
+          messages: remapGroupScopedRecord(current.messages, keyMap),
+          waiting: remapGroupScopedRecord(current.waiting, keyMap),
+          hasMore: remapGroupScopedRecord(current.hasMore, keyMap),
+          streaming: remapGroupScopedRecord(current.streaming, keyMap),
+          pendingThinking: remapGroupScopedRecord(
+            current.pendingThinking,
+            keyMap,
+          ),
+          clearing: remapGroupScopedRecord(current.clearing, keyMap),
+          agents: remapGroupScopedRecord(current.agents, keyMap),
+          activeAgentTab: remapGroupScopedRecord(
+            current.activeAgentTab,
+            keyMap,
+          ),
+          highlightMessageId: remapGroupScopedRecord(
+            current.highlightMessageId,
+            keyMap,
+          ),
+          runnerState: remapGroupScopedRecord(current.runnerState, keyMap),
+          activeTurn: remapGroupScopedRecord(current.activeTurn, keyMap),
+          pendingBuffer: remapGroupScopedRecord(current.pendingBuffer, keyMap),
+          turns: remapGroupScopedRecord(current.turns, keyMap),
           sdkTasks: nextSdkTasks,
           loading: false,
           error: null,
         };
       });
-    } catch (err) {
-      set({ loading: false, error: err instanceof Error ? err.message : String(err) });
+    } catch (error) {
+      if (requestId !== groupLoadRequestSequence) return;
+      set({
+        loading: false,
+        groupsLoading: false,
+        groupsLoadingMore: false,
+        groupsError: getErrorMessage(error),
+        error: getErrorMessage(error),
+      });
+    }
+  },
+
+  loadMoreGroups: async () => {
+    await get().loadGroups({ reset: false });
+  },
+
+  ensureGroupLoaded: async (identifier: string) => {
+    const normalized = identifier.trim();
+    if (!normalized) return null;
+    const existing = Object.entries(get().groups).find(
+      ([sessionId, session]) =>
+        sessionId === normalized ||
+        session.id === normalized ||
+        session.folder === normalized ||
+        session.backing_jid === normalized,
+    );
+    if (existing) return existing[0];
+
+    const sessionId = normalized.includes(':')
+      ? normalized
+      : `main:${normalized}`;
+    try {
+      const data = await api.get<{ session: SessionInfo }>(
+        `/api/sessions/${encodeURIComponent(sessionId)}`,
+      );
+      if (data.session.kind !== 'main' && data.session.kind !== 'workspace') {
+        return null;
+      }
+      const stableId = data.session.id || sessionId;
+      set((current) => ({
+        groups: {
+          ...current.groups,
+          [stableId]: { ...data.session, id: stableId },
+        },
+        groupOrder:
+          !current.groupQuery && !current.groupOrder.includes(stableId)
+            ? [stableId, ...current.groupOrder]
+            : current.groupOrder,
+      }));
+      return stableId;
+    } catch (error) {
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'status' in error &&
+        error.status === 404
+      ) {
+        return null;
+      }
+      set({ groupsError: getErrorMessage(error) });
+      throw error;
     }
   },
 
   selectGroup: (jid: string) => {
-    set({ currentGroup: jid });
+    set((state) => ({
+      currentGroup: jid,
+      groupOrder:
+        !state.groupQuery &&
+        state.groups[jid] &&
+        !state.groupOrder.includes(jid)
+          ? [jid, ...state.groupOrder]
+          : state.groupOrder,
+    }));
     const state = get();
     if (!state.messages[jid]) {
       get().loadMessages(jid);
@@ -998,6 +1174,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
 
         return {
+          groups: latest
+            ? withLatestGroupPreview(s.groups, jid, latest)
+            : s.groups,
           messages: {
             ...s.messages,
             [jid]: merged,
@@ -1064,6 +1243,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
 
           return {
+            groups: withLatestGroupPreview(
+              s.groups,
+              jid,
+              merged[merged.length - 1],
+            ),
             messages: { ...s.messages, [jid]: merged },
             waiting: (agentReplied || hasSystemError)
               ? { ...s.waiting, [jid]: false }
@@ -1124,6 +1308,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             latest.is_from_me === false &&
             !isTerminalSystemMessage(latest);
           return {
+            groups: withLatestGroupPreview(s.groups, jid, msg),
             messages: {
               ...s.messages,
               [jid]: merged,
@@ -1302,16 +1487,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }>('/api/sessions', body, needsLongTimeout ? 120_000 : undefined);
       if (!data.success) return null;
       const createdSession = data.session;
-      await get().loadGroups();
-      const createdEntry = Object.entries(get().groups).find(
-        ([, group]) =>
-          group.folder === createdSession.folder ||
-          group.backing_jid === createdSession.id ||
-          group.id === createdSession.id,
-      );
+      const stableId = createdSession.id || `main:${createdSession.folder}`;
+      set((state) => ({
+        groups: {
+          ...state.groups,
+          [stableId]: { ...createdSession, id: stableId },
+        },
+        groupOrder: [
+          stableId,
+          ...state.groupOrder.filter((sessionId) => sessionId !== stableId),
+        ],
+        groupTotal: state.groupTotal + (state.groups[stableId] ? 0 : 1),
+      }));
       return {
-        jid: createdEntry?.[0] || createdSession.id || createdSession.folder,
-        folder: createdEntry?.[1].folder || createdSession.folder,
+        jid: stableId,
+        folder: createdSession.folder,
       };
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
@@ -1337,6 +1527,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           error: null,
         };
       });
+      await get().loadGroups({ reset: true });
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -1368,6 +1559,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           },
         };
       });
+      await get().loadGroups({ reset: true });
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -1394,15 +1586,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
         delete nextStreaming[jid];
         delete nextPendingThinking[jid];
 
+        const nextOrder = s.groupOrder.filter((sessionId) => sessionId !== jid);
         let nextCurrent = s.currentGroup === jid ? null : s.currentGroup;
         // Auto-select first remaining group after deletion
         if (nextCurrent === null) {
-          const remainingJids = Object.keys(nextGroups);
-          nextCurrent = remainingJids.length > 0 ? remainingJids[0] : null;
+          nextCurrent =
+            nextOrder[0] ||
+            Object.entries(nextGroups).find(
+              ([, session]) => session.kind === 'main',
+            )?.[0] ||
+            null;
         }
 
         return {
           groups: nextGroups,
+          groupOrder: nextOrder,
+          groupTotal: Math.max(0, s.groupTotal - 1),
+          groupsHasMore: nextOrder.length < Math.max(0, s.groupTotal - 1),
           messages: nextMessages,
           waiting: nextWaiting,
           hasMore: nextHasMore,
@@ -1880,6 +2080,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         delete nextRunnerState[chatJid];
 
         return {
+          groups: withLatestGroupPreview(s.groups, chatJid, msg),
           messages: { ...s.messages, [chatJid]: updated },
           waiting: { ...s.waiting, [chatJid]: false },
           streaming: nextStreaming,
@@ -1892,6 +2093,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 普通消息（如 IM 用户发送的消息）：添加到列表并标记等待
       const shouldWait = msg.sender !== '__system__' && !isTerminalSystemMessage(msg);
       return {
+        groups: withLatestGroupPreview(s.groups, chatJid, msg),
         messages: { ...s.messages, [chatJid]: updated },
         ...(shouldWait ? { waiting: { ...s.waiting, [chatJid]: true } } : {}),
       };

@@ -26,6 +26,28 @@ export interface SessionInfo {
   degradation_reasons?: string[];
 }
 
+export interface SessionListPagination {
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+  has_next: boolean;
+  has_previous: boolean;
+}
+
+export interface SessionListResponse {
+  sessions: Record<string, SessionInfo>;
+  pagination: SessionListPagination;
+  query: string;
+}
+
+export interface SessionOption {
+  id: string;
+  name: string;
+  folder: string;
+  kind: 'main' | 'workspace';
+}
+
 export interface AgentInfo {
   id: string;
   session_id?: string;

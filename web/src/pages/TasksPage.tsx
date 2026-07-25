@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useTasksStore } from '../stores/tasks';
-import { useChatStore } from '../stores/chat';
+import { useSessionOptionsStore } from '../stores/session-options';
 import { useAuthStore } from '../stores/auth';
 import { TaskCard } from '../components/tasks/TaskCard';
 import { CreateTaskForm } from '../components/tasks/CreateTaskForm';
@@ -12,15 +12,15 @@ import { Button } from '@/components/ui/button';
 
 export function TasksPage() {
   const { tasks, loading, error, loadTasks, createTask, updateTaskStatus, deleteTask } = useTasksStore();
-  const { groups, loadGroups } = useChatStore();
+  const { options: sessionOptions, loadOptions } = useSessionOptionsStore();
   const { user } = useAuthStore();
   const [showCreateForm, setShowCreateForm] = useState(false);
   const isAdmin = user?.role === 'admin';
 
   useEffect(() => {
     loadTasks();
-    loadGroups();
-  }, [loadTasks, loadGroups]);
+    loadOptions(true);
+  }, [loadTasks, loadOptions]);
 
   const handleCreateTask = async (data: {
     sessionId: string;
@@ -62,19 +62,6 @@ export function TasksPage() {
       await deleteTask(id);
     }
   };
-
-  const sessionOptions = Object.values(groups)
-    .filter(
-      (group) =>
-        !!group.id &&
-        group.kind !== 'worker' &&
-        group.kind !== 'memory',
-    )
-    .map((group) => ({
-      id: group.id!,
-      name: group.name,
-      folder: group.folder,
-    }));
 
   const activeTasks = tasks.filter((t) => t.status === 'active');
   const pausedTasks = tasks.filter((t) => t.status === 'paused');

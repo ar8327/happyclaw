@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useNavigate } from 'react-router-dom';
-import { Plus, PanelLeftClose } from 'lucide-react';
+import { Loader2, Plus, PanelLeftClose, RefreshCw } from 'lucide-react';
 import { useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { Button } from '@/components/ui/button';
@@ -60,10 +60,16 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
 
   const {
     groups: sessions,
+    groupOrder,
+    groupTotal,
+    groupsHasMore,
+    groupsLoading,
+    groupsLoadingMore,
+    groupsError,
     currentGroup: currentSession,
     selectGroup: selectSession,
     loadGroups: loadSessions,
-    loading,
+    loadMoreGroups,
     deleteFlow,
     clearHistory,
     togglePin,
@@ -72,7 +78,7 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    loadSessions();
+    loadSessions({ query: '', reset: true });
   }, [loadSessions]);
 
   // Keep the main session pinned above other sessions, then sort the rest by activity.
@@ -80,9 +86,11 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
     let main: (typeof sessions)[string] & { jid: string } | null = null;
     const others: ((typeof sessions)[string] & { jid: string })[] = [];
 
-    for (const [jid, info] of Object.entries(sessions)) {
+    for (const jid of groupOrder) {
+      const info = sessions[jid];
+      if (!info) continue;
       const entry = { jid, ...info };
-      if (info.kind === 'main') {
+      if (info.kind === 'main' && !main) {
         main = entry;
       } else {
         others.push(entry);
@@ -96,19 +104,13 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
     });
 
     return { mainSession: main, otherSessions: others };
-  }, [sessions]);
+  }, [groupOrder, sessions]);
 
   const { pinnedSessions, workspaceSections } = useMemo(() => {
-    const filtered = searchQuery.trim()
-      ? otherSessions.filter((entry) =>
-          entry.name.toLowerCase().includes(searchQuery.toLowerCase()),
-        )
-      : otherSessions;
-
     const pinned: typeof otherSessions = [];
     const workspaces: typeof otherSessions = [];
 
-    filtered.forEach((g) => {
+    otherSessions.forEach((g) => {
       if (g.pinned_at) {
         pinned.push(g);
       } else {
@@ -120,7 +122,7 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
     pinned.sort((a, b) => (a.pinned_at || '').localeCompare(b.pinned_at || ''));
 
     return { pinnedSessions: pinned, workspaceSections: groupByDate(workspaces) };
-  }, [otherSessions, searchQuery]);
+  }, [otherSessions]);
 
   const handleSessionSelect = (jid: string, sessionSlug: string) => {
     selectSession(jid);
@@ -131,8 +133,15 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
   const appName = appearance?.appName || 'AgentDock';
 
   const handleCreated = (jid: string, sessionSlug: string) => {
+    setSearchQuery('');
+    loadSessions({ query: '', reset: true });
     selectSession(jid);
     navigate(`/chat/${sessionSlug}`);
+  };
+
+  const handleSearch = (value: string) => {
+    setSearchQuery(value);
+    loadSessions({ query: value, reset: true });
   };
 
   const handleDeleteConfirm = async () => {
@@ -246,7 +255,7 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
         </div>
         <SearchInput
           value={searchQuery}
-          onChange={setSearchQuery}
+          onChange={handleSearch}
           placeholder="搜索会话..."
           debounce={200}
           className="max-lg:bg-background/60 max-lg:backdrop-blur-lg max-lg:border-border/30 max-lg:rounded-lg"
@@ -255,7 +264,7 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
 
       {/* Groups List */}
       <div ref={listRef} className="flex-1 overflow-y-auto px-2">
-        {loading && allSessions.length === 0 ? (
+        {groupsLoading && allSessions.length === 0 ? (
           <SkeletonCardList count={6} compact />
         ) : listItems.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-32 px-4">
@@ -325,6 +334,42 @@ export function ChatSidebar({ className, onToggleCollapse }: ChatSidebarProps) {
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {groupsError && (
+          <div className="mx-2 my-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-center">
+            <p className="mb-2 text-xs text-destructive">
+              会话加载失败：{groupsError}
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => loadSessions({ query: searchQuery, reset: true })}
+            >
+              <RefreshCw className="size-4" />
+              重试
+            </Button>
+          </div>
+        )}
+
+        {!groupsError && groupsHasMore && (
+          <div className="px-2 py-3 text-center">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full"
+              disabled={groupsLoadingMore}
+              onClick={loadMoreGroups}
+            >
+              {groupsLoadingMore && <Loader2 className="size-4 animate-spin" />}
+              {groupsLoadingMore ? '加载中…' : '加载更多'}
+            </Button>
+            {groupTotal > 0 && (
+              <p className="mt-1 text-[10px] text-muted-foreground">
+                已加载 {Math.min(groupOrder.length, groupTotal)} / {groupTotal}
+              </p>
+            )}
           </div>
         )}
       </div>

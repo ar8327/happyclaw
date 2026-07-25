@@ -1626,6 +1626,34 @@ export function getAllChats(): ChatInfo[] {
     .all() as ChatInfo[];
 }
 
+/**
+ * Fetch metadata only for the requested chats.
+ *
+ * The session list uses this after pagination so opening the sidebar does not
+ * materialize the complete chats table.
+ */
+export function getChatsByJids(chatJids: string[]): ChatInfo[] {
+  const uniqueJids = Array.from(new Set(chatJids));
+  if (uniqueJids.length === 0) return [];
+
+  const results: ChatInfo[] = [];
+  const batchSize = 400;
+  for (let offset = 0; offset < uniqueJids.length; offset += batchSize) {
+    const batch = uniqueJids.slice(offset, offset + batchSize);
+    const placeholders = batch.map(() => '?').join(',');
+    results.push(
+      ...(db
+        .prepare(
+          `SELECT jid, name, last_message_time
+           FROM chats
+           WHERE jid IN (${placeholders})`,
+        )
+        .all(...batch) as ChatInfo[]),
+    );
+  }
+  return results;
+}
+
 export interface LatestChatMessage {
   chat_jid: string;
   content: string;
@@ -3914,6 +3942,52 @@ export function listSessionRecords(): SessionRecord[] {
     )
     .all() as Array<Record<string, unknown>>;
   return rows.map(parseSessionRecord);
+}
+
+export interface SessionActivity {
+  session_id: string;
+  last_message_at: string;
+}
+
+/**
+ * Resolve the latest chat activity for the requested sessions.
+ *
+ * An explicit binding replaces the compatibility channel's default session,
+ * so a channel contributes activity to exactly one session.
+ */
+export function getSessionActivityForSessions(
+  sessionIds: string[],
+): SessionActivity[] {
+  const uniqueIds = Array.from(new Set(sessionIds));
+  if (uniqueIds.length === 0) return [];
+
+  const results: SessionActivity[] = [];
+  const batchSize = 400;
+  for (let offset = 0; offset < uniqueIds.length; offset += batchSize) {
+    const batch = uniqueIds.slice(offset, offset + batchSize);
+    const placeholders = batch.map(() => '?').join(',');
+    results.push(
+      ...(db
+        .prepare(
+          `WITH effective_channels AS (
+             SELECT
+               sc.jid,
+               COALESCE(sb.session_id, sc.session_id) AS effective_session_id
+             FROM session_channels sc
+             LEFT JOIN session_bindings sb ON sb.channel_jid = sc.jid
+             WHERE COALESCE(sb.session_id, sc.session_id) IN (${placeholders})
+           )
+           SELECT
+             ec.effective_session_id AS session_id,
+             MAX(c.last_message_time) AS last_message_at
+           FROM effective_channels ec
+           JOIN chats c ON c.jid = ec.jid
+           GROUP BY ec.effective_session_id`,
+        )
+        .all(...batch) as SessionActivity[]),
+    );
+  }
+  return results;
 }
 
 export function listRunnerProfiles(

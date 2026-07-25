@@ -28,8 +28,8 @@ import {
   deleteSessionBinding,
   deleteSession,
   ensureChatExists,
-  getAllChats,
   getAllRegisteredGroups,
+  getChatsByJids,
   getContextSummary,
   getJidsByFolder,
   getLatestMessagesForChats,
@@ -42,6 +42,7 @@ import {
   getRegisteredGroup,
   getRunnerProfile,
   getSessionBinding,
+  getSessionActivityForSessions,
   getSessionRecord,
   getSessionRuntimeState,
   getTurnByResultMessageId,
@@ -82,6 +83,7 @@ import {
 import { validateRunnerProfileConfig } from '../runner-profile-schema.js';
 import { initializeWorkspaceFromLocalDirectory } from '../workspace-init.js';
 import { getInheritedWorkspaceRuntimeConfig } from '../session-defaults.js';
+import { paginateTopLevelSessions } from '../session-pagination.js';
 import {
   buildWorkerConversationJid,
   buildWorkerSessionId,
@@ -98,6 +100,20 @@ import type {
 
 const sessionRoutes = new Hono<{ Variables: Variables }>();
 const execFileAsync = promisify(execFile);
+const DEFAULT_SESSION_PAGE_SIZE = 30;
+const MAX_SESSION_PAGE_SIZE = 100;
+const MAX_SESSION_SEARCH_LENGTH = 200;
+
+function parseBoundedInteger(
+  value: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const parsed = Number.parseInt(value || '', 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
 
 function canManageRunnerProfiles(user: AuthUser): boolean {
   return user.role === 'admin';
@@ -634,6 +650,40 @@ function syncExplicitSessionBinding(
     created_at: current?.created_at || imGroup.added_at || now,
     updated_at: now,
   });
+}
+
+function loadSessionPayloadContext(
+  sessions: SessionRecord[],
+  bindings: SessionBindingRecord[],
+  readContext?: SessionReadContext,
+): {
+  latestMessages: Map<string, { content: string; timestamp: string }>;
+  chatsByJid: Map<
+    string,
+    { jid: string; name?: string | null; last_message_time?: string | null }
+  >;
+} {
+  const relevantJids = Array.from(
+    new Set(
+      sessions.flatMap((session) =>
+        getRelevantChatJids(session, bindings, readContext),
+      ),
+    ),
+  );
+  return {
+    latestMessages: new Map(
+      getLatestMessagesForChats(relevantJids).map((message) => [
+        message.chat_jid,
+        {
+          content: message.content.slice(0, 500),
+          timestamp: message.timestamp,
+        },
+      ]),
+    ),
+    chatsByJid: new Map(
+      getChatsByJids(relevantJids).map((chat) => [chat.jid, chat]),
+    ),
+  };
 }
 
 function buildSessionPayload(
@@ -1366,18 +1416,64 @@ sessionRoutes.post('/', authMiddleware, async (c) => {
   updateChatName(backingJid, name);
   deps.getRegisteredGroups()[backingJid] = backingGroup;
 
+  const bindings = listSessionBindings();
+  const readContext = buildSessionReadContext(bindings);
+  const { latestMessages, chatsByJid } = loadSessionPayloadContext(
+    [createdSession],
+    bindings,
+    readContext,
+  );
   const payload = buildSessionPayload(
     user,
     createdSession,
-    listSessionBindings(),
-    new Map(),
-    new Map(getAllChats().map((chat) => [chat.jid, chat])),
+    bindings,
+    latestMessages,
+    chatsByJid,
+    readContext,
   );
 
   return c.json({
     success: true,
     session: payload,
   });
+});
+
+sessionRoutes.get('/options', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const query = (c.req.query('q') || '')
+    .trim()
+    .slice(0, MAX_SESSION_SEARCH_LENGTH);
+  const normalizedQuery = query.toLocaleLowerCase();
+  const bindings = listSessionBindings();
+  const readContext = buildSessionReadContext(bindings);
+  const sessions = listSessionRecords()
+    .filter(
+      (session) =>
+        (session.kind === 'main' || session.kind === 'workspace') &&
+        canAccessSession(user, session, readContext),
+    )
+    .filter(
+      (session) =>
+        !normalizedQuery ||
+        [session.name, session.id, session.cwd].some((value) =>
+          value.toLocaleLowerCase().includes(normalizedQuery),
+        ),
+    )
+    .sort((left, right) => {
+      const leftMain = left.kind === 'main' ? 0 : 1;
+      const rightMain = right.kind === 'main' ? 0 : 1;
+      if (leftMain !== rightMain) return leftMain - rightMain;
+      const nameOrder = left.name.localeCompare(right.name);
+      return nameOrder || left.id.localeCompare(right.id);
+    })
+    .map((session) => ({
+      id: session.id,
+      name: session.name,
+      folder: getFolderForSession(session),
+      kind: session.kind as 'main' | 'workspace',
+    }));
+
+  return c.json({ sessions, query });
 });
 
 sessionRoutes.get('/', authMiddleware, (c) => {
@@ -1396,29 +1492,79 @@ sessionRoutes.get('/', authMiddleware, (c) => {
   );
   const bindings = listSessionBindings();
   const readContext = buildSessionReadContext(bindings);
-  const sessions = listSessionRecords().filter(
+  const requestedPage = parseBoundedInteger(
+    c.req.query('page'),
+    1,
+    1,
+    1_000_000,
+  );
+  const pageSize = parseBoundedInteger(
+    c.req.query('page_size'),
+    DEFAULT_SESSION_PAGE_SIZE,
+    1,
+    MAX_SESSION_PAGE_SIZE,
+  );
+  const query = (c.req.query('q') || '')
+    .trim()
+    .slice(0, MAX_SESSION_SEARCH_LENGTH);
+  const topLevelOnly =
+    requestedKinds.size === 0 ||
+    Array.from(requestedKinds).every(
+      (kind) => kind === 'main' || kind === 'workspace',
+    );
+
+  const authorizedSessions = listSessionRecords().filter(
     (session) =>
-      (requestedKinds.size === 0 || requestedKinds.has(session.kind)) &&
+      (requestedKinds.size === 0
+        ? topLevelOnly
+          ? session.kind === 'main' || session.kind === 'workspace'
+          : true
+        : requestedKinds.has(session.kind)) &&
       canAccessSession(user, session, readContext),
   );
-  const chatsByJid = new Map(getAllChats().map((chat) => [chat.jid, chat]));
 
-  const allRelevantJids = Array.from(
-    new Set(
-      sessions.flatMap((session) =>
-        getRelevantChatJids(session, bindings, readContext),
-      ),
-    ),
+  if (!topLevelOnly) {
+    const { latestMessages, chatsByJid } = loadSessionPayloadContext(
+      authorizedSessions,
+      bindings,
+      readContext,
+    );
+    const payload: Record<string, Record<string, unknown>> = {};
+    for (const session of authorizedSessions) {
+      payload[session.id] = buildSessionPayload(
+        user,
+        session,
+        bindings,
+        latestMessages,
+        chatsByJid,
+        readContext,
+      );
+    }
+    return c.json({ sessions: payload });
+  }
+
+  const activityBySessionId = new Map(
+    getSessionActivityForSessions(
+      authorizedSessions.map((session) => session.id),
+    ).map((activity) => [activity.session_id, activity.last_message_at]),
   );
-  const latestMessages = new Map(
-    getLatestMessagesForChats(allRelevantJids).map((message) => [
-      message.chat_jid,
-      { content: message.content, timestamp: message.timestamp },
-    ]),
+  const page = paginateTopLevelSessions(
+    authorizedSessions,
+    activityBySessionId,
+    {
+      page: requestedPage,
+      pageSize,
+      query,
+    },
+  );
+  const { latestMessages, chatsByJid } = loadSessionPayloadContext(
+    page.sessions,
+    bindings,
+    readContext,
   );
 
   const payload: Record<string, Record<string, unknown>> = {};
-  for (const session of sessions) {
+  for (const session of page.sessions) {
     payload[session.id] = buildSessionPayload(
       user,
       session,
@@ -1431,6 +1577,15 @@ sessionRoutes.get('/', authMiddleware, (c) => {
 
   return c.json({
     sessions: payload,
+    pagination: {
+      page: page.page,
+      page_size: page.pageSize,
+      total: page.total,
+      total_pages: page.totalPages,
+      has_next: page.page * page.pageSize < page.total,
+      has_previous: page.page > 1,
+    },
+    query: page.query,
   });
 });
 
@@ -1441,27 +1596,12 @@ sessionRoutes.get('/:id', authMiddleware, (c) => {
   if (!session) return c.json({ error: 'Session not found' }, 404);
 
   const bindings = listSessionBindings();
-  const chatsByJid = new Map(getAllChats().map((chat) => [chat.jid, chat]));
-  const relevantJids = getRelevantChatJids(session, bindings);
-  const latestMessages = new Map<
-    string,
-    { content: string; timestamp: string }
-  >();
-  if (relevantJids.length > 0) {
-    const rows = getMessagesPageMulti(
-      relevantJids,
-      undefined,
-      Math.max(relevantJids.length * 3, 30),
-    );
-    for (const row of rows) {
-      if (!latestMessages.has(row.chat_jid)) {
-        latestMessages.set(row.chat_jid, {
-          content: row.content,
-          timestamp: row.timestamp,
-        });
-      }
-    }
-  }
+  const readContext = buildSessionReadContext(bindings);
+  const { latestMessages, chatsByJid } = loadSessionPayloadContext(
+    [session],
+    bindings,
+    readContext,
+  );
 
   return c.json({
     session: buildSessionPayload(
@@ -1470,6 +1610,7 @@ sessionRoutes.get('/:id', authMiddleware, (c) => {
       bindings,
       latestMessages,
       chatsByJid,
+      readContext,
     ),
   });
 });
@@ -1726,27 +1867,12 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
   const session = getSessionById(id);
   if (!session) return c.json({ error: 'Session not found after update' }, 500);
   const bindings = listSessionBindings();
-  const chatsByJid = new Map(getAllChats().map((chat) => [chat.jid, chat]));
-  const relevantJids = getRelevantChatJids(session, bindings);
-  const latestMessages = new Map<
-    string,
-    { content: string; timestamp: string }
-  >();
-  if (relevantJids.length > 0) {
-    const rows = getMessagesPageMulti(
-      relevantJids,
-      undefined,
-      Math.max(relevantJids.length * 3, 30),
-    );
-    for (const row of rows) {
-      if (!latestMessages.has(row.chat_jid)) {
-        latestMessages.set(row.chat_jid, {
-          content: row.content,
-          timestamp: row.timestamp,
-        });
-      }
-    }
-  }
+  const readContext = buildSessionReadContext(bindings);
+  const { latestMessages, chatsByJid } = loadSessionPayloadContext(
+    [session],
+    bindings,
+    readContext,
+  );
 
   return c.json({
     success: true,
@@ -1756,6 +1882,7 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
       bindings,
       latestMessages,
       chatsByJid,
+      readContext,
     ),
   });
 });
