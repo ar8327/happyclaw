@@ -1290,6 +1290,10 @@ function ensureMemorySessionProjection(
       primarySession?.runner_id === runnerId
         ? (primarySession?.thinking_effort ?? null)
         : null,
+    model_backend_variant:
+      primarySession?.runner_id === runnerId
+        ? (primarySession?.model_backend_variant ?? null)
+        : null,
     context_compression: 'off',
     is_pinned: false,
     archived: false,

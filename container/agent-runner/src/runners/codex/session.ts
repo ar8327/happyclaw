@@ -13,7 +13,9 @@ import { createInterface, type Interface as ReadlineInterface } from 'readline';
 
 export interface CodexSessionConfig {
   model?: string;
+  modelProvider?: string;
   thinkingEffort?: string;
+  modelBackendVariant?: string;
   workingDirectory: string;
   additionalDirectories?: string[];
   /** Path to MCP server entry point for HappyClaw tools. */
@@ -503,6 +505,9 @@ export class CodexSession {
         type: this.config.readOnly ? 'readOnly' : 'dangerFullAccess',
       },
       model: this.config.model,
+      ...(this.config.modelProvider
+        ? { modelProvider: this.config.modelProvider }
+        : {}),
       ...(this.config.thinkingEffort
         ? { effort: this.config.thinkingEffort }
         : {}),
@@ -723,6 +728,9 @@ export class CodexSession {
 
     return {
       model: this.config.model,
+      ...(this.config.modelProvider
+        ? { modelProvider: this.config.modelProvider }
+        : {}),
       cwd: this.config.workingDirectory,
       approvalPolicy: 'never',
       sandbox: this.config.readOnly ? 'read-only' : 'danger-full-access',
@@ -741,6 +749,9 @@ export class CodexSession {
           : {}),
         ...(this.config.thinkingEffort
           ? { model_reasoning_effort: this.config.thinkingEffort }
+          : {}),
+        ...(this.config.modelBackendVariant
+          ? { model_backend_variant: this.config.modelBackendVariant }
           : {}),
         ...(this.config.includeWebSearchMode === false
           ? {}

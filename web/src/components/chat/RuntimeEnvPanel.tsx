@@ -12,6 +12,10 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import type { SessionInfo } from '../../types';
+import {
+  isThinkingEffortSupported,
+  thinkingEffortOptionsFromSchema,
+} from '@/lib/thinkingEffortOptions';
 
 interface RuntimeEnvPanelProps {
   sessionId: string;
@@ -32,6 +36,7 @@ type RuntimeEnvSession = {
   runner_profile_id?: string | null;
   model?: string | null;
   thinking_effort?: SessionInfo['thinking_effort'] | null;
+  model_backend_variant?: SessionInfo['model_backend_variant'] | null;
   cwd?: string | null;
 };
 
@@ -67,7 +72,17 @@ interface RunnerOption {
   id: string;
   label: string;
   default_model?: string;
-  models?: Array<{ id: string; label?: string }>;
+  profile_schema?: Record<string, unknown> | null;
+  models?: Array<{
+    id: string;
+    label?: string;
+    supportedThinkingEfforts?: string[];
+    backendVariants?: Array<{
+      id: string;
+      label?: string;
+      contextWindow?: number;
+    }>;
+  }>;
   can_serve_memory: boolean;
   compatibility: RunnerCompatibility;
   capabilities: RunnerCapabilities;
@@ -128,13 +143,6 @@ const DEFAULT_MODEL_OPTIONS = [
   { value: '__default__', label: '默认' },
 ];
 
-const THINKING_EFFORT_OPTIONS = [
-  { value: '__default__', label: '默认' },
-  { value: 'low', label: '低' },
-  { value: 'medium', label: '中' },
-  { value: 'high', label: '高' },
-];
-
 export function RuntimeEnvPanel({
   sessionId,
   session: sessionProp,
@@ -156,6 +164,9 @@ export function RuntimeEnvPanel({
 
   const [model, setModel] = useState(session?.model || '__default__');
   const [thinkingEffort, setThinkingEffort] = useState(session?.thinking_effort || '__default__');
+  const [modelBackendVariant, setModelBackendVariant] = useState(
+    session?.model_backend_variant || '__default__',
+  );
   const [runnerProfileId, setRunnerProfileId] = useState(session?.runner_profile_id || '__default__');
   const [runnerProfiles, setRunnerProfiles] = useState<RunnerProfileOption[]>([]);
   const [cwd, setCwd] = useState(session?.cwd || '');
@@ -176,11 +187,13 @@ export function RuntimeEnvPanel({
   useEffect(() => {
     setModel(session?.model || '__default__');
     setThinkingEffort(session?.thinking_effort || '__default__');
+    setModelBackendVariant(session?.model_backend_variant || '__default__');
     setRunnerProfileId(session?.runner_profile_id || '__default__');
     setCwd(session?.cwd || '');
   }, [
     session?.cwd,
     session?.model,
+    session?.model_backend_variant,
     session?.runner_id,
     session?.runner_profile_id,
     session?.thinking_effort,
@@ -266,23 +279,53 @@ export function RuntimeEnvPanel({
     if (!window.confirm(
       '切换 Runner 将开始新对话，当前上下文不会继承。\n确定要切换吗？',
     )) return;
-    await patchSession({ runner_id: value, model: null, thinking_effort: null });
+    setModelBackendVariant('__default__');
+    await patchSession({
+      runner_id: value,
+      model: null,
+      thinking_effort: null,
+      model_backend_variant: null,
+    });
   }, [currentRunnerId, patchSession]);
 
   const handleModelChange = useCallback(async (value: string) => {
+    const nextModelId =
+      value !== '__default__' ? value : selectedRunner?.default_model || '';
+    const nextModel = selectedRunner?.models?.find(
+      (item) => item.id === nextModelId,
+    );
+    const resetThinkingEffort = !isThinkingEffortSupported(
+      thinkingEffort,
+      nextModel?.supportedThinkingEfforts,
+    );
     setModel(value);
-    await patchSession({ model: value === '__default__' ? null : value });
-  }, [patchSession]);
+    setModelBackendVariant('__default__');
+    if (resetThinkingEffort) setThinkingEffort('__default__');
+    await patchSession({
+      model: value === '__default__' ? null : value,
+      model_backend_variant: null,
+      ...(resetThinkingEffort ? { thinking_effort: null } : {}),
+    });
+  }, [patchSession, selectedRunner, thinkingEffort]);
 
   const handleThinkingEffortChange = useCallback(async (value: string) => {
     setThinkingEffort(value);
     await patchSession({ thinking_effort: value === '__default__' ? null : value });
   }, [patchSession]);
 
+  const handleModelBackendVariantChange = useCallback(async (value: string) => {
+    setModelBackendVariant(value);
+    await patchSession({
+      model_backend_variant: value === '__default__' ? null : value,
+    });
+  }, [patchSession]);
+
   const handleRunnerProfileChange = useCallback(async (value: string) => {
     setRunnerProfileId(value);
+    setModelBackendVariant('__default__');
     await patchSession({
       runner_profile_id: value === '__default__' ? null : value,
+      model_backend_variant: null,
     });
   }, [patchSession]);
 
@@ -310,6 +353,29 @@ export function RuntimeEnvPanel({
           },
         ]
       : DEFAULT_MODEL_OPTIONS;
+  const selectedModelId =
+    model !== '__default__' ? model : selectedRunner?.default_model || '';
+  const selectedModel = selectedRunner?.models?.find(
+    (item) => item.id === selectedModelId,
+  );
+  const thinkingEffortOptions = thinkingEffortOptionsFromSchema(
+    selectedRunner?.profile_schema,
+    thinkingEffort,
+    selectedModel?.supportedThinkingEfforts,
+  );
+  const modelBackendVariantOptions = selectedModel?.backendVariants?.length
+    ? [
+        { value: '__default__', label: '默认' },
+        ...selectedModel.backendVariants.map((variant) => ({
+          value: variant.id,
+          label: `${variant.label || variant.id}${
+            variant.contextWindow
+              ? ` · ${Math.round(variant.contextWindow / 1000)}K`
+              : ''
+          }`,
+        })),
+      ]
+    : [];
   const resolvedHostCommandDescription =
     hostCommandDescription ||
     'AgentDock 不再管理 provider 连接配置。认证、Base URL、API Key、自定义环境变量都需要由宿主机自己提供。当前面板只保留 Session 级的 Runner、模型和工作目录设置。';
@@ -430,14 +496,41 @@ export function RuntimeEnvPanel({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {THINKING_EFFORT_OPTIONS.map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value}>
+                  {thinkingEffortOptions.map((opt) => (
+                    <SelectItem
+                      key={opt.value}
+                      value={opt.value}
+                      disabled={opt.disabled}
+                    >
                       {opt.label}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             </div>
+
+            {modelBackendVariantOptions.length > 0 && (
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1">
+                  Backend Variant
+                </label>
+                <Select
+                  value={modelBackendVariant}
+                  onValueChange={handleModelBackendVariantChange}
+                >
+                  <SelectTrigger className="text-xs h-8">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {modelBackendVariantOptions.map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
 
             <div>
               <label className="block text-xs font-medium text-muted-foreground mb-1">

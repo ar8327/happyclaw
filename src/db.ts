@@ -59,6 +59,7 @@ type SessionChannelRow = {
   selected_mcps: string | null;
   model: string | null;
   thinking_effort: string | null;
+  model_backend_variant: string | null;
   context_compression: string | null;
 };
 
@@ -253,6 +254,7 @@ function backfillLegacyGroupOwnersIntoSessions(): void {
       `SELECT jid, name, folder, added_at, container_config, custom_cwd,
               init_source_path, init_git_url, created_by, selected_skills,
               mcp_mode, selected_mcps, model, thinking_effort,
+              NULL AS model_backend_variant,
               context_compression${hasIsHome ? ', is_home' : ', 0 AS is_home'}
        FROM registered_groups
        WHERE jid LIKE 'web:%'`,
@@ -295,6 +297,11 @@ function backfillLegacyGroupOwnersIntoSessions(): void {
           ? JSON.parse(row.selected_mcps)
           : null,
       model: typeof row.model === 'string' ? row.model : undefined,
+      model_backend_variant:
+        row.model_backend_variant === 'standard' ||
+        row.model_backend_variant === 'max'
+          ? row.model_backend_variant
+          : undefined,
       thinking_effort: parseThinkingEffort(
         typeof row.thinking_effort === 'string' ? row.thinking_effort : null,
       ),
@@ -314,6 +321,7 @@ function backfillLegacyGroupOwnersIntoSessions(): void {
       runner_profile_id: null,
       model: fallbackGroup.model ?? null,
       thinking_effort: fallbackGroup.thinking_effort ?? null,
+      model_backend_variant: fallbackGroup.model_backend_variant ?? null,
       context_compression: fallbackGroup.context_compression ?? 'off',
       is_pinned: false,
       archived: false,
@@ -345,6 +353,10 @@ function migrateRegisteredGroupsToSessionChannels(): void {
   const hasSelectedMcps = hasColumn('registered_groups', 'selected_mcps');
   const hasModel = hasColumn('registered_groups', 'model');
   const hasThinkingEffort = hasColumn('registered_groups', 'thinking_effort');
+  const hasModelBackendVariant = hasColumn(
+    'registered_groups',
+    'model_backend_variant',
+  );
   const hasContextCompression = hasColumn(
     'registered_groups',
     'context_compression',
@@ -362,6 +374,10 @@ function migrateRegisteredGroupsToSessionChannels(): void {
         hasSelectedMcps ? ', selected_mcps' : ', NULL AS selected_mcps'
       }${hasModel ? ', model' : ', NULL AS model'}${
         hasThinkingEffort ? ', thinking_effort' : ', NULL AS thinking_effort'
+      }${
+        hasModelBackendVariant
+          ? ', model_backend_variant'
+          : ', NULL AS model_backend_variant'
       }${
         hasContextCompression
           ? ', context_compression'
@@ -383,6 +399,7 @@ function migrateRegisteredGroupsToSessionChannels(): void {
     selected_mcps: string | null;
     model: string | null;
     thinking_effort: string | null;
+    model_backend_variant: string | null;
     context_compression: string | null;
   }>;
 
@@ -393,8 +410,9 @@ function migrateRegisteredGroupsToSessionChannels(): void {
         `INSERT INTO session_channels (
           jid, session_id, name, created_at, container_config, custom_cwd,
           init_source_path, init_git_url, selected_skills, mcp_mode,
-          selected_mcps, model, thinking_effort, context_compression
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          selected_mcps, model, thinking_effort, model_backend_variant,
+          context_compression
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(jid) DO UPDATE SET
           session_id = excluded.session_id,
           name = excluded.name,
@@ -408,6 +426,7 @@ function migrateRegisteredGroupsToSessionChannels(): void {
           selected_mcps = excluded.selected_mcps,
           model = excluded.model,
           thinking_effort = excluded.thinking_effort,
+          model_backend_variant = excluded.model_backend_variant,
           context_compression = excluded.context_compression`,
       ).run(
         row.jid,
@@ -423,6 +442,7 @@ function migrateRegisteredGroupsToSessionChannels(): void {
         row.selected_mcps,
         row.model,
         row.thinking_effort,
+        row.model_backend_variant,
         row.context_compression || 'off',
       );
     }
@@ -448,6 +468,7 @@ function dropLegacySessionRuntimeModeColumn(): void {
         runner_profile_id TEXT,
         model TEXT,
         thinking_effort TEXT,
+        model_backend_variant TEXT,
         context_compression TEXT NOT NULL DEFAULT 'off',
         is_pinned INTEGER NOT NULL DEFAULT 0,
         archived INTEGER NOT NULL DEFAULT 0,
@@ -457,12 +478,13 @@ function dropLegacySessionRuntimeModeColumn(): void {
       );
       INSERT INTO sessions_new (
         id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
-        model, thinking_effort, context_compression,
+        model, thinking_effort, model_backend_variant, context_compression,
         is_pinned, archived, owner_key, created_at, updated_at
       )
       SELECT
         id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
-        model, thinking_effort, COALESCE(context_compression, 'off'),
+        model, thinking_effort, model_backend_variant,
+        COALESCE(context_compression, 'off'),
         COALESCE(is_pinned, 0),
         COALESCE(archived, 0), owner_key, created_at, updated_at
       FROM sessions;
@@ -817,6 +839,7 @@ export function initDatabase(): void {
       selected_mcps TEXT,
       model TEXT,
       thinking_effort TEXT,
+      model_backend_variant TEXT,
       context_compression TEXT DEFAULT 'off'
     );
     CREATE INDEX IF NOT EXISTS idx_session_channels_session
@@ -911,6 +934,7 @@ export function initDatabase(): void {
       runner_profile_id TEXT,
       model TEXT,
       thinking_effort TEXT,
+      model_backend_variant TEXT,
       context_compression TEXT NOT NULL DEFAULT 'off',
       is_pinned INTEGER NOT NULL DEFAULT 0,
       archived INTEGER NOT NULL DEFAULT 0,
@@ -1063,6 +1087,7 @@ export function initDatabase(): void {
       WHERE kind = 'external_knowledge_ingest' AND dedup_key IS NOT NULL;
   `);
 
+  ensureColumn('sessions', 'model_backend_variant', 'TEXT');
   dropLegacySessionRuntimeModeColumn();
   ensureColumn(
     'session_bindings',
@@ -1109,6 +1134,7 @@ export function initDatabase(): void {
   ensureColumn('session_channels', 'selected_mcps', 'TEXT');
   ensureColumn('session_channels', 'model', 'TEXT');
   ensureColumn('session_channels', 'thinking_effort', 'TEXT');
+  ensureColumn('session_channels', 'model_backend_variant', 'TEXT');
   ensureColumn('session_channels', 'context_compression', "TEXT DEFAULT 'off'");
   ensureColumn('scheduled_tasks', 'model', 'TEXT');
   ensureColumn('memory_write_queue', 'result_json', 'TEXT');
@@ -1185,6 +1211,7 @@ export function initDatabase(): void {
     'selected_mcps',
     'model',
     'thinking_effort',
+    'model_backend_variant',
     'context_compression',
   ]);
 
@@ -1393,7 +1420,7 @@ export function initDatabase(): void {
      WHERE status = 'sending'`,
   ).run(Date.now(), new Date().toISOString());
 
-  const SCHEMA_VERSION = '51';
+  const SCHEMA_VERSION = '52';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -3367,10 +3394,16 @@ function parseSessionRecord(row: Record<string, unknown>): SessionRecord {
     runner_profile_id:
       typeof row.runner_profile_id === 'string' ? row.runner_profile_id : null,
     model: typeof row.model === 'string' ? row.model : null,
+    model_backend_variant:
+      row.model_backend_variant === 'standard' ||
+      row.model_backend_variant === 'max'
+        ? row.model_backend_variant
+        : null,
     thinking_effort:
       row.thinking_effort === 'low' ||
       row.thinking_effort === 'medium' ||
-      row.thinking_effort === 'high'
+      row.thinking_effort === 'high' ||
+      row.thinking_effort === 'xhigh'
         ? row.thinking_effort
         : null,
     context_compression:
@@ -3556,6 +3589,7 @@ function resolveSessionRuntimeProjection(
   | 'runner_profile_id'
   | 'model'
   | 'thinking_effort'
+  | 'model_backend_variant'
   | 'context_compression'
 > {
   const runnerId = existing?.runner_id || deriveRunnerId(group || null);
@@ -3578,6 +3612,11 @@ function resolveSessionRuntimeProjection(
       group?.model ??
       (existingMatchesRunner ? existing.model : null) ??
       (primaryMatchesRunner ? primarySession.model : null) ??
+      null,
+    model_backend_variant:
+      group?.model_backend_variant ??
+      (existingMatchesRunner ? existing.model_backend_variant : null) ??
+      (primaryMatchesRunner ? primarySession.model_backend_variant : null) ??
       null,
     thinking_effort:
       group?.thinking_effort ??
@@ -3617,9 +3656,10 @@ function ensureSessionRecordFromGroup(
   db.prepare(
     `INSERT INTO sessions (
       id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
-      model, thinking_effort, context_compression, is_pinned, archived,
+      model, thinking_effort, model_backend_variant, context_compression,
+      is_pinned, archived,
       owner_key, created_at, updated_at
-    ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+    ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       kind = excluded.kind,
@@ -3628,6 +3668,7 @@ function ensureSessionRecordFromGroup(
       runner_profile_id = excluded.runner_profile_id,
       model = excluded.model,
       thinking_effort = excluded.thinking_effort,
+      model_backend_variant = excluded.model_backend_variant,
       context_compression = excluded.context_compression,
       owner_key = excluded.owner_key,
       updated_at = excluded.updated_at`,
@@ -3640,6 +3681,7 @@ function ensureSessionRecordFromGroup(
     runtimeConfig.runner_profile_id,
     runtimeConfig.model,
     runtimeConfig.thinking_effort,
+    runtimeConfig.model_backend_variant,
     runtimeConfig.context_compression,
     existing?.owner_key ?? null,
     now,
@@ -3667,9 +3709,10 @@ function ensureSessionRecordForLegacyKey(
     db.prepare(
       `INSERT OR IGNORE INTO sessions (
         id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
-        model, thinking_effort, context_compression, is_pinned, archived,
+        model, thinking_effort, model_backend_variant, context_compression,
+        is_pinned, archived,
         owner_key, created_at, updated_at
-      ) VALUES (?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
+      ) VALUES (?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
     ).run(
       sessionId,
       agentId,
@@ -3679,6 +3722,7 @@ function ensureSessionRecordForLegacyKey(
       parentSession?.runner_profile_id || null,
       parentSession?.model || null,
       parentSession?.thinking_effort || null,
+      parentSession?.model_backend_variant || null,
       parentSession?.context_compression || 'off',
       parentSession.owner_key,
       now,
@@ -3699,9 +3743,10 @@ function ensureSessionRecordForLegacyKey(
   db.prepare(
     `INSERT OR IGNORE INTO sessions (
       id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
-      model, thinking_effort, context_compression, is_pinned, archived,
+      model, thinking_effort, model_backend_variant, context_compression,
+      is_pinned, archived,
       owner_key, created_at, updated_at
-    ) VALUES (?, ?, 'workspace', NULL, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
+    ) VALUES (?, ?, 'workspace', NULL, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
   ).run(
     sessionId,
     groupFolder,
@@ -3712,6 +3757,7 @@ function ensureSessionRecordForLegacyKey(
     runtimeConfig.runner_profile_id,
     runtimeConfig.model,
     runtimeConfig.thinking_effort,
+    runtimeConfig.model_backend_variant,
     runtimeConfig.context_compression,
     folderOwnerKey,
     now,
@@ -3899,9 +3945,10 @@ export function saveSessionRecord(session: SessionRecord): void {
   db.prepare(
     `INSERT INTO sessions (
       id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
-      model, thinking_effort, context_compression, is_pinned, archived,
+      model, thinking_effort, model_backend_variant, context_compression,
+      is_pinned, archived,
       owner_key, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       kind = excluded.kind,
@@ -3911,6 +3958,7 @@ export function saveSessionRecord(session: SessionRecord): void {
       runner_profile_id = excluded.runner_profile_id,
       model = excluded.model,
       thinking_effort = excluded.thinking_effort,
+      model_backend_variant = excluded.model_backend_variant,
       context_compression = excluded.context_compression,
       is_pinned = excluded.is_pinned,
       archived = excluded.archived,
@@ -3926,6 +3974,7 @@ export function saveSessionRecord(session: SessionRecord): void {
     session.runner_profile_id,
     session.model,
     session.thinking_effort,
+    session.model_backend_variant,
     session.context_compression,
     session.is_pinned ? 1 : 0,
     session.archived ? 1 : 0,
@@ -4227,6 +4276,11 @@ function parseGroupRow(
     mcp_mode: row.mcp_mode === 'custom' ? 'custom' : 'inherit',
     selected_mcps: row.selected_mcps ? JSON.parse(row.selected_mcps) : null,
     model: row.model ?? undefined,
+    model_backend_variant:
+      row.model_backend_variant === 'standard' ||
+      row.model_backend_variant === 'max'
+        ? row.model_backend_variant
+        : undefined,
     thinking_effort: parseThinkingEffort(row.thinking_effort),
     context_compression: parseCompressionMode(row.context_compression),
   };
@@ -4242,8 +4296,10 @@ function parseGroupRow(
 
 function parseThinkingEffort(
   val: string | null,
-): 'low' | 'medium' | 'high' | undefined {
-  if (val === 'low' || val === 'medium' || val === 'high') return val;
+): 'low' | 'medium' | 'high' | 'xhigh' | undefined {
+  if (val === 'low' || val === 'medium' || val === 'high' || val === 'xhigh') {
+    return val;
+  }
   return undefined;
 }
 
@@ -4314,8 +4370,9 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     `INSERT OR REPLACE INTO session_channels (
       jid, session_id, name, created_at, container_config, custom_cwd,
       init_source_path, init_git_url, selected_skills, mcp_mode,
-      selected_mcps, model, thinking_effort, context_compression
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      selected_mcps, model, thinking_effort, model_backend_variant,
+      context_compression
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     buildMainSessionId(group.folder),
@@ -4330,6 +4387,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.selected_mcps ? JSON.stringify(group.selected_mcps) : null,
     group.model ?? null,
     group.thinking_effort ?? null,
+    group.model_backend_variant ?? null,
     group.context_compression ?? 'off',
   );
   if (!jid.startsWith('web:')) {
@@ -4481,6 +4539,12 @@ function syncMemorySessionProjectionForOwner(ownerKey: string): void {
       : primarySession?.runner_id === resolvedRunnerId
         ? primarySession.thinking_effort
         : null;
+  const modelBackendVariant =
+    existing?.runner_id === resolvedRunnerId
+      ? existing.model_backend_variant
+      : primarySession?.runner_id === resolvedRunnerId
+        ? primarySession.model_backend_variant
+        : null;
   const contextCompression =
     existing?.context_compression ||
     primarySession?.context_compression ||
@@ -4488,9 +4552,10 @@ function syncMemorySessionProjectionForOwner(ownerKey: string): void {
   db.prepare(
     `INSERT INTO sessions (
       id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
-      model, thinking_effort, context_compression, is_pinned, archived,
+      model, thinking_effort, model_backend_variant, context_compression,
+      is_pinned, archived,
       owner_key, created_at, updated_at
-    ) VALUES (?, ?, 'memory', ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+    ) VALUES (?, ?, 'memory', ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       parent_session_id = excluded.parent_session_id,
@@ -4499,6 +4564,7 @@ function syncMemorySessionProjectionForOwner(ownerKey: string): void {
       runner_profile_id = excluded.runner_profile_id,
       model = excluded.model,
       thinking_effort = excluded.thinking_effort,
+      model_backend_variant = excluded.model_backend_variant,
       context_compression = excluded.context_compression,
       owner_key = excluded.owner_key,
       updated_at = excluded.updated_at`,
@@ -4511,6 +4577,7 @@ function syncMemorySessionProjectionForOwner(ownerKey: string): void {
     runnerProfileId,
     model,
     thinkingEffort,
+    modelBackendVariant,
     contextCompression,
     ownerKey,
     existing?.created_at || now,
@@ -4644,6 +4711,7 @@ export function ensureUserPrimarySessionChannel(
           runner_profile_id: existingSession?.runner_profile_id ?? null,
           model: existingSession?.model ?? null,
           thinking_effort: existingSession?.thinking_effort ?? null,
+          model_backend_variant: existingSession?.model_backend_variant ?? null,
           context_compression: existingSession?.context_compression || 'off',
           is_pinned: existingSession?.is_pinned ?? false,
           archived: existingSession?.archived ?? false,
@@ -4675,6 +4743,7 @@ export function ensureUserPrimarySessionChannel(
     runner_profile_id: null,
     model: null,
     thinking_effort: null,
+    model_backend_variant: null,
     context_compression: 'off',
     is_pinned: false,
     archived: false,
@@ -5491,9 +5560,10 @@ function syncWorkerSession(agent: SubAgent): void {
   db.prepare(
     `INSERT INTO sessions (
       id, name, kind, parent_session_id, cwd, runner_id, runner_profile_id,
-      model, thinking_effort, context_compression, is_pinned, archived,
+      model, thinking_effort, model_backend_variant, context_compression,
+      is_pinned, archived,
       owner_key, created_at, updated_at
-    ) VALUES (?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+    ) VALUES (?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       parent_session_id = excluded.parent_session_id,
@@ -5502,6 +5572,7 @@ function syncWorkerSession(agent: SubAgent): void {
       runner_profile_id = excluded.runner_profile_id,
       model = excluded.model,
       thinking_effort = excluded.thinking_effort,
+      model_backend_variant = excluded.model_backend_variant,
       context_compression = excluded.context_compression,
       owner_key = excluded.owner_key,
       updated_at = excluded.updated_at`,
@@ -5514,6 +5585,7 @@ function syncWorkerSession(agent: SubAgent): void {
     parentSession?.runner_profile_id || null,
     parentSession?.model || null,
     parentSession?.thinking_effort || null,
+    parentSession?.model_backend_variant || null,
     parentSession?.context_compression || 'off',
     ownerKey,
     agent.created_at || now,

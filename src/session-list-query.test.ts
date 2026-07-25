@@ -60,6 +60,28 @@ try {
     assert.equal(byJid.get(chatJids[404])?.content, 'latest-404');
     assert.equal(byJid.has('web:empty'), false);
 
+    database.saveSessionRecord({
+      id: 'main:traex-runtime',
+      name: 'TraeX Runtime',
+      kind: 'workspace',
+      parent_session_id: null,
+      cwd: '/work/traex-runtime',
+      runner_id: 'traex',
+      runner_profile_id: null,
+      model: 'c_seed_2_1',
+      thinking_effort: 'xhigh',
+      model_backend_variant: 'max',
+      context_compression: 'off',
+      is_pinned: false,
+      archived: false,
+      owner_key: 'operator',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+    });
+    const traexSession = database.getSessionRecord('main:traex-runtime');
+    assert.equal(traexSession?.thinking_effort, 'xhigh');
+    assert.equal(traexSession?.model_backend_variant, 'max');
+
     const chats = database.getChatsByJids([
       ...chatJids,
       chatJids[0],
@@ -143,6 +165,7 @@ function session(
     runner_profile_id: null,
     model: null,
     thinking_effort: null,
+    model_backend_variant: null,
     context_compression: 'off',
     is_pinned: false,
     archived: false,

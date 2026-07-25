@@ -11,6 +11,10 @@ import {
 } from '@/components/ui/select';
 import { api } from '@/api/client';
 import { Input } from '@/components/ui/input';
+import {
+  isThinkingEffortSupported,
+  thinkingEffortOptionsFromSchema,
+} from '@/lib/thinkingEffortOptions';
 
 function resolveRunnerValue(
   runnerId: string | null | undefined,
@@ -41,13 +45,6 @@ function withCurrentRunnerOption(
   ];
 }
 
-const THINKING_OPTIONS = [
-  { value: '__default__', label: '默认' },
-  { value: 'low', label: '低' },
-  { value: 'medium', label: '中' },
-  { value: 'high', label: '高' },
-];
-
 interface RunnerProfileOption {
   id: string;
   runner_id: string;
@@ -58,6 +55,13 @@ interface RunnerProfileOption {
 interface RunnerOption {
   value: string;
   label: string;
+  defaultModel?: string;
+  profileSchema?: Record<string, unknown> | null;
+  models?: Array<{
+    id: string;
+    label?: string;
+    supportedThinkingEfforts?: string[];
+  }>;
   canServeMemory?: boolean;
   compatibility?: {
     chat: string;
@@ -201,6 +205,15 @@ export function SessionDetail({ session }: SessionDetailProps) {
   const selectedRunner =
     runnerSelectOptions.find((option) => option.value === (runnerId || session.runner_id || ''))
     || null;
+  const selectedModelId = model || selectedRunner?.defaultModel || '';
+  const selectedModel = selectedRunner?.models?.find(
+    (item) => item.id === selectedModelId,
+  );
+  const thinkingOptions = thinkingEffortOptionsFromSchema(
+    selectedRunner?.profileSchema,
+    thinkingEffort,
+    selectedModel?.supportedThinkingEfforts,
+  );
 
   const formatDate = (timestamp: string | number) => {
     return new Date(timestamp).toLocaleString('zh-CN', {
@@ -240,6 +253,13 @@ export function SessionDetail({ session }: SessionDetailProps) {
             postCompactRepair: string;
           };
           degradation_reasons: string[];
+          default_model?: string;
+          profile_schema?: Record<string, unknown> | null;
+          models?: Array<{
+            id: string;
+            label?: string;
+            supportedThinkingEfforts?: string[];
+          }>;
         }>;
       }>('/api/sessions/runners')
       .then((res) => {
@@ -249,6 +269,9 @@ export function SessionDetail({ session }: SessionDetailProps) {
               ? res.runners.map((runner) => ({
                   value: runner.id,
                   label: runner.label,
+                  defaultModel: runner.default_model,
+                  profileSchema: runner.profile_schema,
+                  models: runner.models,
                   canServeMemory: runner.can_serve_memory,
                   compatibility: runner.compatibility,
                   capabilities: runner.capabilities,
@@ -309,6 +332,9 @@ export function SessionDetail({ session }: SessionDetailProps) {
       }
       if (thinkingDirty) {
         updates.thinking_effort = thinkingEffort || null;
+      }
+      if (runnerDirty || runnerProfileDirty || modelDirty) {
+        updates.model_backend_variant = null;
       }
       if (!isMemorySession && cwdDirty) {
         updates.cwd = cwd.trim();
@@ -451,7 +477,20 @@ export function SessionDetail({ session }: SessionDetailProps) {
             <div className="text-xs text-muted-foreground mb-1">模型</div>
             <Input
               value={model}
-              onChange={(e) => setModel(e.target.value)}
+              onChange={(e) => {
+                const nextModel = e.target.value;
+                setModel(nextModel);
+                const nextModelId =
+                  nextModel || selectedRunner?.defaultModel || '';
+                const supportedEfforts = selectedRunner?.models?.find(
+                  (item) => item.id === nextModelId,
+                )?.supportedThinkingEfforts;
+                if (
+                  !isThinkingEffortSupported(thinkingEffort, supportedEfforts)
+                ) {
+                  setThinkingEffort('');
+                }
+              }}
               placeholder="留空表示使用默认模型"
               className="h-8 text-sm"
             />
@@ -469,8 +508,12 @@ export function SessionDetail({ session }: SessionDetailProps) {
                 <SelectValue placeholder="默认" />
               </SelectTrigger>
               <SelectContent>
-                {THINKING_OPTIONS.map((opt) => (
-                  <SelectItem key={opt.value} value={opt.value}>
+                {thinkingOptions.map((opt) => (
+                  <SelectItem
+                    key={opt.value}
+                    value={opt.value}
+                    disabled={opt.disabled}
+                  >
                     {opt.label}
                   </SelectItem>
                 ))}

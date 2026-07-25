@@ -85,7 +85,8 @@ export interface RegisteredGroup {
   mcp_mode?: 'inherit' | 'custom'; // MCP 模式：继承全局或自定义（默认 'inherit'）
   selected_mcps?: string[] | null; // 自定义模式下选中的 MCP 列表（null = 使用全局全部）
   model?: string; // 模型标识符覆盖（如 'opus', 'sonnet', 'haiku'），空=使用全局配置
-  thinking_effort?: 'low' | 'medium' | 'high'; // Thinking effort 级别（默认 null=provider 默认）
+  thinking_effort?: 'low' | 'medium' | 'high' | 'xhigh'; // Thinking effort 级别（默认 null=provider 默认）
+  model_backend_variant?: 'standard' | 'max'; // TraeX 模型后端变体
   context_compression?: 'off' | 'auto' | 'manual'; // 上下文压缩模式（默认 'off'）
 }
 
@@ -365,7 +366,8 @@ export interface SessionRecord {
   runner_id: RunnerId;
   runner_profile_id: string | null;
   model: string | null;
-  thinking_effort: 'low' | 'medium' | 'high' | null;
+  thinking_effort: 'low' | 'medium' | 'high' | 'xhigh' | null;
+  model_backend_variant: 'standard' | 'max' | null;
   context_compression: 'off' | 'auto' | 'manual';
   is_pinned: boolean;
   archived: boolean;

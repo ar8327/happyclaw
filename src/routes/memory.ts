@@ -150,6 +150,7 @@ function serializeMemoryConfig(user: AuthUser) {
       label: descriptor.label,
       description: descriptor.description,
       default_model: descriptor.defaultModel,
+      profile_schema: descriptor.profileSchema || null,
       models: modelsForDescriptor(descriptor),
       tool_contract: descriptor.toolContract,
       can_serve_memory: canServeAsMemoryRunner(descriptor),
@@ -841,7 +842,8 @@ memoryRoutes.put('/config', authMiddleware, async (c) => {
   const thinkingEffort =
     body?.thinking_effort === 'low' ||
     body?.thinking_effort === 'medium' ||
-    body?.thinking_effort === 'high'
+    body?.thinking_effort === 'high' ||
+    body?.thinking_effort === 'xhigh'
       ? body.thinking_effort
       : null;
   const model =
@@ -875,6 +877,10 @@ memoryRoutes.put('/config', authMiddleware, async (c) => {
     runner_profile_id: runnerProfileId,
     model,
     thinking_effort: thinkingEffort,
+    model_backend_variant:
+      runnerId === existing.runner_id && model === existing.model
+        ? existing.model_backend_variant
+        : null,
     context_compression: 'off',
     updated_at: new Date().toISOString(),
   });

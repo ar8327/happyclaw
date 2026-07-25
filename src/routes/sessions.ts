@@ -504,6 +504,7 @@ function buildCompatibilityGroupForSession(
     is_home: session.kind === 'main' ? true : existing?.is_home,
     model: session.model ?? undefined,
     thinking_effort: session.thinking_effort ?? undefined,
+    model_backend_variant: session.model_backend_variant ?? undefined,
     context_compression: session.context_compression,
     customCwd:
       path.resolve(session.cwd) === path.resolve(defaultCwd)
@@ -767,6 +768,7 @@ function buildSessionPayload(
         : null,
     model: session.model,
     thinking_effort: session.thinking_effort,
+    model_backend_variant: session.model_backend_variant,
     context_compression: isMemorySession
       ? undefined
       : session.context_compression,
@@ -1085,8 +1087,12 @@ sessionRoutes.put('/bindings/:channelJid', authMiddleware, async (c) => {
   }
 });
 
-sessionRoutes.get('/runners', authMiddleware, (c) => {
-  const runners = listRunnerDescriptors().map(serializeRunnerDescriptor);
+sessionRoutes.get('/runners', authMiddleware, async (c) => {
+  const runners = await Promise.all(
+    listRunnerDescriptors().map((descriptor) =>
+      serializeRunnerDescriptor(descriptor),
+    ),
+  );
   return c.json({ runners });
 });
 
@@ -1723,7 +1729,8 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
   const nextThinkingEffort =
     body.thinking_effort === 'low' ||
     body.thinking_effort === 'medium' ||
-    body.thinking_effort === 'high'
+    body.thinking_effort === 'high' ||
+    body.thinking_effort === 'xhigh'
       ? body.thinking_effort
       : body.thinking_effort === null
         ? null
@@ -1741,6 +1748,19 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
       ? body.cwd.trim()
       : undefined;
   const runnerChanged = nextRunnerId !== existing.runner_id;
+  const runnerProfileChanged =
+    validatedRunnerProfileId !== existing.runner_profile_id;
+  const modelChanged = nextModel !== existing.model;
+  const nextModelBackendVariant =
+    body.model_backend_variant === 'standard' ||
+    body.model_backend_variant === 'max'
+      ? body.model_backend_variant
+      : body.model_backend_variant === null ||
+          runnerChanged ||
+          runnerProfileChanged ||
+          modelChanged
+        ? null
+        : existing.model_backend_variant;
 
   if (existing.kind === 'memory') {
     if (requestedCwd !== undefined) {
@@ -1778,6 +1798,7 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
       runner_profile_id: validatedRunnerProfileId,
       model: nextModel,
       thinking_effort: nextThinkingEffort,
+      model_backend_variant: nextModelBackendVariant,
       context_compression: 'off',
       is_pinned: nextPinned,
       updated_at: now,
@@ -1833,6 +1854,7 @@ sessionRoutes.patch('/:id', authMiddleware, async (c) => {
       runner_profile_id: validatedRunnerProfileId,
       model: nextModel,
       thinking_effort: nextThinkingEffort,
+      model_backend_variant: nextModelBackendVariant,
       context_compression: nextContextCompression,
       is_pinned: nextPinned,
       updated_at: now,

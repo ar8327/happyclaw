@@ -60,7 +60,9 @@ export interface CodexRunnerOptions {
   globalDir: string;
   memoryDir: string;
   model?: string;
+  modelProvider?: string;
   thinkingEffort?: string;
+  modelBackendVariant?: string;
   command?: string;
   commandDefault?: string;
   runnerId?: string;
@@ -335,7 +337,9 @@ export class CodexRunner implements AgentRunner {
     // Initialize CodexSession
     const sessionConfig: CodexSessionConfig = {
       model: this.opts.model,
+      modelProvider: this.opts.modelProvider,
       thinkingEffort: this.opts.thinkingEffort,
+      modelBackendVariant: this.opts.modelBackendVariant,
       workingDirectory: groupDir,
       additionalDirectories: resolveAdditionalDirectories([
         globalDir,

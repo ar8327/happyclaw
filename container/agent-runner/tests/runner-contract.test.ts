@@ -620,6 +620,90 @@ function assertOverlappingRunnerModelPatterns(): void {
   assert.equal(isModelCompatibleWithRunner('claude', 'gpt-5.4'), false);
 }
 
+function assertTraexModelCacheCapabilities(): void {
+  const dir = fs.mkdtempSync(path.join(process.cwd(), '.tmp-traex-models-'));
+  const primaryDir = path.join(dir, 'cli');
+  const providerDir = path.join(dir, 'model-provider', 'seed');
+  fs.mkdirSync(primaryDir, { recursive: true });
+  fs.mkdirSync(providerDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(primaryDir, 'models_cache.json'),
+    JSON.stringify({
+      models: [
+        {
+          slug: 'c_seed_2_1',
+          display_name: 'Seed 2.1',
+          visibility: 'list',
+          priority: 1,
+          supported_reasoning_levels: [{ effort: 'low' }],
+        },
+      ],
+    }),
+  );
+  fs.writeFileSync(
+    path.join(providerDir, 'models_cache.json'),
+    JSON.stringify({
+      models: [
+        {
+          slug: 'c_seed_2_1',
+          display_name: 'Seed 2.1 Provider',
+          visibility: 'list',
+          priority: 9,
+          supported_reasoning_levels: [
+            { effort: 'medium' },
+            { effort: 'xhigh' },
+          ],
+          business_metadata: {
+            variants: {
+              standard_key: 'standard',
+              standard_context_window: 196_608,
+              max_key: 'max',
+              max_context_window: 1_000_000,
+            },
+          },
+        },
+      ],
+    }),
+  );
+
+  try {
+    const models = modelsForDescriptor(
+      {
+        id: 'traex',
+        runtimeContract: {
+          modelCatalog: {
+            type: 'codex_models_cache',
+            envPath: 'TEST_TRAE_HOME',
+            relativeToEnv: 'cli/models_cache.json',
+            extraRelativeToEnv: ['model-provider/*/models_cache.json'],
+            defaultModelProvider: 'trae',
+          },
+        },
+      },
+      { TEST_TRAE_HOME: dir },
+    );
+    assert.deepEqual(models, [
+      {
+        id: 'c_seed_2_1',
+        label: 'Seed 2.1',
+        description: undefined,
+        modelProvider: 'seed',
+        supportedThinkingEfforts: ['medium', 'xhigh'],
+        backendVariants: [
+          {
+            id: 'standard',
+            label: 'Standard',
+            contextWindow: 196_608,
+          },
+          { id: 'max', label: 'Max', contextWindow: 1_000_000 },
+        ],
+      },
+    ]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function assertTraexModelCatalogNormalization(): void {
   const models = normalizeTraexCliModels(
     JSON.stringify([
@@ -645,6 +729,7 @@ function assertTraexModelCatalogNormalization(): void {
       id: 'Doubao-Seed-2.1-Pro',
       label: 'Doubao-Seed-2.1-Pro',
       description: '184K context window',
+      modelProvider: 'trae',
     },
     {
       id: 'c_gpt_5_4',
@@ -756,6 +841,7 @@ assertInvokeAgentIsRegistryDriven();
 assertDescriptorAuthProbeWorks();
 assertCodexModelCacheCatalogWorks();
 assertOverlappingRunnerModelPatterns();
+assertTraexModelCacheCapabilities();
 assertTraexModelCatalogNormalization();
 assertMemoryRouteUsesDynamicRunnerModels();
 assertIpcDeliveryAcknowledgement();

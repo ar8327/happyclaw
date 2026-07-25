@@ -6,6 +6,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import { useMediaQuery } from '@/hooks/useMediaQuery';
 import { RuntimeEnvPanel } from '../components/chat/RuntimeEnvPanel';
+import { thinkingEffortOptionsFromSchema } from '@/lib/thinkingEffortOptions';
 
 interface MemorySource {
   path: string;
@@ -36,7 +37,12 @@ interface MemoryRunnerOption {
   id: string;
   label: string;
   default_model?: string;
-  models?: Array<{ id: string; label?: string }>;
+  profile_schema?: Record<string, unknown> | null;
+  models?: Array<{
+    id: string;
+    label?: string;
+    supportedThinkingEfforts?: string[];
+  }>;
   can_serve_memory: boolean;
   degradation_reasons: string[];
 }
@@ -47,7 +53,7 @@ interface MemorySessionConfig {
   runner_id: string;
   runner_profile_id: string | null;
   model: string | null;
-  thinking_effort: 'low' | 'medium' | 'high' | null;
+  thinking_effort: 'low' | 'medium' | 'high' | 'xhigh' | null;
   owner_key: string | null;
   cwd: string;
   primary_session_folder: string | null;
@@ -533,6 +539,23 @@ export function MemoryPage() {
     }
     return baseOptions;
   }, [memoryConfig?.model, selectedRunner]);
+  const selectedMemoryModel = selectedRunner?.models?.find(
+    (model) =>
+      model.id === (memoryConfig?.model || selectedRunner.default_model || ''),
+  );
+  const memoryThinkingEffortOptions = useMemo(
+    () =>
+      thinkingEffortOptionsFromSchema(
+        selectedRunner?.profile_schema,
+        memoryConfig?.thinking_effort,
+        selectedMemoryModel?.supportedThinkingEfforts,
+      ),
+    [
+      memoryConfig?.thinking_effort,
+      selectedMemoryModel?.supportedThinkingEfforts,
+      selectedRunner?.profile_schema,
+    ],
+  );
 
   return (
     <div className="min-h-full bg-background p-4 lg:p-8">
@@ -597,17 +620,24 @@ export function MemoryPage() {
                           Thinking
                         </label>
                         <select
-                          value={memoryConfig.thinking_effort || ''}
+                          value={memoryConfig.thinking_effort || '__default__'}
                           onChange={(e) => setMemoryConfig((prev) => prev ? {
                             ...prev,
-                            thinking_effort: e.target.value ? e.target.value as 'low' | 'medium' | 'high' : null,
+                            thinking_effort: e.target.value === '__default__'
+                              ? null
+                              : e.target.value as 'low' | 'medium' | 'high' | 'xhigh',
                           } : prev)}
                           className="w-full h-9 rounded-md border border-border bg-background px-3 text-sm"
                         >
-                          <option value="">默认</option>
-                          <option value="low">low</option>
-                          <option value="medium">medium</option>
-                          <option value="high">high</option>
+                          {memoryThinkingEffortOptions.map((option) => (
+                            <option
+                              key={option.value}
+                              value={option.value}
+                              disabled={option.disabled}
+                            >
+                              {option.label}
+                            </option>
+                          ))}
                         </select>
                       </div>
                     </div>

@@ -6,12 +6,12 @@ import {
   getRunnerServerManifest,
   listRunnerServerManifests,
 } from './runners/index.js';
-import { modelsForDescriptor } from './runners/descriptor-manifest.js';
 import type { RunnerDescriptor } from './types.js';
 
 export { getRunnerServerManifest, listRunnerServerManifests };
 
-export function serializeRunnerDescriptor(descriptor: RunnerDescriptor) {
+export async function serializeRunnerDescriptor(descriptor: RunnerDescriptor) {
+  const manifest = getRunnerServerManifest(descriptor.id);
   return {
     id: descriptor.id,
     label: descriptor.label,
@@ -24,7 +24,7 @@ export function serializeRunnerDescriptor(descriptor: RunnerDescriptor) {
     runtime_contract: descriptor.runtimeContract,
     tool_contract: descriptor.toolContract,
     profile_schema: descriptor.profileSchema || null,
-    models: modelsForDescriptor(descriptor),
+    models: manifest ? await manifest.listModels() : [],
     compatibility: descriptor.compatibility,
     can_serve_memory: canServeAsMemoryRunner(descriptor),
     degradation_reasons: explainRunnerDegradation(descriptor),

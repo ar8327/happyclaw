@@ -117,7 +117,10 @@ export interface RunnerModelCatalog {
   type: 'codex_models_cache';
   envPath?: string;
   relativeToEnv?: string;
+  extraRelativeToEnv?: string[];
   relativeToHome?: string;
+  extraRelativeToHome?: string[];
+  defaultModelProvider?: string;
   path?: string;
 }
 
@@ -166,6 +169,13 @@ export interface RunnerModel {
   id: string;
   label?: string;
   description?: string;
+  modelProvider?: string;
+  supportedThinkingEfforts?: string[];
+  backendVariants?: Array<{
+    id: string;
+    label?: string;
+    contextWindow?: number;
+  }>;
 }
 
 const HAPPYCLAW_PLUGIN_CAPABILITIES = [
@@ -444,6 +454,21 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       requiredCommands: ['traex'],
       configDirEnv: 'TRAE_HOME',
       modelEnv: ['HAPPYCLAW_TRAEX_MODEL'],
+      modelCatalog: {
+        type: 'codex_models_cache',
+        envPath: 'TRAE_HOME',
+        relativeToEnv: 'cli/models_cache.json',
+        extraRelativeToEnv: [
+          'model-provider/*/models_cache.json',
+          'cli/model-catalog/*/models_cache.json',
+        ],
+        relativeToHome: '.trae/cli/models_cache.json',
+        extraRelativeToHome: [
+          '.trae/model-provider/*/models_cache.json',
+          '.trae/cli/model-catalog/*/models_cache.json',
+        ],
+        defaultModelProvider: 'trae',
+      },
       availabilityEnv: 'HAPPYCLAW_TRAEX_AVAILABLE',
       auth: 'external_cli',
       authProbe: {
@@ -479,8 +504,15 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
         },
         thinkingEffort: {
           type: 'string',
-          enum: ['low', 'medium', 'high'],
+          enum: ['low', 'medium', 'high', 'xhigh'],
           title: '推理强度',
+        },
+        modelBackendVariant: {
+          type: 'string',
+          enum: ['standard', 'max'],
+          title: '模型后端变体',
+          description:
+            'TraeX 模型后端变体；max 仅对模型缓存中声明 max_key 的模型有效。',
         },
         command: {
           type: 'string',

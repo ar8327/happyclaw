@@ -10,10 +10,12 @@ import type { Variables } from '../web-context.js';
 
 const runnersRoutes = new Hono<{ Variables: Variables }>();
 
-runnersRoutes.get('/', authMiddleware, (c) => {
+runnersRoutes.get('/', authMiddleware, async (c) => {
   return c.json({
-    runners: listRunnerServerManifests().map((manifest) =>
-      serializeRunnerDescriptor(manifest.descriptor),
+    runners: await Promise.all(
+      listRunnerServerManifests().map((manifest) =>
+        serializeRunnerDescriptor(manifest.descriptor),
+      ),
     ),
   });
 });

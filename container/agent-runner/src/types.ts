@@ -12,7 +12,9 @@ import type { RunnerDescriptor } from './runner-descriptor.types.js';
 export interface RunnerResolvedConfig {
   profileId?: string;
   model?: string;
-  thinkingEffort?: 'low' | 'medium' | 'high';
+  modelProvider?: string;
+  thinkingEffort?: 'low' | 'medium' | 'high' | 'xhigh';
+  modelBackendVariant?: 'standard' | 'max';
   command?: string;
   config: Record<string, unknown>;
 }

@@ -42,7 +42,10 @@ export interface RunnerModelCatalog {
   type: 'codex_models_cache';
   envPath?: string;
   relativeToEnv?: string;
+  extraRelativeToEnv?: string[];
   relativeToHome?: string;
+  extraRelativeToHome?: string[];
+  defaultModelProvider?: string;
   path?: string;
 }
 
@@ -67,6 +70,13 @@ export interface RunnerModel {
   id: string;
   label?: string;
   description?: string;
+  modelProvider?: string;
+  supportedThinkingEfforts?: string[];
+  backendVariants?: Array<{
+    id: string;
+    label?: string;
+    contextWindow?: number;
+  }>;
 }
 
 interface CodexCachedModel {
@@ -75,6 +85,39 @@ interface CodexCachedModel {
   description?: unknown;
   visibility?: unknown;
   priority?: unknown;
+  context_window?: unknown;
+  model_provider_id?: unknown;
+  business_metadata?: unknown;
+  supported_reasoning_levels?: unknown;
+}
+
+interface CodexCachedModelEntry {
+  model: CodexCachedModel;
+  modelProviderFromPath: string | undefined;
+}
+
+type RunnerModelWithPriority = RunnerModel & {
+  priority: number;
+  modelProviderStrength?: number;
+};
+
+function reasoningEffortsFromCachedModel(
+  model: CodexCachedModel,
+): string[] | undefined {
+  if (!Array.isArray(model.supported_reasoning_levels)) return undefined;
+  return Array.from(
+    new Set(
+      model.supported_reasoning_levels
+        .map((level) => {
+          if (!level || typeof level !== 'object' || Array.isArray(level)) {
+            return '';
+          }
+          const effort = (level as Record<string, unknown>).effort;
+          return typeof effort === 'string' ? effort.trim().toLowerCase() : '';
+        })
+        .filter(Boolean),
+    ),
+  );
 }
 
 function expandHomePath(value: string): string {
@@ -111,6 +154,66 @@ function resolveModelCatalogPath(
     return path.join(os.homedir(), catalog.relativeToHome);
   }
   return null;
+}
+
+function expandWildcardPath(pattern: string): string[] {
+  if (!pattern.includes('*')) return [pattern];
+  const segments = path.resolve(pattern).split(path.sep);
+  const roots = segments[0] === '' ? [path.sep] : [segments[0]];
+  const rest = segments.slice(1);
+  return rest.reduce<string[]>((bases, segment) => {
+    if (segment !== '*') return bases.map((base) => path.join(base, segment));
+    return bases.flatMap((base) => {
+      try {
+        return fs
+          .readdirSync(base, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => path.join(base, entry.name));
+      } catch {
+        return [];
+      }
+    });
+  }, roots);
+}
+
+function resolveModelCatalogPaths(
+  catalog: RunnerModelCatalog,
+  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
+): string[] {
+  const paths = new Set<string>();
+  const primary = resolveModelCatalogPath(catalog, env);
+  if (primary) paths.add(primary);
+  if (catalog.envPath && env[catalog.envPath]) {
+    const base = expandHomePath(String(env[catalog.envPath]));
+    for (const relativePath of catalog.extraRelativeToEnv || []) {
+      for (const filePath of expandWildcardPath(
+        path.join(base, relativePath),
+      )) {
+        paths.add(filePath);
+      }
+    }
+  }
+  for (const relativePath of catalog.extraRelativeToHome || []) {
+    for (const filePath of expandWildcardPath(
+      path.join(os.homedir(), relativePath),
+    )) {
+      paths.add(filePath);
+    }
+  }
+  return Array.from(paths);
+}
+
+function modelProviderFromCachePath(cachePath: string): string | undefined {
+  const segments = path.normalize(cachePath).split(path.sep).filter(Boolean);
+  const providerIndex = segments.lastIndexOf('model-provider');
+  if (providerIndex >= 0 && providerIndex + 1 < segments.length) {
+    return segments[providerIndex + 1] || undefined;
+  }
+  const catalogIndex = segments.lastIndexOf('model-catalog');
+  if (catalogIndex >= 0 && catalogIndex + 1 < segments.length) {
+    return segments[catalogIndex + 1] || undefined;
+  }
+  return undefined;
 }
 
 function readPath(value: unknown, jsonPath: string[]): unknown {
@@ -326,36 +429,159 @@ function modelsFromCodexCache(
   catalog: RunnerModelCatalog,
   env: NodeJS.ProcessEnv | Record<string, string | undefined>,
 ): RunnerModel[] {
-  const cachePath = resolveModelCatalogPath(catalog, env);
-  if (!cachePath || !fs.existsSync(cachePath)) return [];
+  const cachePaths = resolveModelCatalogPaths(catalog, env).filter(
+    (cachePath) => fs.existsSync(cachePath),
+  );
+  if (cachePaths.length === 0) return [];
 
   try {
-    const parsed = JSON.parse(fs.readFileSync(cachePath, 'utf-8')) as {
-      models?: unknown;
-    };
-    const models = Array.isArray(parsed.models) ? parsed.models : [];
-    return models
-      .filter((model): model is CodexCachedModel => {
+    const models = cachePaths.flatMap((cachePath) => {
+      const parsed = JSON.parse(fs.readFileSync(cachePath, 'utf-8')) as {
+        models?: unknown;
+      };
+      const modelProviderFromPath = modelProviderFromCachePath(cachePath);
+      return Array.isArray(parsed.models)
+        ? parsed.models.map((model) => ({ model, modelProviderFromPath }))
+        : [];
+    });
+    const byId = new Map<string, RunnerModelWithPriority>();
+    for (const model of models
+      .filter((entry): entry is CodexCachedModelEntry => {
+        const model = entry.model;
         if (!model || typeof model !== 'object' || Array.isArray(model)) {
           return false;
         }
         return model.visibility === 'list' && typeof model.slug === 'string';
       })
-      .map((model) => ({
-        id: String(model.slug),
-        label:
-          typeof model.display_name === 'string' && model.display_name.trim()
-            ? model.display_name
-            : String(model.slug),
-        description:
-          typeof model.description === 'string' ? model.description : undefined,
-        priority:
-          typeof model.priority === 'number' && Number.isFinite(model.priority)
-            ? model.priority
-            : 999,
-      }))
+      .map((entry): RunnerModelWithPriority => {
+        const { model } = entry;
+        const variants =
+          model.business_metadata &&
+          typeof model.business_metadata === 'object' &&
+          !Array.isArray(model.business_metadata)
+            ? (model.business_metadata as Record<string, unknown>).variants
+            : undefined;
+        const variantsRecord =
+          variants && typeof variants === 'object' && !Array.isArray(variants)
+            ? (variants as Record<string, unknown>)
+            : {};
+        const standardContext =
+          typeof variantsRecord.standard_context_window === 'number'
+            ? variantsRecord.standard_context_window
+            : typeof model.context_window === 'number'
+              ? model.context_window
+              : undefined;
+        const maxContext =
+          typeof variantsRecord.max_context_window === 'number'
+            ? variantsRecord.max_context_window
+            : undefined;
+        const hasStandard = typeof variantsRecord.standard_key === 'string';
+        const hasMax = typeof variantsRecord.max_key === 'string';
+        const explicitModelProvider =
+          typeof model.model_provider_id === 'string' &&
+          model.model_provider_id.trim()
+            ? model.model_provider_id.trim()
+            : undefined;
+        const modelProvider =
+          explicitModelProvider ||
+          entry.modelProviderFromPath ||
+          catalog.defaultModelProvider;
+        const modelProviderStrength = explicitModelProvider
+          ? 3
+          : entry.modelProviderFromPath
+            ? 2
+            : catalog.defaultModelProvider
+              ? 1
+              : 0;
+        const supportedThinkingEfforts = reasoningEffortsFromCachedModel(model);
+        return {
+          id: String(model.slug),
+          label:
+            typeof model.display_name === 'string' && model.display_name.trim()
+              ? model.display_name
+              : String(model.slug),
+          description:
+            typeof model.description === 'string'
+              ? model.description
+              : undefined,
+          ...(modelProvider ? { modelProvider } : {}),
+          ...(supportedThinkingEfforts !== undefined
+            ? { supportedThinkingEfforts }
+            : {}),
+          backendVariants:
+            hasStandard || hasMax
+              ? [
+                  ...(hasStandard
+                    ? [
+                        {
+                          id: 'standard',
+                          label: 'Standard',
+                          contextWindow: standardContext,
+                        },
+                      ]
+                    : []),
+                  ...(hasMax
+                    ? [
+                        {
+                          id: 'max',
+                          label: 'Max',
+                          contextWindow: maxContext,
+                        },
+                      ]
+                    : []),
+                ]
+              : undefined,
+          priority:
+            typeof model.priority === 'number' &&
+            Number.isFinite(model.priority)
+              ? model.priority
+              : 999,
+          modelProviderStrength,
+        };
+      })) {
+      const existing = byId.get(model.id);
+      if (!existing) {
+        byId.set(model.id, model);
+        continue;
+      }
+      const existingStrength = existing.modelProviderStrength || 0;
+      const candidateStrength = model.modelProviderStrength || 0;
+      if (candidateStrength > existingStrength) {
+        existing.modelProvider = model.modelProvider;
+        existing.modelProviderStrength = model.modelProviderStrength;
+        existing.supportedThinkingEfforts =
+          model.supportedThinkingEfforts === undefined
+            ? undefined
+            : [...model.supportedThinkingEfforts];
+        existing.backendVariants = model.backendVariants
+          ? [...model.backendVariants]
+          : undefined;
+      } else if (
+        candidateStrength === existingStrength &&
+        existing.modelProvider === model.modelProvider
+      ) {
+        if (
+          existing.supportedThinkingEfforts === undefined &&
+          model.supportedThinkingEfforts !== undefined
+        ) {
+          existing.supportedThinkingEfforts = [
+            ...model.supportedThinkingEfforts,
+          ];
+        }
+        if (!existing.backendVariants && model.backendVariants) {
+          existing.backendVariants = [...model.backendVariants];
+        }
+      }
+    }
+    return Array.from(byId.values())
       .sort((a, b) => a.priority - b.priority)
-      .map(({ priority: _priority, ...model }) => model);
+      .map(
+        ({
+          priority: _priority,
+          modelProviderStrength: _modelProviderStrength,
+          ...model
+        }) => model,
+      );
   } catch {
     return [];
   }

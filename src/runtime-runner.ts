@@ -47,7 +47,7 @@ import {
   getSessionRecord,
   listRunnerProfiles,
 } from './db.js';
-import { runnerAuthAvailable } from './runner-health.js';
+import { modelsForDescriptor, runnerAuthAvailable } from './runner-health.js';
 import { validateRunnerProfileConfig } from './runner-profile-schema.js';
 import { nativePluginCapabilitiesForRunner } from './runner-descriptor.types.js';
 
@@ -125,7 +125,9 @@ export interface RuntimeExecutionProfile {
 export interface RunnerResolvedConfig {
   profileId?: string;
   model?: string;
-  thinkingEffort?: 'low' | 'medium' | 'high';
+  modelProvider?: string;
+  thinkingEffort?: 'low' | 'medium' | 'high' | 'xhigh';
+  modelBackendVariant?: 'standard' | 'max';
   command?: string;
   config: Record<string, unknown>;
 }
@@ -326,10 +328,19 @@ function stringConfigValue(
 
 function thinkingEffortConfigValue(
   value: unknown,
-): 'low' | 'medium' | 'high' | undefined {
-  return value === 'low' || value === 'medium' || value === 'high'
+): 'low' | 'medium' | 'high' | 'xhigh' | undefined {
+  return value === 'low' ||
+    value === 'medium' ||
+    value === 'high' ||
+    value === 'xhigh'
     ? value
     : undefined;
+}
+
+function modelBackendVariantConfigValue(
+  value: unknown,
+): 'standard' | 'max' | undefined {
+  return value === 'standard' || value === 'max' ? value : undefined;
 }
 
 function copyTraexSeedPath(source: string, target: string): boolean {
@@ -423,6 +434,16 @@ function resolveRunnerProfileBundle(
     activeProfile,
     config,
   };
+}
+
+function resolveRunnerModelProvider(
+  descriptor: RunnerDescriptor | undefined,
+  model: string | undefined,
+  env: Record<string, string>,
+): string | undefined {
+  if (!descriptor || !model) return undefined;
+  return modelsForDescriptor(descriptor, env).find((item) => item.id === model)
+    ?.modelProvider;
 }
 
 function commandExists(command: string, versionArgs: string[]): boolean {
@@ -658,15 +679,22 @@ export async function runHostAgent(
   const profileThinkingEffort = thinkingEffortConfigValue(
     storedProfileBundle.config.thinkingEffort,
   );
+  const profileModelBackendVariant = modelBackendVariantConfigValue(
+    storedProfileBundle.config.modelBackendVariant,
+  );
   const explicitModel = sessionRecord?.model ?? group.model;
   const explicitThinkingEffort =
     sessionRecord?.thinking_effort ?? group.thinking_effort;
+  const explicitModelBackendVariant =
+    sessionRecord?.model_backend_variant ?? group.model_backend_variant;
   const effectiveModel =
     explicitModel ??
     profileModel ??
     storedProfileBundle.descriptor?.defaultModel;
   const effectiveThinkingEffort =
     explicitThinkingEffort ?? profileThinkingEffort;
+  const effectiveModelBackendVariant =
+    explicitModelBackendVariant ?? profileModelBackendVariant;
   const inferredModelRunner = inferRunnerIdFromModel(
     effectiveModel,
     storedRunnerId,
@@ -731,10 +759,17 @@ export async function runHostAgent(
   if (effectiveThinkingEffort) {
     hostEnv['HAPPYCLAW_THINKING_EFFORT'] = effectiveThinkingEffort;
   }
+  const effectiveModelProvider = resolveRunnerModelProvider(
+    effectiveRunnerDescriptor,
+    effectiveModel,
+    hostEnv,
+  );
   const runnerConfig: RunnerResolvedConfig = {
     profileId: activeProfile?.id,
     model: effectiveModel,
+    modelProvider: effectiveModelProvider,
     thinkingEffort: effectiveThinkingEffort,
+    modelBackendVariant: effectiveModelBackendVariant,
     command: runnerCommand,
     config: runnerProfileConfig,
   };

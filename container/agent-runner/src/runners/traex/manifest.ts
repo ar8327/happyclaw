@@ -18,11 +18,16 @@ export const traexManifest: RunnerManifest = {
   descriptor: RUNNER_DESCRIPTORS.traex,
   createRunner: async (ctx) => {
     const { CodexRunner } = await import('../codex/runner.js');
+    const disableMcp =
+      process.env.HAPPYCLAW_TRAEX_DISABLE_MCP === '1' ||
+      ctx.containerInput.runnerConfig?.config?.disableMcp === true;
     return new CodexRunner({
       ...ctx,
       model: configuredModel(ctx.containerInput.runnerConfig?.model),
+      modelProvider: ctx.containerInput.runnerConfig?.modelProvider,
       thinkingEffort:
         ctx.containerInput.runnerConfig?.thinkingEffort || ctx.thinkingEffort,
+      modelBackendVariant: ctx.containerInput.runnerConfig?.modelBackendVariant,
       command: configuredCommand(ctx.containerInput.runnerConfig?.command),
       commandDefault: 'traex',
       runnerId: 'traex',
@@ -31,7 +36,7 @@ export const traexManifest: RunnerManifest = {
       includeWebSearchMode: false,
       mcpServersMode: 'none',
       aliasBuiltinMcpServer: false,
-      useDynamicTools: true,
+      useDynamicTools: !disableMcp,
       supportsMidQueryPush: false,
       builtinMcpServerName: undefined,
     });

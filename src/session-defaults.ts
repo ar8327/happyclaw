@@ -10,6 +10,7 @@ export function getInheritedWorkspaceRuntimeConfig(
   | 'runner_profile_id'
   | 'model'
   | 'thinking_effort'
+  | 'model_backend_variant'
   | 'context_compression'
 > {
   const primarySession = getPrimarySessionForOwner(ownerKey);
@@ -18,6 +19,7 @@ export function getInheritedWorkspaceRuntimeConfig(
     runner_profile_id: primarySession?.runner_profile_id ?? null,
     model: primarySession?.model ?? null,
     thinking_effort: primarySession?.thinking_effort ?? null,
+    model_backend_variant: primarySession?.model_backend_variant ?? null,
     context_compression: primarySession?.context_compression ?? 'off',
   };
 }

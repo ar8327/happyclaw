@@ -15,7 +15,8 @@ export interface SessionInfo {
   runner_profile_id?: string | null;
   runner_label?: string;
   model?: string;
-  thinking_effort?: 'low' | 'medium' | 'high' | null;
+  thinking_effort?: 'low' | 'medium' | 'high' | 'xhigh' | null;
+  model_backend_variant?: 'standard' | 'max' | null;
   context_compression?: 'off' | 'auto' | 'manual';
   cwd?: string;
   owner_key?: string | null;

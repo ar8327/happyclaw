@@ -992,6 +992,8 @@ function ensureFeishuTopicSession(
     model: parentSession?.model ?? inherited.model,
     thinking_effort:
       parentSession?.thinking_effort ?? inherited.thinking_effort,
+    model_backend_variant:
+      parentSession?.model_backend_variant ?? inherited.model_backend_variant,
     context_compression:
       parentSession?.context_compression ||
       parentGroup?.context_compression ||
@@ -1016,6 +1018,10 @@ function ensureFeishuTopicSession(
       parentSession?.thinking_effort ??
       parentGroup?.thinking_effort ??
       baseGroup.thinking_effort,
+    model_backend_variant:
+      parentSession?.model_backend_variant ??
+      parentGroup?.model_backend_variant ??
+      baseGroup.model_backend_variant,
     context_compression:
       parentSession?.context_compression ||
       parentGroup?.context_compression ||
@@ -1779,6 +1785,7 @@ function createOwnedWorkspace(
     added_at: now,
     model: runtimeConfig.model ?? undefined,
     thinking_effort: runtimeConfig.thinking_effort ?? undefined,
+    model_backend_variant: runtimeConfig.model_backend_variant ?? undefined,
     context_compression: runtimeConfig.context_compression,
   };
   registerGroup(jid, group);
