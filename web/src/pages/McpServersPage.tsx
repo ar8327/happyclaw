@@ -100,7 +100,7 @@ export function McpServersPage() {
 
         {/* Sync message toast */}
         {syncMessage && (
-          <div className="mx-6 mt-4 p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-700">
+          <div className="mx-6 mt-4 p-3 bg-success-bg border border-success-border rounded-lg text-sm text-success">
             {syncMessage}
           </div>
         )}
@@ -121,8 +121,8 @@ export function McpServersPage() {
               {loading && servers.length === 0 ? (
                 <SkeletonCardList count={3} />
               ) : error ? (
-                <div className="bg-card rounded-xl border border-red-200 p-6 text-center">
-                  <p className="text-red-600">{error}</p>
+                <div className="bg-card rounded-xl border border-error-border p-6 text-center">
+                  <p className="text-error">{error}</p>
                 </div>
               ) : filtered.length === 0 ? (
                 <EmptyState

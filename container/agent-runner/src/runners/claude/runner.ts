@@ -9,6 +9,7 @@ import type {
   ActivityReport,
   IpcCapabilities,
   NormalizedMessage,
+  PushMessageResult,
   QueryConfig,
   RuntimePersistenceSnapshot,
   UsageInfo,
@@ -474,6 +475,7 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
       allowedTools.join(','),
       '--agents',
       JSON.stringify(PREDEFINED_AGENTS),
+      '--replay-user-messages',
       '--append-system-prompt',
       query.systemPrompt,
       '--permission-mode',
@@ -532,7 +534,31 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
           content: prepared.prompt,
         },
       })}\n`,
-      endStdin: true,
+      // Keep stdin open during the active query so follow-up user messages
+      // can be pushed. BaseCliRunner closes stdin at the result boundary.
+      endStdin: false,
+    };
+  }
+
+  preparePushedMessage(
+    text: string,
+    images?: Array<{ data: string; mimeType?: string }>,
+  ): { line: string; warnings: string[] } {
+    const prepared = prepareClaudePromptWithImages(
+      text,
+      images,
+      this.imagesDir,
+      this.opts.log,
+    );
+    return {
+      line: `${JSON.stringify({
+        type: 'user',
+        message: {
+          role: 'user',
+          content: prepared.prompt,
+        },
+      })}\n`,
+      warnings: prepared.rejected,
     };
   }
 
@@ -821,7 +847,7 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
 
 export class ClaudeRunner extends BaseCliRunner {
   readonly ipcCapabilities: IpcCapabilities = {
-    supportsMidQueryPush: false,
+    supportsMidQueryPush: true,
     supportsRuntimeModeSwitch: false,
   };
 
@@ -836,8 +862,22 @@ export class ClaudeRunner extends BaseCliRunner {
     this.adapter = new ClaudeCliAdapter(opts, this.tmpDir);
   }
 
-  pushMessage(): string[] {
-    return ['当前 Claude runner 已降级为单 turn 进程，不支持运行中追加消息'];
+  async pushMessage(
+    text: string,
+    images?: Array<{ data: string; mimeType?: string }>,
+  ): Promise<PushMessageResult> {
+    const prepared = this.adapter.preparePushedMessage(text, images);
+    const written = await this.writeStdinLine(prepared.line);
+    if (!written) {
+      return {
+        status: 'buffer',
+        reason: 'Claude CLI stdin 不可写（活跃 turn 可能刚刚结束）',
+      };
+    }
+    return {
+      status: 'accepted',
+      ...(prepared.warnings.length > 0 ? { warnings: prepared.warnings } : {}),
+    };
   }
 
   getRuntimePersistenceSnapshot(): RuntimePersistenceSnapshot {

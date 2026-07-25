@@ -13,6 +13,7 @@ import { isCodexSessionResumeFailedError } from '../src/runners/codex/runner.js'
 import { convertThreadEvent } from '../src/runners/codex/event-adapter.js';
 import { evaluateSafetyLite } from '../src/runners/claude/hooks.js';
 import { readMcpServersFromCodexToml } from '../src/mcp-config-loader.js';
+import { buildIpcAckStreamEvent } from '../src/ipc-handler.js';
 import {
   evaluateRunnerAuthProbe,
   modelsForDescriptor,
@@ -281,9 +282,9 @@ function assertRuntimeProfileInjectionContract(): void {
   }
 }
 
-function assertClaudeRunnerIsOneShotCli(): void {
+function assertClaudeRunnerSupportsTurnSteering(): void {
   const descriptor = RUNNER_DESCRIPTORS.claude;
-  assert.equal(descriptor.capabilities.midQueryPush, false);
+  assert.equal(descriptor.capabilities.midQueryPush, true);
   assert.equal(descriptor.capabilities.interrupt, 'weak');
   assert.equal(descriptor.capabilities.sessionResume, 'weak');
   assert.equal(descriptor.lifecycle.turnBoundary, 'simulated');
@@ -300,8 +301,11 @@ function assertClaudeRunnerIsOneShotCli(): void {
     'utf-8',
   );
   assert.equal(claudeRunner.includes('extends BaseCliRunner'), true);
-  assert.equal(claudeRunner.includes('supportsMidQueryPush: false'), true);
+  assert.equal(claudeRunner.includes('supportsMidQueryPush: true'), true);
   assert.equal(claudeRunner.includes('stream-json'), true);
+  assert.equal(claudeRunner.includes('--replay-user-messages'), true);
+  assert.equal(claudeRunner.includes('endStdin: false'), true);
+  assert.equal(claudeRunner.includes('writeStdinLine'), true);
   assert.equal(claudeRunner.includes('--resume'), true);
   assert.equal(claudeRunner.includes('isSessionResumeFailedError'), true);
   assert.equal(
@@ -610,6 +614,32 @@ function assertMemoryRouteUsesDynamicRunnerModels(): void {
   assert.equal(memoryRoute.includes('models: descriptor.models || []'), false);
 }
 
+function assertIpcDeliveryAcknowledgement(): void {
+  const acknowledgement = buildIpcAckStreamEvent(
+    'session-1',
+    [
+      {
+        text: 'first',
+        deliveryIds: ['delivery-1'],
+        ackTargets: ['feishu:chat-1'],
+      },
+      {
+        text: 'second',
+        deliveryIds: ['delivery-2', 'delivery-1'],
+        ackTargets: ['feishu:chat-1'],
+      },
+    ],
+    'ipc_message_delivered',
+  );
+  assert.equal(acknowledgement.statusText, 'ipc_message_delivered');
+  assert.deepEqual(acknowledgement.ipcDeliveryIds, [
+    'delivery-1',
+    'delivery-2',
+  ]);
+  assert.deepEqual(acknowledgement.ipcAckTargets, ['feishu:chat-1']);
+  assert.equal(acknowledgement.ipcAckMessageCount, 2);
+}
+
 async function assertFakeRunnerContract(): Promise<void> {
   const { messages, result } = await collectRun();
   const eventTypes = messages
@@ -667,7 +697,7 @@ assertProviderStateOpaque();
 assertBackendRunnerChecksAreDescriptorDriven();
 assertLegacyProviderSettingsSurfaceRemoved();
 assertRuntimeProfileInjectionContract();
-assertClaudeRunnerIsOneShotCli();
+assertClaudeRunnerSupportsTurnSteering();
 assertClaudeSafetyLite();
 assertCodexEventDetail();
 assertRemediationWiring();
@@ -677,6 +707,7 @@ assertInvokeAgentIsRegistryDriven();
 assertDescriptorAuthProbeWorks();
 assertCodexModelCacheCatalogWorks();
 assertMemoryRouteUsesDynamicRunnerModels();
+assertIpcDeliveryAcknowledgement();
 await assertFakeRunnerContract();
 await assertBaseCliRunnerRecoverableError();
 await assertBaseCliRunnerGenericError();

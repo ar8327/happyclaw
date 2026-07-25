@@ -1,4 +1,5 @@
 import { ChildProcess } from 'child_process';
+import { randomUUID } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
@@ -29,6 +30,13 @@ interface QueuedTask {
 
 const MAX_RETRIES = 5;
 const BASE_RETRY_MS = 5000;
+let ipcMessageSequence = 0;
+
+export interface IpcInjection {
+  ipcFilePath: string;
+  deliveryId: string;
+  groupFolder: string;
+}
 
 interface GroupState {
   active: boolean;
@@ -185,6 +193,15 @@ export class SessionRuntimeQueue {
     return state?.active === true;
   }
 
+  hasActiveRuntimeForFolder(folder: string): boolean {
+    for (const [jid, state] of this.groups) {
+      if (!state.active) continue;
+      const stateFolder = state.groupFolder || this.getSerializationKey(jid);
+      if (stateFolder === folder) return true;
+    }
+    return false;
+  }
+
   enqueueMessageCheck(groupJid: string): void {
     if (this.shuttingDown) return;
 
@@ -322,14 +339,15 @@ export class SessionRuntimeQueue {
    * - 'sent': message written to IPC (continue intent)
    * - 'no_active': no active container/process for this group
    * - 'interrupted_stop': stop intent detected, query interrupted, message NOT written
-   * - 'interrupted_correction': correction intent detected, query interrupted, message written
+   * - 'interrupted_correction': retained for compatibility; new corrections
+   *   are delivered through IPC and only non-steering runners interrupt locally
    */
   sendMessage(
     groupJid: string,
     text: string,
     images?: Array<{ data: string; mimeType?: string }>,
     intent: MessageIntent = 'continue',
-    onInjected?: (ipcFilePath: string) => void,
+    onInjected?: (injection: IpcInjection) => void,
   ): SendMessageResult {
     const state = this.resolveActiveState(groupJid);
     if (!state) return 'no_active';
@@ -350,19 +368,12 @@ export class SessionRuntimeQueue {
       return 'interrupted_stop';
     }
 
-    if (intent === 'correction') {
-      this.interruptQuery(groupJid);
-      logger.info(
-        { groupJid, intent },
-        'Correction intent detected, interrupting query and writing IPC message',
-      );
-      // Fall through to write the IPC message so the agent sees the correction after restart
-    }
-
     const inputDir = this.resolveIpcInputDir(state);
     try {
       fs.mkdirSync(inputDir, { recursive: true });
-      const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
+      const deliveryId = randomUUID();
+      const sequence = String(ipcMessageSequence++).padStart(8, '0');
+      const filename = `${Date.now()}-${sequence}-${deliveryId}.json`;
       const filepath = path.join(inputDir, filename);
       const tempPath = `${filepath}.tmp`;
       fs.writeFileSync(
@@ -371,14 +382,20 @@ export class SessionRuntimeQueue {
           type: 'message',
           text,
           images,
+          intent,
+          deliveryId,
           ackTargets: [groupJid],
           ackSourceChannels: extractSourceChannels(text),
         }),
       );
       fs.renameSync(tempPath, filepath);
       state.busy = true;
-      onInjected?.(filepath);
-      return intent === 'correction' ? 'interrupted_correction' : 'sent';
+      onInjected?.({
+        ipcFilePath: filepath,
+        deliveryId,
+        groupFolder: state.groupFolder,
+      });
+      return 'sent';
     } catch {
       return 'no_active';
     }
@@ -838,10 +855,12 @@ export class SessionRuntimeQueue {
     const activeRunner = this.findActiveRunnerFor(groupJid);
     if (activeRunner && activeRunner !== groupJid) {
       this.waitingGroups.add(groupJid);
+      this.drainWaiting();
       return;
     }
     if (!this.hasCapacityFor(groupJid)) {
       this.waitingGroups.add(groupJid);
+      this.drainWaiting();
       return;
     }
 

@@ -7,6 +7,7 @@ import { TelegramChannelCard } from './TelegramChannelCard';
 import { QQChannelCard } from './QQChannelCard';
 import { ImGeneralCard } from './ImGeneralCard';
 import { WeChatChannelCard } from './WeChatChannelCard';
+import { FailedDeliveriesCard } from './FailedDeliveriesCard';
 
 interface UserIMPreferences {
   autoCreateWorkspaceForGroups?: boolean;
@@ -15,7 +16,10 @@ interface UserIMPreferences {
 
 interface UserChannelsSectionProps extends SettingsNotification {}
 
-export function UserChannelsSection({ setNotice, setError }: UserChannelsSectionProps) {
+export function UserChannelsSection({
+  setNotice,
+  setError,
+}: UserChannelsSectionProps) {
   const [autoCreate, setAutoCreate] = useState(false);
   const [loading, setLoading] = useState(true);
 
@@ -57,18 +61,20 @@ export function UserChannelsSection({ setNotice, setError }: UserChannelsSection
 
   return (
     <div className="space-y-6">
-      <p className="text-sm text-slate-500 bg-slate-50 rounded-lg px-4 py-3">
-        这里管理这台工作台的全局 IM 渠道。接入后，消息会按当前绑定规则进入主会话或独立会话。
+      <p className="text-sm text-muted-foreground bg-surface rounded-lg px-4 py-3">
+        这里管理这台工作台的全局 IM
+        渠道。接入后，消息会按当前绑定规则进入主会话或独立会话。
       </p>
 
-      <div className="bg-white border border-slate-200 rounded-lg p-4 space-y-4">
+      <div className="bg-card border border-border rounded-lg p-4 space-y-4">
         <div className="flex items-center justify-between gap-4">
           <div className="flex-1">
             <label className="block text-sm font-medium text-foreground">
               为 IM 群聊自动创建独立会话
             </label>
             <p className="text-xs text-muted-foreground mt-0.5">
-              开启后，新加入的 IM 群聊将自动创建独立会话并绑定，而非共用主会话。私聊不受影响。
+              开启后，新加入的 IM
+              群聊将自动创建独立会话并绑定，而非共用主会话。私聊不受影响。
             </p>
           </div>
           {!loading && (
@@ -81,7 +87,7 @@ export function UserChannelsSection({ setNotice, setError }: UserChannelsSection
         </div>
 
         {autoCreate && (
-          <div className="pt-2 border-t border-slate-100">
+          <div className="pt-2 border-t border-border-subtle">
             <p className="text-sm text-muted-foreground">
               新自动创建的会话会固定使用本地 Runtime。
             </p>
@@ -94,6 +100,7 @@ export function UserChannelsSection({ setNotice, setError }: UserChannelsSection
       <QQChannelCard setNotice={setNotice} setError={setError} />
       <WeChatChannelCard setNotice={setNotice} setError={setError} />
       <ImGeneralCard setNotice={setNotice} setError={setError} />
+      <FailedDeliveriesCard setNotice={setNotice} setError={setError} />
     </div>
   );
 }

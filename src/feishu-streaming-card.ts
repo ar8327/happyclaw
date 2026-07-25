@@ -1,16 +1,21 @@
 /**
- * Feishu Streaming Card Controller
+ * Feishu CardKit streaming reply controller.
  *
- * Implements CardKit 2.0 streaming cards with typing-machine effect.
- * Uses im.message.patch API to update card content in real-time.
- *
- * Rate limiting: Feishu patch API has ~1000ms minimum interval.
- * Text change threshold: skip patches if delta < 50 chars (reduce noise).
+ * CardKit receives cumulative content and computes its own delta. Every
+ * CardKit mutation is serialized and uses one strictly increasing sequence.
+ * If CardKit is unavailable, the controller falls back to the JSON 2.0
+ * whole-card patch path so callers still get a usable reply.
  */
 import * as lark from '@larksuiteoapi/node-sdk';
+import { randomUUID } from 'node:crypto';
 import { logger } from './logger.js';
-
-// ─── Types ────────────────────────────────────────────────────
+import {
+  buildCardKitStreamingCard,
+  buildStaticReplyCard,
+  STREAMING_CONTENT_ELEMENT_ID,
+  STREAMING_PRINT_FREQUENCY_MS,
+  STREAMING_PRINT_STEP,
+} from './feishu-card-builder.js';
 
 type StreamingState =
   | 'idle'
@@ -21,490 +26,403 @@ type StreamingState =
   | 'error';
 
 export interface StreamingCardOptions {
-  /** Lark SDK client instance */
   client: lark.Client;
-  /** Chat ID to send the card to */
   chatId: string;
-  /** Reply to this message ID (optional) */
   replyToMsgId?: string;
-  /** Called when the card is created or streaming fails */
+  threadId?: string;
+  idempotencyKey?: string;
+  /** Force the whole-card JSON 2.0 patch transport. */
+  cardKit?: boolean;
   onFallback?: () => void;
 }
 
-// ─── Card Template Builders ───────────────────────────────────
-
-const CARD_MD_LIMIT = 4000;
-
-function splitAtParagraphs(text: string, maxLen: number): string[] {
-  if (text.length <= maxLen) return [text];
-  const chunks: string[] = [];
-  let remaining = text;
-  while (remaining.length > maxLen) {
-    let idx = remaining.lastIndexOf('\n\n', maxLen);
-    if (idx < maxLen * 0.3) idx = remaining.lastIndexOf('\n', maxLen);
-    if (idx < maxLen * 0.3) idx = maxLen;
-    chunks.push(remaining.slice(0, idx).trim());
-    remaining = remaining.slice(idx).trim();
-  }
-  if (remaining) chunks.push(remaining);
-  return chunks;
+interface CardKitResponse {
+  code?: number;
+  msg?: string;
+  data?: { card_id?: string; message_id?: string };
 }
 
-function buildStreamingCard(
-  text: string,
-  state: 'streaming' | 'completed' | 'aborted',
-): object {
-  const lines = text.split('\n');
-  let title = '';
-  let bodyStartIdx = 0;
+const STREAM_RENEW_MS = 100_000;
 
-  for (let i = 0; i < lines.length; i++) {
-    if (!lines[i].trim()) continue;
-    if (/^#{1,3}\s+/.test(lines[i])) {
-      title = lines[i].replace(/^#+\s*/, '').trim();
-      bodyStartIdx = i + 1;
-    }
-    break;
-  }
-
-  const body = lines.slice(bodyStartIdx).join('\n').trim();
-
-  if (!title) {
-    const firstLine = (lines.find((l) => l.trim()) || '')
-      .replace(/[*_`#\[\]]/g, '')
-      .trim();
-    title =
-      firstLine.length > 40
-        ? firstLine.slice(0, 37) + '...'
-        : firstLine || 'Reply';
-  }
-
-  // Build card elements
-  const elements: Array<Record<string, unknown>> = [];
-  const contentToRender = body || text.trim();
-
-  if (contentToRender.length > CARD_MD_LIMIT) {
-    const chunks = splitAtParagraphs(contentToRender, CARD_MD_LIMIT);
-    for (const chunk of chunks) {
-      elements.push({ tag: 'markdown', content: chunk });
-    }
-  } else if (contentToRender) {
-    const sections = contentToRender.split(/\n-{3,}\n/);
-    for (let i = 0; i < sections.length; i++) {
-      if (i > 0) elements.push({ tag: 'hr' });
-      const s = sections[i].trim();
-      if (s) elements.push({ tag: 'markdown', content: s });
-    }
-  }
-
-  if (elements.length === 0) {
-    elements.push({ tag: 'markdown', content: text.trim() || '...' });
-  }
-
-  // Status note
-  const noteMap = {
-    streaming: '⏳ 生成中...',
-    completed: '',
-    aborted: '⚠️ 已中断',
-  };
-  const headerTemplate = {
-    streaming: 'wathet',
-    completed: 'indigo',
-    aborted: 'orange',
-  };
-
-  if (noteMap[state]) {
-    elements.push({
-      tag: 'note',
-      elements: [{ tag: 'plain_text', content: noteMap[state] }],
-    });
-  }
-
-  return {
-    config: { wide_screen_mode: true },
-    header: {
-      title: { tag: 'plain_text', content: title },
-      template: headerTemplate[state],
-    },
-    elements,
-  };
+function mergeCumulativeText(previous: string, next: string): string {
+  if (!next) return previous;
+  if (!previous || next === previous || next.startsWith(previous)) return next;
+  if (previous.startsWith(next)) return previous;
+  return `${previous}${next}`;
 }
 
-// ─── Flush Controller ─────────────────────────────────────────
-
-class FlushController {
-  private timer: ReturnType<typeof setTimeout> | null = null;
-  private lastFlushTime = 0;
-  private lastFlushedLength = 0;
-  private pendingFlush: (() => Promise<void>) | null = null;
-
-  /** Minimum interval between flushes (ms) */
-  private readonly minInterval: number;
-  /** Minimum text change to trigger a flush (chars) */
-  private readonly minDelta: number;
-
-  constructor(minInterval = 1200, minDelta = 50) {
-    this.minInterval = minInterval;
-    this.minDelta = minDelta;
-  }
-
-  /**
-   * Schedule a flush. If a flush is already pending, replace it.
-   * The flush function will be called after the minimum interval.
-   */
-  schedule(currentLength: number, flushFn: () => Promise<void>): void {
-    // Check text change threshold
-    if (currentLength - this.lastFlushedLength < this.minDelta) {
-      // Still schedule in case no more text comes (ensure eventual flush)
-      if (!this.timer) {
-        this.pendingFlush = flushFn;
-        this.timer = setTimeout(() => {
-          this.timer = null;
-          this.executeFlush();
-        }, this.minInterval);
-      } else {
-        this.pendingFlush = flushFn;
-      }
-      return;
-    }
-
-    // Enough text change — schedule or execute
-    this.pendingFlush = flushFn;
-    const elapsed = Date.now() - this.lastFlushTime;
-    if (elapsed >= this.minInterval) {
-      // Can flush immediately
-      this.clearTimer();
-      this.executeFlush();
-    } else if (!this.timer) {
-      // Schedule for remaining interval
-      this.timer = setTimeout(() => {
-        this.timer = null;
-        this.executeFlush();
-      }, this.minInterval - elapsed);
-    }
-    // else: timer already running, will pick up pendingFlush
-  }
-
-  /** Force flush immediately (for complete/abort) */
-  async forceFlush(flushFn: () => Promise<void>): Promise<void> {
-    this.clearTimer();
-    this.pendingFlush = flushFn;
-    await this.executeFlush();
-  }
-
-  private async executeFlush(): Promise<void> {
-    const fn = this.pendingFlush;
-    this.pendingFlush = null;
-    if (!fn) return;
-    this.lastFlushTime = Date.now();
-    try {
-      await fn();
-    } catch (err) {
-      logger.debug({ err }, 'FlushController: flush failed');
-    }
-  }
-
-  markFlushed(length: number): void {
-    this.lastFlushedLength = length;
-  }
-
-  private clearTimer(): void {
-    if (this.timer) {
-      clearTimeout(this.timer);
-      this.timer = null;
-    }
-  }
-
-  dispose(): void {
-    this.clearTimer();
-    this.pendingFlush = null;
+function assertLarkSuccess(response: CardKitResponse, operation: string): void {
+  if (typeof response.code === 'number' && response.code !== 0) {
+    throw new Error(
+      `${operation} failed (${response.code}): ${response.msg || 'unknown error'}`,
+    );
   }
 }
 
-// ─── Streaming Card Controller ────────────────────────────────
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export class StreamingCardController {
   private state: StreamingState = 'idle';
+  private cardId: string | null = null;
   private messageId: string | null = null;
   private accumulatedText = '';
-  private flushCtrl: FlushController;
-  private patchFailCount = 0;
-  private readonly maxPatchFailures = 2;
+  private sequence = 0;
+  private operationQueue: Promise<void> = Promise.resolve();
+  private renewalTimer: ReturnType<typeof setTimeout> | null = null;
+  private legacyPatch = false;
+  private fallbackNotified = false;
+
   private readonly client: lark.Client;
   private readonly chatId: string;
   private readonly replyToMsgId?: string;
+  private readonly threadId?: string;
+  private readonly idempotencyKey?: string;
+  private readonly cardKit: boolean;
   private readonly onFallback?: () => void;
 
   constructor(opts: StreamingCardOptions) {
     this.client = opts.client;
     this.chatId = opts.chatId;
     this.replyToMsgId = opts.replyToMsgId;
+    this.threadId = opts.threadId;
+    this.idempotencyKey = opts.idempotencyKey;
+    this.cardKit = opts.cardKit !== false;
+    this.legacyPatch = !this.cardKit;
     this.onFallback = opts.onFallback;
-    this.flushCtrl = new FlushController();
   }
 
   get currentState(): StreamingState {
     return this.state;
   }
 
+  get externalMessageId(): string | undefined {
+    return this.messageId || undefined;
+  }
+
   isActive(): boolean {
     return this.state === 'streaming' || this.state === 'creating';
   }
 
-  /**
-   * Append text to the streaming card.
-   * Creates the card on first call, then patches on subsequent calls.
-   */
   append(text: string): void {
-    this.accumulatedText = text;
-
-    if (this.state === 'idle') {
-      this.state = 'creating';
-      this.createInitialCard().catch((err) => {
-        logger.warn(
-          { err, chatId: this.chatId },
-          'Streaming card: initial create failed, will use fallback',
-        );
-        this.state = 'error';
-        this.onFallback?.();
-      });
+    if (
+      this.state === 'completed' ||
+      this.state === 'aborted' ||
+      this.state === 'error'
+    ) {
       return;
     }
-
-    if (this.state === 'streaming') {
-      this.schedulePatch();
-    }
-    // If 'creating', the text will be picked up after creation completes
+    this.accumulatedText = mergeCumulativeText(this.accumulatedText, text);
+    void this.enqueue(async () => {
+      await this.ensureCreated();
+      await this.updateContent('streaming');
+    }).catch((err) => this.fail(err));
   }
 
   /**
-   * Complete the streaming card with final text.
+   * Publish final cumulative text, let native typewriter rendering catch up,
+   * then close streaming mode. The wait is capped below CardKit's 120s lease;
+   * a 100s close/reopen renewal covers exceptionally long content.
    */
-  async complete(finalText: string): Promise<void> {
-    if (this.state !== 'streaming' && this.state !== 'creating') return;
-
+  async complete(finalText: string): Promise<string | undefined> {
+    if (this.state === 'completed') return this.externalMessageId;
+    if (this.state === 'aborted') return this.externalMessageId;
     this.accumulatedText = finalText;
-    this.state = 'completed';
-    this.flushCtrl.dispose();
 
-    if (this.messageId) {
+    await this.enqueue(async () => {
+      await this.ensureCreated();
       try {
-        await this.patchCard('completed');
+        await this.updateContent('streaming');
       } catch (err) {
-        logger.debug(
+        // The initial card entity already contains finalText. A failed
+        // incremental refresh must not make the durable outbox resend the
+        // successfully-created IM message.
+        logger.warn(
           { err, chatId: this.chatId },
-          'Streaming card: final patch failed',
+          'Streaming card content refresh failed; initial content is still visible',
         );
       }
+    });
+
+    if (!this.legacyPatch) {
+      const estimatedPrintMs = Math.ceil(
+        (Math.max(1, finalText.length) / STREAMING_PRINT_STEP) *
+          STREAMING_PRINT_FREQUENCY_MS,
+      );
+      await wait(Math.min(110_000, Math.max(600, estimatedPrintMs + 250)));
     }
+
+    await this.enqueue(async () => {
+      try {
+        if (this.legacyPatch) {
+          await this.patchLegacyCard('completed');
+        } else {
+          await this.setStreamingMode(false);
+        }
+      } catch (err) {
+        logger.warn(
+          { err, chatId: this.chatId },
+          'Streaming card finalization failed after visible delivery',
+        );
+      }
+      this.state = 'completed';
+      this.clearRenewalTimer();
+    });
+    return this.externalMessageId;
   }
 
-  /**
-   * Abort the streaming card (e.g., user interrupted).
-   */
   async abort(reason?: string): Promise<void> {
     if (this.state === 'completed' || this.state === 'aborted') return;
-
-    const wasActive = this.isActive();
-    this.state = 'aborted';
-    this.flushCtrl.dispose();
-
-    if (this.messageId && wasActive) {
-      if (reason) {
-        this.accumulatedText += `\n\n---\n*${reason}*`;
-      }
-      try {
-        await this.patchCard('aborted');
-      } catch (err) {
-        logger.debug(
-          { err, chatId: this.chatId },
-          'Streaming card: abort patch failed',
-        );
-      }
+    if (reason) {
+      this.accumulatedText = `${this.accumulatedText}${this.accumulatedText ? '\n\n' : ''}*${reason}*`;
     }
+
+    await this.enqueue(async () => {
+      if (this.state === 'idle' && !this.accumulatedText) {
+        this.state = 'aborted';
+        return;
+      }
+      await this.ensureCreated();
+      if (this.legacyPatch) {
+        await this.patchLegacyCard('aborted');
+      } else {
+        await this.updateCardKitContent();
+        await this.setStreamingMode(false);
+      }
+      this.state = 'aborted';
+      this.clearRenewalTimer();
+    }).catch((err) => this.fail(err));
   }
 
   dispose(): void {
-    this.flushCtrl.dispose();
+    this.clearRenewalTimer();
   }
 
-  // ─── Internal Methods ──────────────────────────────────
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.operationQueue.then(operation, operation);
+    this.operationQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
 
-  private async createInitialCard(): Promise<void> {
-    const card = buildStreamingCard(this.accumulatedText || '...', 'streaming');
-    const content = JSON.stringify(card);
+  private nextSequence(): number {
+    this.sequence += 1;
+    return this.sequence;
+  }
 
-    try {
-      let resp: any;
+  private async ensureCreated(): Promise<void> {
+    if (this.messageId) return;
+    this.state = 'creating';
 
-      if (this.replyToMsgId) {
-        resp = await this.client.im.message.reply({
-          path: { message_id: this.replyToMsgId },
-          data: { content, msg_type: 'interactive' },
-        });
-      } else {
-        resp = await this.client.im.v1.message.create({
-          params: { receive_id_type: 'chat_id' },
-          data: {
-            receive_id: this.chatId,
-            msg_type: 'interactive',
-            content,
-          },
-        });
-      }
-
-      this.messageId = resp?.data?.message_id || null;
-      if (!this.messageId) {
-        throw new Error('No message_id in response');
-      }
-
-      // Check if state changed while we were awaiting the API call.
-      // complete() or abort() may have been called during createInitialCard().
-      if (this.state !== 'creating') {
-        // Apply the pending final state now that we have a messageId.
-        const finalState = this.state as 'completed' | 'aborted';
-        logger.debug(
-          { chatId: this.chatId, messageId: this.messageId, finalState },
-          'Streaming card created but state already changed, patching to final',
-        );
-        try {
-          await this.patchCard(finalState);
-        } catch (err) {
-          logger.debug(
-            { err, chatId: this.chatId },
-            'Failed to patch to final state after late creation',
-          );
-        }
+    if (!this.legacyPatch) {
+      try {
+        await this.createCardKitMessage();
+        this.state = 'streaming';
+        this.scheduleRenewal();
         return;
+      } catch (err) {
+        logger.warn(
+          { err, chatId: this.chatId },
+          'CardKit create failed, falling back to whole-card patch transport',
+        );
+        this.legacyPatch = true;
+        if (!this.fallbackNotified) {
+          this.fallbackNotified = true;
+          this.onFallback?.();
+        }
       }
+    }
 
-      this.state = 'streaming';
-      logger.debug(
-        { chatId: this.chatId, messageId: this.messageId },
-        'Streaming card created',
-      );
+    await this.createLegacyMessage();
+    this.state = 'streaming';
+  }
 
-      // If text accumulated while creating, schedule a patch
-      if (this.accumulatedText.length > 3) {
-        this.schedulePatch();
-      }
-    } catch (err) {
-      this.state = 'error';
-      throw err;
+  private async createCardKitMessage(): Promise<void> {
+    const card = buildCardKitStreamingCard(
+      this.accumulatedText.trim() || '...',
+    );
+    const created = (await this.client.cardkit.v1.card.create({
+      data: {
+        type: 'card_json',
+        data: JSON.stringify(card),
+      },
+    })) as CardKitResponse;
+    assertLarkSuccess(created, 'cardkit.card.create');
+    this.cardId = created.data?.card_id || null;
+    if (!this.cardId) throw new Error('CardKit create returned no card_id');
+
+    const content = JSON.stringify({
+      type: 'card',
+      data: { card_id: this.cardId },
+    });
+    const sent = await this.sendInteractiveContent(content);
+    this.messageId = sent?.data?.message_id || null;
+    if (!this.messageId) {
+      throw new Error('Sending CardKit card returned no message_id');
     }
   }
 
-  private schedulePatch(): void {
-    if (this.patchFailCount >= this.maxPatchFailures) {
-      // Too many failures, fall back to static card
-      logger.info(
-        { chatId: this.chatId },
-        'Streaming card: too many patch failures, falling back',
-      );
-      this.state = 'error';
-      this.flushCtrl.dispose();
-      this.onFallback?.();
-      return;
+  private async createLegacyMessage(): Promise<void> {
+    const content = JSON.stringify(
+      buildStaticReplyCard(this.accumulatedText || '...', 'streaming'),
+    );
+    const sent = await this.sendInteractiveContent(content);
+    this.messageId = sent?.data?.message_id || null;
+    if (!this.messageId) {
+      throw new Error('Sending fallback card returned no message_id');
     }
+  }
 
-    this.flushCtrl.schedule(this.accumulatedText.length, async () => {
-      await this.patchCard('streaming');
+  private sendInteractiveContent(content: string): Promise<any> {
+    if (this.replyToMsgId) {
+      return this.client.im.message.reply({
+        path: { message_id: this.replyToMsgId },
+        data: {
+          content,
+          msg_type: 'interactive',
+          uuid: this.idempotencyKey,
+          reply_in_thread: Boolean(this.threadId),
+        },
+      });
+    }
+    return this.client.im.v1.message.create({
+      params: { receive_id_type: 'chat_id' },
+      data: {
+        receive_id: this.chatId,
+        msg_type: 'interactive',
+        content,
+        uuid: this.idempotencyKey,
+      },
     });
   }
 
-  private async patchCard(
-    displayState: 'streaming' | 'completed' | 'aborted',
+  private async updateContent(
+    state: 'streaming' | 'completed' | 'aborted',
+  ): Promise<void> {
+    if (this.legacyPatch) {
+      await this.patchLegacyCard(state);
+      return;
+    }
+    await this.updateCardKitContent();
+  }
+
+  private async updateCardKitContent(): Promise<void> {
+    if (!this.cardId) return;
+    const sequence = this.nextSequence();
+    const response = (await this.client.cardkit.v1.cardElement.content({
+      path: {
+        card_id: this.cardId,
+        element_id: STREAMING_CONTENT_ELEMENT_ID,
+      },
+      data: {
+        // CardKit expects the full cumulative content and derives the delta.
+        content: this.accumulatedText || '...',
+        sequence,
+        uuid: randomUUID(),
+      },
+    })) as CardKitResponse;
+    assertLarkSuccess(response, 'cardkit.cardElement.content');
+  }
+
+  private async setStreamingMode(enabled: boolean): Promise<void> {
+    if (!this.cardId) return;
+    const sequence = this.nextSequence();
+    const response = (await this.client.cardkit.v1.card.settings({
+      path: { card_id: this.cardId },
+      data: {
+        settings: JSON.stringify({ streaming_mode: enabled }),
+        sequence,
+        uuid: randomUUID(),
+      },
+    })) as CardKitResponse;
+    assertLarkSuccess(response, 'cardkit.card.settings');
+  }
+
+  private async patchLegacyCard(
+    state: 'streaming' | 'completed' | 'aborted',
   ): Promise<void> {
     if (!this.messageId) return;
+    await this.client.im.v1.message.patch({
+      path: { message_id: this.messageId },
+      data: {
+        content: JSON.stringify(
+          buildStaticReplyCard(this.accumulatedText, state),
+        ),
+      },
+    });
+  }
 
-    const card = buildStreamingCard(this.accumulatedText, displayState);
-    const content = JSON.stringify(card);
+  private scheduleRenewal(): void {
+    this.clearRenewalTimer();
+    this.renewalTimer = setTimeout(() => {
+      if (this.state !== 'streaming' || this.legacyPatch) return;
+      void this.enqueue(async () => {
+        // CardKit streaming leases are about 120 seconds. Close and reopen
+        // before expiry using the same global sequence to continue safely.
+        await this.setStreamingMode(false);
+        await this.setStreamingMode(true);
+        this.scheduleRenewal();
+      }).catch((err) => this.fail(err));
+    }, STREAM_RENEW_MS);
+    this.renewalTimer.unref?.();
+  }
 
-    try {
-      await this.client.im.v1.message.patch({
-        path: { message_id: this.messageId },
-        data: { content },
-      });
-      this.flushCtrl.markFlushed(this.accumulatedText.length);
-      this.patchFailCount = 0; // Reset on success
-    } catch (err) {
-      this.patchFailCount++;
-      logger.debug(
-        { err, chatId: this.chatId, failCount: this.patchFailCount },
-        'Streaming card patch failed',
-      );
-      throw err;
+  private clearRenewalTimer(): void {
+    if (this.renewalTimer) {
+      clearTimeout(this.renewalTimer);
+      this.renewalTimer = null;
     }
+  }
+
+  private fail(error: unknown): void {
+    this.clearRenewalTimer();
+    this.state = 'error';
+    logger.warn({ error, chatId: this.chatId }, 'Streaming card failed');
   }
 }
 
-// ─── Streaming Session Registry ───────────────────────────────
-// Global registry for tracking active streaming sessions.
-// Used by shutdown hooks to abort all active sessions.
-
 const activeSessions = new Map<string, StreamingCardController>();
 
-/**
- * Register a streaming session for a chatJid.
- * Replaces any existing session for the same chatJid.
- */
 export function registerStreamingSession(
   chatJid: string,
   session: StreamingCardController,
 ): void {
   const existing = activeSessions.get(chatJid);
-  if (existing && existing.isActive()) {
-    // Abort (not just dispose) so the old card shows "已中断" instead of stuck "生成中..."
-    existing.abort('新的回复已开始').catch(() => {});
+  if (existing?.isActive()) {
+    void existing.abort('新的回复已开始');
   }
   activeSessions.set(chatJid, session);
 }
 
-/**
- * Remove a streaming session from the registry.
- */
 export function unregisterStreamingSession(chatJid: string): void {
   activeSessions.delete(chatJid);
 }
 
-/**
- * Get the active streaming session for a chatJid.
- */
 export function getStreamingSession(
   chatJid: string,
 ): StreamingCardController | undefined {
   return activeSessions.get(chatJid);
 }
 
-/**
- * Check if there's an active streaming session for a chatJid.
- */
 export function hasActiveStreamingSession(chatJid: string): boolean {
-  const session = activeSessions.get(chatJid);
-  return session?.isActive() ?? false;
+  return activeSessions.get(chatJid)?.isActive() ?? false;
 }
 
-/**
- * Abort all active streaming sessions.
- * Called during graceful shutdown.
- */
 export async function abortAllStreamingSessions(
   reason = '服务维护中',
 ): Promise<void> {
-  const promises: Promise<void>[] = [];
-  for (const [chatJid, session] of activeSessions.entries()) {
-    if (session.isActive()) {
-      promises.push(
-        session.abort(reason).catch((err) => {
-          logger.debug(
-            { err, chatJid },
-            'Failed to abort streaming session during shutdown',
-          );
-        }),
-      );
-    }
-  }
-  await Promise.allSettled(promises);
+  const pending = Array.from(activeSessions.entries()).map(
+    async ([chatJid, session]) => {
+      try {
+        await session.abort(reason);
+      } catch (err) {
+        logger.debug({ err, chatJid }, 'Failed to abort streaming card');
+      }
+    },
+  );
+  await Promise.allSettled(pending);
   activeSessions.clear();
-  logger.info({ count: promises.length }, 'All streaming sessions aborted');
 }

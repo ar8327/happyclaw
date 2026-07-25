@@ -70,10 +70,10 @@ export function ChatGroupItem({
       >
         <div className="flex items-center gap-1.5">
           {isHome && (
-            <Star className="w-3.5 h-3.5 text-yellow-500 fill-yellow-500 flex-shrink-0" />
+            <Star className="w-3.5 h-3.5 text-warning fill-warning flex-shrink-0" />
           )}
           {isPinned && !isHome && (
-            <Pin className="w-3 h-3 text-teal-500 flex-shrink-0" />
+            <Pin className="w-3 h-3 text-primary flex-shrink-0" />
           )}
           <span
             className={cn(
@@ -86,7 +86,7 @@ export function ChatGroupItem({
           {(model || runnerLabel) && (
             <span className={cn(
               'inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium',
-              model ? 'bg-orange-100 text-orange-700' : 'bg-slate-100 text-slate-600',
+              model ? 'tag-amber' : 'tag-neutral',
             )}>
               {model || runnerLabel}
             </span>
@@ -130,7 +130,7 @@ export function ChatGroupItem({
             )}
             <DropdownMenuItem
               onClick={() => onClearHistory(jid, displayName)}
-              className="text-amber-700 focus:text-amber-700"
+              className="text-warning focus:text-warning"
             >
               <RotateCcw className="w-4 h-4" />
               重建会话

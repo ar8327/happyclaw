@@ -327,14 +327,14 @@ export function MessageInput({
         {uploading && uploadProgress && (
           <div className={`mb-2 px-4 py-2.5 ${isCompact ? 'bg-card border border-border' : 'bg-card rounded-xl border border-border shadow-sm'}`}>
             <div className="flex items-center justify-between mb-1.5">
-              <span className="text-xs text-slate-600 truncate max-w-[65%]">
+              <span className="text-xs text-muted-foreground truncate max-w-[65%]">
                 {uploadProgress.currentFile || '完成'}
               </span>
-              <span className="text-xs text-slate-400">
+              <span className="text-xs text-muted-foreground/80">
                 {uploadProgress.completed}/{uploadProgress.total} · {progressPercent}%
               </span>
             </div>
-            <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+            <div className="w-full h-1.5 bg-surface-2 rounded-full overflow-hidden">
               <div
                 className="h-full bg-primary rounded-full transition-all duration-300 ease-out"
                 style={{ width: `${progressPercent}%` }}
@@ -347,7 +347,7 @@ export function MessageInput({
         <div className={isCompact ? 'bg-card border border-border rounded-lg' : 'bg-card rounded-2xl border border-border shadow-sm'}>
           {/* Send error banner */}
           {sendError && (
-            <div className={`px-4 py-2 bg-red-50 text-red-600 text-xs font-medium border-b border-red-100 flex items-center gap-2 ${isCompact ? 'rounded-t-lg' : 'rounded-t-2xl'}`}>
+            <div className={`px-4 py-2 bg-error-bg text-error text-xs font-medium border-b border-error-border flex items-center gap-2 ${isCompact ? 'rounded-t-lg' : 'rounded-t-2xl'}`}>
               <span>{sendError}</span>
             </div>
           )}
@@ -356,13 +356,13 @@ export function MessageInput({
           {pendingImages.length > 0 && (
             <div className="px-3 pt-2.5 pb-1 border-b border-border">
               <div className="flex items-center gap-1 mb-1.5">
-                <ImageIcon className="w-3 h-3 text-slate-400" />
-                <span className="text-[11px] text-slate-400">
+                <ImageIcon className="w-3 h-3 text-muted-foreground/80" />
+                <span className="text-[11px] text-muted-foreground/80">
                   已添加 {pendingImages.length} 张图片
                 </span>
                 <button
                   onClick={clearPendingImages}
-                  className="ml-auto text-[11px] text-slate-400 hover:text-slate-600 cursor-pointer"
+                  className="ml-auto text-[11px] text-muted-foreground/80 hover:text-muted-foreground cursor-pointer"
                 >
                   清空
                 </button>
@@ -373,11 +373,11 @@ export function MessageInput({
                     <img
                       src={img.preview}
                       alt={img.name}
-                      className="w-16 h-16 object-cover rounded-lg border border-slate-200"
+                      className="w-16 h-16 object-cover rounded-lg border border-border"
                     />
                     <button
                       onClick={() => removePendingImage(i)}
-                      className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-slate-700 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer hover:bg-slate-900"
+                      className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-foreground text-background flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer hover:bg-foreground/80"
                       aria-label="移除图片"
                     >
                       <X className="w-3 h-3" />
@@ -392,13 +392,13 @@ export function MessageInput({
           {pendingFiles.length > 0 && (
             <div className="px-3 pt-2.5 pb-1 border-b border-border">
               <div className="flex items-center gap-1 mb-1">
-                <Paperclip className="w-3 h-3 text-slate-400" />
-                <span className="text-[11px] text-slate-400">
+                <Paperclip className="w-3 h-3 text-muted-foreground/80" />
+                <span className="text-[11px] text-muted-foreground/80">
                   已上传 {pendingFiles.length} 个文件，发送时将告知 AI
                 </span>
                 <button
                   onClick={clearPendingFiles}
-                  className="ml-auto text-[11px] text-slate-400 hover:text-slate-600 cursor-pointer"
+                  className="ml-auto text-[11px] text-muted-foreground/80 hover:text-muted-foreground cursor-pointer"
                 >
                   清空
                 </button>
@@ -425,10 +425,10 @@ export function MessageInput({
 
           {/* Action row — shown when attach is toggled */}
           {showActions && sessionId && (
-            <div className="flex items-center gap-2 px-3 pt-2.5 pb-1.5 border-b border-slate-100">
+            <div className="flex items-center gap-2 px-3 pt-2.5 pb-1.5 border-b border-border-subtle">
               <button
                 onClick={() => imageInputRef.current?.click()}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-purple-700 bg-purple-50 hover:bg-purple-100 rounded-lg transition-colors cursor-pointer"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[var(--tag-purple-fg)] bg-[var(--tag-purple-bg)] hover:bg-[var(--tag-purple-bg)] rounded-lg transition-colors cursor-pointer"
               >
                 <ImageIcon className="w-3.5 h-3.5" />
                 添加图片
@@ -444,7 +444,7 @@ export function MessageInput({
               <button
                 onClick={() => folderInputRef.current?.click()}
                 disabled={uploading}
-                className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer disabled:opacity-40"
+                className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-muted-foreground bg-surface-2 hover:bg-surface-3 rounded-lg transition-colors cursor-pointer disabled:opacity-40"
               >
                 <FolderUp className="w-3.5 h-3.5" />
                 上传文件夹
@@ -464,7 +464,7 @@ export function MessageInput({
               onPaste={handlePaste}
               placeholder="输入消息..."
               disabled={disabled}
-              className="w-full text-[15px] leading-6 resize-none focus:outline-none placeholder:text-slate-400 disabled:opacity-50 disabled:cursor-not-allowed bg-transparent"
+              className="w-full text-[15px] leading-6 resize-none focus:outline-none placeholder:text-muted-foreground/80 disabled:opacity-50 disabled:cursor-not-allowed bg-transparent"
               rows={1}
               style={{ minHeight: '28px', maxHeight: '144px' }}
             />
@@ -482,7 +482,7 @@ export function MessageInput({
                   className={`w-9 h-9 rounded-lg flex items-center justify-center transition-all cursor-pointer ${
                     showActions
                       ? 'bg-brand-50 text-primary'
-                      : 'hover:bg-slate-100 text-slate-400 hover:text-slate-600'
+                      : 'hover:bg-surface-2 text-muted-foreground/80 hover:text-muted-foreground'
                   } ${uploading ? 'opacity-40 pointer-events-none' : ''}`}
                   title="添加文件"
                   aria-label="添加文件"
@@ -494,7 +494,7 @@ export function MessageInput({
                 <button
                   type="button"
                   onClick={onResetSession}
-                  className="w-9 h-9 rounded-lg flex items-center justify-center hover:bg-amber-50 text-slate-400 hover:text-amber-600 transition-all cursor-pointer"
+                  className="w-9 h-9 rounded-lg flex items-center justify-center hover:bg-warning-bg text-muted-foreground/80 hover:text-warning transition-all cursor-pointer"
                   title="清除上下文"
                 >
                   <Brush className="w-4 h-4" />
@@ -504,7 +504,7 @@ export function MessageInput({
                 <button
                   type="button"
                   onClick={onToggleTerminal}
-                  className="w-9 h-9 rounded-lg flex items-center justify-center hover:bg-brand-50 text-slate-400 hover:text-primary transition-all cursor-pointer"
+                  className="w-9 h-9 rounded-lg flex items-center justify-center hover:bg-brand-50 text-muted-foreground/80 hover:text-primary transition-all cursor-pointer"
                   title="终端"
                   aria-label="终端"
                 >
@@ -517,8 +517,8 @@ export function MessageInput({
                   onClick={onTogglePermissionMode}
                   className={`h-9 px-2 rounded-lg flex items-center gap-1 text-xs font-medium transition-all cursor-pointer ${
                     permissionMode === 'plan'
-                      ? 'bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-950/50 dark:text-amber-400 dark:border-amber-800'
-                      : 'hover:bg-slate-100 text-slate-400 hover:text-slate-600'
+                      ? 'bg-warning-bg text-warning border border-warning-border'
+                      : 'hover:bg-surface-2 text-muted-foreground/80 hover:text-muted-foreground'
                   }`}
                   title={permissionMode === 'plan' ? 'Plan 模式，点击切到 Code' : 'Code 模式，点击切到 Plan'}
                 >
@@ -537,8 +537,8 @@ export function MessageInput({
               disabled={!canSend || disabled || sending}
               className={`w-9 h-9 rounded-full flex items-center justify-center transition-all cursor-pointer active:scale-90 ${
                 canSend && !disabled && !sending
-                  ? 'bg-primary text-white hover:bg-primary/90 max-lg:shadow-[0_2px_8px_rgba(13,148,136,0.3)]'
-                  : 'bg-slate-100 text-slate-400'
+                  ? 'bg-primary text-primary-foreground hover:bg-primary/90 max-lg:shadow-[0_2px_8px_rgba(13,148,136,0.3)]'
+                  : 'bg-surface-2 text-muted-foreground/80'
               }`}
             >
               {sending ? <Loader2 className="w-4.5 h-4.5 animate-spin" /> : <ArrowUp className="w-4.5 h-4.5" />}

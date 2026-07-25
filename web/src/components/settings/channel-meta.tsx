@@ -6,10 +6,10 @@ export const CHANNEL_LABEL: Record<string, string> = {
 };
 
 export const CHANNEL_COLORS: Record<string, string> = {
-  feishu: 'bg-blue-100 text-blue-700',
-  telegram: 'bg-sky-100 text-sky-700',
-  qq: 'bg-purple-100 text-purple-700',
-  wechat: 'bg-green-100 text-green-700',
+  feishu: 'tag-blue',
+  telegram: 'tag-sky',
+  qq: 'tag-purple',
+  wechat: 'tag-green',
 };
 
 const FeishuIcon = () => (
@@ -48,7 +48,7 @@ export const CHANNEL_ICON: Record<string, React.FC> = {
 export function ChannelBadge({ channelType }: { channelType: string }) {
   const Icon = CHANNEL_ICON[channelType];
   return (
-    <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium inline-flex items-center gap-0.5 ${CHANNEL_COLORS[channelType] || 'bg-slate-100 text-slate-600'}`}>
+    <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium inline-flex items-center gap-0.5 ${CHANNEL_COLORS[channelType] || 'tag-neutral'}`}>
       {Icon && <Icon />}
       {CHANNEL_LABEL[channelType] || channelType}
     </span>

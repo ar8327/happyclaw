@@ -152,7 +152,7 @@ export function CreateTaskForm({ sessions, onSubmit, onClose, isAdmin }: CreateT
           <h2 className="text-xl font-bold text-foreground">创建定时任务</h2>
           <button
             onClick={onClose}
-            className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+            className="p-2 text-muted-foreground/80 hover:text-muted-foreground hover:bg-surface-2 rounded-lg transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
@@ -163,10 +163,10 @@ export function CreateTaskForm({ sessions, onSubmit, onClose, isAdmin }: CreateT
           {/* Group Selection */}
           <div>
             <label className="block text-sm font-medium text-foreground mb-2">
-              选择会话 <span className="text-red-500">*</span>
+              选择会话 <span className="text-error">*</span>
             </label>
             <Select value={formData.sessionId || undefined} onValueChange={handleSessionChange}>
-              <SelectTrigger className={cn("w-full", errors.sessionId && "border-red-500")}>
+              <SelectTrigger className={cn("w-full", errors.sessionId && "border-error")}>
                 <SelectValue placeholder="请选择" />
               </SelectTrigger>
               <SelectContent>
@@ -178,7 +178,7 @@ export function CreateTaskForm({ sessions, onSubmit, onClose, isAdmin }: CreateT
               </SelectContent>
             </Select>
             {errors.sessionId && (
-              <p className="mt-1 text-sm text-red-600">{errors.sessionId}</p>
+              <p className="mt-1 text-sm text-error">{errors.sessionId}</p>
             )}
           </div>
 
@@ -205,7 +205,7 @@ export function CreateTaskForm({ sessions, onSubmit, onClose, isAdmin }: CreateT
                   <SelectItem value="script">脚本（Shell 命令）</SelectItem>
                 </SelectContent>
               </Select>
-              <p className="mt-1 text-xs text-slate-500">
+              <p className="mt-1 text-xs text-muted-foreground">
                 {isScript
                   ? '直接执行 Shell 命令，零 API 消耗，适合确定性任务'
                   : '启动完整 Claude Agent，消耗 API tokens'}
@@ -217,20 +217,20 @@ export function CreateTaskForm({ sessions, onSubmit, onClose, isAdmin }: CreateT
           {isScript && (
             <div>
               <label className="block text-sm font-medium text-foreground mb-2">
-                脚本命令 <span className="text-red-500">*</span>
+                脚本命令 <span className="text-error">*</span>
               </label>
               <Textarea
                 value={formData.scriptCommand}
                 onChange={(e) => setFormData({ ...formData, scriptCommand: e.target.value })}
                 rows={3}
                 maxLength={4096}
-                className={cn("resize-none font-mono text-sm", errors.scriptCommand && "border-red-500")}
+                className={cn("resize-none font-mono text-sm", errors.scriptCommand && "border-error")}
                 placeholder="例如: curl -s https://api.example.com/health | jq .status"
               />
               {errors.scriptCommand && (
-                <p className="mt-1 text-sm text-red-600">{errors.scriptCommand}</p>
+                <p className="mt-1 text-sm text-error">{errors.scriptCommand}</p>
               )}
-              <p className="mt-1 text-xs text-slate-500">
+              <p className="mt-1 text-xs text-muted-foreground">
                 命令在会话工作目录下执行，最大 4096 字符
               </p>
             </div>
@@ -240,24 +240,24 @@ export function CreateTaskForm({ sessions, onSubmit, onClose, isAdmin }: CreateT
           <div>
             <label className="block text-sm font-medium text-foreground mb-2">
               {isScript ? '任务描述' : '任务 Prompt'}{' '}
-              {!isScript && <span className="text-red-500">*</span>}
+              {!isScript && <span className="text-error">*</span>}
             </label>
             <Textarea
               value={formData.prompt}
               onChange={(e) => setFormData({ ...formData, prompt: e.target.value })}
               rows={isScript ? 2 : 4}
-              className={cn("resize-none", errors.prompt && "border-red-500")}
+              className={cn("resize-none", errors.prompt && "border-error")}
               placeholder={isScript ? '可选的任务描述...' : '输入任务的提示词...'}
             />
             {errors.prompt && (
-              <p className="mt-1 text-sm text-red-600">{errors.prompt}</p>
+              <p className="mt-1 text-sm text-error">{errors.prompt}</p>
             )}
           </div>
 
           {/* Schedule Type */}
           <div>
             <label className="block text-sm font-medium text-foreground mb-2">
-              调度类型 <span className="text-red-500">*</span>
+              调度类型 <span className="text-error">*</span>
             </label>
             <Select
               value={formData.scheduleType}
@@ -285,7 +285,7 @@ export function CreateTaskForm({ sessions, onSubmit, onClose, isAdmin }: CreateT
           {/* Schedule Value */}
           <div>
             <label className="block text-sm font-medium text-foreground mb-2">
-              调度值 <span className="text-red-500">*</span>
+              调度值 <span className="text-error">*</span>
             </label>
 
             {formData.scheduleType === 'cron' && (
@@ -296,10 +296,10 @@ export function CreateTaskForm({ sessions, onSubmit, onClose, isAdmin }: CreateT
                   onChange={(e) =>
                     setFormData({ ...formData, scheduleValue: e.target.value })
                   }
-                  className={cn(errors.scheduleValue && "border-red-500")}
+                  className={cn(errors.scheduleValue && "border-error")}
                   placeholder="例如: 0 0 * * * (每天 0 点)"
                 />
-                <p className="mt-1 text-xs text-slate-500">
+                <p className="mt-1 text-xs text-muted-foreground">
                   格式: 分 时 日 月 星期（如 0 9 * * * = 每天 9 点）
                 </p>
               </>
@@ -313,7 +313,7 @@ export function CreateTaskForm({ sessions, onSubmit, onClose, isAdmin }: CreateT
                     min="1"
                     value={intervalNumber}
                     onChange={(e) => setIntervalNumber(e.target.value)}
-                    className={cn("flex-1", errors.scheduleValue && "border-red-500")}
+                    className={cn("flex-1", errors.scheduleValue && "border-error")}
                     placeholder="数值"
                   />
                   <Select value={intervalUnit} onValueChange={setIntervalUnit}>
@@ -329,7 +329,7 @@ export function CreateTaskForm({ sessions, onSubmit, onClose, isAdmin }: CreateT
                     </SelectContent>
                   </Select>
                 </div>
-                <p className="mt-1 text-xs text-slate-500">
+                <p className="mt-1 text-xs text-muted-foreground">
                   设置任务执行间隔
                 </p>
               </>
@@ -341,16 +341,16 @@ export function CreateTaskForm({ sessions, onSubmit, onClose, isAdmin }: CreateT
                   type="datetime-local"
                   value={onceDateTime}
                   onChange={(e) => setOnceDateTime(e.target.value)}
-                  className={cn(errors.scheduleValue && "border-red-500")}
+                  className={cn(errors.scheduleValue && "border-error")}
                 />
-                <p className="mt-1 text-xs text-slate-500">
+                <p className="mt-1 text-xs text-muted-foreground">
                   选择任务的执行时间
                 </p>
               </>
             )}
 
             {errors.scheduleValue && (
-              <p className="mt-1 text-sm text-red-600">{errors.scheduleValue}</p>
+              <p className="mt-1 text-sm text-error">{errors.scheduleValue}</p>
             )}
           </div>
 
@@ -376,7 +376,7 @@ export function CreateTaskForm({ sessions, onSubmit, onClose, isAdmin }: CreateT
                   <SelectItem value="haiku">Haiku（快速/低成本）</SelectItem>
                 </SelectContent>
               </Select>
-              <p className="mt-1 text-xs text-slate-500">
+              <p className="mt-1 text-xs text-muted-foreground">
                 覆盖此任务使用的模型，留空则跟随会话配置
               </p>
             </div>

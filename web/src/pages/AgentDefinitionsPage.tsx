@@ -164,7 +164,7 @@ tools:
               </div>
               <div>
                 <h1 className="text-2xl font-bold text-foreground">Agent 管理</h1>
-                <p className="text-sm text-slate-500 mt-0.5">
+                <p className="text-sm text-muted-foreground mt-0.5">
                   管理 Agent 定义文件（~/.claude/agents/*.md）
                 </p>
               </div>
@@ -180,7 +180,7 @@ tools:
               </Button>
             </div>
           </div>
-          <div className="text-xs text-slate-500">
+          <div className="text-xs text-muted-foreground">
             已加载 Agent: {agents.length}
           </div>
         </div>
@@ -205,9 +205,9 @@ tools:
                     <Loader2 className="animate-spin text-primary" size={24} />
                   </div>
                 ) : listError ? (
-                  <div className="text-sm text-red-600 py-4 text-center">{listError}</div>
+                  <div className="text-sm text-error py-4 text-center">{listError}</div>
                 ) : filtered.length === 0 ? (
-                  <div className="text-sm text-slate-500 py-4 text-center">
+                  <div className="text-sm text-muted-foreground py-4 text-center">
                     {searchQuery ? '没有匹配的 Agent' : '暂无 Agent 定义'}
                   </div>
                 ) : (
@@ -226,7 +226,7 @@ tools:
                         <div className="text-sm font-medium text-foreground truncate">
                           {agent.name}
                         </div>
-                        <div className="text-[11px] text-slate-500 line-clamp-2 mt-0.5">
+                        <div className="text-[11px] text-muted-foreground line-clamp-2 mt-0.5">
                           {agent.description || '无描述'}
                         </div>
                         {agent.tools.length > 0 && (
@@ -234,13 +234,13 @@ tools:
                             {agent.tools.slice(0, 4).map((tool) => (
                               <span
                                 key={tool}
-                                className="px-1.5 py-0.5 bg-muted text-slate-600 rounded text-[10px]"
+                                className="px-1.5 py-0.5 bg-muted text-muted-foreground rounded text-[10px]"
                               >
                                 {tool}
                               </span>
                             ))}
                             {agent.tools.length > 4 && (
-                              <span className="px-1.5 py-0.5 text-slate-400 text-[10px]">
+                              <span className="px-1.5 py-0.5 text-muted-foreground/80 text-[10px]">
                                 +{agent.tools.length - 4}
                               </span>
                             )}
@@ -272,7 +272,7 @@ tools:
                   {/* Meta info */}
                   <div className="mb-3">
                     <div className="text-sm font-semibold text-foreground break-all">{detail.name}</div>
-                    <div className="text-xs text-slate-500 mt-1">
+                    <div className="text-xs text-muted-foreground mt-1">
                       最近更新: {updatedText} · {byteCount} 字节
                     </div>
                   </div>
@@ -306,15 +306,15 @@ tools:
                       variant="outline"
                       onClick={handleDelete}
                       disabled={deleting || saving}
-                      className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950"
+                      className="text-error hover:text-error hover:bg-error-bg"
                     >
                       <Trash2 className="w-4 h-4" />
                       {deleting ? '删除中...' : '删除'}
                     </Button>
 
-                    {dirty && <span className="text-sm text-amber-600">有未保存修改</span>}
-                    {notice && <span className="text-sm text-green-600">{notice}</span>}
-                    {detailError && <span className="text-sm text-red-600">{detailError}</span>}
+                    {dirty && <span className="text-sm text-warning">有未保存修改</span>}
+                    {notice && <span className="text-sm text-success">{notice}</span>}
+                    {detailError && <span className="text-sm text-error">{detailError}</span>}
                   </div>
                 </>
               ) : loadingDetail ? (
@@ -322,7 +322,7 @@ tools:
                   <Loader2 className="animate-spin text-primary" size={32} />
                 </div>
               ) : (
-                <div className="flex items-center justify-center h-full text-sm text-slate-500">
+                <div className="flex items-center justify-center h-full text-sm text-muted-foreground">
                   {selectedId ? (detailError || '加载失败') : '选择一个 Agent 查看详情'}
                 </div>
               )}

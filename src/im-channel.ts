@@ -39,7 +39,11 @@ import {
 
 export interface IMChannelConnectOpts {
   onReady: () => void;
-  onNewChat: (chatJid: string, chatName: string, chatType?: 'p2p' | 'group') => void;
+  onNewChat: (
+    chatJid: string,
+    chatName: string,
+    chatType?: 'p2p' | 'group',
+  ) => void;
   onMessage?: (chatJid: string, text: string, senderName: string) => void;
   ignoreMessagesBefore?: number;
   isChatAuthorized?: (jid: string) => boolean;
@@ -77,6 +81,10 @@ export interface IMSendOptions {
   replyToMsgId?: string;
   /** Extra elements to append to the Feishu interactive card (e.g. action buttons). */
   cardExtraElements?: Array<Record<string, unknown>>;
+  /** Stable outbox id used by channels that support idempotent creation. */
+  idempotencyKey?: string;
+  /** Explicit Feishu thread scope. Omit for the chat root. */
+  threadId?: string;
 }
 
 export interface IMChannel {
@@ -90,7 +98,12 @@ export interface IMChannel {
     options?: IMSendOptions,
   ): Promise<string | undefined>;
   /** Send file to chat (if supported) */
-  sendFile?(chatId: string, filePath: string, fileName: string): Promise<void>;
+  sendFile?(
+    chatId: string,
+    filePath: string,
+    fileName: string,
+    options?: IMSendOptions,
+  ): Promise<void>;
   sendImage?(
     chatId: string,
     imageBuffer: Buffer,
@@ -98,14 +111,22 @@ export interface IMChannel {
     caption?: string,
     fileName?: string,
     replyToMsgId?: string,
+    threadId?: string,
+    idempotencyKey?: string,
   ): Promise<void>;
   setTyping(chatId: string, isTyping: boolean): Promise<void>;
   isConnected(): boolean;
   syncGroups?(): Promise<void>;
   /** Create a streaming card session for real-time card updates (Feishu only) */
-  createStreamingSession?(chatId: string): StreamingCardController | undefined;
+  createStreamingSession?(
+    chatId: string,
+    options?: Omit<StreamingCardOptions, 'client' | 'chatId'>,
+  ): StreamingCardController | undefined;
   /** Create a progress card for real-time tool execution display (Feishu only) */
-  createProgressCard?(chatId: string): ProgressCardController | undefined;
+  createProgressCard?(
+    chatId: string,
+    options?: Omit<ProgressCardOptions, 'client' | 'clientResolver' | 'chatId'>,
+  ): ProgressCardController | undefined;
   /** Get the underlying Lark SDK client (Feishu only, used for lazy card resolution) */
   getLarkClient?(): lark.Client | undefined;
   /** Get the last inbound message ID for a chat (Feishu only) */
@@ -192,11 +213,7 @@ export function createFeishuChannel(config: FeishuConnectionConfig): IMChannel {
       options?: IMSendOptions,
     ): Promise<string | undefined> {
       if (!inner) {
-        logger.warn(
-          { chatId },
-          'Feishu channel not connected, skip sending message',
-        );
-        return undefined;
+        throw new Error('Feishu channel is not connected');
       }
       return inner.sendMessage(chatId, text, localImagePaths, options);
     },
@@ -208,15 +225,22 @@ export function createFeishuChannel(config: FeishuConnectionConfig): IMChannel {
       caption?: string,
       fileName?: string,
       replyToMsgId?: string,
+      threadId?: string,
+      idempotencyKey?: string,
     ): Promise<void> {
       if (!inner) {
-        logger.warn(
-          { chatId },
-          'Feishu channel not connected, skip sending image',
-        );
-        return;
+        throw new Error('Feishu channel is not connected');
       }
-      await inner.sendImage(chatId, imageBuffer, mimeType, caption, fileName, replyToMsgId);
+      await inner.sendImage(
+        chatId,
+        imageBuffer,
+        mimeType,
+        caption,
+        fileName,
+        replyToMsgId,
+        threadId,
+        idempotencyKey,
+      );
     },
 
     async setTyping(chatId: string, isTyping: boolean): Promise<void> {
@@ -237,6 +261,7 @@ export function createFeishuChannel(config: FeishuConnectionConfig): IMChannel {
       chatId: string,
       filePath: string,
       fileName: string,
+      options?: IMSendOptions,
     ): Promise<void> {
       if (!inner) {
         logger.warn(
@@ -245,7 +270,7 @@ export function createFeishuChannel(config: FeishuConnectionConfig): IMChannel {
         );
         return;
       }
-      await inner.sendFile(chatId, filePath, fileName);
+      await inner.sendFile(chatId, filePath, fileName, options);
     },
 
     async getChatInfo(chatId: string) {
@@ -255,6 +280,7 @@ export function createFeishuChannel(config: FeishuConnectionConfig): IMChannel {
 
     createStreamingSession(
       chatId: string,
+      options?: Omit<StreamingCardOptions, 'client' | 'chatId'>,
     ): StreamingCardController | undefined {
       if (!inner) return undefined;
       const larkClient = inner.getLarkClient();
@@ -262,13 +288,17 @@ export function createFeishuChannel(config: FeishuConnectionConfig): IMChannel {
       const opts: StreamingCardOptions = {
         client: larkClient,
         chatId,
-        replyToMsgId: inner.getLastMessageId(chatId),
+        ...options,
       };
       return new StreamingCardController(opts);
     },
 
     createProgressCard(
       chatId: string,
+      options?: Omit<
+        ProgressCardOptions,
+        'client' | 'clientResolver' | 'chatId'
+      >,
     ): ProgressCardController | undefined {
       if (!inner) return undefined;
       const larkClient = inner.getLarkClient();
@@ -276,7 +306,7 @@ export function createFeishuChannel(config: FeishuConnectionConfig): IMChannel {
       const opts: ProgressCardOptions = {
         client: larkClient,
         chatId,
-        replyToMsgId: inner.getLastMessageId(chatId),
+        ...options,
       };
       return new ProgressCardController(opts);
     },
@@ -350,11 +380,7 @@ export function createTelegramChannel(
       localImagePaths?: string[],
     ): Promise<string | undefined> {
       if (!inner) {
-        logger.warn(
-          { chatId },
-          'Telegram channel not connected, skip sending message',
-        );
-        return undefined;
+        throw new Error('Telegram channel is not connected');
       }
       await inner.sendMessage(chatId, text, localImagePaths);
       return undefined;
@@ -368,11 +394,7 @@ export function createTelegramChannel(
       fileName?: string,
     ): Promise<void> {
       if (!inner) {
-        logger.warn(
-          { chatId },
-          'Telegram channel not connected, skip sending image',
-        );
-        return;
+        throw new Error('Telegram channel is not connected');
       }
       await inner.sendImage(chatId, imageBuffer, mimeType, caption, fileName);
     },
@@ -383,11 +405,7 @@ export function createTelegramChannel(
       fileName: string,
     ): Promise<void> {
       if (!inner) {
-        logger.warn(
-          { chatId },
-          'Telegram channel not connected, skip sending file',
-        );
-        return;
+        throw new Error('Telegram channel is not connected');
       }
       await inner.sendFile(chatId, filePath, fileName);
     },
@@ -455,13 +473,12 @@ export function createQQChannel(config: QQConnectionConfig): IMChannel {
       }
     },
 
-    async sendMessage(chatId: string, text: string): Promise<string | undefined> {
+    async sendMessage(
+      chatId: string,
+      text: string,
+    ): Promise<string | undefined> {
       if (!inner) {
-        logger.warn(
-          { chatId },
-          'QQ channel not connected, skip sending message',
-        );
-        return undefined;
+        throw new Error('QQ channel is not connected');
       }
       await inner.sendMessage(chatId, text);
       return undefined;
@@ -481,9 +498,7 @@ export function createQQChannel(config: QQConnectionConfig): IMChannel {
 
 // ─── WeChat Adapter ─────────────────────────────────────────────
 
-export function createWeChatChannel(
-  config: WeChatConnectionConfig,
-): IMChannel {
+export function createWeChatChannel(config: WeChatConnectionConfig): IMChannel {
   let inner: WeChatConnection | null = null;
 
   const channel: IMChannel = {
@@ -516,13 +531,12 @@ export function createWeChatChannel(
       }
     },
 
-    async sendMessage(chatId: string, text: string): Promise<string | undefined> {
+    async sendMessage(
+      chatId: string,
+      text: string,
+    ): Promise<string | undefined> {
       if (!inner) {
-        logger.warn(
-          { chatId },
-          'WeChat channel not connected, skip sending message',
-        );
-        return undefined;
+        throw new Error('WeChat channel is not connected');
       }
       await inner.sendMessage(chatId, text);
       return undefined;

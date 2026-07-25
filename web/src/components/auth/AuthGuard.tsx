@@ -42,13 +42,13 @@ export function AuthGuard({
         <div className="min-h-screen bg-background flex items-center justify-center p-6">
           <div className="max-w-md text-center bg-card rounded-xl border border-border p-6">
             <h2 className="text-lg font-semibold text-foreground mb-2">页面初始化超时</h2>
-            <p className="text-sm text-slate-600 mb-4">
+            <p className="text-sm text-muted-foreground mb-4">
               后端可能刚启动或浏览器缓存异常，请先刷新页面。
             </p>
             <div className="flex items-center justify-center gap-3">
               <button
                 onClick={() => window.location.reload()}
-                className="px-4 py-2 text-sm rounded-lg bg-primary text-white hover:bg-primary/90"
+                className="px-4 py-2 text-sm rounded-lg bg-primary text-primary-foreground hover:bg-primary/90"
               >
                 刷新页面
               </button>
@@ -56,7 +56,7 @@ export function AuthGuard({
                   onClick={() => {
                     navigate('/chat', { replace: true });
                   }}
-                className="px-4 py-2 text-sm rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-100"
+                className="px-4 py-2 text-sm rounded-lg border border-border-strong text-foreground hover:bg-surface-2"
               >
                 返回工作台
               </button>
@@ -69,7 +69,7 @@ export function AuthGuard({
       <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="text-center">
           <Loader2 className="w-16 h-16 text-primary animate-spin mx-auto mb-4" />
-          <p className="text-slate-500">加载中...</p>
+          <p className="text-muted-foreground">加载中...</p>
         </div>
       </div>
     );
@@ -80,7 +80,7 @@ export function AuthGuard({
       <div className="min-h-screen bg-background flex items-center justify-center p-6">
         <div className="max-w-md text-center bg-card rounded-xl border border-border p-6">
           <h2 className="text-lg font-semibold text-foreground mb-2">本地工作台初始化中</h2>
-          <p className="text-sm text-slate-600">
+          <p className="text-sm text-muted-foreground">
             后端尚未准备好，刷新页面后会自动恢复本地单用户上下文。
           </p>
         </div>

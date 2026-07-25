@@ -129,7 +129,7 @@ export function AddMcpServerDialog({ open, onClose, onAdd }: AddMcpServerDialogP
           {/* ID */}
           <div>
             <label htmlFor="mcp-id" className="block text-sm font-medium text-foreground mb-1">
-              服务器 ID <span className="text-red-500">*</span>
+              服务器 ID <span className="text-error">*</span>
             </label>
             <Input
               id="mcp-id"
@@ -156,7 +156,7 @@ export function AddMcpServerDialog({ open, onClose, onAdd }: AddMcpServerDialogP
                   className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
                     serverType === t
                       ? 'bg-primary text-primary-foreground'
-                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                      : 'tag-neutral hover:bg-surface-3'
                   } disabled:opacity-50`}
                 >
                   {t.toUpperCase()}
@@ -170,7 +170,7 @@ export function AddMcpServerDialog({ open, onClose, onAdd }: AddMcpServerDialogP
               {/* URL */}
               <div>
                 <label htmlFor="mcp-url" className="block text-sm font-medium text-foreground mb-1">
-                  URL <span className="text-red-500">*</span>
+                  URL <span className="text-error">*</span>
                 </label>
                 <Input
                   id="mcp-url"
@@ -214,7 +214,7 @@ export function AddMcpServerDialog({ open, onClose, onAdd }: AddMcpServerDialogP
                         type="button"
                         onClick={() => setHeaders(headers.filter((_, j) => j !== i))}
                         disabled={submitting}
-                        className="p-1.5 text-slate-400 hover:text-red-500 transition-colors disabled:opacity-50"
+                        className="p-1.5 text-muted-foreground/80 hover:text-error transition-colors disabled:opacity-50"
                       >
                         <X size={16} />
                       </button>
@@ -238,7 +238,7 @@ export function AddMcpServerDialog({ open, onClose, onAdd }: AddMcpServerDialogP
               {/* Command */}
               <div>
                 <label htmlFor="mcp-command" className="block text-sm font-medium text-foreground mb-1">
-                  命令 <span className="text-red-500">*</span>
+                  命令 <span className="text-error">*</span>
                 </label>
                 <Input
                   id="mcp-command"
@@ -271,7 +271,7 @@ export function AddMcpServerDialog({ open, onClose, onAdd }: AddMcpServerDialogP
                         type="button"
                         onClick={() => setArgs(args.filter((_, j) => j !== i))}
                         disabled={submitting}
-                        className="p-1.5 text-slate-400 hover:text-red-500 transition-colors disabled:opacity-50"
+                        className="p-1.5 text-muted-foreground/80 hover:text-error transition-colors disabled:opacity-50"
                       >
                         <X size={16} />
                       </button>
@@ -322,7 +322,7 @@ export function AddMcpServerDialog({ open, onClose, onAdd }: AddMcpServerDialogP
                         type="button"
                         onClick={() => setEnv(env.filter((_, j) => j !== i))}
                         disabled={submitting}
-                        className="p-1.5 text-slate-400 hover:text-red-500 transition-colors disabled:opacity-50"
+                        className="p-1.5 text-muted-foreground/80 hover:text-error transition-colors disabled:opacity-50"
                       >
                         <X size={16} />
                       </button>

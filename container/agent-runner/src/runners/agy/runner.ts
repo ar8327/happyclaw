@@ -28,6 +28,7 @@ import type {
   QueryResult,
   RenderedRunnerContext,
   RuntimePersistenceSnapshot,
+  PushMessageResult,
 } from '../../runner-interface.js';
 import { combineRenderedContext } from '../../runner-interface.js';
 import type { ContainerInput, ContainerOutput } from '../../types.js';
@@ -602,9 +603,11 @@ export class AgyRunner implements AgentRunner {
     };
   }
 
-  pushMessage(): string[] {
-    // print 模式无 mid-query push；query-loop 会用 pendingMessages 排队
-    return [];
+  async pushMessage(): Promise<PushMessageResult> {
+    return {
+      status: 'buffer',
+      reason: 'agy print 模式不支持运行中追加消息，消息将在下一轮送达',
+    };
   }
 
   async interrupt(): Promise<void> {

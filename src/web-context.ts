@@ -27,7 +27,15 @@ export interface WebDeps {
   getLastAgentTimestamp: () => Record<string, MessageCursor>;
   setLastAgentTimestamp: (jid: string, cursor: MessageCursor) => void;
   advanceGlobalCursor: (cursor: MessageCursor) => void;
-  trackIpcDelivery?: (jid: string) => void;
+  deferIpcCursorCommit?: (
+    jid: string,
+    rowid: number,
+    injection: {
+      deliveryId: string;
+      ipcFilePath: string;
+      groupFolder: string;
+    },
+  ) => void;
   reloadFeishuConnection?: (config: {
     appId: string;
     appSecret: string;

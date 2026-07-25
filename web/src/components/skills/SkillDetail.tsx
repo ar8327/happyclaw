@@ -59,7 +59,7 @@ export function SkillDetail({ skillId, onDeleted }: SkillDetailProps) {
   if (error || !detail) {
     return (
       <div className="bg-card rounded-xl border border-border p-12 flex items-center justify-center">
-        <p className="text-red-600 text-center">{error || '加载失败'}</p>
+        <p className="text-error text-center">{error || '加载失败'}</p>
       </div>
     );
   }
@@ -81,12 +81,12 @@ export function SkillDetail({ skillId, onDeleted }: SkillDetailProps) {
                 {detail.source === 'user' ? '用户级' : '项目级'}
               </span>
               {detail.syncedFromHost && (
-                <span className="px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700">
+                <span className="px-2 py-0.5 rounded text-xs font-medium bg-warning-bg text-warning">
                   已同步
                 </span>
               )}
               {detail.userInvocable && (
-                <span className="px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700">
+                <span className="px-2 py-0.5 rounded text-xs font-medium tag-blue">
                   可调用
                 </span>
               )}
@@ -103,7 +103,7 @@ export function SkillDetail({ skillId, onDeleted }: SkillDetailProps) {
                 } opacity-50`}
               >
                 <span
-                  className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+                  className={`inline-block h-4 w-4 rounded-full bg-card transition-transform ${
                     detail.enabled ? 'translate-x-6' : 'translate-x-1'
                   }`}
                 />
@@ -125,7 +125,7 @@ export function SkillDetail({ skillId, onDeleted }: SkillDetailProps) {
                     setDeleting(false);
                   }
                 }}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-950 transition-colors disabled:opacity-50"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm text-error hover:bg-error-bg transition-colors disabled:opacity-50"
               >
                 <Trash2 size={16} />
                 {deleting ? '删除中...' : '删除'}

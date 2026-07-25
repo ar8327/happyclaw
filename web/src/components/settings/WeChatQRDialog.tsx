@@ -125,7 +125,7 @@ export function WeChatQRDialog({ isOpen, onClose, onSuccess }: WeChatQRDialogPro
 
         <div className="flex flex-col items-center gap-4 py-4">
           {/* QR Code Area */}
-          <div className="w-64 h-64 rounded-xl border border-border bg-white flex items-center justify-center overflow-hidden">
+          <div className="w-64 h-64 rounded-xl border border-border bg-card flex items-center justify-center overflow-hidden">
             {status === 'loading' && <Loader2 className="size-8 animate-spin text-muted-foreground" />}
             {status === 'error' && (
               <div className="text-center px-4">
@@ -141,8 +141,8 @@ export function WeChatQRDialog({ isOpen, onClose, onSuccess }: WeChatQRDialogPro
             )}
             {status === 'confirmed' && (
               <div className="text-center">
-                <CheckCircle2 className="size-16 text-emerald-500 mx-auto mb-2" />
-                <p className="text-sm font-medium text-emerald-600">登录成功</p>
+                <CheckCircle2 className="size-16 text-success mx-auto mb-2" />
+                <p className="text-sm font-medium text-success">登录成功</p>
               </div>
             )}
             {status === 'expired' && (
@@ -160,11 +160,11 @@ export function WeChatQRDialog({ isOpen, onClose, onSuccess }: WeChatQRDialogPro
           <p
             className={`text-sm text-center ${
               status === 'confirmed'
-                ? 'text-emerald-600 font-medium'
+                ? 'text-success font-medium'
                 : status === 'error'
                   ? 'text-destructive'
                   : status === 'scaned'
-                    ? 'text-amber-600'
+                    ? 'text-warning'
                     : 'text-muted-foreground'
             }`}
           >

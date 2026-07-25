@@ -154,7 +154,7 @@ export function GroupMcpPanel({ sessionId }: GroupMcpPanelProps) {
                     type="checkbox"
                     checked={selectedMcps === null || selectedMcps.has(mcp.id)}
                     onChange={() => toggleMcp(mcp.id)}
-                    className="rounded border-gray-300 text-primary focus:ring-primary"
+                    className="rounded border-border-strong text-primary focus:ring-primary"
                   />
                   <div className="flex-1 min-w-0">
                     <span className="text-sm font-medium truncate block">{mcp.id}</span>

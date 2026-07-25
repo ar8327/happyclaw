@@ -12,11 +12,7 @@
  * CDN URL:  https://novac2c.cdn.weixin.qq.com/c2c
  */
 import crypto from 'crypto';
-import {
-  storeChatMetadata,
-  storeMessageDirect,
-  updateChatName,
-} from './db.js';
+import { storeChatMetadata, storeMessageDirect, updateChatName } from './db.js';
 import { notifyNewImMessage } from './message-notifier.js';
 import { broadcastNewMessage } from './web.js';
 import { logger } from './logger.js';
@@ -385,29 +381,28 @@ export function createWeChatConnection(
     contextToken: string,
     text: string,
   ): Promise<void> {
-    const clientId = String(
-      crypto.randomBytes(4).readUInt32BE(0),
-    );
+    const clientId = String(crypto.randomBytes(4).readUInt32BE(0));
 
-    const resp = await apiPost<{ ret?: number; errcode?: number; errmsg?: string }>(
-      'ilink/bot/sendmessage',
-      {
-        msg: {
-          to_user_id: toUserId,
-          context_token: contextToken,
-          item_list: [
-            {
-              type: MESSAGE_ITEM_TYPE_TEXT,
-              text_item: { text },
-            },
-          ],
-          message_type: MESSAGE_TYPE_BOT,
-          message_state: MESSAGE_STATE_FINISH,
-          client_id: clientId,
-        },
-        base_info: baseInfo(),
+    const resp = await apiPost<{
+      ret?: number;
+      errcode?: number;
+      errmsg?: string;
+    }>('ilink/bot/sendmessage', {
+      msg: {
+        to_user_id: toUserId,
+        context_token: contextToken,
+        item_list: [
+          {
+            type: MESSAGE_ITEM_TYPE_TEXT,
+            text_item: { text },
+          },
+        ],
+        message_type: MESSAGE_TYPE_BOT,
+        message_state: MESSAGE_STATE_FINISH,
+        client_id: clientId,
       },
-    );
+      base_info: baseInfo(),
+    });
 
     if (resp.ret !== undefined && resp.ret !== 0) {
       throw new Error(
@@ -592,11 +587,7 @@ export function createWeChatConnection(
           if (reply) {
             const ct = contextTokenCache.get(fromUserId);
             if (ct) {
-              await sendMessageApi(
-                fromUserId,
-                ct,
-                markdownToPlainText(reply),
-              );
+              await sendMessageApi(fromUserId, ct, markdownToPlainText(reply));
             }
             return;
           }
@@ -680,8 +671,18 @@ export function createWeChatConnection(
       const senderId = `wechat:${fromUserId}`;
 
       if (targetJid !== jid) storeChatMetadata(targetJid, timestamp);
-      storeMessageDirect(id, targetJid, senderId, senderName, content, timestamp, false,
-        attachmentsJson, undefined, jid);
+      storeMessageDirect(
+        id,
+        targetJid,
+        senderId,
+        senderName,
+        content,
+        timestamp,
+        false,
+        attachmentsJson,
+        undefined,
+        jid,
+      );
 
       broadcastNewMessage(
         targetJid,
@@ -713,7 +714,10 @@ export function createWeChatConnection(
         );
       }
     } catch (err) {
-      logger.error({ err, msgId: msg.message_id }, 'Error handling WeChat message');
+      logger.error(
+        { err, msgId: msg.message_id },
+        'Error handling WeChat message',
+      );
     }
   }
 
@@ -733,7 +737,9 @@ export function createWeChatConnection(
 
         // Check for session expiry
         if (response.ret === ERRCODE_SESSION_EXPIRED) {
-          logger.warn('WeChat session expired (errcode -14), stopping poll loop');
+          logger.warn(
+            'WeChat session expired (errcode -14), stopping poll loop',
+          );
           connected = false;
           break;
         }
@@ -837,11 +843,7 @@ export function createWeChatConnection(
 
       const contextToken = contextTokenCache.get(userId);
       if (!contextToken) {
-        logger.warn(
-          { chatId },
-          'No context_token available for WeChat user, cannot send message',
-        );
-        return;
+        throw new Error(`No context_token available for WeChat user ${chatId}`);
       }
 
       try {

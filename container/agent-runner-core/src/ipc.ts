@@ -10,6 +10,8 @@ import path from 'path';
 import type { StreamEvent } from './types.js';
 import { emitStreamEvent } from './protocol.js';
 
+let ipcWriteSequence = 0;
+
 // ─── Config ─────────────────────────────────────────────────
 
 export interface IpcConfig {
@@ -20,7 +22,10 @@ export interface IpcConfig {
   pollIntervalMs: number;
 }
 
-export function createIpcConfig(workspaceIpc: string, pollIntervalMs = 500): IpcConfig {
+export function createIpcConfig(
+  workspaceIpc: string,
+  pollIntervalMs = 500,
+): IpcConfig {
   const inputDir = path.join(workspaceIpc, 'input');
   return {
     inputDir,
@@ -35,7 +40,11 @@ export function createIpcConfig(workspaceIpc: string, pollIntervalMs = 500): Ipc
 
 function checkAndRemoveSentinel(filepath: string): boolean {
   if (fs.existsSync(filepath)) {
-    try { fs.unlinkSync(filepath); } catch { /* ignore */ }
+    try {
+      fs.unlinkSync(filepath);
+    } catch {
+      /* ignore */
+    }
     return true;
   }
   return false;
@@ -58,7 +67,8 @@ export function shouldInterrupt(config: IpcConfig): boolean {
 /** Atomic write a JSON file to an IPC directory. Returns the filename. */
 export function writeIpcFile(dir: string, data: object): string {
   fs.mkdirSync(dir, { recursive: true });
-  const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
+  const sequence = String(ipcWriteSequence++).padStart(8, '0');
+  const filename = `${Date.now()}-${sequence}-${Math.random().toString(36).slice(2, 8)}.json`;
   const filepath = path.join(dir, filename);
   const tempPath = `${filepath}.tmp`;
   fs.writeFileSync(tempPath, JSON.stringify(data, null, 2));
@@ -77,7 +87,8 @@ export interface IpcMessage {
 export function drainIpcInput(config: IpcConfig): IpcMessage[] {
   const messages: IpcMessage[] = [];
   try {
-    const files = fs.readdirSync(config.inputDir)
+    const files = fs
+      .readdirSync(config.inputDir)
       .filter((f) => f.endsWith('.json'))
       .sort();
     for (const file of files) {
@@ -89,10 +100,16 @@ export function drainIpcInput(config: IpcConfig): IpcMessage[] {
           messages.push({ text: data.text, images: data.images });
         }
       } catch {
-        try { fs.unlinkSync(filePath); } catch { /* ignore */ }
+        try {
+          fs.unlinkSync(filePath);
+        } catch {
+          /* ignore */
+        }
       }
     }
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   return messages;
 }
 
@@ -100,7 +117,9 @@ export function drainIpcInput(config: IpcConfig): IpcMessage[] {
  * Wait for the next IPC message or close sentinel.
  * Returns the message text, or null if close sentinel was received.
  */
-export function waitForIpcMessage(config: IpcConfig): Promise<IpcMessage | null> {
+export function waitForIpcMessage(
+  config: IpcConfig,
+): Promise<IpcMessage | null> {
   return new Promise((resolve) => {
     const poll = () => {
       if (shouldClose(config)) {
@@ -109,7 +128,10 @@ export function waitForIpcMessage(config: IpcConfig): Promise<IpcMessage | null>
       }
       const messages = drainIpcInput(config);
       if (messages.length > 0) {
-        emitStreamEvent({ eventType: 'status', statusText: 'ipc_message_received' });
+        emitStreamEvent({
+          eventType: 'status',
+          statusText: 'ipc_message_received',
+        });
         // Combine multiple messages into one
         if (messages.length === 1) {
           resolve(messages[0]);

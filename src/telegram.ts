@@ -5,6 +5,7 @@ import https from 'node:https';
 import { Agent as HttpsAgent } from 'node:https';
 import { ProxyAgent } from 'proxy-agent';
 import { storeChatMetadata, storeMessageDirect, updateChatName } from './db.js';
+import { notifyNewImMessage } from './message-notifier.js';
 import { broadcastNewMessage } from './web.js';
 import { logger } from './logger.js';
 import {
@@ -468,7 +469,11 @@ export function createTelegramConnection(
           // 自动注册（确保 metadata 和名称同步）
           storeChatMetadata(jid, new Date().toISOString());
           updateChatName(jid, chatName);
-          opts.onNewChat(jid, chatName, ctx.chat.type === 'private' ? 'p2p' : 'group');
+          opts.onNewChat(
+            jid,
+            chatName,
+            ctx.chat.type === 'private' ? 'p2p' : 'group',
+          );
 
           // ── 斜杠指令：拦截已知 /xxx 命令，不进入消息流 ──
           // Telegram 群聊中会追加 @BotUsername，需要去掉
@@ -547,6 +552,7 @@ export function createTelegramConnection(
             undefined,
             jid,
           );
+          notifyNewImMessage();
 
           // 广播到 Web 客户端
           broadcastNewMessage(
@@ -619,7 +625,11 @@ export function createTelegramConnection(
 
           storeChatMetadata(jid, new Date().toISOString());
           updateChatName(jid, chatName);
-          opts.onNewChat(jid, chatName, ctx.chat.type === 'private' ? 'p2p' : 'group');
+          opts.onNewChat(
+            jid,
+            chatName,
+            ctx.chat.type === 'private' ? 'p2p' : 'group',
+          );
 
           // 取最高分辨率，下载为 base64 供 Vision
           const photo = ctx.message.photo.at(-1);
@@ -701,6 +711,7 @@ export function createTelegramConnection(
             undefined,
             jid,
           );
+          notifyNewImMessage();
 
           broadcastNewMessage(
             targetJid,
@@ -762,7 +773,11 @@ export function createTelegramConnection(
 
           storeChatMetadata(jid, new Date().toISOString());
           updateChatName(jid, chatName);
-          opts.onNewChat(jid, chatName, ctx.chat.type === 'private' ? 'p2p' : 'group');
+          opts.onNewChat(
+            jid,
+            chatName,
+            ctx.chat.type === 'private' ? 'p2p' : 'group',
+          );
 
           const doc = ctx.message.document;
           const originalFilename = doc.file_name || 'file';
@@ -787,6 +802,7 @@ export function createTelegramConnection(
               undefined,
               jid,
             );
+            notifyNewImMessage();
             broadcastNewMessage(
               earlyTargetJid,
               {
@@ -850,6 +866,7 @@ export function createTelegramConnection(
             undefined,
             jid,
           );
+          notifyNewImMessage();
 
           broadcastNewMessage(
             targetJid,
@@ -991,17 +1008,12 @@ export function createTelegramConnection(
       localImagePaths?: string[],
     ): Promise<void> {
       if (!bot) {
-        logger.warn(
-          { chatId },
-          'Telegram bot not initialized, skip sending message',
-        );
-        return;
+        throw new Error('Telegram bot is not initialized');
       }
 
       const chatIdNum = Number(chatId);
       if (isNaN(chatIdNum)) {
-        logger.error({ chatId }, 'Invalid Telegram chat ID');
-        return;
+        throw new Error(`Invalid Telegram chat ID: ${chatId}`);
       }
 
       try {
@@ -1048,11 +1060,7 @@ export function createTelegramConnection(
       fileName?: string,
     ): Promise<void> {
       if (!bot) {
-        logger.warn(
-          { chatId },
-          'Telegram bot not initialized, skip sending image',
-        );
-        return;
+        throw new Error('Telegram bot is not initialized');
       }
 
       const chatIdNum = Number(chatId);

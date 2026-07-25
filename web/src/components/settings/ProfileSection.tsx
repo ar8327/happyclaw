@@ -124,7 +124,7 @@ export function ProfileSection({ setNotice, setError }: ProfileSectionProps) {
     <div className="space-y-6">
       {/* Avatar */}
       <div>
-        <h3 className="text-base font-semibold text-slate-900 mb-4">头像设置</h3>
+        <h3 className="text-base font-semibold text-foreground mb-4">头像设置</h3>
         <div className="flex items-center gap-4 mb-4">
           <EmojiAvatar
             emoji={avatarEmoji}
@@ -132,31 +132,31 @@ export function ProfileSection({ setNotice, setError }: ProfileSectionProps) {
             fallbackChar={displayName || username}
             size="lg"
           />
-          <div className="text-sm text-slate-500">
+          <div className="text-sm text-muted-foreground">
             选择一个 Emoji 和背景色作为你的头像
           </div>
         </div>
         <div className="space-y-4">
           <div>
-            <label className="block text-xs text-slate-500 mb-2">Emoji</label>
+            <label className="block text-xs text-muted-foreground mb-2">Emoji</label>
             <EmojiPicker value={avatarEmoji ?? undefined} onChange={setAvatarEmoji} />
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-2">背景色</label>
+            <label className="block text-xs text-muted-foreground mb-2">背景色</label>
             <ColorPicker value={avatarColor ?? undefined} onChange={setAvatarColor} />
           </div>
         </div>
       </div>
 
       {/* Divider */}
-      <div className="border-t border-slate-200" />
+      <div className="border-t border-border" />
 
       {/* Operator Info */}
       <div>
-        <h3 className="text-base font-semibold text-slate-900 mb-4">Operator 资料</h3>
+        <h3 className="text-base font-semibold text-foreground mb-4">Operator 资料</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
           <div>
-            <label className="block text-xs text-slate-500 mb-1">用户名</label>
+            <label className="block text-xs text-muted-foreground mb-1">用户名</label>
             <Input
               type="text"
               value={username}
@@ -164,7 +164,7 @@ export function ProfileSection({ setNotice, setError }: ProfileSectionProps) {
             />
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">显示名称</label>
+            <label className="block text-xs text-muted-foreground mb-1">显示名称</label>
             <Input
               type="text"
               value={displayName}
@@ -172,7 +172,7 @@ export function ProfileSection({ setNotice, setError }: ProfileSectionProps) {
             />
           </div>
         </div>
-        <div className="mt-4 flex flex-wrap items-center gap-4 text-xs text-slate-500">
+        <div className="mt-4 flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
           <span>Operator：本机单用户</span>
           <span>最近活动：{currentUser?.last_login_at ? new Date(currentUser.last_login_at).toLocaleString('zh-CN') : '-'}</span>
         </div>
@@ -188,12 +188,12 @@ export function ProfileSection({ setNotice, setError }: ProfileSectionProps) {
       </div>
 
       {/* Divider */}
-      <div className="border-t border-slate-200" />
+      <div className="border-t border-border" />
 
       {/* AI Appearance */}
       <div>
-        <h3 className="text-base font-semibold text-slate-900 mb-4">我的机器人外观</h3>
-        <p className="text-xs text-slate-500 mb-4">
+        <h3 className="text-base font-semibold text-foreground mb-4">我的机器人外观</h3>
+        <p className="text-xs text-muted-foreground mb-4">
           自定义你的 AI 助手外观，覆盖系统默认值，仅影响你看到的对话界面。
         </p>
         <div className="space-y-4">
@@ -205,12 +205,12 @@ export function ProfileSection({ setNotice, setError }: ProfileSectionProps) {
               fallbackChar={aiName || 'AI'}
               size="lg"
             />
-            <div className="text-sm text-slate-500">
+            <div className="text-sm text-muted-foreground">
               设置机器人的头像图片、Emoji 和背景色
             </div>
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">AI 名称</label>
+            <label className="block text-xs text-muted-foreground mb-1">AI 名称</label>
             <Input
               type="text"
               value={aiName}
@@ -219,15 +219,15 @@ export function ProfileSection({ setNotice, setError }: ProfileSectionProps) {
             />
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-2">Emoji</label>
+            <label className="block text-xs text-muted-foreground mb-2">Emoji</label>
             <EmojiPicker value={aiAvatarEmoji ?? undefined} onChange={setAiAvatarEmoji} />
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-2">背景色</label>
+            <label className="block text-xs text-muted-foreground mb-2">背景色</label>
             <ColorPicker value={aiAvatarColor ?? undefined} onChange={setAiAvatarColor} />
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">自定义头像图片</label>
+            <label className="block text-xs text-muted-foreground mb-1">自定义头像图片</label>
             <input
               ref={avatarInputRef}
               type="file"
@@ -258,7 +258,7 @@ export function ProfileSection({ setNotice, setError }: ProfileSectionProps) {
                 </Button>
               )}
             </div>
-            <p className="text-xs text-slate-400 mt-1">
+            <p className="text-xs text-muted-foreground/80 mt-1">
               支持 jpg、png、gif、webp，最大 2MB。上传后将优先于 Emoji 头像显示
             </p>
           </div>

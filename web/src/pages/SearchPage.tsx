@@ -116,7 +116,7 @@ export function SearchPage() {
     return (
       <>
         <span className="text-muted-foreground">{excerpt.before}</span>
-        <mark className="bg-yellow-200 dark:bg-yellow-800 text-foreground rounded-sm px-0.5">{excerpt.match}</mark>
+        <mark className="bg-warning/30 text-foreground rounded-sm px-0.5">{excerpt.match}</mark>
         <span className="text-muted-foreground">{excerpt.after}</span>
       </>
     );

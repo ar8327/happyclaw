@@ -13,6 +13,7 @@ import type {
   QueryConfig,
   QueryResult,
   RenderedRunnerContext,
+  PushMessageResult,
 } from '../runner-interface.js';
 import { combineRenderedContext } from '../runner-interface.js';
 
@@ -109,6 +110,8 @@ export abstract class BaseCliRunner implements AgentRunner {
   private activeStartedAt = 0;
   private interrupted = false;
   private renderedContext: RenderedRunnerContext | null = null;
+  private stdinOperation: Promise<void> = Promise.resolve();
+  private stdinEnding = false;
 
   async initialize(): Promise<void> {
     // CLI runners usually do not need eager initialization.
@@ -118,8 +121,83 @@ export abstract class BaseCliRunner implements AgentRunner {
     this.renderedContext = context;
   }
 
-  pushMessage(): string[] {
-    return ['当前 runner 不支持运行中追加消息'];
+  async pushMessage(
+    _text: string,
+    _images?: Array<{ data: string; mimeType?: string }>,
+    _deliveryId?: string,
+  ): Promise<PushMessageResult> {
+    return {
+      status: 'buffer',
+      reason: '当前 runner 不支持运行中追加消息',
+    };
+  }
+
+  /**
+   * Serialize writes against stdin.end().  Writable.write(false) means
+   * backpressure, not rejection, so success is determined by the callback.
+   */
+  protected writeStdinLine(line: string): Promise<boolean> {
+    const proc = this.activeProcess;
+    if (
+      !proc ||
+      proc.killed ||
+      this.stdinEnding ||
+      !proc.stdin.writable ||
+      proc.stdin.destroyed
+    ) {
+      return Promise.resolve(false);
+    }
+
+    let resolveResult: (value: boolean) => void = () => {};
+    const result = new Promise<boolean>((resolve) => {
+      resolveResult = resolve;
+    });
+    this.stdinOperation = this.stdinOperation
+      .catch(() => {})
+      .then(
+        () =>
+          new Promise<void>((resolve) => {
+            if (
+              this.activeProcess !== proc ||
+              proc.killed ||
+              this.stdinEnding ||
+              !proc.stdin.writable ||
+              proc.stdin.destroyed
+            ) {
+              resolveResult(false);
+              resolve();
+              return;
+            }
+            proc.stdin.write(line, (error) => {
+              resolveResult(!error);
+              resolve();
+            });
+          }),
+      );
+    return result;
+  }
+
+  protected endStdin(): Promise<void> {
+    const proc = this.activeProcess;
+    if (!proc || this.stdinEnding) return this.stdinOperation;
+    this.stdinEnding = true;
+    this.stdinOperation = this.stdinOperation
+      .catch(() => {})
+      .then(
+        () =>
+          new Promise<void>((resolve) => {
+            if (
+              this.activeProcess !== proc ||
+              proc.stdin.destroyed ||
+              !proc.stdin.writable
+            ) {
+              resolve();
+              return;
+            }
+            proc.stdin.end(() => resolve());
+          }),
+      );
+    return this.stdinOperation;
   }
 
   async interrupt(): Promise<void> {
@@ -162,6 +240,8 @@ export abstract class BaseCliRunner implements AgentRunner {
     this.activeProcess = proc;
     this.activeStartedAt = Date.now();
     this.interrupted = false;
+    this.stdinOperation = Promise.resolve();
+    this.stdinEnding = false;
 
     const queue = new AsyncMessageQueue<NormalizedMessage>();
     let exitErrorMessage: string | null = null;
@@ -190,6 +270,9 @@ export abstract class BaseCliRunner implements AgentRunner {
           }
         }
         queue.push(message);
+        if (message.kind === 'result' || message.kind === 'error') {
+          void this.endStdin();
+        }
       }
     };
     enqueue(this.adapter.beforeRun?.(effectiveConfig) || []);
@@ -302,9 +385,15 @@ export abstract class BaseCliRunner implements AgentRunner {
       queue.close();
     });
 
-    for (const chunk of input.stdinChunks || []) proc.stdin.write(chunk);
-    if (input.stdin) proc.stdin.write(input.stdin);
-    if (input.endStdin !== false) proc.stdin.end();
+    for (const chunk of input.stdinChunks || []) {
+      if (!(await this.writeStdinLine(chunk))) {
+        throw new Error('CLI stdin became unavailable during initial input');
+      }
+    }
+    if (input.stdin && !(await this.writeStdinLine(input.stdin))) {
+      throw new Error('CLI stdin became unavailable during initial input');
+    }
+    if (input.endStdin !== false) await this.endStdin();
 
     try {
       while (true) {
@@ -338,6 +427,8 @@ export abstract class BaseCliRunner implements AgentRunner {
       this.activeProcess = null;
       this.activeStartedAt = 0;
       this.interrupted = false;
+      this.stdinEnding = false;
+      this.stdinOperation = Promise.resolve();
     }
   }
 }

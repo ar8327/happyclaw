@@ -99,6 +99,8 @@ export interface NewMessage {
   timestamp: string;
   attachments?: string;
   reply_to_id?: string;
+  thread_id?: string;
+  root_id?: string;
 }
 
 /** NewMessage with guaranteed rowid — returned by DB query functions */
@@ -280,13 +282,9 @@ export interface AuthUser {
   must_change_password: boolean;
 }
 
-export type Permission =
-  | 'manage_system_config'
-  | 'manage_group_env';
+export type Permission = 'manage_system_config' | 'manage_group_env';
 
-export type PermissionTemplateKey =
-  | 'admin_full'
-  | 'ops_manager';
+export type PermissionTemplateKey = 'admin_full' | 'ops_manager';
 
 export interface User {
   id: string;

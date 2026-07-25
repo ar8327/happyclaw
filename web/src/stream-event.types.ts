@@ -10,16 +10,24 @@
  */
 
 export type StreamEventType =
-  | 'text_delta' | 'thinking_delta'
-  | 'tool_use_start' | 'tool_use_end' | 'tool_progress'
-  | 'hook_started' | 'hook_progress' | 'hook_response'
+  | 'text_delta'
+  | 'thinking_delta'
+  | 'tool_use_start'
+  | 'tool_use_end'
+  | 'tool_progress'
+  | 'hook_started'
+  | 'hook_progress'
+  | 'hook_response'
   | 'lifecycle'
-  | 'task_start' | 'task_notification'
+  | 'task_start'
+  | 'task_notification'
   | 'todo_update'
   | 'mode_change'
   | 'usage'
-  | 'status' | 'init'
-  | 'turn_started' | 'turn_completed';
+  | 'status'
+  | 'init'
+  | 'turn_started'
+  | 'turn_completed';
 
 export interface StreamEvent {
   eventType: StreamEventType;
@@ -34,7 +42,11 @@ export interface StreamEvent {
   hookName?: string;
   hookEvent?: string;
   hookOutcome?: string;
-  phase?: 'compact_started' | 'compact_completed' | 'archive_started' | 'archive_completed';
+  phase?:
+    | 'compact_started'
+    | 'compact_completed'
+    | 'archive_started'
+    | 'archive_completed';
   trigger?: 'native' | 'synthetic_threshold';
   repairHints?: {
     recentImChannels?: string[];
@@ -53,7 +65,11 @@ export interface StreamEvent {
   isBackground?: boolean;
   isTeammate?: boolean;
   toolInput?: Record<string, unknown>;
-  todos?: Array<{ id: string; content: string; status: 'pending' | 'in_progress' | 'completed' }>;
+  todos?: Array<{
+    id: string;
+    content: string;
+    status: 'pending' | 'in_progress' | 'completed';
+  }>;
   /** Permission mode change (e.g. agent called ExitPlanMode/EnterPlanMode) */
   permissionMode?: string;
   /** Token usage data emitted at query completion */
@@ -65,13 +81,18 @@ export interface StreamEvent {
     costUSD: number;
     durationMs: number;
     numTurns: number;
-    modelUsage?: Record<string, { inputTokens: number; outputTokens: number; costUSD: number }>;
+    modelUsage?: Record<
+      string,
+      { inputTokens: number; outputTokens: number; costUSD: number }
+    >;
   };
   /** IPC delivery acknowledgement metadata emitted by agent-runner */
   ipcAckSessionId?: string;
   ipcAckTargets?: string[];
   ipcAckSources?: string[];
   ipcAckMessageCount?: number;
+  /** Stable IDs for exact IPC receive/delivery correlation. */
+  ipcDeliveryIds?: string[];
   /** Turn lifecycle fields (emitted by host process, not agent-runner) */
   turnId?: string;
   turnStatus?: 'started' | 'completed' | 'interrupted' | 'error' | 'drained';

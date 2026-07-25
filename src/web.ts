@@ -56,6 +56,8 @@ import memoryAgentInternalRoutes from './routes/memory-agent.js';
 import feishuApiRoutes, { injectFeishuApiDeps } from './routes/feishu-api.js';
 import searchRoutes from './routes/search.js';
 import workflowsRoutes from './routes/workflows.js';
+import outboxRoutes from './routes/outbox.js';
+import feishuCardActionRoutes from './routes/feishu-card-action.js';
 import { getSystemSettings } from './runtime-config.js';
 
 // Database and types (only for handleWebUserMessage and broadcast)
@@ -75,7 +77,12 @@ import type {
   StreamEvent,
   UserRole,
 } from './types.js';
-import { WEB_PORT, SESSION_COOKIE_NAME, GROUPS_DIR } from './config.js';
+import {
+  WEB_PORT,
+  WEB_HOST,
+  SESSION_COOKIE_NAME,
+  GROUPS_DIR,
+} from './config.js';
 import { logger } from './logger.js';
 import { analyzeIntent } from './intent-analyzer.js';
 import { executeSessionReset } from './commands.js';
@@ -103,9 +110,10 @@ const wsTerminals = new Map<WebSocket, string>(); // ws → groupJid
 const terminalOwners = new Map<string, WebSocket>(); // groupJid → ws
 const wsTerminalClientJids = new Map<WebSocket, string>(); // ws → client-facing jid
 
-function resolveRouteGroup(
-  id: string,
-): { accessJid: string; group: NonNullable<ReturnType<typeof getRegisteredGroup>> } | null {
+function resolveRouteGroup(id: string): {
+  accessJid: string;
+  group: NonNullable<ReturnType<typeof getRegisteredGroup>>;
+} | null {
   const direct = getRegisteredGroup(id);
   if (direct) return { accessJid: id, group: direct };
 
@@ -119,7 +127,9 @@ function resolveRouteGroup(
       : null;
   if (!folder) return null;
 
-  const accessJid = getJidsByFolder(folder).find((jid) => jid.startsWith('web:'));
+  const accessJid = getJidsByFolder(folder).find((jid) =>
+    jid.startsWith('web:'),
+  );
   if (!accessJid) return null;
   const group = getRegisteredGroup(accessJid);
   return group ? { accessJid, group } : null;
@@ -202,6 +212,8 @@ app.route('/api/browse', browseRoutes);
 app.route('/api/mcp-servers', mcpServersRoutes);
 app.route('/api/runners', runnersRoutes);
 app.route('/api/workflows', workflowsRoutes);
+app.route('/api/outbox', outboxRoutes);
+app.route('/api/feishu', feishuCardActionRoutes);
 app.route('/api/sessions', agentRoutes);
 app.route('/api/logs', logsRoutes);
 app.route('/api/sessions', turnsRoutes);
@@ -341,7 +353,13 @@ async function handleWebUserMessage(
   // IPC-inject the message into the running agent process. For Session-backed
   // web workspaces, the reply route is updated dynamically via
   // activeRouteUpdaters so we no longer need to kill and restart the process.
-  let pipedToActive = false;
+  let injection:
+    | {
+        deliveryId: string;
+        ipcFilePath: string;
+        groupFolder: string;
+      }
+    | undefined;
   const images = toAgentImages(normalizedAttachments);
   const intent = analyzeIntent(content);
   const sendResult = deps.queue.sendMessage(
@@ -349,28 +367,25 @@ async function handleWebUserMessage(
     formatted,
     images,
     intent,
-    () => {
+    (createdInjection) => {
+      injection = createdInjection;
       // IPC write succeeded — update the reply route for Session-backed web workspaces.
       // Web messages have no IM source, so clear the IM route.
     },
   );
   if (sendResult === 'sent') {
-    pipedToActive = true;
-    deps.trackIpcDelivery?.(chatJid);
+    if (injection) {
+      deps.deferIpcCursorCommit?.(chatJid, msgRowid, injection);
+    }
   } else if (sendResult === 'interrupted_stop') {
     // Stop intent: cursor updated, no enqueue needed
-    pipedToActive = true;
-  } else if (sendResult === 'interrupted_correction') {
-    // Correction intent: IPC message written, agent handles it after interrupt
-    pipedToActive = true;
-    deps.trackIpcDelivery?.(chatJid);
   } else {
     deps.queue.enqueueMessageCheck(chatJid);
   }
 
-  // Only advance per-group cursor when we piped directly into a running container.
-  // For queued processing, processGroupMessages must still see this message from DB.
-  if (pipedToActive) {
+  // A stop command is consumed by the host. Other injected messages advance
+  // only after the runtime reports successful delivery.
+  if (sendResult === 'interrupted_stop') {
     deps.setLastAgentTimestamp(chatJid, { rowid: msgRowid });
   }
   deps.advanceGlobalCursor({ rowid: msgRowid });
@@ -418,7 +433,7 @@ async function handleAgentConversationMessage(
       : undefined;
 
   ensureChatExists(virtualChatJid);
-  storeMessageDirect(
+  const msgRowid = storeMessageDirect(
     messageId,
     virtualChatJid,
     userId,
@@ -464,11 +479,21 @@ async function handleAgentConversationMessage(
   // Try to pipe into running agent process
   const agentIntent = analyzeIntent(content);
   const agentImages = toAgentImages(normalizedAttachments);
+  let injection:
+    | {
+        deliveryId: string;
+        ipcFilePath: string;
+        groupFolder: string;
+      }
+    | undefined;
   const agentSendResult = deps.queue.sendMessage(
     workerSessionId,
     formatted,
     agentImages,
     agentIntent,
+    (createdInjection) => {
+      injection = createdInjection;
+    },
   );
   if (agentSendResult === 'no_active') {
     // No running process — start one via processAgentConversation
@@ -478,14 +503,13 @@ async function handleAgentConversationMessage(
         await deps!.processAgentConversation!(chatJid, agentId);
       });
     }
-  } else if (
-    agentSendResult === 'sent' ||
-    agentSendResult === 'interrupted_correction'
-  ) {
-    deps.trackIpcDelivery?.(workerSessionId);
+  } else if (agentSendResult === 'sent') {
+    if (injection) {
+      deps.deferIpcCursorCommit?.(virtualChatJid, msgRowid, injection);
+    }
+  } else if (agentSendResult === 'interrupted_stop') {
+    deps.setLastAgentTimestamp(virtualChatJid, { rowid: msgRowid });
   }
-  // 'sent', 'interrupted_stop', 'interrupted_correction' need no further action —
-  // for correction, the IPC message was written and the agent handles it after interrupt
 }
 
 // --- Static Files ---
@@ -653,7 +677,10 @@ function setupWebSocket(server: any): WebSocketServer {
                 setLastAgentTimestamp: deps.setLastAgentTimestamp,
               });
             } catch (err) {
-              logger.error({ chatJid: accessJid, err }, '/clear command failed');
+              logger.error(
+                { chatJid: accessJid, err },
+                '/clear command failed',
+              );
               const errId = crypto.randomUUID();
               const errTs = new Date().toISOString();
               ensureChatExists(accessJid);
@@ -862,10 +889,7 @@ function setupWebSocket(server: any): WebSocketServer {
           }
           const accessJid = resolved.accessJid;
           const ownerJid = wsTerminals.get(ws);
-          if (
-            ownerJid !== accessJid ||
-            terminalOwners.get(accessJid) !== ws
-          ) {
+          if (ownerJid !== accessJid || terminalOwners.get(accessJid) !== ws) {
             ws.send(
               JSON.stringify({
                 type: 'terminal_error',
@@ -875,10 +899,7 @@ function setupWebSocket(server: any): WebSocketServer {
             );
             return;
           }
-          terminalManager.write(
-            accessJid,
-            inputValidation.data.data,
-          );
+          terminalManager.write(accessJid, inputValidation.data.data);
         } else if (msg.type === 'terminal_resize') {
           const resizeValidation = TerminalResizeSchema.safeParse(msg);
           if (!resizeValidation.success) {
@@ -904,10 +925,7 @@ function setupWebSocket(server: any): WebSocketServer {
           }
           const accessJid = resolved.accessJid;
           const ownerJid = wsTerminals.get(ws);
-          if (
-            ownerJid !== accessJid ||
-            terminalOwners.get(accessJid) !== ws
-          ) {
+          if (ownerJid !== accessJid || terminalOwners.get(accessJid) !== ws) {
             ws.send(
               JSON.stringify({
                 type: 'terminal_error',
@@ -939,10 +957,7 @@ function setupWebSocket(server: any): WebSocketServer {
           if (!resolved) return;
           const accessJid = resolved.accessJid;
           const ownerJid = wsTerminals.get(ws);
-          if (
-            ownerJid !== accessJid ||
-            terminalOwners.get(accessJid) !== ws
-          ) {
+          if (ownerJid !== accessJid || terminalOwners.get(accessJid) !== ws) {
             return;
           }
           terminalManager.stop(accessJid);
@@ -1236,6 +1251,7 @@ export function startWebServer(webDeps: WebDeps): void {
     {
       fetch: app.fetch,
       port: WEB_PORT,
+      hostname: WEB_HOST,
       // Node 25 + @hono/node-server's Response shim can corrupt JSON bodies
       // on the wire even though app.fetch() stays correct. Keep the native
       // Request/Response objects for the HTTP server path.

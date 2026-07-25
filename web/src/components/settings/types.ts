@@ -91,6 +91,7 @@ export interface SystemSettings {
 export type SettingsTab =
   | 'runners'
   | 'appearance'
+  | 'theme'
   | 'system'
   | 'profile'
   | 'channels'

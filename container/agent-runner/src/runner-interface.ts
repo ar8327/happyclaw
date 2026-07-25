@@ -115,7 +115,7 @@ export interface ActivityReport {
 // ─── IPC 交互能力 ───────────────────────────────────────
 
 export interface IpcCapabilities {
-  /** 能否向活跃 query 中推送消息？Claude: true, Codex: false */
+  /** 能否向活跃 query 中推送消息？Claude/Codex: true, agy: false */
   supportsMidQueryPush: boolean;
   /** 能否运行时切换权限模式？Claude: true, Codex: false */
   supportsRuntimeModeSwitch: boolean;
@@ -129,6 +129,22 @@ export interface RuntimePersistenceSnapshot {
     clearResumeAnchor?: boolean;
   };
 }
+
+export type PushMessageResult =
+  | {
+      /**
+       * The provider accepted the message into the active query.  This is not
+       * yet the host-side durable-delivery acknowledgement: query-loop emits
+       * that only after the query finishes successfully.
+       */
+      status: 'accepted';
+      warnings?: string[];
+    }
+  | {
+      /** The active query cannot accept the message; query-loop must buffer it. */
+      status: 'buffer';
+      reason: string;
+    };
 
 // ─── Runner 接口 ────────────────────────────────────────
 
@@ -170,13 +186,14 @@ export interface AgentRunner {
 
   /**
    * 向活跃查询推送后续消息（仅 supportsMidQueryPush=true 时有效）。
-   * Codex 实现应将消息累积到 pendingMessages。
-   * @returns 被拒绝的图片原因列表（空 = 全部通过）
+   * 返回 accepted 只表示 provider 已受理；query-loop 会在本轮成功结束后
+   * 发出持久交付回执。buffer 表示调用方必须保留消息并在下一轮重试。
    */
   pushMessage(
     text: string,
     images?: Array<{ data: string; mimeType?: string }>,
-  ): string[];
+    deliveryId?: string,
+  ): Promise<PushMessageResult>;
 
   /** 中断当前查询 */
   interrupt(): Promise<void>;

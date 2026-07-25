@@ -7,6 +7,7 @@ import { SettingsNav } from '../components/settings/SettingsNav';
 import { ProfileSection } from '../components/settings/ProfileSection';
 import { AboutSection } from '../components/settings/AboutSection';
 import { AppearanceSection } from '../components/settings/AppearanceSection';
+import { ThemeSection } from '../components/settings/ThemeSection';
 import { SystemSettingsSection } from '../components/settings/SystemSettingsSection';
 import { UserChannelsSection } from '../components/settings/UserChannelsSection';
 import { SessionsPage } from './SessionsPage';
@@ -18,7 +19,7 @@ import { BindingsSection } from '../components/settings/BindingsSection';
 import { AgentDefinitionsPage } from './AgentDefinitionsPage';
 import type { SettingsTab } from '../components/settings/types';
 
-const VALID_TABS: SettingsTab[] = ['runners', 'appearance', 'system', 'profile', 'channels', 'sessions', 'memory', 'skills', 'mcp-servers', 'agent-definitions', 'about', 'bindings'];
+const VALID_TABS: SettingsTab[] = ['runners', 'appearance', 'theme', 'system', 'profile', 'channels', 'sessions', 'memory', 'skills', 'mcp-servers', 'agent-definitions', 'about', 'bindings'];
 const SYSTEM_TABS: SettingsTab[] = ['runners', 'appearance', 'system'];
 const FULLPAGE_TABS: SettingsTab[] = ['sessions', 'memory', 'runners', 'skills', 'mcp-servers', 'agent-definitions', 'bindings'];
 
@@ -66,6 +67,7 @@ export function SettingsPage() {
   const mobileTabs = useMemo(() => {
     const tabs: { key: SettingsTab; label: string }[] = [];
     tabs.push({ key: 'profile', label: '个人资料' });
+    tabs.push({ key: 'theme', label: '主题皮肤' });
     tabs.push({ key: 'channels', label: '消息渠道' });
     if (canManageSystemConfig) {
       tabs.push({ key: 'runners', label: 'Runners' });
@@ -96,6 +98,7 @@ export function SettingsPage() {
   const sectionTitle: Record<SettingsTab, string> = {
     runners: 'Runner 注册表',
     appearance: '外观设置（全局默认）',
+    theme: '主题皮肤',
     system: '系统参数',
     profile: '个人资料',
     channels: '消息渠道',
@@ -116,12 +119,12 @@ export function SettingsPage() {
       >
         <button
           onClick={() => setNavOpen(true)}
-          className="p-1.5 -ml-1.5 rounded-lg hover:bg-slate-100 transition-colors"
+          className="p-1.5 -ml-1.5 rounded-lg hover:bg-surface-2 transition-colors"
           aria-label="打开导航"
         >
-          <Menu className="w-5 h-5 text-slate-600" />
+          <Menu className="w-5 h-5 text-muted-foreground" />
         </button>
-        <span className="ml-3 text-sm font-semibold text-slate-900 truncate">{sectionTitle[activeTab]}</span>
+        <span className="ml-3 text-sm font-semibold text-foreground truncate">{sectionTitle[activeTab]}</span>
       </div>
 
       {/* Mobile horizontal tab bar */}
@@ -141,10 +144,10 @@ export function SettingsPage() {
               disabled={disabled}
               className={`flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
                 isActive
-                  ? 'bg-primary text-white'
+                  ? 'bg-primary text-primary-foreground'
                   : disabled
-                    ? 'text-slate-300'
-                    : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'
+                    ? 'text-muted-foreground/50'
+                    : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
               }`}
             >
               {tab.label}
@@ -177,24 +180,25 @@ export function SettingsPage() {
           <div className="p-4 lg:p-8">
             <div className="max-w-3xl mx-auto space-y-6">
               <div>
-                <h1 className="text-2xl font-bold text-slate-900">{sectionTitle[activeTab]}</h1>
+                <h1 className="text-2xl font-bold text-foreground">{sectionTitle[activeTab]}</h1>
               </div>
 
               {mustChangePassword && (
-                <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm text-amber-800">
+                <div className="bg-warning-bg border border-warning-border rounded-xl px-4 py-3 text-sm text-warning-foreground">
                   检测到首次登录或管理员重置密码，请先完成"修改密码"，其余关键操作会被暂时限制。
                 </div>
               )}
 
               {(notice || error) && (
                 <div className="bg-card rounded-xl border border-border p-4 space-y-1">
-                  {notice && <div className="text-sm text-green-600">{notice}</div>}
-                  {error && <div className="text-sm text-red-600">{error}</div>}
+                  {notice && <div className="text-sm text-success">{notice}</div>}
+                  {error && <div className="text-sm text-error">{error}</div>}
                 </div>
               )}
 
               <div className="bg-card rounded-xl border border-border p-6">
                 {activeTab === 'appearance' && <AppearanceSection setNotice={setNotice} setError={setError} />}
+                {activeTab === 'theme' && <ThemeSection />}
                 {activeTab === 'system' && <SystemSettingsSection setNotice={setNotice} setError={setError} />}
                 {activeTab === 'profile' && <ProfileSection setNotice={setNotice} setError={setError} />}
                 {activeTab === 'channels' && <UserChannelsSection setNotice={setNotice} setError={setError} />}

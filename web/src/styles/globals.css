@@ -1,12 +1,12 @@
-@import "tailwindcss";
+@import 'tailwindcss';
+@import './themes.css';
 @plugin "tailwindcss-animate";
 
 @custom-variant dark (&:is(.dark *));
 
 /* =====================================================
-   Tailwind CSS 4 Theme — shadcn/ui CSS variable mapping
-   Maps semantic CSS variables → Tailwind utility classes
-   e.g. --color-primary → bg-primary, text-primary, etc.
+   Tailwind CSS 4 Theme — 语义 CSS 变量 → Tailwind 工具类
+   token 的真实取值由 themes.css 的派生层给出
    ===================================================== */
 @theme inline {
   --color-background: var(--background);
@@ -15,6 +15,7 @@
   --color-card-foreground: var(--card-foreground);
   --color-popover: var(--popover);
   --color-popover-foreground: var(--popover-foreground);
+  --color-elevated: var(--elevated);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
   --color-secondary: var(--secondary);
@@ -26,13 +27,22 @@
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
   --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-border-subtle: var(--border-subtle);
   --color-input: var(--input);
   --color-ring: var(--ring);
+
+  /* 表面层次 — bg-surface / bg-surface-2 / bg-surface-3 */
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);
   --color-chart-3: var(--chart-3);
   --color-chart-4: var(--chart-4);
   --color-chart-5: var(--chart-5);
+
   --color-sidebar: var(--sidebar-background);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);
@@ -42,7 +52,7 @@
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
 
-  /* Brand color scale — available as bg-brand-500, text-brand-300, etc. */
+  /* 品牌色阶 — bg-brand-500, text-brand-300, ... */
   --color-brand-50: var(--brand-50);
   --color-brand-100: var(--brand-100);
   --color-brand-200: var(--brand-200);
@@ -52,157 +62,52 @@
   --color-brand-600: var(--brand-600);
   --color-brand-700: var(--brand-700);
 
-  /* Feedback semantic colors — bg-success, text-warning, etc. */
+  /* 反馈语义色 — 每种都有 文本 / 底色 / 边框 / 底色上的文本 */
   --color-success: var(--success);
   --color-success-bg: var(--success-bg);
+  --color-success-border: var(--success-border);
+  --color-success-foreground: var(--success-foreground);
   --color-warning: var(--warning);
   --color-warning-bg: var(--warning-bg);
+  --color-warning-border: var(--warning-border);
+  --color-warning-foreground: var(--warning-foreground);
   --color-error: var(--error);
   --color-error-bg: var(--error-bg);
+  --color-error-border: var(--error-border);
+  --color-error-foreground: var(--error-foreground);
+  --color-info: var(--info);
+  --color-info-bg: var(--info-bg);
+  --color-info-border: var(--info-border);
+  --color-info-foreground: var(--info-foreground);
 
-  /* Border radius tokens */
+  /* 圆角 */
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+
+  /* 阴影 — 覆盖 Tailwind 自带色阶，使 shadow-* 随主题自动加深 */
+  --shadow-2xs: var(--elev-xs);
+  --shadow-xs: var(--elev-xs);
+  --shadow-sm: var(--elev-sm);
+  --shadow-md: var(--elev-md);
+  --shadow-lg: var(--elev-lg);
+  --shadow-xl: var(--elev-xl);
+  --shadow-2xl: var(--elev-xl);
 }
 
 /* =====================================================
-   Design Token values — Teal theme
-   Primary: #0d9488 (Teal) | Logo accent: #d97706 (Amber) | Base: Slate
-   ===================================================== */
-:root {
-  /* shadcn/ui semantic tokens */
-  --background: #ffffff;
-  --foreground: #0f172a;
-  --card: #ffffff;
-  --card-foreground: #0f172a;
-  --popover: #ffffff;
-  --popover-foreground: #0f172a;
-  --primary: #0d9488;
-  --primary-foreground: #ffffff;
-  --secondary: #f1f5f9;
-  --secondary-foreground: #0f172a;
-  --muted: #f1f5f9;
-  --muted-foreground: #64748b;
-  --accent: #f0fdfa;
-  --accent-foreground: #134e4a;
-  --destructive: #dc2626;
-  --destructive-foreground: #ffffff;
-  --border: #e2e8f0;
-  --input: #e2e8f0;
-  --ring: #0d9488;
-  --radius: 0.5rem;
-
-  /* Brand color scale (Teal) */
-  --brand-50: #f0fdfa;
-  --brand-100: #ccfbf1;
-  --brand-200: #99f6e4;
-  --brand-300: #5eead4;
-  --brand-400: #2dd4bf;
-  --brand-500: #0d9488;
-  --brand-600: #0f766e;
-  --brand-700: #115e59;
-
-  /* Chart colors */
-  --chart-1: #0d9488;
-  --chart-2: #d97706;
-  --chart-3: #4c6ef5;
-  --chart-4: #9333ea;
-  --chart-5: #dc2626;
-
-  /* Sidebar */
-  --sidebar-background: #f8fafc;
-  --sidebar-foreground: #0f172a;
-  --sidebar-primary: #0d9488;
-  --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #f1f5f9;
-  --sidebar-accent-foreground: #0f172a;
-  --sidebar-border: #e2e8f0;
-  --sidebar-ring: #0d9488;
-
-  /* Feedback colors */
-  --success: #16a34a;
-  --success-bg: #dcfce7;
-  --warning: #d97706;
-  --warning-bg: #fef3c7;
-  --error: #dc2626;
-  --error-bg: #fee2e2;
-
-  /* iOS keyboard height */
-  --keyboard-height: 0px;
-
-  /* Liquid Glass design tokens */
-  --glass-blur: 20px;
-  --glass-saturate: 1.8;
-  --glass-bg: rgba(255, 255, 255, 0.55);
-  --glass-bg-heavy: rgba(255, 255, 255, 0.75);
-  --glass-border: rgba(255, 255, 255, 0.35);
-  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.06);
-  --glass-highlight: linear-gradient(135deg, rgba(255,255,255,0.5) 0%, rgba(255,255,255,0) 60%);
-  --glass-inner-shadow: inset 0 1px 1px rgba(255,255,255,0.6);
-}
-
-/* =====================================================
-   Dark mode token overrides
-   ===================================================== */
-.dark {
-  --background: #0f172a;
-  --foreground: #e2e8f0;
-  --card: #1e293b;
-  --card-foreground: #e2e8f0;
-  --popover: #1e293b;
-  --popover-foreground: #e2e8f0;
-  --primary: #2dd4bf;
-  --primary-foreground: #0f172a;
-  --secondary: #1e293b;
-  --secondary-foreground: #e2e8f0;
-  --muted: #1e293b;
-  --muted-foreground: #94a3b8;
-  --accent: #134e4a;
-  --accent-foreground: #99f6e4;
-  --destructive: #f87171;
-  --destructive-foreground: #ffffff;
-  --border: #334155;
-  --input: #334155;
-  --ring: #2dd4bf;
-
-  --sidebar-background: #0f172a;
-  --sidebar-foreground: #cbd5e1;
-  --sidebar-primary: #2dd4bf;
-  --sidebar-primary-foreground: #0f172a;
-  --sidebar-accent: #1e293b;
-  --sidebar-accent-foreground: #cbd5e1;
-  --sidebar-border: #1e293b;
-  --sidebar-ring: #2dd4bf;
-
-  --success: #4ade80;
-  --success-bg: #14532d;
-  --warning: #fbbf24;
-  --warning-bg: #451a03;
-  --error: #f87171;
-  --error-bg: #450a0a;
-
-  --glass-bg: rgba(15, 23, 42, 0.55);
-  --glass-bg-heavy: rgba(15, 23, 42, 0.80);
-  --glass-border: rgba(255, 255, 255, 0.08);
-  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-  --glass-highlight: linear-gradient(135deg, rgba(255,255,255,0.06) 0%, rgba(255,255,255,0) 60%);
-  --glass-inner-shadow: inset 0 1px 1px rgba(255,255,255,0.06);
-}
-
-/* =====================================================
-   Base styles
+   基础样式
    ===================================================== */
 
-/* Tailwind v4 默认 border 使用 currentColor（黑色），
-   覆盖为设计系统的 border 色 */
+/* Tailwind v4 默认 border 使用 currentColor（黑色），覆盖为设计系统 border 色 */
 *,
 ::after,
 ::before,
 ::backdrop,
 ::file-selector-button {
-  border-color: var(--border, #e2e8f0);
+  border-color: var(--border);
 }
 
 html {
@@ -214,10 +119,15 @@ body {
   height: 100%;
   overflow: hidden;
   margin: 0;
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family:
+    'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
   background: var(--background);
   color: var(--foreground);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
   overscroll-behavior: none;
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
@@ -225,65 +135,158 @@ body {
   word-break: break-word;
 }
 
-/* Code highlighting theme override — GitHub light */
+/* 切换皮肤 / 明暗时给一个短过渡，避免生硬跳变。
+   .theme-switching 由 useTheme 在切换瞬间挂到 <html> 上。 */
+.theme-switching,
+.theme-switching *,
+.theme-switching *::before,
+.theme-switching *::after {
+  transition:
+    background-color 220ms ease,
+    border-color 220ms ease,
+    color 220ms ease,
+    fill 220ms ease,
+    stroke 220ms ease !important;
+}
+
+/* 选中态跟随主题 */
+::selection {
+  background: color-mix(in srgb, var(--primary) 26%, transparent);
+  color: var(--foreground);
+}
+
+/* =====================================================
+   滚动条 — 跟随主题，避免暗色模式下出现亮色滚动条
+   ===================================================== */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: color-mix(in oklab, var(--border-strong) 70%, transparent);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--border-strong);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* =====================================================
+   焦点可见性 — 统一键盘焦点环
+   ===================================================== */
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+/* =====================================================
+   代码高亮 — 全部走主题 token
+   ===================================================== */
 pre code.hljs {
-  background: #f6f8fa !important;
-  border-radius: 8px;
+  background: var(--code-bg) !important;
+  color: var(--foreground) !important;
+  border-radius: calc(var(--radius) - 2px);
   padding: 16px !important;
 }
 
-/* Dark mode syntax highlighting — GitHub Dark Dimmed */
-.dark pre code.hljs {
-  background: #22272e !important;
-  color: #adbac7 !important;
+/* 亮色语法配色 */
+.hljs-doctag,
+.hljs-keyword,
+.hljs-meta .hljs-keyword,
+.hljs-template-tag,
+.hljs-template-variable,
+.hljs-type,
+.hljs-variable.language_ {
+  color: color-mix(in oklab, var(--error) 88%, var(--foreground)) !important;
 }
-.dark .hljs-doctag,
-.dark .hljs-keyword,
-.dark .hljs-meta .hljs-keyword,
-.dark .hljs-template-tag,
-.dark .hljs-template-variable,
-.dark .hljs-type,
-.dark .hljs-variable.language_ { color: #f47067 !important; }
-.dark .hljs-title,
-.dark .hljs-title.class_,
-.dark .hljs-title.class_.inherited__,
-.dark .hljs-title\.function_ { color: #dcbdfb !important; }
-.dark .hljs-attr,
-.dark .hljs-attribute,
-.dark .hljs-literal,
-.dark .hljs-meta,
-.dark .hljs-number,
-.dark .hljs-operator,
-.dark .hljs-variable,
-.dark .hljs-selector-attr,
-.dark .hljs-selector-class,
-.dark .hljs-selector-id { color: #6cb6ff !important; }
-.dark .hljs-regexp,
-.dark .hljs-string,
-.dark .hljs-meta .hljs-string { color: #96d0ff !important; }
-.dark .hljs-built_in,
-.dark .hljs-symbol { color: #f69d50 !important; }
-.dark .hljs-comment,
-.dark .hljs-code,
-.dark .hljs-formula { color: #768390 !important; }
-.dark .hljs-name,
-.dark .hljs-quote,
-.dark .hljs-selector-tag,
-.dark .hljs-selector-pseudo { color: #8ddb8c !important; }
-.dark .hljs-subst { color: #adbac7 !important; }
-.dark .hljs-section { color: #316dca !important; font-weight: bold; }
-.dark .hljs-bullet { color: #eac55f !important; }
-.dark .hljs-emphasis { color: #adbac7 !important; font-style: italic; }
-.dark .hljs-strong { color: #adbac7 !important; font-weight: bold; }
-.dark .hljs-addition { color: #b4f1b4 !important; background-color: #1b4721 !important; }
-.dark .hljs-deletion { color: #ffd8d3 !important; background-color: #78191b !important; }
+.hljs-title,
+.hljs-title.class_,
+.hljs-title.class_.inherited__,
+.hljs-title.function_ {
+  color: color-mix(in oklab, var(--chart-3) 80%, var(--foreground)) !important;
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-literal,
+.hljs-meta,
+.hljs-number,
+.hljs-operator,
+.hljs-variable,
+.hljs-selector-attr,
+.hljs-selector-class,
+.hljs-selector-id {
+  color: color-mix(in oklab, var(--info) 85%, var(--foreground)) !important;
+}
+.hljs-regexp,
+.hljs-string,
+.hljs-meta .hljs-string {
+  color: color-mix(in oklab, var(--success) 82%, var(--foreground)) !important;
+}
+.hljs-built_in,
+.hljs-symbol {
+  color: color-mix(in oklab, var(--warning) 85%, var(--foreground)) !important;
+}
+.hljs-comment,
+.hljs-code,
+.hljs-formula {
+  color: var(--muted-foreground) !important;
+  font-style: italic;
+}
+.hljs-name,
+.hljs-quote,
+.hljs-selector-tag,
+.hljs-selector-pseudo {
+  color: color-mix(in oklab, var(--primary) 85%, var(--foreground)) !important;
+}
+.hljs-subst {
+  color: var(--foreground) !important;
+}
+.hljs-section {
+  color: var(--primary) !important;
+  font-weight: 600;
+}
+.hljs-bullet {
+  color: var(--warning) !important;
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 700;
+}
+.hljs-addition {
+  color: var(--success-foreground) !important;
+  background-color: var(--success-bg) !important;
+}
+.hljs-deletion {
+  color: var(--error-foreground) !important;
+  background-color: var(--error-bg) !important;
+}
 
-/* KaTeX dark mode — inherit text color from theme */
-.dark .katex { color: inherit; }
+/* KaTeX 继承主题文本色 */
+.katex {
+  color: inherit;
+}
 
-/* Reduced motion preference */
+/* =====================================================
+   动效偏好
+   ===================================================== */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
+  *,
+  *::before,
+  *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
@@ -291,7 +294,7 @@ pre code.hljs {
   }
 }
 
-/* Safe area insets for iOS */
+/* iOS 安全区 */
 @supports (padding: env(safe-area-inset-top)) {
   .safe-area-top {
     padding-top: env(safe-area-inset-top);
@@ -304,29 +307,16 @@ pre code.hljs {
 /* =====================================================
    iOS PWA: 防止底部 TabBar 触发 Safari 工具栏
 
-   问题根因：
-   1. URL 变化（History API）会触发工具栏
-   2. 底部边缘触摸会触发系统工具栏（iOS 保留区域）
-
-   核心策略：
-   - 底部边缘是 iOS 系统保留区域，Web 无法完全阻止
-   - 解决方案：将交互元素移离底部边缘 + 触摸吸收层
-   - TabBar 内容必须完全在安全区域内（距底部 > 44px）
+   底部边缘是 iOS 系统保留区域，Web 无法完全阻止，
+   策略是把交互元素移离底部边缘 + 加一层触摸吸收层。
    ===================================================== */
-
-/* PWA standalone 模式专用优化 */
 @media all and (display-mode: standalone) {
-  /* 全局禁止双击缩放 */
   body {
     touch-action: manipulation;
     -webkit-touch-callout: none;
   }
 
-  /*
-   * 关键方案：底部触摸吸收层
-   * 这个透明层位于屏幕最底部，高度 44px（iOS 手势区域高度）
-   * 它会拦截所有底部边缘的触摸事件，防止触发系统工具栏
-   */
+  /* 透明触摸吸收层，拦截底部边缘触摸，避免唤起系统工具栏 */
   .pwa-bottom-guard {
     position: fixed;
     bottom: 0;
@@ -337,17 +327,17 @@ pre code.hljs {
     touch-action: none;
     z-index: 9999;
     pointer-events: auto;
-    /* 确保这个层可以接收触摸事件 */
     -webkit-tap-highlight-color: transparent;
   }
 
-  /* 聊天输入框底部安全区域 */
   .ios-pwa-bottom-safe {
     padding-bottom: max(env(safe-area-inset-bottom), 34px);
   }
 }
 
-/* Floating Navigation (Liquid Glass Capsule) */
+/* =====================================================
+   浮动导航（液态玻璃胶囊）
+   ===================================================== */
 .floating-nav-container {
   position: fixed;
   bottom: 24px;
@@ -357,8 +347,9 @@ pre code.hljs {
   display: flex;
   justify-content: center;
   pointer-events: none;
-  transition: transform 300ms cubic-bezier(0.4, 0, 0.2, 1),
-              opacity 300ms cubic-bezier(0.4, 0, 0.2, 1);
+  transition:
+    transform 300ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 300ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .floating-nav-container.compact {
@@ -371,13 +362,12 @@ pre code.hljs {
   align-items: center;
   gap: 2px;
   padding: 8px;
-  background: var(--glass-bg);
+  background: var(--glass-bg-heavy);
   backdrop-filter: blur(24px) saturate(1.8);
   -webkit-backdrop-filter: blur(24px) saturate(1.8);
   border: 1px solid var(--glass-border);
   border-radius: 9999px;
-  box-shadow: var(--glass-shadow),
-              var(--glass-inner-shadow);
+  box-shadow: var(--elev-lg), var(--glass-inner-shadow);
   pointer-events: auto;
 }
 
@@ -389,19 +379,22 @@ pre code.hljs {
   width: 52px;
   height: 44px;
   border-radius: 9999px;
-  color: rgba(100, 116, 139, 0.7);
+  color: var(--muted-foreground);
   transition: all 200ms cubic-bezier(0.4, 0, 0.2, 1);
   text-decoration: none;
   -webkit-tap-highlight-color: transparent;
 }
 
-.floating-nav-item:active { transform: scale(0.92); }
+.floating-nav-item:active {
+  transform: scale(0.92);
+}
 
 .floating-nav-item.active {
-  background: rgba(13, 148, 136, 0.15);
+  background: color-mix(in srgb, var(--primary) 16%, transparent);
   color: var(--primary);
-  box-shadow: 0 2px 8px rgba(13, 148, 136, 0.15),
-              var(--glass-inner-shadow);
+  box-shadow:
+    0 2px 8px color-mix(in srgb, var(--primary) 18%, transparent),
+    var(--glass-inner-shadow);
   transition: all 350ms cubic-bezier(0.34, 1.56, 0.64, 1);
   transform: scale(1.08);
 }
@@ -411,17 +404,29 @@ pre code.hljs {
   position: absolute;
   inset: 0;
   border-radius: 9999px;
-  background: radial-gradient(circle, rgba(13, 148, 136, 0.2) 0%, transparent 70%);
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--primary) 22%, transparent) 0%,
+    transparent 70%
+  );
   animation: glass-ripple 400ms ease-out;
 }
 
 @keyframes glass-ripple {
-  from { transform: scale(0.8); opacity: 0.8; }
-  to { transform: scale(1.2); opacity: 0; }
+  from {
+    transform: scale(0.8);
+    opacity: 0.8;
+  }
+  to {
+    transform: scale(1.2);
+    opacity: 0;
+  }
 }
 
 @media (min-width: 1024px) {
-  .floating-nav-container { display: none; }
+  .floating-nav-container {
+    display: none;
+  }
 }
 
 @supports (padding: env(safe-area-inset-bottom)) {
@@ -430,26 +435,69 @@ pre code.hljs {
   }
 }
 
-/* Search result highlight animation */
-@keyframes highlight-fade {
-  0% { background-color: oklch(0.85 0.15 85); }
-  100% { background-color: transparent; }
+/* =====================================================
+   工具类
+   ===================================================== */
+
+/* 分类标签 — 渠道 / 日志类型等需要互相区分但无成功失败语义的场景。
+   色值由主题派生，明暗模式与各皮肤下都能保持可读对比。 */
+.tag-blue {
+  background-color: var(--tag-blue-bg);
+  color: var(--tag-blue-fg);
 }
-.dark .animate-highlight-fade {
-  animation: highlight-fade-dark 3s ease-out forwards;
+.tag-sky {
+  background-color: var(--tag-sky-bg);
+  color: var(--tag-sky-fg);
+}
+.tag-purple {
+  background-color: var(--tag-purple-bg);
+  color: var(--tag-purple-fg);
+}
+.tag-green {
+  background-color: var(--tag-green-bg);
+  color: var(--tag-green-fg);
+}
+.tag-amber {
+  background-color: var(--tag-amber-bg);
+  color: var(--tag-amber-fg);
+}
+.tag-rose {
+  background-color: var(--tag-rose-bg);
+  color: var(--tag-rose-fg);
+}
+.tag-cyan {
+  background-color: var(--tag-cyan-bg);
+  color: var(--tag-cyan-fg);
+}
+.tag-neutral {
+  background-color: var(--surface-2);
+  color: var(--muted-foreground);
+}
+
+/* 玻璃面板 */
+.glass-panel {
+  background: var(--glass-bg-heavy);
+  backdrop-filter: blur(20px) saturate(1.6);
+  -webkit-backdrop-filter: blur(20px) saturate(1.6);
+  border: 1px solid var(--glass-border);
+}
+
+/* 搜索命中高亮 — 用主题强调色，明暗自适应 */
+@keyframes highlight-fade {
+  0% {
+    background-color: color-mix(in srgb, var(--warning) 35%, transparent);
+  }
+  100% {
+    background-color: transparent;
+  }
 }
 .animate-highlight-fade {
   animation: highlight-fade 3s ease-out forwards;
-  border-radius: 0.5rem;
-}
-@keyframes highlight-fade-dark {
-  0% { background-color: oklch(0.45 0.12 85); }
-  100% { background-color: transparent; }
+  border-radius: var(--radius);
 }
 
-/* Terminal visual safety: avoid last line clipping at the bottom edge */
+/* 终端底部避免最后一行被裁切 */
 .terminal-panel .xterm-viewport {
   padding-bottom: 8px;
   box-sizing: border-box;
 }
-

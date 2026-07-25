@@ -6,8 +6,52 @@ import { EyeOff, Trash2 } from 'lucide-react';
 import '@xterm/xterm/css/xterm.css';
 import { wsManager } from '../../api/ws';
 import { resolveStoreJid, useChatStore } from '../../stores/chat';
+import { resolveCssColors } from '@/lib/theme-colors';
+import { useTheme } from '../../hooks/useTheme';
 
 type ConnectionState = 'idle' | 'connecting' | 'connected' | 'disconnected';
+
+const TERMINAL_COLOR_VARS = [
+  '--card',
+  '--foreground',
+  '--primary',
+  '--accent',
+  '--muted-foreground',
+  '--border-strong',
+  '--error',
+  '--success',
+  '--warning',
+  '--info',
+  '--tag-purple-fg',
+  '--tag-cyan-fg',
+] as const;
+
+/** 让 xterm 跟随当前皮肤，而不是固定一套 Tokyo Night 配色 */
+function buildTerminalTheme() {
+  const c = resolveCssColors(TERMINAL_COLOR_VARS);
+  return {
+    background: c['--card'],
+    foreground: c['--foreground'],
+    cursor: c['--primary'],
+    selectionBackground: c['--accent'],
+    black: c['--border-strong'],
+    red: c['--error'],
+    green: c['--success'],
+    yellow: c['--warning'],
+    blue: c['--info'],
+    magenta: c['--tag-purple-fg'],
+    cyan: c['--tag-cyan-fg'],
+    white: c['--muted-foreground'],
+    brightBlack: c['--muted-foreground'],
+    brightRed: c['--error'],
+    brightGreen: c['--success'],
+    brightYellow: c['--warning'],
+    brightBlue: c['--info'],
+    brightMagenta: c['--tag-purple-fg'],
+    brightCyan: c['--tag-cyan-fg'],
+    brightWhite: c['--foreground'],
+  };
+}
 
 interface TerminalPanelProps {
   sessionId: string;
@@ -28,6 +72,7 @@ export function TerminalPanel({
   const visibleRef = useRef<boolean>(visible);
   const [connState, setConnState] = useState<ConnectionState>('idle');
   const connStateRef = useRef<ConnectionState>('idle');
+  const { resolvedMode, skin } = useTheme();
   const syncConnState = (state: ConnectionState) => {
     connStateRef.current = state;
     setConnState(state);
@@ -50,6 +95,16 @@ export function TerminalPanel({
     return () => clearTimeout(timer);
   }, [visible, sessionId]);
 
+  // 切换明暗或皮肤时刷新终端配色。CSS 变量切换有 220ms 过渡，
+  // 延迟一帧再取值，避免读到过渡中间态的颜色。
+  useEffect(() => {
+    if (!xtermRef.current) return;
+    const timer = setTimeout(() => {
+      if (xtermRef.current) xtermRef.current.options.theme = buildTerminalTheme();
+    }, 260);
+    return () => clearTimeout(timer);
+  }, [resolvedMode, skin]);
+
   useEffect(() => {
     if (!termRef.current) return;
 
@@ -60,28 +115,7 @@ export function TerminalPanel({
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
       scrollback: 5000,
       convertEol: true,
-      theme: {
-        background: '#1a1b26',
-        foreground: '#a9b1d6',
-        cursor: '#c0caf5',
-        selectionBackground: '#33467c',
-        black: '#32344a',
-        red: '#f7768e',
-        green: '#9ece6a',
-        yellow: '#e0af68',
-        blue: '#7aa2f7',
-        magenta: '#ad8ee6',
-        cyan: '#449dab',
-        white: '#787c99',
-        brightBlack: '#444b6a',
-        brightRed: '#ff7a93',
-        brightGreen: '#b9f27c',
-        brightYellow: '#ff9e64',
-        brightBlue: '#7da6ff',
-        brightMagenta: '#bb9af7',
-        brightCyan: '#0db9d7',
-        brightWhite: '#acb0d0',
-      },
+      theme: buildTerminalTheme(),
     });
 
     const fitAddon = new FitAddon();
@@ -208,14 +242,14 @@ export function TerminalPanel({
   return (
     <div className="h-full flex flex-col terminal-panel">
       {/* Status bar */}
-      <div className="flex items-center justify-between px-3 py-1.5 bg-[#1a1b26] border-b border-slate-700 text-xs">
+      <div className="flex items-center justify-between px-3 py-1.5 bg-surface border-b border-border text-xs">
         <div className="flex items-center gap-2">
           <span className={`inline-block w-2 h-2 rounded-full ${
-            connState === 'connected' ? 'bg-green-400' :
-            connState === 'connecting' ? 'bg-yellow-400 animate-pulse' :
-            'bg-slate-500'
+            connState === 'connected' ? 'bg-success' :
+            connState === 'connecting' ? 'bg-warning animate-pulse' :
+            'bg-muted-foreground/60'
           }`} />
-          <span className="text-slate-400">
+          <span className="text-muted-foreground">
             {connState === 'connected' ? '已连接' :
              connState === 'connecting' ? '连接中...' :
              connState === 'disconnected' ? '已断开' : '空闲'}
@@ -239,7 +273,7 @@ export function TerminalPanel({
                   wsManager.connect();
                 }
               }}
-              className="text-brand-400 hover:text-brand-300 transition-colors cursor-pointer"
+              className="text-primary hover:text-primary/80 transition-colors cursor-pointer"
             >
               重新连接
             </button>
@@ -247,7 +281,7 @@ export function TerminalPanel({
           {onHide && (
             <button
               onClick={onHide}
-              className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-slate-200 transition-colors cursor-pointer"
+              className="p-1 rounded hover:bg-surface-3 text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
               aria-label="隐藏终端"
               title="隐藏终端"
             >
@@ -257,7 +291,7 @@ export function TerminalPanel({
           {onDelete && (
             <button
               onClick={onDelete}
-              className="p-1 rounded hover:bg-red-900/30 text-slate-400 hover:text-red-300 transition-colors cursor-pointer"
+              className="p-1 rounded hover:bg-error-bg text-muted-foreground hover:text-error transition-colors cursor-pointer"
               aria-label="删除终端"
               title="删除终端"
             >
@@ -267,7 +301,7 @@ export function TerminalPanel({
         </div>
       </div>
       {/* Terminal container */}
-      <div ref={termRef} className="flex-1 min-h-0 overflow-hidden bg-[#1a1b26]" />
+      <div ref={termRef} className="flex-1 min-h-0 overflow-hidden bg-card" />
     </div>
   );
 }

@@ -68,6 +68,7 @@ interface IpcPollerState {
   interruptedDuringQuery: boolean;
   drainDetectedDuringQuery: boolean;
   stop(): void;
+  stopAndDrain(): Promise<void>;
 }
 
 interface IpcPollerOptions {
@@ -78,11 +79,13 @@ interface IpcPollerOptions {
   writeOutput: WriteOutputFn;
   imChannelsFile: string;
   sessionRecordId: string;
-  onMessage: (msg: IpcMessage) => void;
-  onModeChange?: (mode: string) => void;
+  onMessage: (msg: IpcMessage) => Promise<void> | void;
+  onModeChange?: (mode: string) => Promise<void> | void;
 }
 
 function createUnifiedIpcPoller(opts: IpcPollerOptions): IpcPollerState {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let inFlight: Promise<void> = Promise.resolve();
   const pollerState: IpcPollerState = {
     isActive: true,
     closedDuringQuery: false,
@@ -90,10 +93,28 @@ function createUnifiedIpcPoller(opts: IpcPollerOptions): IpcPollerState {
     drainDetectedDuringQuery: false,
     stop() {
       this.isActive = false;
+      if (timer) clearTimeout(timer);
+      timer = null;
+    },
+    async stopAndDrain() {
+      this.stop();
+      await inFlight;
     },
   };
 
-  const poll = () => {
+  const schedule = () => {
+    if (!pollerState.isActive) return;
+    timer = setTimeout(() => {
+      timer = null;
+      inFlight = poll().catch((err) => {
+        opts.log(
+          `IPC poll failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    }, IPC_POLL_MS);
+  };
+
+  const poll = async () => {
     if (!pollerState.isActive) return;
 
     // 1. Close sentinel
@@ -126,7 +147,7 @@ function createUnifiedIpcPoller(opts: IpcPollerOptions): IpcPollerState {
     if (modeChange) {
       opts.state.currentPermissionMode = modeChange;
       opts.log(`Mode change via IPC: ${modeChange}`);
-      opts.onModeChange?.(modeChange);
+      await opts.onModeChange?.(modeChange);
     }
     for (const msg of messages) {
       opts.log(
@@ -138,12 +159,13 @@ function createUnifiedIpcPoller(opts: IpcPollerOptions): IpcPollerState {
         result: null,
         streamEvent: buildIpcAckStreamEvent(opts.sessionRecordId, msg),
       });
-      opts.onMessage(msg);
+      await opts.onMessage(msg);
+      if (!pollerState.isActive) return;
     }
 
-    setTimeout(poll, IPC_POLL_MS);
+    schedule();
   };
-  setTimeout(poll, IPC_POLL_MS);
+  schedule();
 
   return pollerState;
 }
@@ -437,6 +459,7 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
     : config.initialResumeAnchor;
   let overflowRetryCount = 0;
   let pendingMessages: IpcMessage[] = [];
+  let nextTurnMessages: IpcMessage[] = [];
   const handleIdleDrain = async (): Promise<void> => {
     await runner.cleanup?.();
     emitRuntimeState(writeOutput, runner, state, {
@@ -446,6 +469,8 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
   };
 
   while (true) {
+    const activeQueryMessages = nextTurnMessages;
+    nextTurnMessages = [];
     // Clear stale interrupt sentinel
     try {
       fs.unlinkSync(ipcPaths.interruptSentinel);
@@ -465,17 +490,35 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
       imChannelsFile: config.imChannelsFile,
       sessionRecordId: config.sessionRecordId,
       onMessage: runner.ipcCapabilities.supportsMidQueryPush
-        ? (msg) => {
-            const rejected = runner.pushMessage(msg.text, msg.images);
-            for (const reason of rejected) {
-              writeOutput({
-                status: 'success',
-                result: `⚠️ ${reason}`,
-                newSessionId: undefined,
-              });
+        ? async (msg) => {
+            const pushed = await runner
+              .pushMessage(msg.text, msg.images, msg.deliveryIds?.[0])
+              .catch((err) => ({
+                status: 'buffer' as const,
+                reason: `steering 失败: ${
+                  err instanceof Error ? err.message : String(err)
+                }`,
+              }));
+            if (pushed.status === 'accepted') {
+              activeQueryMessages.push(msg);
+              for (const warning of pushed.warnings || []) {
+                writeOutput({
+                  status: 'success',
+                  result: `⚠️ ${warning}`,
+                  newSessionId: undefined,
+                });
+              }
+              return;
             }
+            log(`Steering unavailable (${pushed.reason}), buffering`);
+            pendingMessages.push(msg);
           }
-        : (msg) => pendingMessages.push(msg),
+        : async (msg) => {
+            pendingMessages.push(msg);
+            if (msg.intent === 'correction') {
+              await runner.interrupt();
+            }
+          },
       onModeChange: runner.ipcCapabilities.supportsRuntimeModeSwitch
         ? (mode) => runner.setPermissionMode?.(mode)
         : undefined,
@@ -511,15 +554,38 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
         writeOutput,
       );
     } catch (err) {
-      poller.stop();
+      await poller.stopAndDrain();
       throw err;
     }
-    poller.stop();
+    await poller.stopAndDrain();
 
     // Merge poller state into result
     if (poller.closedDuringQuery) result.closedDuringQuery = true;
     if (poller.interruptedDuringQuery) result.interruptedDuringQuery = true;
     if (poller.drainDetectedDuringQuery) result.drainDetectedDuringQuery = true;
+
+    const queryCompletedSuccessfully =
+      !result.closedDuringQuery &&
+      !result.interruptedDuringQuery &&
+      !result.contextOverflow &&
+      !result.unrecoverableTranscriptError &&
+      !result.sessionResumeFailed &&
+      !result.genericError;
+    if (queryCompletedSuccessfully && activeQueryMessages.length > 0) {
+      writeOutput({
+        status: 'stream',
+        result: null,
+        streamEvent: buildIpcAckStreamEvent(
+          config.sessionRecordId,
+          activeQueryMessages,
+          'ipc_message_delivered',
+        ),
+      });
+      activeQueryMessages.length = 0;
+    } else if (activeQueryMessages.length > 0) {
+      pendingMessages.unshift(...activeQueryMessages);
+      activeQueryMessages.length = 0;
+    }
 
     // Update session state
     if (config.ephemeralSession || shouldClearProviderSession(runner)) {
@@ -599,8 +665,9 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
         /* ignore */
       }
       if (pendingMessages.length > 0) {
-        prompt = mergeMessages(pendingMessages);
-        images = mergeImages(pendingMessages);
+        nextTurnMessages = pendingMessages;
+        prompt = mergeMessages(nextTurnMessages);
+        images = mergeImages(nextTurnMessages);
         pendingMessages = [];
         continue;
       }
@@ -617,9 +684,21 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
       state.clearInterruptRequested();
       prompt = next.text;
       images = next.images;
+      nextTurnMessages = [next];
       continue;
     }
     if (result.drainDetectedDuringQuery || shouldDrain(ipcPaths)) {
+      if (pendingMessages.length > 0) {
+        writeOutput({
+          status: 'stream',
+          result: null,
+          streamEvent: buildIpcAckStreamEvent(
+            config.sessionRecordId,
+            pendingMessages,
+            'ipc_messages_returned',
+          ),
+        });
+      }
       await runner.cleanup?.();
       emitRuntimeState(writeOutput, runner, state, {
         providerSessionId: sessionId,
@@ -644,8 +723,9 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
     // In that case start the next turn immediately instead of blocking for yet
     // another IPC file and effectively swallowing the first follow-up message.
     if (pendingMessages.length > 0) {
-      prompt = mergeMessages(pendingMessages);
-      images = mergeImages(pendingMessages);
+      nextTurnMessages = pendingMessages;
+      prompt = mergeMessages(nextTurnMessages);
+      images = mergeImages(nextTurnMessages);
       pendingMessages = [];
       log(
         'Query ended with buffered IPC follow-ups, starting next turn immediately',
@@ -677,12 +757,14 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
 
     // Merge pending messages (accumulated during Codex turns)
     if (pendingMessages.length > 0) {
-      prompt = mergeMessages([...pendingMessages, nextMsg]);
-      images = mergeImages([...pendingMessages, nextMsg]);
+      nextTurnMessages = [...pendingMessages, nextMsg];
+      prompt = mergeMessages(nextTurnMessages);
+      images = mergeImages(nextTurnMessages);
       pendingMessages = [];
     } else {
       prompt = nextMsg.text;
       images = nextMsg.images;
+      nextTurnMessages = [nextMsg];
     }
   }
 }

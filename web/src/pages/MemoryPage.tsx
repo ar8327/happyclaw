@@ -544,7 +544,7 @@ export function MemoryPage() {
             </div>
             <div>
               <h1 className="text-2xl font-bold text-foreground">记忆管理</h1>
-              <p className="text-sm text-slate-500 mt-0.5">
+              <p className="text-sm text-muted-foreground mt-0.5">
                 管理个人全局记忆、主会话记忆、各会话流记忆，以及可读取的自动记忆文件。
               </p>
             </div>
@@ -554,13 +554,13 @@ export function MemoryPage() {
               <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-3">
                 <div>
                   <div className="text-sm font-medium text-foreground">Memory Session</div>
-                  <div className="text-xs text-slate-500 mt-0.5">
+                  <div className="text-xs text-muted-foreground mt-0.5">
                     这里控制记忆整理使用的 runner、模型和推理强度。
                   </div>
                 </div>
 
                 {loadingMemoryConfig ? (
-                  <div className="flex items-center justify-center py-4 text-slate-500">
+                  <div className="flex items-center justify-center py-4 text-muted-foreground">
                     <Loader2 className="w-4 h-4 animate-spin mr-2" />
                     加载配置中...
                   </div>
@@ -568,7 +568,7 @@ export function MemoryPage() {
                   <div className="space-y-3">
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
                       <div>
-                        <label className="block text-xs font-medium text-slate-600 mb-1">
+                        <label className="block text-xs font-medium text-muted-foreground mb-1">
                           Runner
                         </label>
                         <select
@@ -593,7 +593,7 @@ export function MemoryPage() {
                         </select>
                       </div>
                       <div>
-                        <label className="block text-xs font-medium text-slate-600 mb-1">
+                        <label className="block text-xs font-medium text-muted-foreground mb-1">
                           Thinking
                         </label>
                         <select
@@ -613,7 +613,7 @@ export function MemoryPage() {
                     </div>
 
                     <div>
-                      <label className="block text-xs font-medium text-slate-600 mb-1">
+                      <label className="block text-xs font-medium text-muted-foreground mb-1">
                         Runner Profile
                       </label>
                       <select
@@ -641,7 +641,7 @@ export function MemoryPage() {
 
                     <div className="grid grid-cols-1 gap-3">
                       <div>
-                        <label className="block text-xs font-medium text-slate-600 mb-1">
+                        <label className="block text-xs font-medium text-muted-foreground mb-1">
                           模型
                         </label>
                         <select
@@ -661,7 +661,7 @@ export function MemoryPage() {
                       </div>
                     </div>
 
-                    <div className="text-xs text-slate-500 space-y-1">
+                    <div className="text-xs text-muted-foreground space-y-1">
                       <div>会话 ID: {memoryConfig.id}</div>
                       <div>工作目录: {memoryConfig.cwd}</div>
                       <div>主会话目录: {memoryConfig.primary_session_folder || '未解析'}</div>
@@ -674,10 +674,10 @@ export function MemoryPage() {
                     </div>
 
                     {selectedRunner && selectedRunner.degradation_reasons.length > 0 && (
-                      <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 space-y-1">
-                        <div className="text-xs font-medium text-amber-700">兼容性提示</div>
+                      <div className="rounded-lg border border-warning-border bg-warning-bg px-3 py-2 space-y-1">
+                        <div className="text-xs font-medium text-warning">兼容性提示</div>
                         {selectedRunner.degradation_reasons.map((reason) => (
-                          <div key={reason} className="text-xs text-amber-700">
+                          <div key={reason} className="text-xs text-warning">
                             {reason}
                           </div>
                         ))}
@@ -692,7 +692,7 @@ export function MemoryPage() {
                     </div>
                   </div>
                 ) : (
-                  <div className="text-xs text-red-600">未找到记忆会话配置</div>
+                  <div className="text-xs text-error">未找到记忆会话配置</div>
                 )}
               </div>
 
@@ -710,7 +710,7 @@ export function MemoryPage() {
               )}
 
               <div className="text-sm font-medium text-foreground">AI 记忆系统</div>
-              <div className="text-xs text-slate-500 mt-0.5">
+              <div className="text-xs text-muted-foreground mt-0.5">
                 使用 Memory Agent 自动整理和检索记忆
               </div>
 
@@ -718,38 +718,38 @@ export function MemoryPage() {
                 <div className="space-y-3">
                   <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-2.5">
                       <div className="text-xs font-medium text-foreground">记忆系统状态</div>
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs text-slate-500">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs text-muted-foreground">
                         <div>
-                          <span className="text-slate-400">上次会话整理：</span>
+                          <span className="text-muted-foreground/80">上次会话整理：</span>
                           {memoryStatus.lastSessionWrapupAt
                             ? new Date(memoryStatus.lastSessionWrapupAt).toLocaleString('zh-CN')
                             : '从未执行'}
                         </div>
                         <div>
-                          <span className="text-slate-400">上次深度整理：</span>
+                          <span className="text-muted-foreground/80">上次深度整理：</span>
                           {memoryStatus.lastGlobalSleep
                             ? new Date(memoryStatus.lastGlobalSleep).toLocaleString('zh-CN')
                             : '从未执行'}
                         </div>
                         <div>
-                          <span className="text-slate-400">待整理记录：</span>
+                          <span className="text-muted-foreground/80">待整理记录：</span>
                           {memoryStatus.pendingWrapupsCount} 个
                         </div>
                       </div>
                       {memoryStatus.lanes && (
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs text-slate-500">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs text-muted-foreground">
                           <div>
-                            <span className="text-slate-400">查询车道：</span>
+                            <span className="text-muted-foreground/80">查询车道：</span>
                             {memoryStatus.lanes.readLane.inFlight} 运行，
                             {memoryStatus.lanes.readLane.waiting} 等待，
                             并行 {memoryStatus.lanes.readLane.concurrency}
                           </div>
                           <div>
-                            <span className="text-slate-400">写入车道：</span>
+                            <span className="text-muted-foreground/80">写入车道：</span>
                             {memoryStatus.lanes.writeLane.inFlight} 运行
                           </div>
                           <div>
-                            <span className="text-slate-400">持久队列：</span>
+                            <span className="text-muted-foreground/80">持久队列：</span>
                             {memoryStatus.lanes.queue.pending} 待处理，
                             {memoryStatus.lanes.queue.running} 运行，
                             {memoryStatus.lanes.queue.failed} 失败
@@ -757,7 +757,7 @@ export function MemoryPage() {
                         </div>
                       )}
                       {memoryStatus.ownedSessionFolders.length > 0 && (
-                        <div className="text-[11px] text-slate-500">
+                        <div className="text-[11px] text-muted-foreground">
                           当前会检查这些会话: {memoryStatus.ownedSessionFolders.join('、')}
                         </div>
                       )}
@@ -789,12 +789,12 @@ export function MemoryPage() {
                           {memoryStatus.globalSleepInProgress && !triggeringGlobalSleep ? '深度整理中…' : '深度整理'}
                         </Button>
                         {memoryStatus.hasActiveSession && (
-                          <span className="text-[11px] text-slate-400">
+                          <span className="text-[11px] text-muted-foreground/80">
                             活跃会话不会阻塞后台整理
                           </span>
                         )}
                         {triggeringGlobalSleep && (
-                          <span className="text-[11px] text-slate-400">正在提交后台整理……</span>
+                          <span className="text-[11px] text-muted-foreground/80">正在提交后台整理……</span>
                         )}
                       </div>
                     </div>
@@ -817,12 +817,12 @@ export function MemoryPage() {
                       <div className="px-3 py-3 space-y-3">
                         {timeoutLoading ? (
                           <div className="flex items-center justify-center py-2">
-                            <Loader2 className="w-4 h-4 animate-spin text-slate-400" />
+                            <Loader2 className="w-4 h-4 animate-spin text-muted-foreground/80" />
                           </div>
                         ) : timeoutValues ? (
                           <>
                             <div>
-                              <label className="block text-xs font-medium text-slate-600 mb-1">
+                              <label className="block text-xs font-medium text-muted-foreground mb-1">
                                 查询并行度
                               </label>
                               <div className="flex items-center gap-2">
@@ -840,11 +840,11 @@ export function MemoryPage() {
                                   step={1}
                                   className="max-w-24 text-xs"
                                 />
-                                <span className="text-xs text-slate-400">个（1-10）</span>
+                                <span className="text-xs text-muted-foreground/80">个（1-10）</span>
                               </div>
                             </div>
                             <div>
-                              <label className="block text-xs font-medium text-slate-600 mb-1">
+                              <label className="block text-xs font-medium text-muted-foreground mb-1">
                                 记忆查询超时
                               </label>
                               <div className="flex items-center gap-2">
@@ -862,11 +862,11 @@ export function MemoryPage() {
                                   step={5}
                                   className="max-w-24 text-xs"
                                 />
-                                <span className="text-xs text-slate-400">秒（10-600）</span>
+                                <span className="text-xs text-muted-foreground/80">秒（10-600）</span>
                               </div>
                             </div>
                             <div>
-                              <label className="block text-xs font-medium text-slate-600 mb-1">
+                              <label className="block text-xs font-medium text-muted-foreground mb-1">
                                 会话整理超时
                               </label>
                               <div className="flex items-center gap-2">
@@ -884,11 +884,11 @@ export function MemoryPage() {
                                   step={10}
                                   className="max-w-24 text-xs"
                                 />
-                                <span className="text-xs text-slate-400">秒（30-3600）</span>
+                                <span className="text-xs text-muted-foreground/80">秒（30-3600）</span>
                               </div>
                             </div>
                             <div>
-                              <label className="block text-xs font-medium text-slate-600 mb-1">
+                              <label className="block text-xs font-medium text-muted-foreground mb-1">
                                 深度整理超时
                               </label>
                               <div className="flex items-center gap-2">
@@ -906,7 +906,7 @@ export function MemoryPage() {
                                   step={30}
                                   className="max-w-24 text-xs"
                                 />
-                                <span className="text-xs text-slate-400">秒（60-3600）</span>
+                                <span className="text-xs text-muted-foreground/80">秒（60-3600）</span>
                               </div>
                             </div>
                             <Button
@@ -926,7 +926,7 @@ export function MemoryPage() {
               )}
           </div>
 
-          <div className="text-xs text-slate-500 mt-3">
+          <div className="text-xs text-muted-foreground mt-3">
             已加载记忆源: {sources.length}
           </div>
         </div>
@@ -941,7 +941,7 @@ export function MemoryPage() {
                 onChange={(e) => setKeyword(e.target.value)}
                 placeholder="搜索记忆源（路径 + 全文）"
               />
-              <div className="mt-1 text-[11px] text-slate-500">
+              <div className="mt-1 text-[11px] text-muted-foreground">
                 {keyword.trim()
                   ? searchingContent
                     ? '正在做全文检索...'
@@ -956,7 +956,7 @@ export function MemoryPage() {
                 if (items.length === 0) return null;
                 return (
                   <div key={scope}>
-                    <div className="text-xs font-semibold text-slate-500 mb-2">
+                    <div className="text-xs font-semibold text-muted-foreground mb-2">
                       {scopeLabel(scope)} ({items.length})
                     </div>
                     <div className="space-y-1">
@@ -976,10 +976,10 @@ export function MemoryPage() {
                             <div className="text-sm font-medium text-foreground truncate">
                               {source.label}
                             </div>
-                            <div className="text-[11px] text-slate-500 truncate mt-0.5">
+                            <div className="text-[11px] text-muted-foreground truncate mt-0.5">
                               {source.path}
                             </div>
-                            <div className="text-[11px] mt-1 text-slate-500">
+                            <div className="text-[11px] mt-1 text-muted-foreground">
                               {source.writable ? '可编辑' : '只读'} · {source.exists ? `${source.size} B` : '文件不存在'}
                             </div>
                             {hit && (
@@ -996,7 +996,7 @@ export function MemoryPage() {
               })}
 
               {!loadingSources && filteredSources.length === 0 && (
-                <div className="text-sm text-slate-500">没有匹配的记忆源</div>
+                <div className="text-sm text-muted-foreground">没有匹配的记忆源</div>
               )}
             </div>
           </div>
@@ -1017,7 +1017,7 @@ export function MemoryPage() {
                 )}
                 <div className="mb-3">
                   <div className="text-sm font-semibold text-foreground break-all">{selectedPath}</div>
-                  <div className="text-xs text-slate-500 mt-1">
+                  <div className="text-xs text-muted-foreground mt-1">
                     最近更新时间: {updatedText} · 字节数: {new TextEncoder().encode(content).length} · {fileMeta?.writable ? '可编辑' : '只读'}
                   </div>
                 </div>
@@ -1058,13 +1058,13 @@ export function MemoryPage() {
                     刷新记忆源
                   </Button>
 
-                  {dirty && <span className="text-sm text-amber-600">有未保存修改</span>}
-                  {notice && <span className="text-sm text-green-600">{notice}</span>}
-                  {error && <span className="text-sm text-red-600">{error}</span>}
+                  {dirty && <span className="text-sm text-warning">有未保存修改</span>}
+                  {notice && <span className="text-sm text-success">{notice}</span>}
+                  {error && <span className="text-sm text-error">{error}</span>}
                 </div>
               </>
             ) : (
-              <div className="text-sm text-slate-500">暂无可用记忆源</div>
+              <div className="text-sm text-muted-foreground">暂无可用记忆源</div>
             )}
           </div>
           )}

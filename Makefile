@@ -1,5 +1,5 @@
 .PHONY: dev dev-backend dev-web build build-backend build-web start \
-       typecheck typecheck-backend typecheck-web typecheck-agent-runner-core typecheck-agent-runner test-runner-contracts test-prompt-characterization test-memory-timeout test-memory-lanes test-memory-write-queue test-memory-search test-memory-retention test-context-conformance \
+       typecheck typecheck-backend typecheck-web typecheck-agent-runner-core typecheck-agent-runner test-runner-contracts test-steering-feishu test-im-outbox test-prompt-characterization test-memory-timeout test-memory-lanes test-memory-write-queue test-memory-search test-memory-retention test-context-conformance \
        format format-check install clean reset-init sync-types ensure-deps \
        backup restore help
 
@@ -39,7 +39,7 @@ start: ensure-deps ## 一键启动生产环境
 
 # ─── Quality ─────────────────────────────────────────────────
 
-typecheck: sync-types typecheck-backend typecheck-web typecheck-agent-runner-core typecheck-agent-runner test-runner-contracts test-prompt-characterization test-memory-timeout test-memory-lanes test-memory-write-queue test-memory-search test-memory-retention test-context-conformance ## 全量类型检查
+typecheck: sync-types typecheck-backend typecheck-web typecheck-agent-runner-core typecheck-agent-runner test-runner-contracts test-steering-feishu test-im-outbox test-prompt-characterization test-memory-timeout test-memory-lanes test-memory-write-queue test-memory-search test-memory-retention test-context-conformance ## 全量类型检查
 	@./scripts/check-stream-event-sync.sh
 
 typecheck-backend:
@@ -56,6 +56,12 @@ typecheck-agent-runner:
 
 test-runner-contracts:
 	npm run test:runner-contracts
+
+test-steering-feishu:
+	npm run test:steering-feishu
+
+test-im-outbox:
+	npm run test:im-outbox
 
 test-prompt-characterization:
 	npm run test:prompt-characterization

@@ -41,20 +41,20 @@ function formatTimestamp(ts: string): string {
 function StatusBadge({ exitCode }: { exitCode: number | null }) {
   if (exitCode === null) {
     return (
-      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-700">
+      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-warning-bg text-warning">
         超时
       </span>
     );
   }
   if (exitCode === 0) {
     return (
-      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">
+      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium tag-green">
         成功
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700">
+    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-error-bg text-error-foreground">
       错误 ({exitCode})
     </span>
   );
@@ -68,8 +68,8 @@ function TypeBadge({ prefix }: { prefix: string }) {
         ? '本地 Runtime'
         : 'Runtime';
   const color = prefix === 'memory'
-    ? 'bg-purple-100 text-purple-700'
-    : 'bg-blue-100 text-blue-700';
+    ? 'tag-purple'
+    : 'tag-blue';
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${color}`}>
       {label}
@@ -317,11 +317,11 @@ export function LogsPage() {
         )}
 
         {error && (
-          <div className="mb-4 p-3 rounded-lg bg-red-50 border border-red-200 flex items-center justify-between">
-            <span className="text-sm text-red-700">{error}</span>
+          <div className="mb-4 p-3 rounded-lg bg-error-bg border border-error-border flex items-center justify-between">
+            <span className="text-sm text-error">{error}</span>
             <button
               onClick={() => useLogsStore.setState({ error: null })}
-              className="p-1 text-red-400 hover:text-red-600 rounded transition-colors"
+              className="p-1 text-error hover:text-error rounded transition-colors"
             >
               <X size={16} />
             </button>

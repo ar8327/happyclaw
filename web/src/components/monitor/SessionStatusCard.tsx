@@ -15,7 +15,7 @@ export function SessionStatusCard({ session }: SessionStatusCardProps) {
           {sessionLabel}
         </span>
         {session.active ? (
-          <Badge variant="default" className="bg-green-100 text-green-700 hover:bg-green-200 shrink-0">
+          <Badge variant="default" className="tag-green shrink-0">
             运行中
           </Badge>
         ) : (
@@ -25,7 +25,7 @@ export function SessionStatusCard({ session }: SessionStatusCardProps) {
         )}
       </div>
 
-      <div className="space-y-1.5 text-xs text-slate-500">
+      <div className="space-y-1.5 text-xs text-muted-foreground">
         <div className="flex items-center justify-between">
           <span>队列</span>
           <span className="text-foreground">

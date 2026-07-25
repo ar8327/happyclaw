@@ -14,6 +14,7 @@ import http from 'node:http';
 import https from 'node:https';
 import WebSocket from 'ws';
 import { storeChatMetadata, storeMessageDirect, updateChatName } from './db.js';
+import { notifyNewImMessage } from './message-notifier.js';
 import { broadcastNewMessage } from './web.js';
 import { logger } from './logger.js';
 import { saveDownloadedFile, MAX_FILE_SIZE } from './im-downloader.js';
@@ -748,7 +749,11 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
       // ── Authorized: process message ──
       storeChatMetadata(jid, new Date().toISOString());
       updateChatName(jid, chatName);
-      opts.onNewChat(jid, chatName, jid.startsWith('qq:c2c:') ? 'p2p' : 'group');
+      opts.onNewChat(
+        jid,
+        chatName,
+        jid.startsWith('qq:c2c:') ? 'p2p' : 'group',
+      );
 
       // Handle slash commands
       const slashMatch = content.match(/^\/(\S+)(?:\s+(.*))?$/i);
@@ -851,6 +856,7 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
         undefined,
         jid,
       );
+      notifyNewImMessage();
 
       broadcastNewMessage(
         targetJid,
@@ -946,7 +952,11 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
       // ── Authorized: process message ──
       storeChatMetadata(jid, new Date().toISOString());
       updateChatName(jid, chatName);
-      opts.onNewChat(jid, chatName, jid.startsWith('qq:c2c:') ? 'p2p' : 'group');
+      opts.onNewChat(
+        jid,
+        chatName,
+        jid.startsWith('qq:c2c:') ? 'p2p' : 'group',
+      );
 
       // Handle slash commands
       const slashMatch = content.match(/^\/(\S+)(?:\s+(.*))?$/i);
@@ -1053,6 +1063,7 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
         undefined,
         jid,
       );
+      notifyNewImMessage();
 
       broadcastNewMessage(
         targetJid,
@@ -1137,8 +1148,7 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
     async sendMessage(chatId: string, text: string): Promise<void> {
       const parsed = parseQQChatId(chatId);
       if (!parsed) {
-        logger.error({ chatId }, 'Invalid QQ chat ID format');
-        return;
+        throw new Error(`Invalid QQ chat ID format: ${chatId}`);
       }
 
       try {

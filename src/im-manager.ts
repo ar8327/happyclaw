@@ -20,8 +20,14 @@ import type { FeishuConnectionConfig } from './feishu.js';
 import type { TelegramConnectionConfig } from './telegram.js';
 import type { QQConnectionConfig } from './qq.js';
 import type { WeChatConnectionConfig } from './wechat.js';
-import type { StreamingCardController } from './feishu-streaming-card.js';
-import { ProgressCardController } from './feishu-progress-card.js';
+import type {
+  StreamingCardController,
+  StreamingCardOptions,
+} from './feishu-streaming-card.js';
+import {
+  ProgressCardController,
+  type ProgressCardOptions,
+} from './feishu-progress-card.js';
 import {
   getRegisteredGroup,
   getSessionBinding,
@@ -128,8 +134,7 @@ class IMConnectionManager {
   ): Promise<string | undefined> {
     const channelType = getChannelType(jid);
     if (!channelType) {
-      logger.debug({ jid }, 'Unknown channel type for JID, skip sending');
-      return undefined;
+      throw new Error(`Unknown IM channel type for JID: ${jid}`);
     }
 
     const chatId = extractChatId(jid);
@@ -138,11 +143,7 @@ class IMConnectionManager {
       return channel.sendMessage(chatId, text, localImagePaths, options);
     }
 
-    logger.warn(
-      { jid, channelType },
-      'No IM channel available to send message',
-    );
-    return undefined;
+    throw new Error(`No connected ${channelType} channel for ${jid}`);
   }
 
   /**
@@ -155,17 +156,27 @@ class IMConnectionManager {
     caption?: string,
     fileName?: string,
     replyToMsgId?: string,
+    threadId?: string,
+    idempotencyKey?: string,
   ): Promise<void> {
     const channelType = getChannelType(jid);
     if (!channelType) {
-      logger.debug({ jid }, 'Unknown channel type for JID, skip sending image');
-      return;
+      throw new Error(`Unknown IM channel type for JID: ${jid}`);
     }
 
     const chatId = extractChatId(jid);
     const channel = this.findChannelForJid(jid, channelType);
     if (channel?.sendImage) {
-      await channel.sendImage(chatId, imageBuffer, mimeType, caption, fileName, replyToMsgId);
+      await channel.sendImage(
+        chatId,
+        imageBuffer,
+        mimeType,
+        caption,
+        fileName,
+        replyToMsgId,
+        threadId,
+        idempotencyKey,
+      );
       return;
     }
 
@@ -175,7 +186,7 @@ class IMConnectionManager {
       return;
     }
 
-    logger.warn({ jid, channelType }, 'No IM channel available to send image');
+    throw new Error(`No connected ${channelType} channel for ${jid}`);
   }
 
   /**
@@ -186,6 +197,7 @@ class IMConnectionManager {
     jid: string,
     filePath: string,
     fileName: string,
+    options?: IMSendOptions,
   ): Promise<void> {
     const channelType = getChannelType(jid);
     if (!channelType) {
@@ -195,7 +207,7 @@ class IMConnectionManager {
     const chatId = extractChatId(jid);
     const channel = this.findChannelForJid(jid, channelType);
     if (channel?.sendFile) {
-      await channel.sendFile(chatId, filePath, fileName);
+      await channel.sendFile(chatId, filePath, fileName, options);
     } else {
       throw new Error(`通道 ${channelType} 不支持发送文件`);
     }
@@ -220,14 +232,17 @@ class IMConnectionManager {
    * Create a streaming card session for an IM chat (Feishu only).
    * Returns undefined for non-Feishu channels or if not supported.
    */
-  createStreamingSession(jid: string): StreamingCardController | undefined {
+  createStreamingSession(
+    jid: string,
+    options?: Omit<StreamingCardOptions, 'client' | 'chatId'>,
+  ): StreamingCardController | undefined {
     const channelType = getChannelType(jid);
     if (channelType !== 'feishu') return undefined;
 
     const chatId = extractChatId(jid);
     const channel = this.findChannelForJid(jid, channelType);
     if (channel?.createStreamingSession) {
-      return channel.createStreamingSession(chatId);
+      return channel.createStreamingSession(chatId, options);
     }
     return undefined;
   }
@@ -236,7 +251,10 @@ class IMConnectionManager {
    * Create a progress card for an IM chat (Feishu only).
    * Returns undefined for non-Feishu channels or if not supported.
    */
-  createProgressCard(jid: string): ProgressCardController | undefined {
+  createProgressCard(
+    jid: string,
+    options?: Omit<ProgressCardOptions, 'client' | 'clientResolver' | 'chatId'>,
+  ): ProgressCardController | undefined {
     const channelType = getChannelType(jid);
     if (channelType !== 'feishu') return undefined;
 
@@ -250,15 +268,10 @@ class IMConnectionManager {
       const channel = this.findChannelForJid(jid, channelType);
       return channel?.getLarkClient?.() ?? undefined;
     };
-    const replyToMsgIdResolver = () => {
-      const channel = this.findChannelForJid(jid, channelType);
-      return channel?.getLastMessageId?.(chatId);
-    };
-
     return new ProgressCardController({
       clientResolver,
       chatId,
-      replyToMsgIdResolver,
+      ...options,
     });
   }
 
@@ -273,8 +286,8 @@ class IMConnectionManager {
     if (binding) {
       const boundSession = getSessionRecord(binding.session_id);
       const ownerKey =
-        boundSession?.owner_key
-        || (boundSession?.parent_session_id
+        boundSession?.owner_key ||
+        (boundSession?.parent_session_id
           ? getSessionRecord(boundSession.parent_session_id)?.owner_key
           : undefined);
       if (ownerKey && this.ownerKey && ownerKey === this.ownerKey) {
@@ -298,7 +311,9 @@ class IMConnectionManager {
   /**
    * Get any available Feishu Lark client (for cleanup tasks that don't need a specific chat).
    */
-  getAnyLarkClient(): ReturnType<NonNullable<IMChannel['getLarkClient']>> | undefined {
+  getAnyLarkClient():
+    | ReturnType<NonNullable<IMChannel['getLarkClient']>>
+    | undefined {
     const channel = this.channels.get('feishu');
     if (channel?.isConnected()) {
       return channel.getLarkClient?.();
@@ -314,7 +329,11 @@ class IMConnectionManager {
   async connectUserFeishu(
     userId: string,
     config: FeishuConnectConfig,
-    onNewChat: (chatJid: string, chatName: string, chatType?: 'p2p' | 'group') => void,
+    onNewChat: (
+      chatJid: string,
+      chatName: string,
+      chatType?: 'p2p' | 'group',
+    ) => void,
     options?: ConnectFeishuOptions,
   ): Promise<boolean> {
     if (!config.appId || !config.appSecret) {
@@ -350,7 +369,11 @@ class IMConnectionManager {
   async connectUserTelegram(
     userId: string,
     config: TelegramConnectConfig,
-    onNewChat: (chatJid: string, chatName: string, chatType?: 'p2p' | 'group') => void,
+    onNewChat: (
+      chatJid: string,
+      chatName: string,
+      chatType?: 'p2p' | 'group',
+    ) => void,
     isChatAuthorized?: (jid: string) => boolean,
     onPairAttempt?: (
       jid: string,
@@ -405,7 +428,11 @@ class IMConnectionManager {
   async connectUserQQ(
     userId: string,
     config: QQConnectConfig,
-    onNewChat: (chatJid: string, chatName: string, chatType?: 'p2p' | 'group') => void,
+    onNewChat: (
+      chatJid: string,
+      chatName: string,
+      chatType?: 'p2p' | 'group',
+    ) => void,
     isChatAuthorized?: (jid: string) => boolean,
     onPairAttempt?: (
       jid: string,

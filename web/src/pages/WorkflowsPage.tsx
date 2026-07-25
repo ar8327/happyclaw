@@ -16,40 +16,40 @@ import {
 function statusClass(status: WorkflowRunStatus | string) {
   switch (status) {
     case 'success':
-      return 'bg-green-100 text-green-700';
+      return 'tag-green';
     case 'running':
-      return 'bg-blue-100 text-blue-700';
+      return 'tag-blue';
     case 'queued':
-      return 'bg-amber-100 text-amber-700';
+      return 'bg-warning-bg text-warning';
     case 'error':
-      return 'bg-red-100 text-red-700';
+      return 'bg-error-bg text-error-foreground';
     case 'cancelled':
-      return 'bg-slate-100 text-slate-600';
+      return 'tag-neutral';
     case 'skipped':
-      return 'bg-zinc-100 text-zinc-600';
+      return 'tag-neutral';
     case 'pending':
-      return 'bg-slate-100 text-slate-500';
+      return 'bg-surface-2 text-muted-foreground';
     default:
-      return 'bg-slate-100 text-slate-600';
+      return 'tag-neutral';
   }
 }
 
 function ganttColor(status: string) {
   switch (status) {
     case 'success':
-      return 'bg-green-500';
+      return 'bg-success';
     case 'running':
-      return 'bg-blue-500 animate-pulse';
+      return 'bg-info animate-pulse';
     case 'queued':
-      return 'bg-amber-400';
+      return 'bg-warning';
     case 'error':
-      return 'bg-red-500';
+      return 'bg-error';
     case 'cancelled':
-      return 'bg-slate-400';
+      return 'bg-muted-foreground/60';
     case 'skipped':
-      return 'bg-zinc-300';
+      return 'bg-border-strong';
     default:
-      return 'bg-slate-300';
+      return 'bg-border-strong';
   }
 }
 
@@ -172,9 +172,9 @@ function WorkflowCard({ workflow }: { workflow: WorkflowRecord }) {
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <GitBranch size={18} className="text-blue-500" />
+            <GitBranch size={18} className="text-info" />
             <h2 className="font-semibold text-foreground truncate">{workflow.name}</h2>
-            <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">v{workflow.version}</span>
+            <span className="text-xs px-2 py-0.5 rounded-full tag-neutral">v{workflow.version}</span>
           </div>
           {workflow.description && <p className="text-sm text-muted-foreground mt-2">{workflow.description}</p>}
           <p className="text-xs text-muted-foreground mt-2">
@@ -364,9 +364,9 @@ export function WorkflowsPage() {
         />
 
         {error && (
-          <div className="p-3 rounded-lg bg-red-50 border border-red-200 flex items-center justify-between">
-            <span className="text-sm text-red-700">{error}</span>
-            <button onClick={clearError} className="p-1 text-red-400 hover:text-red-600 rounded transition-colors">
+          <div className="p-3 rounded-lg bg-error-bg border border-error-border flex items-center justify-between">
+            <span className="text-sm text-error">{error}</span>
+            <button onClick={clearError} className="p-1 text-error hover:text-error rounded transition-colors">
               <X size={16} />
             </button>
           </div>
@@ -377,7 +377,7 @@ export function WorkflowsPage() {
             <div key={provider.id} className="bg-card border border-border rounded-xl p-4">
               <div className="flex items-center justify-between mb-2">
                 <div className="font-semibold text-foreground">{provider.label}</div>
-                <span className={`text-xs px-2 py-0.5 rounded-full ${provider.available ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'}`}>
+                <span className={`text-xs px-2 py-0.5 rounded-full ${provider.available ? 'tag-green' : 'bg-surface-2 text-muted-foreground'}`}>
                   {provider.available ? 'available' : 'unavailable'}
                 </span>
               </div>
@@ -425,7 +425,7 @@ export function WorkflowsPage() {
                         </Button>
                       )}
                     </div>
-                    {run.error && <div className="mt-3 text-xs text-red-600">{run.error}</div>}
+                    {run.error && <div className="mt-3 text-xs text-error">{run.error}</div>}
                     <RunGantt run={run} workflow={workflow} />
                     <details className="mt-3 text-xs">
                       <summary className="cursor-pointer text-muted-foreground hover:text-foreground">节点输出节选</summary>
@@ -437,7 +437,7 @@ export function WorkflowsPage() {
                               <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${statusClass(node.status)}`}>{node.status}</span>
                             </div>
                             {node.output_excerpt && <p className="mt-2 text-xs text-muted-foreground line-clamp-3 whitespace-pre-wrap">{node.output_excerpt}</p>}
-                            {node.error && <p className="mt-2 text-xs text-red-600 line-clamp-2">{node.error}</p>}
+                            {node.error && <p className="mt-2 text-xs text-error line-clamp-2">{node.error}</p>}
                           </div>
                         ))}
                       </div>

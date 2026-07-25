@@ -75,8 +75,8 @@ export function SkillsPage() {
               {loading && skills.length === 0 ? (
                 <SkeletonCardList count={3} />
               ) : error ? (
-                <div className="bg-card rounded-xl border border-red-200 p-6 text-center">
-                  <p className="text-red-600">{error}</p>
+                <div className="bg-card rounded-xl border border-error-border p-6 text-center">
+                  <p className="text-error">{error}</p>
                 </div>
               ) : filtered.length === 0 ? (
                 <EmptyState

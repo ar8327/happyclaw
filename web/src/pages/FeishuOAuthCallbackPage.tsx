@@ -54,25 +54,25 @@ export function FeishuOAuthCallbackPage() {
   }, [searchParams, navigate]);
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
-      <div className="max-w-md w-full bg-white rounded-lg shadow-md p-8 text-center">
+    <div className="min-h-screen flex items-center justify-center bg-surface">
+      <div className="max-w-md w-full bg-card rounded-lg shadow-md p-8 text-center">
         {status === 'processing' && (
           <>
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-teal-600 mx-auto mb-4" />
-            <h2 className="text-lg font-semibold text-gray-900">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4" />
+            <h2 className="text-lg font-semibold text-foreground">
               正在完成授权...
             </h2>
-            <p className="text-sm text-gray-500 mt-2">请稍候</p>
+            <p className="text-sm text-muted-foreground mt-2">请稍候</p>
           </>
         )}
 
         {status === 'success' && (
           <>
             <div className="text-4xl mb-4">✅</div>
-            <h2 className="text-lg font-semibold text-gray-900">
+            <h2 className="text-lg font-semibold text-foreground">
               飞书文档授权成功！
             </h2>
-            <p className="text-sm text-gray-500 mt-2">
+            <p className="text-sm text-muted-foreground mt-2">
               正在跳转回设置页面...
             </p>
           </>
@@ -81,11 +81,11 @@ export function FeishuOAuthCallbackPage() {
         {status === 'error' && (
           <>
             <div className="text-4xl mb-4">❌</div>
-            <h2 className="text-lg font-semibold text-gray-900">授权失败</h2>
-            <p className="text-sm text-red-600 mt-2">{errorMsg}</p>
+            <h2 className="text-lg font-semibold text-foreground">授权失败</h2>
+            <p className="text-sm text-error mt-2">{errorMsg}</p>
             <button
               onClick={() => navigate('/settings?tab=im')}
-              className="mt-4 px-4 py-2 bg-teal-600 text-white rounded-md hover:bg-teal-700 transition-colors"
+              className="mt-4 px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary transition-colors"
             >
               返回设置页
             </button>

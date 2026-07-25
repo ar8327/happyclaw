@@ -161,7 +161,7 @@ export function CreateWorkspaceDialog({
                 </div>
 
                 <div className="flex items-start gap-2 p-2 bg-muted/40 border border-border rounded-lg">
-                  <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+                  <AlertTriangle className="w-4 h-4 text-warning flex-shrink-0 mt-0.5" />
                   <p className="text-xs text-muted-foreground">
                     新工作区统一使用本地 runtime。运行目录、runner 和 profile 可在会话详情里继续调整。
                   </p>

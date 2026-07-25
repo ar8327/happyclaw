@@ -28,6 +28,7 @@ import type {
   RuntimePersistenceSnapshot,
   RenderedRunnerContext,
   UsageInfo,
+  PushMessageResult,
 } from '../../runner-interface.js';
 import { combineRenderedContext } from '../../runner-interface.js';
 import type { ContainerInput, ContainerOutput } from '../../types.js';
@@ -224,7 +225,7 @@ export function planCodexContextInjection(
 
 export class CodexRunner implements AgentRunner {
   readonly ipcCapabilities: IpcCapabilities = {
-    supportsMidQueryPush: false, // Codex turns are independent processes
+    supportsMidQueryPush: true,
     supportsRuntimeModeSwitch: false,
   };
 
@@ -614,13 +615,33 @@ export class CodexRunner implements AgentRunner {
     };
   }
 
-  pushMessage(
-    _text: string,
-    _images?: Array<{ data: string; mimeType?: string }>,
-  ): string[] {
-    // Codex doesn't support mid-query push.
-    // query-loop handles this via pendingMessages accumulation.
-    return [];
+  async pushMessage(
+    text: string,
+    images?: Array<{ data: string; mimeType?: string }>,
+    deliveryId?: string,
+  ): Promise<PushMessageResult> {
+    const imagePaths =
+      images && images.length > 0
+        ? saveImagesToTempFiles(images, this.tmpDir)
+        : [];
+    const input: Array<Record<string, unknown>> = [
+      { type: 'text', text, text_elements: [] },
+      ...imagePaths.map((imagePath) => ({
+        type: 'localImage',
+        path: imagePath,
+      })),
+    ];
+    try {
+      await this.session.steer(input, deliveryId);
+      return { status: 'accepted' };
+    } catch (err) {
+      return {
+        status: 'buffer',
+        reason: `Codex turn/steer 失败: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      };
+    }
   }
 
   async interrupt(): Promise<void> {

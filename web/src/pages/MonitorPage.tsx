@@ -69,22 +69,22 @@ export function MonitorPage() {
                   <table className="min-w-full divide-y divide-border">
                     <thead>
                       <tr>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">
+                        <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">
                           会话
                         </th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">
+                        <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">
                           Session ID
                         </th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">
+                        <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">
                           Runner
                         </th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">
+                        <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">
                           队列
                         </th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">
+                        <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">
                           运行状态
                         </th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">
+                        <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">
                           进程标识
                         </th>
                       </tr>
@@ -95,27 +95,27 @@ export function MonitorPage() {
                           <td className="px-4 py-3 text-sm font-medium text-foreground">
                             {session.session_name || session.session_id || '未知会话'}
                           </td>
-                          <td className="px-4 py-3 text-sm text-slate-600 font-mono">
+                          <td className="px-4 py-3 text-sm text-muted-foreground font-mono">
                             {session.session_id || '-'}
                           </td>
-                          <td className="px-4 py-3 text-sm text-slate-600">
+                          <td className="px-4 py-3 text-sm text-muted-foreground">
                             {session.runner_id || '-'}
                           </td>
-                          <td className="px-4 py-3 text-sm text-slate-600">
+                          <td className="px-4 py-3 text-sm text-muted-foreground">
                             {session.pendingTasks} 个任务 / {session.pendingMessages ? '有新消息' : '无新消息'}
                           </td>
                           <td className="px-4 py-3 text-sm">
                             {session.active ? (
-                              <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-600">
+                              <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-success-bg text-success">
                                 运行中
                               </span>
                             ) : (
-                              <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-500">
+                              <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-surface-2 text-muted-foreground">
                                 空闲
                               </span>
                             )}
                           </td>
-                          <td className="px-4 py-3 text-sm text-slate-600 font-mono text-xs">
+                          <td className="px-4 py-3 text-sm text-muted-foreground font-mono text-xs">
                             {session.runtime_identifier || '-'}
                           </td>
                         </tr>

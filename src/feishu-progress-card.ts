@@ -10,9 +10,14 @@
 import * as lark from '@larksuiteoapi/node-sdk';
 import * as fs from 'fs';
 import * as path from 'path';
+import { randomUUID } from 'node:crypto';
 import { DATA_DIR } from './config.js';
 import { logger } from './logger.js';
 import type { StreamEvent } from './stream-event.types.js';
+import {
+  buildProgressCard,
+  type ProgressCardRenderData,
+} from './feishu-card-builder.js';
 
 // ─── Persistent Card Store ───────────────────────────────────
 // Tracks active card messageIds on disk so they survive restarts.
@@ -65,7 +70,9 @@ export async function cleanupStaleProgressCards(
   const entries = loadCardStore();
   if (entries.length === 0) return;
 
-  logger.info(`Progress card: cleaning up ${entries.length} stale card(s) from previous process`);
+  logger.info(
+    `Progress card: cleaning up ${entries.length} stale card(s) from previous process`,
+  );
   const client = clientResolver();
   if (!client) {
     logger.warn('Progress card: no lark client for stale card cleanup');
@@ -77,7 +84,9 @@ export async function cleanupStaleProgressCards(
       await client.im.v1.message.delete({
         path: { message_id: entry.messageId },
       });
-      logger.info(`Progress card: deleted stale card | chatId=${entry.chatId} messageId=${entry.messageId}`);
+      logger.info(
+        `Progress card: deleted stale card | chatId=${entry.chatId} messageId=${entry.messageId}`,
+      );
     } catch {
       // Card may already be deleted — that's fine
     }
@@ -87,7 +96,13 @@ export async function cleanupStaleProgressCards(
 
 // ─── Types ────────────────────────────────────────────────────
 
-type ProgressState = 'idle' | 'creating' | 'active' | 'completed' | 'aborted' | 'error';
+type ProgressState =
+  | 'idle'
+  | 'creating'
+  | 'active'
+  | 'completed'
+  | 'aborted'
+  | 'error';
 
 export interface ProgressCardOptions {
   /** Pre-resolved client (used by im-channel adapter) */
@@ -97,8 +112,11 @@ export interface ProgressCardOptions {
   clientResolver?: () => lark.Client | undefined;
   chatId: string;
   replyToMsgId?: string;
-  /** Lazy resolver for reply-to message ID (may change between creation and first event) */
-  replyToMsgIdResolver?: () => string | undefined;
+  threadId?: string;
+  title?: string;
+  modelLabel?: string;
+  /** Present only when a verified card-action callback is configured. */
+  onStop?: () => boolean | Promise<boolean>;
 }
 
 interface ActiveTool {
@@ -134,159 +152,40 @@ interface CompletedSubAgent {
   agentName?: string;
 }
 
-// ─── Card Builder ─────────────────────────────────────────────
+// ─── Verified stop-action registry ─────────────────────────────
 
-const MAX_LOG_ENTRIES = 15;
-
-function formatElapsed(ms: number): string {
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  return `${m}m${s % 60}s`;
+interface StopActionEntry {
+  expiresAt: number;
+  run: () => boolean | Promise<boolean>;
 }
 
-function toolDisplayName(tool: { toolName: string; skillName?: string }): string {
-  if (tool.skillName) return `技能 ${tool.skillName}`;
-  return tool.toolName;
-}
+const stopActions = new Map<string, StopActionEntry>();
+const STOP_ACTION_TTL_MS = 6 * 60 * 60 * 1000;
 
-function formatAgentLabel(agent: { description: string; agentType?: string; agentName?: string }): string {
-  const parts: string[] = [];
-  // Show name or type as prefix if available
-  if (agent.agentName) {
-    parts.push(`[${agent.agentName}]`);
-  } else if (agent.agentType) {
-    parts.push(`[${agent.agentType}]`);
-  }
-  parts.push(agent.description.slice(0, 50));
-  return parts.join(' ');
-}
+export type ProgressCardActionResult =
+  | 'stopped'
+  | 'already_finished'
+  | 'invalid';
 
-/** Format thinking text for display in the Feishu card.
- *  Shows the full text with blockquote formatting, preserving paragraph structure. */
-function formatThinking(text: string): string {
-  const trimmed = text.trim();
-  if (!trimmed) return '';
-  // Preserve paragraph breaks but collapse excessive whitespace
-  return trimmed
-    .replace(/\n{3,}/g, '\n\n')
-    .split('\n')
-    .map((line) => `> ${line}`)
-    .join('\n');
-}
-
-interface CardData {
-  activeTools: ActiveTool[];
-  completedTools: CompletedTool[];
-  isThinking: boolean;
-  thinkingText: string;
-  elapsedMs: number;
-  state: 'active' | 'completed' | 'aborted';
-  abortReason?: string;
-  activeSubAgents: ActiveSubAgent[];
-  completedSubAgents: CompletedSubAgent[];
-  latestCommentary?: string;
-}
-
-function buildProgressCard(data: CardData): object {
-  const {
-    activeTools, completedTools, isThinking, thinkingText,
-    elapsedMs, state, abortReason, activeSubAgents, completedSubAgents,
-    latestCommentary,
-  } = data;
-  const elements: Array<Record<string, unknown>> = [];
-
-  // Elapsed time
-  const statusEmoji = state === 'active' ? '⚡' : state === 'completed' ? '✅' : '⚠️';
-  const statusLabel = state === 'active' ? '执行中' : state === 'completed' ? '完成' : (abortReason || '已中断');
-  elements.push({
-    tag: 'markdown',
-    content: `${statusEmoji} **${statusLabel}** · ⏱ ${formatElapsed(elapsedMs)}`,
-  });
-
-  // Commentary: human-readable explanation updated in-place (no new message)
-  if (latestCommentary && state === 'active') {
-    elements.push({
-      tag: 'markdown',
-      content: `💬 ${latestCommentary}`,
-    });
+export async function handleProgressCardAction(
+  value: unknown,
+): Promise<ProgressCardActionResult> {
+  if (!value || typeof value !== 'object') return 'invalid';
+  const action = value as Record<string, unknown>;
+  if (action.action !== 'stop_turn' || typeof action.action_id !== 'string') {
+    return 'invalid';
   }
 
-  // Thinking indicator with full content
-  if (isThinking && state === 'active') {
-    const formatted = formatThinking(thinkingText);
-    const thinkingContent = formatted
-      ? `💭 正在思考...\n${formatted}`
-      : '💭 正在思考...';
-    elements.push({
-      tag: 'markdown',
-      content: thinkingContent,
-    });
+  const entry = stopActions.get(action.action_id);
+  if (!entry || entry.expiresAt < Date.now()) {
+    stopActions.delete(action.action_id);
+    return 'already_finished';
   }
 
-  // Sub-agent section
-  const agentLines: string[] = [];
-  for (const a of completedSubAgents) {
-    const label = formatAgentLabel(a);
-    const summary = a.summary ? `: ${a.summary.slice(0, 60)}` : '';
-    agentLines.push(`✅ 🤖 ${label}${summary} (${formatElapsed(a.duration)})`);
-  }
-  for (const a of activeSubAgents) {
-    const label = formatAgentLabel(a);
-    const elapsed = formatElapsed(Date.now() - a.startTime);
-    const bgLabel = a.isBackground ? ' [后台]' : '';
-    agentLines.push(`🔄 🤖 ${label}${bgLabel} (${elapsed})`);
-  }
-
-  if (agentLines.length > 0) {
-    elements.push({ tag: 'hr' });
-    elements.push({
-      tag: 'markdown',
-      content: '**子 Agent**\n' + agentLines.join('\n'),
-    });
-  }
-
-  // Tool traces
-  const traceLines: string[] = [];
-
-  // Completed tools (last N)
-  const recentCompleted = completedTools.slice(-MAX_LOG_ENTRIES);
-  for (const t of recentCompleted) {
-    const name = toolDisplayName(t);
-    const summary = t.inputSummary ? ` \`${t.inputSummary.slice(0, 60)}\`` : '';
-    traceLines.push(`✅ ${name}${summary} (${formatElapsed(t.duration)})`);
-  }
-
-  // Active tools
-  for (const t of activeTools) {
-    const name = toolDisplayName(t);
-    const summary = t.inputSummary ? ` \`${t.inputSummary.slice(0, 60)}\`` : '';
-    const elapsed = formatElapsed(Date.now() - t.startTime);
-    traceLines.push(`🔧 ${name}${summary} (${elapsed})`);
-  }
-
-  if (traceLines.length > 0) {
-    elements.push({ tag: 'hr' });
-    elements.push({
-      tag: 'markdown',
-      content: traceLines.join('\n'),
-    });
-  }
-
-  const headerTemplate = {
-    active: 'wathet',
-    completed: 'green',
-    aborted: 'orange',
-  };
-
-  return {
-    config: { wide_screen_mode: true },
-    header: {
-      title: { tag: 'plain_text', content: `${statusEmoji} Agent ${statusLabel}` },
-      template: headerTemplate[state],
-    },
-    elements,
-  };
+  // One-time capability: delete before invoking so retries/double-clicks cannot
+  // interrupt a later turn that happens to share the same chat.
+  stopActions.delete(action.action_id);
+  return (await entry.run()) ? 'stopped' : 'already_finished';
 }
 
 // ─── Progress Card Controller ─────────────────────────────────
@@ -316,14 +215,38 @@ export class ProgressCardController {
   private readonly clientResolver?: () => lark.Client | undefined;
   private readonly chatId: string;
   private readonly replyToMsgId?: string;
-  private readonly replyToMsgIdResolver?: () => string | undefined;
+  private readonly threadId?: string;
+  private readonly title?: string;
+  private readonly modelLabel?: string;
+  private readonly onStop?: () => boolean | Promise<boolean>;
+  private stopActionId?: string;
 
   constructor(opts: ProgressCardOptions) {
     this.client = opts.client;
     this.clientResolver = opts.clientResolver;
     this.chatId = opts.chatId;
     this.replyToMsgId = opts.replyToMsgId;
-    this.replyToMsgIdResolver = opts.replyToMsgIdResolver;
+    this.threadId = opts.threadId;
+    this.title = opts.title;
+    this.modelLabel = opts.modelLabel;
+    this.onStop = opts.onStop;
+    this.registerStopAction();
+  }
+
+  private registerStopAction(): void {
+    if (!this.onStop || this.stopActionId) return;
+    const actionId = randomUUID();
+    stopActions.set(actionId, {
+      expiresAt: Date.now() + STOP_ACTION_TTL_MS,
+      run: this.onStop,
+    });
+    this.stopActionId = actionId;
+  }
+
+  private clearStopAction(): void {
+    if (!this.stopActionId) return;
+    stopActions.delete(this.stopActionId);
+    this.stopActionId = undefined;
   }
 
   /** Resolve the lark client lazily — allows creation before Feishu connection is ready. */
@@ -384,7 +307,8 @@ export class ProgressCardController {
     } else if (type === 'tool_progress' && event.toolUseId) {
       const active = this.activeTools.get(event.toolUseId);
       if (active) {
-        if (event.toolInputSummary) active.inputSummary = event.toolInputSummary;
+        if (event.toolInputSummary)
+          active.inputSummary = event.toolInputSummary;
         if (event.skillName) active.skillName = event.skillName;
         this.dirty = true;
       }
@@ -421,7 +345,10 @@ export class ProgressCardController {
     if (this.dirty && this.state === 'idle') {
       this.state = 'creating';
       this.createCard().catch((err) => {
-        logger.warn({ err, chatId: this.chatId }, 'Progress card: create failed');
+        logger.warn(
+          { err, chatId: this.chatId },
+          'Progress card: create failed',
+        );
         this.state = 'error';
       });
     }
@@ -439,27 +366,41 @@ export class ProgressCardController {
     // Allow completion from 'aborted' state — the abort may have been triggered by
     // registerProgressSession when a new run starts for the same chatJid, but the
     // owning processGroupMessages still needs to finalize the card properly.
-    if (prevState !== 'active' && prevState !== 'creating' && prevState !== 'aborted') {
-      logger.info(`Progress card: complete() skipped | chatId=${this.chatId} state=${prevState}`);
+    if (
+      prevState !== 'active' &&
+      prevState !== 'creating' &&
+      prevState !== 'aborted'
+    ) {
+      logger.info(
+        `Progress card: complete() skipped | chatId=${this.chatId} state=${prevState}`,
+      );
       return;
     }
     this.state = 'completed';
     this.abortReason = undefined; // Clear any abort reason since we're completing successfully
     this.clearFlushTimer();
+    this.clearStopAction();
 
     if (this.messageId) {
       try {
         await this.patchCard('completed');
-        logger.info(`Progress card: patched to completed | chatId=${this.chatId} messageId=${this.messageId}`);
+        logger.info(
+          `Progress card: patched to completed | chatId=${this.chatId} messageId=${this.messageId}`,
+        );
         // Delete after 15s so user can see the "完成" state.
         // Capture messageId in closure — completeAndReset() nulls this.messageId.
         const msgId = this.messageId;
         this.deleteTimer = setTimeout(() => this.deleteCardById(msgId), 15000);
       } catch (err) {
-        logger.warn({ err }, `Progress card: failed to patch completed | chatId=${this.chatId} messageId=${this.messageId}`);
+        logger.warn(
+          { err },
+          `Progress card: failed to patch completed | chatId=${this.chatId} messageId=${this.messageId}`,
+        );
       }
     } else {
-      logger.info(`Progress card: complete() called but no messageId | chatId=${this.chatId} prevState=${prevState}`);
+      logger.info(
+        `Progress card: complete() called but no messageId | chatId=${this.chatId} prevState=${prevState}`,
+      );
     }
   }
 
@@ -471,6 +412,7 @@ export class ProgressCardController {
     this.state = 'aborted';
     this.abortReason = reason;
     this.clearFlushTimer();
+    this.clearStopAction();
 
     // Don't patch the card to "aborted" — let the owning process decide the final
     // state via complete() or a real abort. The abort from registerProgressSession
@@ -478,9 +420,14 @@ export class ProgressCardController {
     if (this.messageId && reason !== '新的执行已开始') {
       try {
         await this.patchCard('aborted');
-        logger.info(`Progress card: patched to aborted | chatId=${this.chatId} reason=${reason}`);
+        logger.info(
+          `Progress card: patched to aborted | chatId=${this.chatId} reason=${reason}`,
+        );
       } catch (err) {
-        logger.warn({ err }, `Progress card: failed to patch aborted | chatId=${this.chatId}`);
+        logger.warn(
+          { err },
+          `Progress card: failed to patch aborted | chatId=${this.chatId}`,
+        );
       }
     }
   }
@@ -491,6 +438,7 @@ export class ProgressCardController {
    */
   async forceCleanup(_reason: string): Promise<void> {
     this.clearFlushTimer();
+    this.clearStopAction();
     if (this.deleteTimer) {
       clearTimeout(this.deleteTimer);
       this.deleteTimer = null;
@@ -501,9 +449,14 @@ export class ProgressCardController {
     // Just delete the card silently — no need to show "服务维护中" to the user
     try {
       await this.deleteCard();
-      logger.info(`Progress card: force cleanup (deleted) | chatId=${this.chatId}`);
+      logger.info(
+        `Progress card: force cleanup (deleted) | chatId=${this.chatId}`,
+      );
     } catch (err) {
-      logger.warn({ err }, `Progress card: force cleanup failed | chatId=${this.chatId}`);
+      logger.warn(
+        { err },
+        `Progress card: force cleanup failed | chatId=${this.chatId}`,
+      );
     }
   }
 
@@ -524,9 +477,11 @@ export class ProgressCardController {
     this.completedSubAgents = [];
     this.isThinking = false;
     this.thinkingText = '';
+    this.latestCommentary = '';
     this.dirty = false;
     this.abortReason = undefined;
     this.patchFailCount = 0;
+    this.registerStopAction();
     // Don't clear deleteTimer — let the completed card be deleted on its own schedule
   }
 
@@ -536,6 +491,7 @@ export class ProgressCardController {
    */
   dispose(): void {
     this.clearFlushTimer();
+    this.clearStopAction();
   }
 
   /**
@@ -550,9 +506,13 @@ export class ProgressCardController {
     }
   }
 
-  /** Build CardData snapshot for buildProgressCard. */
-  private getCardData(state: 'active' | 'completed' | 'aborted'): CardData {
+  /** Build a presentation-only snapshot for the shared JSON 2.0 builder. */
+  private getCardData(
+    state: 'active' | 'completed' | 'aborted',
+  ): ProgressCardRenderData {
     return {
+      title: this.title,
+      modelLabel: this.modelLabel,
       activeTools: Array.from(this.activeTools.values()),
       completedTools: this.completedTools,
       isThinking: this.isThinking,
@@ -563,6 +523,7 @@ export class ProgressCardController {
       activeSubAgents: Array.from(this.activeSubAgents.values()),
       completedSubAgents: this.completedSubAgents,
       latestCommentary: this.latestCommentary || undefined,
+      stopActionId: state === 'active' ? this.stopActionId : undefined,
     };
   }
 
@@ -571,7 +532,10 @@ export class ProgressCardController {
   private async createCard(): Promise<void> {
     const client = this.resolveClient();
     if (!client) {
-      logger.warn({ chatId: this.chatId }, 'Progress card: no lark client available (connection not ready?)');
+      logger.warn(
+        { chatId: this.chatId },
+        'Progress card: no lark client available (connection not ready?)',
+      );
       this.state = 'error';
       return;
     }
@@ -580,12 +544,15 @@ export class ProgressCardController {
     const content = JSON.stringify(card);
 
     try {
-      const replyTo = this.replyToMsgId || this.replyToMsgIdResolver?.();
       let resp: any;
-      if (replyTo) {
+      if (this.replyToMsgId) {
         resp = await client.im.message.reply({
-          path: { message_id: replyTo },
-          data: { content, msg_type: 'interactive' },
+          path: { message_id: this.replyToMsgId },
+          data: {
+            content,
+            msg_type: 'interactive',
+            reply_in_thread: Boolean(this.threadId),
+          },
         });
       } else {
         resp = await client.im.v1.message.create({
@@ -603,20 +570,29 @@ export class ProgressCardController {
       // State may have changed during await (complete/abort called while creating)
       if (this.state !== 'creating') {
         const finalState = this.state as 'completed' | 'aborted';
-        logger.info({ chatId: this.chatId, finalState, messageId: this.messageId }, 'Progress card: state changed during creation, patching to final state');
+        logger.info(
+          { chatId: this.chatId, finalState, messageId: this.messageId },
+          'Progress card: state changed during creation, patching to final state',
+        );
         try {
           await this.patchCard(finalState);
           if (finalState === 'completed') {
             this.deleteTimer = setTimeout(() => this.deleteCard(), 15000);
           }
         } catch (err) {
-          logger.warn({ err, chatId: this.chatId, finalState }, 'Progress card: failed to patch final state after creation race');
+          logger.warn(
+            { err, chatId: this.chatId, finalState },
+            'Progress card: failed to patch final state after creation race',
+          );
         }
         return;
       }
 
       this.state = 'active';
-      logger.info({ chatId: this.chatId, messageId: this.messageId }, 'Progress card created');
+      logger.info(
+        { chatId: this.chatId, messageId: this.messageId },
+        'Progress card created',
+      );
 
       if (this.dirty) this.scheduleFlush();
     } catch (err) {
@@ -643,7 +619,10 @@ export class ProgressCardController {
         this.patchFailCount = 0;
       } catch (err) {
         this.patchFailCount++;
-        logger.debug({ err, chatId: this.chatId, failCount: this.patchFailCount }, 'Progress card: patch failed');
+        logger.debug(
+          { err, chatId: this.chatId, failCount: this.patchFailCount },
+          'Progress card: patch failed',
+        );
       }
 
       // If more events arrived during flush, schedule again
@@ -660,9 +639,7 @@ export class ProgressCardController {
     const client = this.resolveClient();
     if (!client) return;
 
-    const card = buildProgressCard(
-      this.getCardData(displayState),
-    );
+    const card = buildProgressCard(this.getCardData(displayState));
     const content = JSON.stringify(card);
 
     await client.im.v1.message.patch({
@@ -683,7 +660,9 @@ export class ProgressCardController {
       await client.im.v1.message.delete({
         path: { message_id: messageId },
       });
-      logger.info(`Progress card: deleted | chatId=${this.chatId} messageId=${messageId}`);
+      logger.info(
+        `Progress card: deleted | chatId=${this.chatId} messageId=${messageId}`,
+      );
     } catch {
       // Deletion is best-effort
     }

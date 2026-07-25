@@ -43,14 +43,14 @@ export function SessionCard({ session }: SessionCardProps) {
             </div>
 
             {/* Session ID / JID */}
-            <p className="text-xs text-slate-500 font-mono mb-2">
+            <p className="text-xs text-muted-foreground font-mono mb-2">
               {truncateId(session.jid)}
             </p>
 
             {/* Core metadata */}
             <div className="space-y-1 text-sm">
               <div className="flex items-center gap-2">
-                <span className="text-slate-500">
+                <span className="text-muted-foreground">
                   {isSessionView ? (isMemorySession ? '条目类型:' : '会话类型:') : '会话目录:'}
                 </span>
                 <span className="text-foreground font-medium">
@@ -63,7 +63,7 @@ export function SessionCard({ session }: SessionCardProps) {
               </div>
               {isSessionView && (
                 <div className="flex items-center gap-2">
-                  <span className="text-slate-500">运行引擎:</span>
+                  <span className="text-muted-foreground">运行引擎:</span>
                   <span className="text-foreground font-medium">
                     {session.runner_label || session.runner_id || 'unknown'}
                   </span>
@@ -71,7 +71,7 @@ export function SessionCard({ session }: SessionCardProps) {
               )}
               {isSessionView && !isMemorySession && (
                 <div className="flex items-center gap-2">
-                  <span className="text-slate-500">渠道绑定:</span>
+                  <span className="text-muted-foreground">渠道绑定:</span>
                   <span className="text-foreground font-medium truncate">
                     {session.binding_summary || '无渠道绑定'}
                   </span>
@@ -83,9 +83,9 @@ export function SessionCard({ session }: SessionCardProps) {
           {/* Expand Icon */}
           <div className="ml-4 flex-shrink-0">
             {expanded ? (
-              <ChevronUp className="w-5 h-5 text-slate-400" />
+              <ChevronUp className="w-5 h-5 text-muted-foreground/80" />
             ) : (
-              <ChevronDown className="w-5 h-5 text-slate-400" />
+              <ChevronDown className="w-5 h-5 text-muted-foreground/80" />
             )}
           </div>
         </div>

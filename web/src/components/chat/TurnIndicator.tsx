@@ -97,10 +97,10 @@ export function TurnIndicator({ chatJid }: TurnIndicatorProps) {
   return (
     <div className="px-4 py-2">
       {activeTurn && (
-        <div className="rounded-xl border border-teal-200/70 bg-teal-50/40 px-3 py-2.5">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-teal-800 dark:text-teal-200">
+        <div className="rounded-xl border border-brand-200/70 bg-brand-50/40 px-3 py-2.5">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-primary">
             <span className="inline-flex items-center gap-1.5 font-medium">
-              <span className="inline-block w-1.5 h-1.5 rounded-full bg-teal-500 animate-pulse" />
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
               <span>当前 Turn</span>
             </span>
             <span className="opacity-50">·</span>
@@ -111,20 +111,20 @@ export function TurnIndicator({ chatJid }: TurnIndicatorProps) {
             <span>已运行 {formatDuration(activeTurn.startedAt)}</span>
           </div>
 
-          <div className={`mt-1 text-xs ${stale ? 'text-amber-700 dark:text-amber-300' : 'text-slate-600 dark:text-slate-300'}`}>
+          <div className={`mt-1 text-xs ${stale ? 'text-warning' : 'text-muted-foreground'}`}>
             {formatRunnerState(runnerState?.state || activeTurn.status, runnerState?.detail)}
           </div>
 
-          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500 dark:text-slate-400">
+          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
             {lastEventAge ? (
-              <span className={stale ? 'text-amber-600 dark:text-amber-300 font-medium' : ''}>
+              <span className={stale ? 'text-warning font-medium' : ''}>
                 最近事件 {lastEventAge} 前
               </span>
             ) : (
               <span>尚未收到执行事件</span>
             )}
             {stale && (
-              <span className="text-amber-600 dark:text-amber-300">
+              <span className="text-warning">
                 长时间无新进展，可能卡住
               </span>
             )}
@@ -132,7 +132,7 @@ export function TurnIndicator({ chatJid }: TurnIndicatorProps) {
         </div>
       )}
       {pendingEntries.length > 0 && (
-        <div className="mt-2 text-[11px] text-amber-700 dark:text-amber-300">
+        <div className="mt-2 text-[11px] text-warning">
           {pendingEntries
             .map(([ch, count]) => `${formatChannel(ch)} ${count} 条等待中`)
             .join(' · ')}

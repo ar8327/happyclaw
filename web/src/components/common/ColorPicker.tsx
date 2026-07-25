@@ -22,7 +22,7 @@ export function ColorPicker({ value, onChange }: ColorPickerProps) {
           onClick={() => onChange(color)}
           className={cn(
             'w-8 h-8 rounded-full cursor-pointer flex items-center justify-center transition-transform hover:scale-110',
-            value === color && 'ring-2 ring-offset-2 ring-slate-400',
+            value === color && 'ring-2 ring-offset-2 ring-border-strong',
           )}
           style={{ backgroundColor: color }}
         >

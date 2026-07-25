@@ -18,8 +18,10 @@ export type WriteOutputFn = (output: ContainerOutput) => void;
 export interface IpcMessage {
   text: string;
   images?: Array<{ data: string; mimeType?: string }>;
+  deliveryIds?: string[];
   ackTargets?: string[];
   ackSourceChannels?: string[];
+  intent?: 'continue' | 'correction';
 }
 
 /**
@@ -64,6 +66,10 @@ function extractAckSourceChannels(text: string): string[] | undefined {
 export function buildIpcAckStreamEvent(
   sessionRecordId: string,
   messageOrMessages: IpcMessage | IpcMessage[],
+  statusText:
+    | 'ipc_message_received'
+    | 'ipc_message_delivered'
+    | 'ipc_messages_returned' = 'ipc_message_received',
 ): NonNullable<ContainerOutput['streamEvent']> {
   const messages = Array.isArray(messageOrMessages)
     ? messageOrMessages
@@ -74,13 +80,17 @@ export function buildIpcAckStreamEvent(
   const ipcAckSources = normalizeStringArray(
     messages.flatMap((message) => message.ackSourceChannels || []),
   );
+  const ipcDeliveryIds = normalizeStringArray(
+    messages.flatMap((message) => message.deliveryIds || []),
+  );
   return {
     eventType: 'status',
-    statusText: 'ipc_message_received',
+    statusText,
     ipcAckSessionId: sessionRecordId,
     ipcAckTargets,
     ipcAckSources,
     ipcAckMessageCount: messages.length,
+    ipcDeliveryIds,
   };
 }
 
@@ -107,7 +117,11 @@ export function buildIpcPaths(workspaceIpc: string): IpcPaths {
  */
 export function shouldClose(paths: IpcPaths): boolean {
   if (fs.existsSync(paths.closeSentinel)) {
-    try { fs.unlinkSync(paths.closeSentinel); } catch { /* ignore */ }
+    try {
+      fs.unlinkSync(paths.closeSentinel);
+    } catch {
+      /* ignore */
+    }
     return true;
   }
   return false;
@@ -119,7 +133,11 @@ export function shouldClose(paths: IpcPaths): boolean {
  */
 export function shouldDrain(paths: IpcPaths): boolean {
   if (fs.existsSync(paths.drainSentinel)) {
-    try { fs.unlinkSync(paths.drainSentinel); } catch { /* ignore */ }
+    try {
+      fs.unlinkSync(paths.drainSentinel);
+    } catch {
+      /* ignore */
+    }
     return true;
   }
   return false;
@@ -130,7 +148,11 @@ export function shouldDrain(paths: IpcPaths): boolean {
  */
 export function shouldInterrupt(paths: IpcPaths): boolean {
   if (fs.existsSync(paths.interruptSentinel)) {
-    try { fs.unlinkSync(paths.interruptSentinel); } catch { /* ignore */ }
+    try {
+      fs.unlinkSync(paths.interruptSentinel);
+    } catch {
+      /* ignore */
+    }
     return true;
   }
   return false;
@@ -143,8 +165,10 @@ export function shouldInterrupt(paths: IpcPaths): boolean {
 export function isInterruptRelatedError(err: unknown): boolean {
   const errno = err as NodeJS.ErrnoException;
   const message = err instanceof Error ? err.message : String(err ?? '');
-  return errno?.code === 'ABORT_ERR'
-    || /abort|aborted|interrupt|interrupted|cancelled|canceled/i.test(message);
+  return (
+    errno?.code === 'ABORT_ERR' ||
+    /abort|aborted|interrupt|interrupted|cancelled|canceled/i.test(message)
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -158,8 +182,9 @@ export function isInterruptRelatedError(err: unknown): boolean {
 export function drainIpcInput(paths: IpcPaths, log: LogFn): IpcDrainResult {
   const result: IpcDrainResult = { messages: [] };
   try {
-    const files = fs.readdirSync(paths.inputDir)
-      .filter(f => f.endsWith('.json'))
+    const files = fs
+      .readdirSync(paths.inputDir)
+      .filter((f) => f.endsWith('.json'))
       .sort();
 
     for (const file of files) {
@@ -167,22 +192,36 @@ export function drainIpcInput(paths: IpcPaths, log: LogFn): IpcDrainResult {
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
         fs.unlinkSync(filePath);
-        if (data.type === 'message' && typeof data.text === 'string' && data.text.length > 0) {
+        if (
+          data.type === 'message' &&
+          typeof data.text === 'string' &&
+          data.text.length > 0
+        ) {
           result.messages.push({
             text: data.text,
             images: data.images,
+            deliveryIds: normalizeStringArray(
+              data.deliveryIds || (data.deliveryId ? [data.deliveryId] : []),
+            ),
             ackTargets: normalizeStringArray(data.ackTargets),
             ackSourceChannels:
-              normalizeStringArray(data.ackSourceChannels)
-              || normalizeStringArray(data.sourceChannels)
-              || extractAckSourceChannels(data.text),
+              normalizeStringArray(data.ackSourceChannels) ||
+              normalizeStringArray(data.sourceChannels) ||
+              extractAckSourceChannels(data.text),
+            intent: data.intent === 'correction' ? 'correction' : 'continue',
           });
         } else if (data.type === 'set_mode' && data.mode) {
           result.modeChange = data.mode;
         }
       } catch (err) {
-        log(`Failed to process input file ${file}: ${err instanceof Error ? err.message : String(err)}`);
-        try { fs.unlinkSync(filePath); } catch { /* ignore */ }
+        log(
+          `Failed to process input file ${file}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        try {
+          fs.unlinkSync(filePath);
+        } catch {
+          /* ignore */
+        }
       }
     }
   } catch (err) {
@@ -241,9 +280,13 @@ export function waitForIpcMessage(
       if (pollCount % HEARTBEAT_INTERVAL === 0) {
         try {
           const files = fs.readdirSync(paths.inputDir);
-          log(`Idle heartbeat: ${Math.round(pollCount * IPC_POLL_MS / 1000)}s waiting, IPC dir has ${files.length} files: [${files.join(', ')}]`);
+          log(
+            `Idle heartbeat: ${Math.round((pollCount * IPC_POLL_MS) / 1000)}s waiting, IPC dir has ${files.length} files: [${files.join(', ')}]`,
+          );
         } catch {
-          log(`Idle heartbeat: ${Math.round(pollCount * IPC_POLL_MS / 1000)}s waiting, IPC dir read failed`);
+          log(
+            `Idle heartbeat: ${Math.round((pollCount * IPC_POLL_MS) / 1000)}s waiting, IPC dir read failed`,
+          );
         }
       }
       const { messages, modeChange } = drainIpcInput(paths, log);
@@ -257,7 +300,9 @@ export function waitForIpcMessage(
         const allImages = messages.flatMap((m) => m.images || []);
         // Track IM channels for post-compaction routing reminder
         state.extractSourceChannels(combinedText, imChannelsFile);
-        log(`Idle IPC pickup: ${messages.length} message(s), ${combinedText.length} chars`);
+        log(
+          `Idle IPC pickup: ${messages.length} message(s), ${combinedText.length} chars`,
+        );
         // Emit one acknowledgement per IPC message file so host-side counts stay balanced.
         for (const message of messages) {
           writeOutput({
@@ -269,6 +314,9 @@ export function waitForIpcMessage(
         resolve({
           text: combinedText,
           images: allImages.length > 0 ? allImages : undefined,
+          deliveryIds: normalizeStringArray(
+            messages.flatMap((message) => message.deliveryIds || []),
+          ),
           ackTargets: normalizeStringArray(
             messages.flatMap((message) => message.ackTargets || []),
           ),

@@ -415,11 +415,11 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
                   }}
                 >
                   <div className="flex items-center gap-3 my-6 px-4">
-                    <div className="flex-1 border-t border-amber-300" />
-                    <span className="text-xs text-amber-600 whitespace-pre-wrap">
+                    <div className="flex-1 border-t border-warning-border" />
+                    <span className="text-xs text-warning whitespace-pre-wrap">
                       {item.content}
                     </span>
-                    <div className="flex-1 border-t border-amber-300" />
+                    <div className="flex-1 border-t border-warning-border" />
                   </div>
                 </div>
               );
@@ -440,12 +440,12 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
                   }}
                 >
                   <div className="flex items-center gap-3 my-6 px-4">
-                    <div className="flex-1 border-t border-red-300" />
-                    <span className="text-xs text-red-600 whitespace-pre-wrap flex items-center gap-1">
+                    <div className="flex-1 border-t border-error-border" />
+                    <span className="text-xs text-error whitespace-pre-wrap flex items-center gap-1">
                       <AlertTriangle size={14} />
                       {item.content}
                     </span>
-                    <div className="flex-1 border-t border-red-300" />
+                    <div className="flex-1 border-t border-error-border" />
                   </div>
                 </div>
               );
@@ -530,8 +530,8 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
                   />
                 </div>
                 <div>
-                  <h3 className="text-lg font-semibold text-slate-900">{aiName}</h3>
-                  <p className="text-sm text-slate-500 mt-1">有什么我可以帮你的吗？</p>
+                  <h3 className="text-lg font-semibold text-foreground">{aiName}</h3>
+                  <p className="text-sm text-muted-foreground mt-1">有什么我可以帮你的吗？</p>
                 </div>
               </div>
 
@@ -581,7 +581,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
             <button
               type="button"
               onClick={onInterrupt}
-              className="inline-flex items-center gap-1.5 px-3 py-1 text-xs text-slate-500 hover:text-red-600 bg-slate-100 hover:bg-red-50 rounded-full transition-colors cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-3 py-1 text-xs text-muted-foreground hover:text-error bg-surface-2 hover:bg-error-bg rounded-full transition-colors cursor-pointer"
             >
               <Square className="w-3 h-3" />
               中断

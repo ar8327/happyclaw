@@ -13,11 +13,11 @@ export function QueueStatus({ status }: QueueStatusProps) {
   return (
     <div className="bg-card rounded-xl border border-border p-6">
       <div className="flex items-center gap-3 mb-4">
-        <div className="p-2 bg-amber-100 rounded-lg">
-          <ListOrdered className="w-6 h-6 text-amber-600" />
+        <div className="p-2 bg-warning-bg rounded-lg">
+          <ListOrdered className="w-6 h-6 text-warning" />
         </div>
         <div>
-          <h3 className="text-sm font-medium text-slate-500">队列状态</h3>
+          <h3 className="text-sm font-medium text-muted-foreground">队列状态</h3>
           <p className="text-2xl font-bold text-foreground">
             {status.queueLength}
           </p>
@@ -25,7 +25,7 @@ export function QueueStatus({ status }: QueueStatusProps) {
       </div>
 
       <div className="space-y-1">
-        <div className="text-xs text-slate-500">
+        <div className="text-xs text-muted-foreground">
           {sessionsWithQueue.length} 个会话 runtime 有待处理任务或消息
         </div>
 
@@ -36,7 +36,7 @@ export function QueueStatus({ status }: QueueStatusProps) {
                 key={session.runtime_key}
                 className="flex items-center justify-between text-xs"
               >
-                <span className="text-slate-600 truncate">
+                <span className="text-muted-foreground truncate">
                   {session.session_name || session.session_id || '未知会话'}
                 </span>
                 <span className="text-foreground font-medium ml-2">
@@ -45,7 +45,7 @@ export function QueueStatus({ status }: QueueStatusProps) {
               </div>
             ))}
             {sessionsWithQueue.length > 3 && (
-              <div className="text-xs text-slate-400">
+              <div className="text-xs text-muted-foreground/80">
                 ... 还有 {sessionsWithQueue.length - 3} 个会话
               </div>
             )}

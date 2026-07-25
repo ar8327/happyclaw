@@ -43,7 +43,7 @@ export function TaskDetail({ task }: TaskDetailProps) {
       {/* Script Command (script mode) */}
       {task.execution_type === 'script' && task.script_command && (
         <div>
-          <div className="text-xs text-slate-500 mb-2">脚本命令</div>
+          <div className="text-xs text-muted-foreground mb-2">脚本命令</div>
           <pre className="text-sm text-foreground bg-card px-3 py-2 rounded border border-border whitespace-pre-wrap font-mono">
             {task.script_command}
           </pre>
@@ -53,7 +53,7 @@ export function TaskDetail({ task }: TaskDetailProps) {
       {/* Full Prompt / Description */}
       {task.prompt && (
         <div>
-          <div className="text-xs text-slate-500 mb-2">
+          <div className="text-xs text-muted-foreground mb-2">
             {task.execution_type === 'script' ? '任务描述' : '完整 Prompt'}
           </div>
           <div className="text-sm text-foreground bg-card px-3 py-2 rounded border border-border whitespace-pre-wrap">
@@ -65,21 +65,21 @@ export function TaskDetail({ task }: TaskDetailProps) {
       {/* Schedule Details */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <div>
-          <div className="text-xs text-slate-500 mb-1">执行方式</div>
+          <div className="text-xs text-muted-foreground mb-1">执行方式</div>
           <div className="text-sm text-foreground">
             {task.execution_type === 'script' ? '脚本' : 'Agent'}
           </div>
         </div>
 
         <div>
-          <div className="text-xs text-slate-500 mb-1">会话</div>
+          <div className="text-xs text-muted-foreground mb-1">会话</div>
           <div className="text-sm text-foreground">
             {sessionLabel}
           </div>
         </div>
 
         <div>
-          <div className="text-xs text-slate-500 mb-1">调度类型</div>
+          <div className="text-xs text-muted-foreground mb-1">调度类型</div>
           <div className="text-sm text-foreground">
             {task.schedule_type === 'cron' && 'Cron 表达式'}
             {task.schedule_type === 'interval' && '间隔执行'}
@@ -88,14 +88,14 @@ export function TaskDetail({ task }: TaskDetailProps) {
         </div>
 
         <div>
-          <div className="text-xs text-slate-500 mb-1">调度值</div>
+          <div className="text-xs text-muted-foreground mb-1">调度值</div>
           <code className="text-sm text-foreground bg-card px-2 py-1 rounded border border-border">
             {task.schedule_value}
           </code>
         </div>
 
         <div>
-          <div className="text-xs text-slate-500 mb-1">下次运行</div>
+          <div className="text-xs text-muted-foreground mb-1">下次运行</div>
           <div className="text-sm text-foreground">
             {formatDate(task.next_run)}
           </div>
@@ -103,7 +103,7 @@ export function TaskDetail({ task }: TaskDetailProps) {
 
         {task.last_run && (
           <div>
-            <div className="text-xs text-slate-500 mb-1">上次运行</div>
+            <div className="text-xs text-muted-foreground mb-1">上次运行</div>
             <div className="text-sm text-foreground">
               {formatDate(task.last_run)}
             </div>
@@ -111,7 +111,7 @@ export function TaskDetail({ task }: TaskDetailProps) {
         )}
 
         <div>
-          <div className="text-xs text-slate-500 mb-1">创建时间</div>
+          <div className="text-xs text-muted-foreground mb-1">创建时间</div>
           <div className="text-sm text-foreground">
             {formatDate(task.created_at)}
           </div>
@@ -119,7 +119,7 @@ export function TaskDetail({ task }: TaskDetailProps) {
 
         {task.last_result && (
           <div className="col-span-1 md:col-span-2">
-            <div className="text-xs text-slate-500 mb-1">最近结果</div>
+            <div className="text-xs text-muted-foreground mb-1">最近结果</div>
             <div className="text-sm text-foreground bg-card px-3 py-2 rounded border border-border whitespace-pre-wrap break-words">
               {task.last_result}
             </div>
@@ -129,9 +129,9 @@ export function TaskDetail({ task }: TaskDetailProps) {
 
       {/* Execution Logs */}
       <div>
-        <div className="text-xs text-slate-500 mb-2">执行日志</div>
+        <div className="text-xs text-muted-foreground mb-2">执行日志</div>
         {taskLogs.length === 0 ? (
-          <div className="text-sm text-slate-400 bg-card px-3 py-4 rounded border border-border text-center">
+          <div className="text-sm text-muted-foreground/80 bg-card px-3 py-4 rounded border border-border text-center">
             暂无执行记录
           </div>
         ) : (
@@ -139,16 +139,16 @@ export function TaskDetail({ task }: TaskDetailProps) {
             <table className="min-w-full divide-y divide-border text-sm">
               <thead className="bg-muted">
                 <tr>
-                  <th className="px-3 py-2 text-left text-xs font-medium text-slate-500">
+                  <th className="px-3 py-2 text-left text-xs font-medium text-muted-foreground">
                     运行时间
                   </th>
-                  <th className="px-3 py-2 text-left text-xs font-medium text-slate-500">
+                  <th className="px-3 py-2 text-left text-xs font-medium text-muted-foreground">
                     耗时
                   </th>
-                  <th className="px-3 py-2 text-left text-xs font-medium text-slate-500">
+                  <th className="px-3 py-2 text-left text-xs font-medium text-muted-foreground">
                     状态
                   </th>
-                  <th className="px-3 py-2 text-left text-xs font-medium text-slate-500">
+                  <th className="px-3 py-2 text-left text-xs font-medium text-muted-foreground">
                     结果
                   </th>
                 </tr>
@@ -166,8 +166,8 @@ export function TaskDetail({ task }: TaskDetailProps) {
                       <span
                         className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${
                           log.status === 'success'
-                            ? 'bg-green-100 text-green-600'
-                            : 'bg-red-100 text-red-600'
+                            ? 'bg-success-bg text-success'
+                            : 'bg-error-bg text-error'
                         }`}
                       >
                         {log.status === 'success' ? '成功' : '失败'}

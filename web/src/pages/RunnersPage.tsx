@@ -344,7 +344,7 @@ export function RunnersPage() {
               <h1 className="text-2xl font-bold text-foreground">
                 Runner 注册表
               </h1>
-              <p className="text-sm text-slate-500 mt-0.5">
+              <p className="text-sm text-muted-foreground mt-0.5">
                 管理 runner 能力矩阵，以及 session 与 memory 可选的 profile。
               </p>
             </div>
@@ -353,13 +353,13 @@ export function RunnersPage() {
 
         {(notice || error) && (
           <div className="bg-card rounded-xl border border-border p-4 space-y-1">
-            {notice && <div className="text-sm text-green-600">{notice}</div>}
-            {error && <div className="text-sm text-red-600">{error}</div>}
+            {notice && <div className="text-sm text-success">{notice}</div>}
+            {error && <div className="text-sm text-error">{error}</div>}
           </div>
         )}
 
         {loading ? (
-          <div className="flex items-center justify-center py-12 text-slate-500">
+          <div className="flex items-center justify-center py-12 text-muted-foreground">
             <Loader2 className="w-5 h-5 animate-spin mr-2" />
             加载中...
           </div>
@@ -380,23 +380,23 @@ export function RunnersPage() {
                             <div className="text-lg font-semibold text-foreground">
                               {runner.label}
                             </div>
-                            <div className="text-xs font-mono text-slate-500 mt-1">
+                            <div className="text-xs font-mono text-muted-foreground mt-1">
                               {runner.id}
                             </div>
                             {runner.description && (
-                              <div className="text-xs text-slate-500 mt-2">
+                              <div className="text-xs text-muted-foreground mt-2">
                                 {runner.description}
                               </div>
                             )}
                           </div>
-                          <div className="text-right text-xs text-slate-500 space-y-1">
+                          <div className="text-right text-xs text-muted-foreground space-y-1">
                             <div>chat: {runner.compatibility.chat}</div>
                             <div>IM: {runner.compatibility.im}</div>
                             <div
                               className={
                                 health?.available
-                                  ? 'text-green-600'
-                                  : 'text-amber-600'
+                                  ? 'text-success'
+                                  : 'text-warning'
                               }
                             >
                               {health
@@ -435,7 +435,7 @@ export function RunnersPage() {
                           </div>
                         </div>
 
-                        <div className="text-xs text-slate-500 space-y-1">
+                        <div className="text-xs text-muted-foreground space-y-1">
                           <div>
                             归档触发:{' '}
                             {runner.lifecycle.archivalTrigger.join(' / ') ||
@@ -477,14 +477,14 @@ export function RunnersPage() {
                           !health.available &&
                           health.missingReasons &&
                           health.missingReasons.length > 0 && (
-                            <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 space-y-1">
-                              <div className="text-xs font-medium text-red-700">
+                            <div className="rounded-lg border border-error-border bg-error-bg px-3 py-2 space-y-1">
+                              <div className="text-xs font-medium text-error">
                                 健康检查
                               </div>
                               {health.missingReasons.map((reason) => (
                                 <div
                                   key={reason}
-                                  className="text-xs text-red-700"
+                                  className="text-xs text-error"
                                 >
                                   {reason}
                                 </div>
@@ -493,14 +493,14 @@ export function RunnersPage() {
                           )}
 
                         {runner.degradation_reasons.length > 0 && (
-                          <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 space-y-1">
-                            <div className="text-xs font-medium text-amber-700">
+                          <div className="rounded-lg border border-warning-border bg-warning-bg px-3 py-2 space-y-1">
+                            <div className="text-xs font-medium text-warning">
                               退化说明
                             </div>
                             {runner.degradation_reasons.map((reason) => (
                               <div
                                 key={reason}
-                                className="text-xs text-amber-700"
+                                className="text-xs text-warning"
                               >
                                 {reason}
                               </div>
@@ -521,7 +521,7 @@ export function RunnersPage() {
                     <div className="text-lg font-semibold text-foreground">
                       Runner Profiles
                     </div>
-                    <div className="text-sm text-slate-500 mt-0.5">
+                    <div className="text-sm text-muted-foreground mt-0.5">
                       这些 profile 会出现在 session 与 memory 配置里。
                     </div>
                   </div>
@@ -548,12 +548,12 @@ export function RunnersPage() {
                 </div>
 
                 {profilesLoading ? (
-                  <div className="flex items-center justify-center py-8 text-slate-500">
+                  <div className="flex items-center justify-center py-8 text-muted-foreground">
                     <Loader2 className="w-4 h-4 animate-spin mr-2" />
                     加载 profile 中...
                   </div>
                 ) : profiles.length === 0 ? (
-                  <div className="rounded-lg border border-dashed border-border px-4 py-6 text-sm text-slate-500">
+                  <div className="rounded-lg border border-dashed border-border px-4 py-6 text-sm text-muted-foreground">
                     当前 runner 还没有 profile。
                   </div>
                 ) : (
@@ -573,10 +573,10 @@ export function RunnersPage() {
                               {profile.name}
                               {profile.is_default ? ' · 默认' : ''}
                             </div>
-                            <div className="text-xs text-slate-500 font-mono mt-1">
+                            <div className="text-xs text-muted-foreground font-mono mt-1">
                               {profile.id}
                             </div>
-                            <div className="text-xs text-slate-400 mt-1">
+                            <div className="text-xs text-muted-foreground/80 mt-1">
                               更新于{' '}
                               {new Date(profile.updated_at).toLocaleString(
                                 'zh-CN',
@@ -611,14 +611,14 @@ export function RunnersPage() {
                   <div className="text-lg font-semibold text-foreground">
                     {editingProfileId ? '编辑 Profile' : '新建 Profile'}
                   </div>
-                  <div className="text-sm text-slate-500 mt-0.5">
+                  <div className="text-sm text-muted-foreground mt-0.5">
                     `config_json` 只放 runner 行为配置，不放应用代管凭据。
                   </div>
                 </div>
 
                 <div className="space-y-3">
                   <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">
+                    <label className="block text-xs font-medium text-muted-foreground mb-1">
                       名称
                     </label>
                     <Input
@@ -637,7 +637,7 @@ export function RunnersPage() {
                     />
                   </div>
 
-                  <label className="flex items-center gap-2 text-sm text-slate-600">
+                  <label className="flex items-center gap-2 text-sm text-muted-foreground">
                     <input
                       type="checkbox"
                       checked={profileForm.is_default}
@@ -647,7 +647,7 @@ export function RunnersPage() {
                           is_default: e.target.checked,
                         }))
                       }
-                      className="w-4 h-4 rounded border-slate-300"
+                      className="w-4 h-4 rounded border-border-strong"
                     />
                     设为当前 runner 的默认 profile
                   </label>
@@ -665,7 +665,7 @@ export function RunnersPage() {
                         if (Array.isArray(property.enum)) {
                           return (
                             <div key={key}>
-                              <label className="block text-xs font-medium text-slate-600 mb-1">
+                              <label className="block text-xs font-medium text-muted-foreground mb-1">
                                 {label}
                               </label>
                               <select
@@ -690,7 +690,7 @@ export function RunnersPage() {
                                 ))}
                               </select>
                               {description && (
-                                <div className="mt-1 text-xs text-slate-400">
+                                <div className="mt-1 text-xs text-muted-foreground/80">
                                   {description}
                                 </div>
                               )}
@@ -701,7 +701,7 @@ export function RunnersPage() {
                           return (
                             <label
                               key={key}
-                              className="flex items-center gap-2 text-sm text-slate-600"
+                              className="flex items-center gap-2 text-sm text-muted-foreground"
                             >
                               <input
                                 type="checkbox"
@@ -713,7 +713,7 @@ export function RunnersPage() {
                                     e.target.checked,
                                   )
                                 }
-                                className="w-4 h-4 rounded border-slate-300"
+                                className="w-4 h-4 rounded border-border-strong"
                               />
                               {label}
                             </label>
@@ -721,7 +721,7 @@ export function RunnersPage() {
                         }
                         return (
                           <div key={key}>
-                            <label className="block text-xs font-medium text-slate-600 mb-1">
+                            <label className="block text-xs font-medium text-muted-foreground mb-1">
                               {label}
                             </label>
                             <Input
@@ -771,7 +771,7 @@ export function RunnersPage() {
                               placeholder={key}
                             />
                             {description && (
-                              <div className="mt-1 text-xs text-slate-400">
+                              <div className="mt-1 text-xs text-muted-foreground/80">
                                 {description}
                               </div>
                             )}
@@ -782,7 +782,7 @@ export function RunnersPage() {
                   )}
 
                   <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">
+                    <label className="block text-xs font-medium text-muted-foreground mb-1">
                       config_json
                     </label>
                     <Textarea

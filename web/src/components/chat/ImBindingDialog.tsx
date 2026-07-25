@@ -222,9 +222,9 @@ export function ImBindingDialog({
                   key={group.jid}
                   className={`flex items-center gap-3 p-3 rounded-lg border ${
                     boundToThis
-                      ? 'border-teal-500/30 bg-teal-50/50 dark:bg-teal-950/20'
+                      ? 'border-primary/30 bg-brand-50/50'
                       : boundToOther
-                        ? 'border-amber-200/50 dark:border-amber-800/30'
+                        ? 'border-warning-border/50'
                         : 'border-border hover:border-border/80'
                   }`}
                 >
@@ -253,7 +253,7 @@ export function ImBindingDialog({
                         </span>
                       )}
                       {boundToOther && (
-                        <span className="text-amber-500 truncate">
+                        <span className="text-warning truncate">
                           已绑定{group.bound_session_kind === 'worker' ? ' Agent' : ''}
                           {group.bound_target_name && `「${
                             group.bound_workspace_name && group.bound_workspace_name !== group.bound_target_name
@@ -287,7 +287,7 @@ export function ImBindingDialog({
                       variant="outline"
                       onClick={() => setRebindTarget({ imJid: group.jid, group })}
                       disabled={isActioning}
-                      className="flex-shrink-0 text-amber-600 border-amber-300 hover:bg-amber-50 dark:text-amber-400 dark:border-amber-700 dark:hover:bg-amber-950/30"
+                      className="flex-shrink-0 text-warning border-warning-border hover:bg-warning-bg"
                     >
                       {isActioning ? (
                         <Loader2 className="w-3 h-3 animate-spin" />

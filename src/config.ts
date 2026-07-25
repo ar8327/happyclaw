@@ -31,6 +31,7 @@ export const TIMEZONE =
 
 // Web server configuration
 export const WEB_PORT = parseInt(process.env.WEB_PORT || '3000', 10);
+export const WEB_HOST = process.env.WEB_HOST || '0.0.0.0';
 
 // Cookie configuration
 // Production (non-localhost): use __Host- prefix (requires Secure; Path=/; no Domain)

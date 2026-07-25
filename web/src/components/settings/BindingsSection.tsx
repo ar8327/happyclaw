@@ -123,7 +123,7 @@ export function BindingsSection() {
         {/* Header */}
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
+            <h1 className="text-2xl font-bold text-foreground flex items-center gap-2">
               <Link2 className="w-6 h-6" />
               IM 绑定管理
             </h1>
@@ -144,9 +144,9 @@ export function BindingsSection() {
 
         {/* Error banner */}
         {errorMsg && (
-          <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg px-4 py-2.5 flex items-center justify-between">
+          <div className="bg-error-bg border border-error-border text-error text-sm rounded-lg px-4 py-2.5 flex items-center justify-between">
             <span>{errorMsg}</span>
-            <button onClick={() => { setLocalError(null); clearHookError(); }} className="text-red-400 hover:text-red-600 ml-2 text-xs">✕</button>
+            <button onClick={() => { setLocalError(null); clearHookError(); }} className="text-error hover:text-error ml-2 text-xs">✕</button>
           </div>
         )}
 
@@ -161,8 +161,8 @@ export function BindingsSection() {
                     onClick={() => setChannelFilter(ch.key)}
                     className={`px-3 py-1 text-xs font-medium rounded-full transition-colors cursor-pointer ${
                       channelFilter === ch.key
-                        ? 'bg-primary text-white'
-                        : 'bg-slate-100 text-slate-500 hover:bg-slate-200 hover:text-slate-700'
+                        ? 'bg-primary text-primary-foreground'
+                        : 'bg-surface-2 text-muted-foreground hover:bg-surface-3 hover:text-foreground'
                     }`}
                   >
                     {ch.label}
@@ -189,7 +189,7 @@ export function BindingsSection() {
           </div>
         ) : bindings.length === 0 ? (
           <div className="bg-card rounded-xl border border-border p-8 text-center">
-            <MessageSquare className="w-10 h-10 mx-auto text-slate-300 mb-3" />
+            <MessageSquare className="w-10 h-10 mx-auto text-muted-foreground/50 mb-3" />
             <p className="text-sm text-muted-foreground">
               暂无 IM 渠道。在飞书、Telegram、QQ 或微信中向 Bot 发送消息后，渠道会自动出现在这里。
             </p>

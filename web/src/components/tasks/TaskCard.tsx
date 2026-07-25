@@ -18,13 +18,13 @@ export function TaskCard({ task, onPause, onResume, onDelete }: TaskCardProps) {
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'active':
-        return 'bg-green-100 text-green-600';
+        return 'bg-success-bg text-success';
       case 'paused':
-        return 'bg-amber-100 text-amber-600';
+        return 'bg-warning-bg text-warning';
       case 'completed':
-        return 'bg-slate-100 text-slate-500';
+        return 'bg-surface-2 text-muted-foreground';
       default:
-        return 'bg-slate-100 text-slate-600';
+        return 'tag-neutral';
     }
   };
 
@@ -74,17 +74,17 @@ export function TaskCard({ task, onPause, onResume, onDelete }: TaskCardProps) {
             {/* Schedule Info */}
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm mb-2">
               {task.execution_type === 'script' && (
-                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-info-bg text-info-foreground">
                   脚本
                 </span>
               )}
               {task.model && (
-                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium tag-purple">
                   {task.model}
                 </span>
               )}
               <div className="flex items-center gap-2">
-                <span className="text-slate-500">调度:</span>
+                <span className="text-muted-foreground">调度:</span>
                 <span className="text-foreground font-medium">
                   {task.schedule_type === 'cron' && 'Cron'}
                   {task.schedule_type === 'interval' && '间隔'}
@@ -96,7 +96,7 @@ export function TaskCard({ task, onPause, onResume, onDelete }: TaskCardProps) {
               </div>
 
               <div className="flex items-center gap-2">
-                <span className="text-slate-500">会话:</span>
+                <span className="text-muted-foreground">会话:</span>
                 <span className="text-foreground font-medium">
                   {sessionLabel}
                 </span>
@@ -121,7 +121,7 @@ export function TaskCard({ task, onPause, onResume, onDelete }: TaskCardProps) {
             {(task.status === 'active' || task.status === 'paused') && (
               <button
                 onClick={handleTogglePause}
-                className="p-2 text-slate-600 hover:text-primary hover:bg-brand-50 rounded-lg transition-colors cursor-pointer"
+                className="p-2 text-muted-foreground hover:text-primary hover:bg-brand-50 rounded-lg transition-colors cursor-pointer"
                 title={task.status === 'active' ? '暂停' : '恢复'}
                 aria-label={task.status === 'active' ? '暂停任务' : '恢复任务'}
               >
@@ -136,7 +136,7 @@ export function TaskCard({ task, onPause, onResume, onDelete }: TaskCardProps) {
             {/* Delete */}
             <button
               onClick={handleDelete}
-              className="p-2 text-slate-600 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+              className="p-2 text-muted-foreground hover:text-error hover:bg-error-bg rounded-lg transition-colors cursor-pointer"
               title="删除"
               aria-label="删除任务"
             >
@@ -146,9 +146,9 @@ export function TaskCard({ task, onPause, onResume, onDelete }: TaskCardProps) {
             {/* Expand Icon */}
             <div className="ml-2">
               {expanded ? (
-                <ChevronUp className="w-5 h-5 text-slate-400" />
+                <ChevronUp className="w-5 h-5 text-muted-foreground/80" />
               ) : (
-                <ChevronDown className="w-5 h-5 text-slate-400" />
+                <ChevronDown className="w-5 h-5 text-muted-foreground/80" />
               )}
             </div>
           </div>

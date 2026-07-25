@@ -37,8 +37,8 @@ export function ImGeneralCard({ setNotice, setError }: ImGeneralCardProps) {
 
   if (loading) {
     return (
-      <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
-        <div className="flex items-center gap-2 text-slate-500">
+      <div className="bg-card rounded-lg shadow-sm border border-border p-6">
+        <div className="flex items-center gap-2 text-muted-foreground">
           <Loader2 className="w-4 h-4 animate-spin" />
           <span className="text-sm">加载通用设置...</span>
         </div>
@@ -47,12 +47,12 @@ export function ImGeneralCard({ setNotice, setError }: ImGeneralCardProps) {
   }
 
   return (
-    <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
-      <h3 className="text-base font-semibold text-slate-800 mb-4">IM 通用设置</h3>
+    <div className="bg-card rounded-lg shadow-sm border border-border p-6">
+      <h3 className="text-base font-semibold text-foreground mb-4">IM 通用设置</h3>
       <div className="flex items-center justify-between gap-4">
         <div className="flex-1">
-          <h4 className="text-xs font-semibold text-slate-700">发送失败自动解绑</h4>
-          <p className="text-xs text-slate-500 mt-0.5">
+          <h4 className="text-xs font-semibold text-foreground">发送失败自动解绑</h4>
+          <p className="text-xs text-muted-foreground mt-0.5">
             开启后，连续发送失败 3 次的 IM 群组将自动解除与工作区的绑定。
             关闭时仅记录日志，不自动解绑。
           </p>

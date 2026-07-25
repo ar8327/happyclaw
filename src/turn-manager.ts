@@ -1,5 +1,5 @@
 /**
- * Turn Manager: routes incoming messages into Turns based on channel + time window.
+ * Turn Manager: routes incoming messages into turns by channel ownership.
  *
  * A Turn is a batch of messages from the same channel + the Agent's processing/reply.
  * Messages from different channels queue up and wait for the current Turn to complete.
@@ -7,7 +7,6 @@
 
 import crypto from 'crypto';
 import { insertTurn, updateTurn, markStaleTurnsAsError } from './db.js';
-import { getSystemSettings } from './runtime-config.js';
 import { logger } from './logger.js';
 
 export interface ActiveTurn {
@@ -35,6 +34,9 @@ export type RouteResult =
 export class TurnManager {
   private activeTurns = new Map<string, ActiveTurn>(); // folder → active turn
   private pendingQueue = new Map<string, QueuedTurnEntry[]>(); // folder → FIFO
+  private handoffInFlight = new Set<string>();
+  private readonly queueWarnLimit = 100;
+  private readonly queueTtlMs = 10 * 60_000;
 
   /**
    * Route an incoming message to the appropriate action.
@@ -53,6 +55,7 @@ export class TurnManager {
     const active = this.activeTurns.get(folder);
 
     if (!active) {
+      this.handoffInFlight.delete(folder);
       // No active turn → create new
       const turnId = crypto.randomUUID();
       const now = Date.now();
@@ -85,18 +88,14 @@ export class TurnManager {
       return { action: 'start_new', turnId };
     }
 
-    // Active turn exists — check if same channel and within window
+    // Active turn exists — same-channel messages stay with its runtime.
     const now = Date.now();
-    const settings = getSystemSettings();
-    const batchWindow = settings.turnBatchWindowMs;
-    const maxBatch = settings.turnMaxBatchMs;
-
     const sameChannel = active.channel === channel;
-    const withinWindow = now - active.lastInjectedAt < batchWindow;
-    const withinMax = now - active.startedAt < maxBatch;
 
-    if (sameChannel && withinWindow && withinMax) {
-      // Same channel, within time window → inject into current turn
+    if (sameChannel) {
+      // An active same-channel runtime always owns follow-up delivery.  Its
+      // runner decides whether to steer immediately or buffer for the next
+      // provider turn; routing must not force a process restart.
       active.lastInjectedAt = now;
       active.messageIds.push(...messageIds);
 
@@ -112,7 +111,8 @@ export class TurnManager {
       return { action: 'inject', turnId: active.id };
     }
 
-    // Different channel or outside window → queue
+    // Different channel → queue.  Cross-channel drain preserves the explicit
+    // Session routing boundary.
     const queue = this.getQueue(folder);
     const alreadyQueued = queue.some((q) => q.chatJid === chatJid);
     if (alreadyQueued) {
@@ -124,11 +124,14 @@ export class TurnManager {
       channel,
       queuedAt: now,
     });
+    if (queue.length > this.queueWarnLimit) {
+      logger.warn(
+        { folder, queueLength: queue.length, limit: this.queueWarnLimit },
+        'Turn pending queue exceeded warning limit',
+      );
+    }
 
-    // needsDrain: only if the active turn is from a different channel or window expired
-    // This signals the caller to write a _drain sentinel
-    const needsDrain = !sameChannel || !withinWindow || !withinMax;
-    return { action: 'queue', needsDrain };
+    return { action: 'queue', needsDrain: true };
   }
 
   /**
@@ -223,6 +226,38 @@ export class TurnManager {
   }
 
   /**
+   * Claim exactly one pending entry for the next runtime. Repeated terminal
+   * callbacks are idempotent until routeMessage starts that claimed turn.
+   */
+  handoffNext(folder: string): QueuedTurnEntry | null {
+    if (this.handoffInFlight.has(folder)) return null;
+    const next = this.drainNext(folder);
+    if (!next) return null;
+    this.handoffInFlight.add(folder);
+    if (Date.now() - next.queuedAt > this.queueTtlMs) {
+      logger.warn(
+        {
+          folder,
+          chatJid: next.chatJid,
+          queuedForMs: Date.now() - next.queuedAt,
+        },
+        'Turn handoff exceeded pending queue TTL',
+      );
+    }
+    return next;
+  }
+
+  hasHandoffInFlight(folder: string): boolean {
+    return this.handoffInFlight.has(folder);
+  }
+
+  getPendingFolders(): string[] {
+    return [...this.pendingQueue.entries()]
+      .filter(([, entries]) => entries.length > 0)
+      .map(([folder]) => folder);
+  }
+
+  /**
    * Get the current active turn for a folder, if any.
    */
   getActiveTurn(folder: string): ActiveTurn | null {
@@ -257,6 +292,7 @@ export class TurnManager {
   recoverOnStartup(): void {
     this.activeTurns.clear();
     this.pendingQueue.clear();
+    this.handoffInFlight.clear();
     try {
       cleanupStaleTurns();
     } catch (err) {

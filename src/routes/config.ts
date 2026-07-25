@@ -164,12 +164,14 @@ function isImplicitDefaultSessionBinding(
   imGroup: RegisteredGroup,
   binding: ReturnType<typeof getSessionBinding> | undefined,
 ): boolean {
-  return !!binding
-    && binding.session_id === resolveDefaultBindingSessionId(imGroup)
-    && binding.binding_mode === 'source_only'
-    && binding.reply_policy === 'source_only'
-    && binding.activation_mode === 'auto'
-    && binding.require_mention !== true;
+  return (
+    !!binding &&
+    binding.session_id === resolveDefaultBindingSessionId(imGroup) &&
+    binding.binding_mode === 'source_only' &&
+    binding.reply_policy === 'source_only' &&
+    binding.activation_mode === 'auto' &&
+    binding.require_mention !== true
+  );
 }
 
 function getExplicitSessionBinding(
@@ -177,7 +179,9 @@ function getExplicitSessionBinding(
   imGroup: RegisteredGroup,
 ): ReturnType<typeof getSessionBinding> | undefined {
   const binding = getSessionBinding(imJid);
-  return isImplicitDefaultSessionBinding(imGroup, binding) ? undefined : binding;
+  return isImplicitDefaultSessionBinding(imGroup, binding)
+    ? undefined
+    : binding;
 }
 
 function applyExplicitSessionBinding(
@@ -192,23 +196,22 @@ function applyExplicitSessionBinding(
 ): void {
   const now = new Date().toISOString();
   const currentBinding = getSessionBinding(imJid);
-  const nextReplyPolicy = updates.reply_policy ?? imGroup.reply_policy ?? 'source_only';
-  const nextActivationMode = updates.activation_mode ?? imGroup.activation_mode ?? 'auto';
+  const nextReplyPolicy =
+    updates.reply_policy ?? imGroup.reply_policy ?? 'source_only';
+  const nextActivationMode =
+    updates.activation_mode ?? imGroup.activation_mode ?? 'auto';
   const nextRequireMention =
     updates.require_mention !== undefined
       ? updates.require_mention
       : imGroup.require_mention === true;
   const isDefaultPolicy =
-    nextReplyPolicy === 'source_only'
-    && nextActivationMode === 'auto'
-    && !nextRequireMention;
+    nextReplyPolicy === 'source_only' &&
+    nextActivationMode === 'auto' &&
+    !nextRequireMention;
 
   if (
-    !sessionId
-    || (
-      sessionId === resolveDefaultBindingSessionId(imGroup)
-      && isDefaultPolicy
-    )
+    !sessionId ||
+    (sessionId === resolveDefaultBindingSessionId(imGroup) && isDefaultPolicy)
   ) {
     deleteSessionBinding(imJid);
     return;
@@ -216,15 +219,16 @@ function applyExplicitSessionBinding(
 
   const boundSession = getSessionRecord(sessionId);
   const bindingMode =
-    !boundSession || boundSession.kind === 'main' ? 'source_only'
-      : boundSession.kind === 'worker' ? 'direct'
-      : 'direct';
+    !boundSession || boundSession.kind === 'main'
+      ? 'source_only'
+      : boundSession.kind === 'worker'
+        ? 'direct'
+        : 'direct';
 
   saveSessionBinding({
     channel_jid: imJid,
     session_id: sessionId,
-    binding_mode:
-      nextReplyPolicy === 'mirror' ? 'mirror' : bindingMode,
+    binding_mode: nextReplyPolicy === 'mirror' ? 'mirror' : bindingMode,
     activation_mode: nextActivationMode,
     require_mention: nextRequireMention,
     display_name: imGroup.name,
@@ -253,16 +257,14 @@ function resolveSessionBindingAccessTarget(sessionId: string): {
   const folder = getSessionFolder(sessionId);
   if (!folder) return null;
   const accessJid =
-    getJidsByFolder(folder).find((jid) => jid.startsWith('web:')) || `web:${folder}`;
+    getJidsByFolder(folder).find((jid) => jid.startsWith('web:')) ||
+    `web:${folder}`;
   const group = getRegisteredGroup(accessJid);
   return group ? { session, accessJid, group } : null;
 }
 
 configRoutes.get('/feishu', authMiddleware, systemConfigMiddleware, (c) => {
-  logDeprecationOnce(
-    'GET /api/config/feishu',
-    'GET /api/config/im/feishu',
-  );
+  logDeprecationOnce('GET /api/config/feishu', 'GET /api/config/im/feishu');
   try {
     const { config, source } = getFeishuProviderConfigWithSource();
     const pub = toPublicFeishuProviderConfig(config, source);
@@ -335,10 +337,7 @@ configRoutes.put(
 // ─── Telegram config ─────────────────────────────────────────────
 
 configRoutes.get('/telegram', authMiddleware, systemConfigMiddleware, (c) => {
-  logDeprecationOnce(
-    'GET /api/config/telegram',
-    'GET /api/config/im/telegram',
-  );
+  logDeprecationOnce('GET /api/config/telegram', 'GET /api/config/im/telegram');
   try {
     const { config, source } = getTelegramProviderConfigWithSource();
     const pub = toPublicTelegramProviderConfig(config, source);
@@ -588,6 +587,8 @@ configRoutes.get('/im/feishu', authMiddleware, (c) => {
         replyThreadingMode: 'auto',
         streamingCard: false,
         imCommentary: false,
+        hasCardVerificationToken: false,
+        hasCardEncryptKey: false,
       });
     }
     return c.json({
@@ -596,6 +597,8 @@ configRoutes.get('/im/feishu', authMiddleware, (c) => {
       replyThreadingMode: config.replyThreadingMode ?? 'auto',
       streamingCard: config.streamingCard ?? false,
       imCommentary: config.imCommentary ?? false,
+      hasCardVerificationToken: !!config.cardVerificationToken,
+      hasCardEncryptKey: !!config.cardEncryptKey,
     });
   } catch (err) {
     logger.error({ err }, 'Failed to load Feishu IM config');
@@ -614,7 +617,17 @@ configRoutes.put('/im/feishu', authMiddleware, async (c) => {
   }
 
   const current = getImFeishuConfig();
-  const next: { appId: string; appSecret: string; enabled: boolean; updatedAt: string | null; replyThreadingMode?: 'auto' | 'agent'; streamingCard?: boolean; imCommentary?: boolean } = {
+  const next: {
+    appId: string;
+    appSecret: string;
+    enabled: boolean;
+    updatedAt: string | null;
+    replyThreadingMode?: 'auto' | 'agent';
+    streamingCard?: boolean;
+    imCommentary?: boolean;
+    cardVerificationToken?: string;
+    cardEncryptKey?: string;
+  } = {
     appId: current?.appId || '',
     appSecret: current?.appSecret || '',
     enabled: current?.enabled ?? true,
@@ -622,6 +635,8 @@ configRoutes.put('/im/feishu', authMiddleware, async (c) => {
     replyThreadingMode: current?.replyThreadingMode ?? 'auto',
     streamingCard: current?.streamingCard ?? false,
     imCommentary: current?.imCommentary ?? false,
+    cardVerificationToken: current?.cardVerificationToken ?? '',
+    cardEncryptKey: current?.cardEncryptKey ?? '',
   };
   if (typeof validation.data.appId === 'string') {
     const appId = validation.data.appId.trim();
@@ -648,6 +663,16 @@ configRoutes.put('/im/feishu', authMiddleware, async (c) => {
   if (typeof validation.data.imCommentary === 'boolean') {
     next.imCommentary = validation.data.imCommentary;
   }
+  if (typeof validation.data.cardVerificationToken === 'string') {
+    next.cardVerificationToken = validation.data.cardVerificationToken.trim();
+  } else if (validation.data.clearCardVerificationToken === true) {
+    next.cardVerificationToken = '';
+  }
+  if (typeof validation.data.cardEncryptKey === 'string') {
+    next.cardEncryptKey = validation.data.cardEncryptKey.trim();
+  } else if (validation.data.clearCardEncryptKey === true) {
+    next.cardEncryptKey = '';
+  }
 
   try {
     const saved = saveImFeishuConfig({
@@ -657,6 +682,8 @@ configRoutes.put('/im/feishu', authMiddleware, async (c) => {
       replyThreadingMode: next.replyThreadingMode,
       streamingCard: next.streamingCard,
       imCommentary: next.imCommentary,
+      cardVerificationToken: next.cardVerificationToken,
+      cardEncryptKey: next.cardEncryptKey,
     });
 
     // Hot-reload: reconnect user's Feishu channel
@@ -675,6 +702,8 @@ configRoutes.put('/im/feishu', authMiddleware, async (c) => {
       replyThreadingMode: saved.replyThreadingMode ?? 'auto',
       streamingCard: saved.streamingCard ?? false,
       imCommentary: saved.imCommentary ?? false,
+      hasCardVerificationToken: !!saved.cardVerificationToken,
+      hasCardEncryptKey: !!saved.cardEncryptKey,
     });
   } catch (err) {
     const message =
@@ -690,142 +719,131 @@ configRoutes.put('/im/feishu', authMiddleware, async (c) => {
  * GET /api/config/im/feishu/oauth-status
  * Returns the current OAuth authorization status for the global IM config.
  */
-configRoutes.get(
-  '/im/feishu/oauth-status',
-  authMiddleware,
-  (c) => {
-    const tokens = getImFeishuOAuthTokens();
-    const config = getImFeishuConfig();
+configRoutes.get('/im/feishu/oauth-status', authMiddleware, (c) => {
+  const tokens = getImFeishuOAuthTokens();
+  const config = getImFeishuConfig();
 
-    if (!tokens) {
-      return c.json({
-        authorized: false,
-        hasAppCredentials: !!(config?.appId && config?.appSecret),
-      });
-    }
-
+  if (!tokens) {
     return c.json({
-      authorized: true,
+      authorized: false,
       hasAppCredentials: !!(config?.appId && config?.appSecret),
-      authorizedAt: tokens.authorizedAt || null,
-      scopes: tokens.scopes || '',
-      tokenExpired: tokens.expiresAt < Date.now(),
-      hasRefreshToken: !!tokens.refreshToken,
     });
-  },
-);
+  }
+
+  return c.json({
+    authorized: true,
+    hasAppCredentials: !!(config?.appId && config?.appSecret),
+    authorizedAt: tokens.authorizedAt || null,
+    scopes: tokens.scopes || '',
+    tokenExpired: tokens.expiresAt < Date.now(),
+    hasRefreshToken: !!tokens.refreshToken,
+  });
+});
 
 /**
  * GET /api/config/im/feishu/oauth-url
  * Generates a Feishu OAuth authorization URL for the current auth session.
  * Requires existing Feishu app credentials (appId + appSecret).
  */
-configRoutes.get(
-  '/im/feishu/oauth-url',
-  authMiddleware,
-  (c) => {
-    const config = getImFeishuConfig();
-    const sessionId = c.get('sessionId') as string;
+configRoutes.get('/im/feishu/oauth-url', authMiddleware, (c) => {
+  const config = getImFeishuConfig();
+  const sessionId = c.get('sessionId') as string;
 
-    if (!config?.appId || !config?.appSecret) {
-      return c.json(
-        { error: '请先配置飞书应用的 App ID 和 App Secret' },
-        400,
-      );
-    }
+  if (!config?.appId || !config?.appSecret) {
+    return c.json({ error: '请先配置飞书应用的 App ID 和 App Secret' }, 400);
+  }
 
-    // Build redirect URI from request origin
-    const origin = c.req.header('Origin') || c.req.header('Referer')?.replace(/\/[^/]*$/, '') || '';
-    if (!origin) {
-      return c.json({ error: '无法确定回调地址，请从 Web 界面发起授权' }, 400);
-    }
-    const redirectUri = `${origin}/feishu-oauth-callback`;
+  // Build redirect URI from request origin
+  const origin =
+    c.req.header('Origin') ||
+    c.req.header('Referer')?.replace(/\/[^/]*$/, '') ||
+    '';
+  if (!origin) {
+    return c.json({ error: '无法确定回调地址，请从 Web 界面发起授权' }, 400);
+  }
+  const redirectUri = `${origin}/feishu-oauth-callback`;
 
-    const state = createOAuthState(sessionId);
-    const url = buildOAuthUrl(config.appId, redirectUri, state);
+  const state = createOAuthState(sessionId);
+  const url = buildOAuthUrl(config.appId, redirectUri, state);
 
-    return c.json({ url, state, redirectUri });
-  },
-);
+  return c.json({ url, state, redirectUri });
+});
 
 /**
  * POST /api/config/im/feishu/oauth-callback
  * Exchanges the authorization code for access + refresh tokens.
  * Body: { code: string, state: string, redirectUri: string }
  */
-configRoutes.post(
-  '/im/feishu/oauth-callback',
-  authMiddleware,
-  async (c) => {
-    const sessionId = c.get('sessionId') as string;
-    const body = await c.req.json().catch(() => ({}));
+configRoutes.post('/im/feishu/oauth-callback', authMiddleware, async (c) => {
+  const sessionId = c.get('sessionId') as string;
+  const body = await c.req.json().catch(() => ({}));
 
-    const { code, state, redirectUri } = body as {
-      code?: string;
-      state?: string;
-      redirectUri?: string;
-    };
+  const { code, state, redirectUri } = body as {
+    code?: string;
+    state?: string;
+    redirectUri?: string;
+  };
 
-    if (!code || !state || !redirectUri) {
-      return c.json({ error: 'Missing required fields: code, state, redirectUri' }, 400);
-    }
+  if (!code || !state || !redirectUri) {
+    return c.json(
+      { error: 'Missing required fields: code, state, redirectUri' },
+      400,
+    );
+  }
 
-    // Validate state against the current auth session before consuming it.
-    if (!consumeOAuthState(state, sessionId)) {
-      return c.json({ error: '授权状态已过期或不匹配，请重新发起授权' }, 400);
-    }
+  // Validate state against the current auth session before consuming it.
+  if (!consumeOAuthState(state, sessionId)) {
+    return c.json({ error: '授权状态已过期或不匹配，请重新发起授权' }, 400);
+  }
 
-    // Get app credentials
-    const config = getImFeishuConfig();
-    if (!config?.appId || !config?.appSecret) {
-      return c.json({ error: '飞书应用凭据缺失' }, 400);
-    }
+  // Get app credentials
+  const config = getImFeishuConfig();
+  if (!config?.appId || !config?.appSecret) {
+    return c.json({ error: '飞书应用凭据缺失' }, 400);
+  }
 
-    try {
-      const tokens = await exchangeCodeForTokens(
-        config.appId,
-        config.appSecret,
-        code,
-        redirectUri,
-      );
+  try {
+    const tokens = await exchangeCodeForTokens(
+      config.appId,
+      config.appSecret,
+      code,
+      redirectUri,
+    );
 
-      saveImFeishuOAuthTokens({
-        accessToken: tokens.accessToken,
-        refreshToken: tokens.refreshToken,
-        expiresAt: tokens.expiresAt,
-        scopes: tokens.scopes,
-      });
+    saveImFeishuOAuthTokens({
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      expiresAt: tokens.expiresAt,
+      scopes: tokens.scopes,
+    });
 
-      logger.info({ scopes: tokens.scopes }, 'Feishu OAuth authorized successfully');
+    logger.info(
+      { scopes: tokens.scopes },
+      'Feishu OAuth authorized successfully',
+    );
 
-      return c.json({
-        success: true,
-        scopes: tokens.scopes,
-        expiresIn: Math.floor((tokens.expiresAt - Date.now()) / 1000),
-      });
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'OAuth 授权失败';
-      logger.error({ err }, 'Feishu OAuth callback failed');
-      return c.json({ error: message }, 500);
-    }
-  },
-);
+    return c.json({
+      success: true,
+      scopes: tokens.scopes,
+      expiresIn: Math.floor((tokens.expiresAt - Date.now()) / 1000),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'OAuth 授权失败';
+    logger.error({ err }, 'Feishu OAuth callback failed');
+    return c.json({ error: message }, 500);
+  }
+});
 
 /**
  * DELETE /api/config/im/feishu/oauth-revoke
  * Revokes the current OAuth authorization from the global IM config.
  */
-configRoutes.delete(
-  '/im/feishu/oauth-revoke',
-  authMiddleware,
-  (c) => {
-    clearImFeishuOAuthTokens();
-    logger.info('Feishu OAuth authorization revoked');
+configRoutes.delete('/im/feishu/oauth-revoke', authMiddleware, (c) => {
+  clearImFeishuOAuthTokens();
+  logger.info('Feishu OAuth authorization revoked');
 
-    return c.json({ success: true });
-  },
-);
+  return c.json({ success: true });
+});
 
 // ─── Telegram IM config ───────────────────────────────────────────
 
@@ -963,28 +981,24 @@ configRoutes.post('/im/telegram/test', authMiddleware, async (c) => {
   }
 });
 
-configRoutes.post(
-  '/im/telegram/pairing-code',
-  authMiddleware,
-  async (c) => {
-    const user = c.get('user') as AuthUser;
-    const config = getImTelegramConfig();
-    if (!config?.botToken) {
-      return c.json({ error: 'Telegram bot token not configured' }, 400);
-    }
+configRoutes.post('/im/telegram/pairing-code', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const config = getImTelegramConfig();
+  if (!config?.botToken) {
+    return c.json({ error: 'Telegram bot token not configured' }, 400);
+  }
 
-    try {
-      const { generatePairingCode } = await import('../telegram-pairing.js');
-      const result = generatePairingCode(user.id);
-      return c.json(result);
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Failed to generate pairing code';
-      logger.warn({ err }, 'Failed to generate pairing code');
-      return c.json({ error: message }, 500);
-    }
-  },
-);
+  try {
+    const { generatePairingCode } = await import('../telegram-pairing.js');
+    const result = generatePairingCode(user.id);
+    return c.json(result);
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : 'Failed to generate pairing code';
+    logger.warn({ err }, 'Failed to generate pairing code');
+    return c.json({ error: message }, 500);
+  }
+});
 
 // List Telegram paired chats for the current user
 configRoutes.get('/im/telegram/paired-chats', authMiddleware, (c) => {
@@ -996,8 +1010,8 @@ configRoutes.get('/im/telegram/paired-chats', authMiddleware, (c) => {
   const chats: Array<{ jid: string; name: string; addedAt: string }> = [];
   for (const [jid, group] of Object.entries(groups)) {
     if (
-      jid.startsWith('telegram:')
-      && resolveImGroupOwnerKey(jid, group) === user.id
+      jid.startsWith('telegram:') &&
+      resolveImGroupOwnerKey(jid, group) === user.id
     ) {
       chats.push({ jid, name: group.name, addedAt: group.added_at });
     }
@@ -1006,33 +1020,29 @@ configRoutes.get('/im/telegram/paired-chats', authMiddleware, (c) => {
 });
 
 // Remove (unpair) a Telegram chat
-configRoutes.delete(
-  '/im/telegram/paired-chats/:jid',
-  authMiddleware,
-  (c) => {
-    const user = c.get('user') as AuthUser;
-    const jid = decodeURIComponent(c.req.param('jid'));
+configRoutes.delete('/im/telegram/paired-chats/:jid', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const jid = decodeURIComponent(c.req.param('jid'));
 
-    if (!jid.startsWith('telegram:')) {
-      return c.json({ error: 'Invalid Telegram chat JID' }, 400);
-    }
+  if (!jid.startsWith('telegram:')) {
+    return c.json({ error: 'Invalid Telegram chat JID' }, 400);
+  }
 
-    const groups = deps?.getRegisteredGroups() ?? {};
-    const group = groups[jid];
-    if (!group) {
-      return c.json({ error: 'Chat not found' }, 404);
-    }
-    if (resolveImGroupOwnerKey(jid, group) !== user.id) {
-      return c.json({ error: 'Not authorized to remove this chat' }, 403);
-    }
+  const groups = deps?.getRegisteredGroups() ?? {};
+  const group = groups[jid];
+  if (!group) {
+    return c.json({ error: 'Chat not found' }, 404);
+  }
+  if (resolveImGroupOwnerKey(jid, group) !== user.id) {
+    return c.json({ error: 'Not authorized to remove this chat' }, 403);
+  }
 
-    deleteRegisteredGroup(jid);
-    deleteChatHistory(jid);
-    delete groups[jid];
-    logger.info({ jid, userId: user.id }, 'Telegram chat unpaired');
-    return c.json({ success: true });
-  },
-);
+  deleteRegisteredGroup(jid);
+  deleteChatHistory(jid);
+  delete groups[jid];
+  logger.info({ jid, userId: user.id }, 'Telegram chat unpaired');
+  return c.json({ success: true });
+});
 
 // ─── QQ IM Config ───────────────────────────────────────────────
 
@@ -1234,7 +1244,10 @@ configRoutes.get('/im/qq/paired-chats', authMiddleware, (c) => {
   >;
   const chats: Array<{ jid: string; name: string; addedAt: string }> = [];
   for (const [jid, group] of Object.entries(groups)) {
-    if (jid.startsWith('qq:') && resolveImGroupOwnerKey(jid, group) === user.id) {
+    if (
+      jid.startsWith('qq:') &&
+      resolveImGroupOwnerKey(jid, group) === user.id
+    ) {
       chats.push({ jid, name: group.name, addedAt: group.added_at });
     }
   }
@@ -1301,7 +1314,6 @@ configRoutes.put('/im/general', authMiddleware, async (c) => {
   const saved = saveImGeneralConfig(parsed.data);
   return c.json(saved);
 });
-
 
 // ─── WeChat IM config ───────────────────────────────────────────
 
@@ -1410,14 +1422,8 @@ configRoutes.post('/im/wechat/qrcode', authMiddleware, async (c) => {
     const res = await fetch(url);
     if (!res.ok) {
       const body = await res.text().catch(() => '');
-      logger.error(
-        { status: res.status, body },
-        'WeChat QR code fetch failed',
-      );
-      return c.json(
-        { error: `Failed to fetch QR code: ${res.status}` },
-        502,
-      );
+      logger.error({ status: res.status, body }, 'WeChat QR code fetch failed');
+      return c.json({ error: `Failed to fetch QR code: ${res.status}` }, 502);
     }
     const data = (await res.json()) as {
       qrcode?: string;
@@ -1455,93 +1461,86 @@ configRoutes.post('/im/wechat/qrcode', authMiddleware, async (c) => {
 });
 
 // Poll QR code scan status
-configRoutes.get(
-  '/im/wechat/qrcode-status',
-  authMiddleware,
-  async (c) => {
-    const qrcode = c.req.query('qrcode');
-    if (!qrcode) {
-      return c.json({ error: 'qrcode query parameter required' }, 400);
+configRoutes.get('/im/wechat/qrcode-status', authMiddleware, async (c) => {
+  const qrcode = c.req.query('qrcode');
+  if (!qrcode) {
+    return c.json({ error: 'qrcode query parameter required' }, 400);
+  }
+
+  try {
+    const url = `${WECHAT_API_BASE}/ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}`;
+    const headers: Record<string, string> = {
+      'iLink-App-ClientVersion': '1',
+    };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 35000);
+    let res: Response;
+    try {
+      res = await fetch(url, { headers, signal: controller.signal });
+      clearTimeout(timer);
+    } catch (err) {
+      clearTimeout(timer);
+      if (err instanceof Error && err.name === 'AbortError') {
+        return c.json({ status: 'wait' });
+      }
+      throw err;
     }
 
-    try {
-      const url = `${WECHAT_API_BASE}/ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}`;
-      const headers: Record<string, string> = {
-        'iLink-App-ClientVersion': '1',
-      };
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 35000);
-      let res: Response;
-      try {
-        res = await fetch(url, { headers, signal: controller.signal });
-        clearTimeout(timer);
-      } catch (err) {
-        clearTimeout(timer);
-        if (
-          err instanceof Error &&
-          err.name === 'AbortError'
-        ) {
-          return c.json({ status: 'wait' });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      return c.json(
+        { error: `QR status poll failed: ${res.status}`, body },
+        502,
+      );
+    }
+
+    const data = (await res.json()) as {
+      status?: 'wait' | 'scaned' | 'confirmed' | 'expired';
+      bot_token?: string;
+      ilink_bot_id?: string;
+      baseurl?: string;
+      ilink_user_id?: string;
+    };
+
+    if (data.status === 'confirmed' && data.bot_token && data.ilink_bot_id) {
+      // Auto-save credentials and connect
+      const saved = saveImWeChatConfig({
+        botToken: data.bot_token,
+        ilinkBotId: data.ilink_bot_id.replace(/[^a-zA-Z0-9@._-]/g, ''),
+        baseUrl: data.baseurl || undefined,
+        enabled: true,
+      });
+
+      // Note: ilink_user_id (the QR scanner) is NOT auto-paired here.
+      // The scanner needs to send a message to the bot and use /pair <code>
+      // to complete pairing, same as QQ/Telegram flow.
+      // This ensures proper group registration via buildOnNewChat/registerGroup.
+
+      // Hot-reload: connect WeChat
+      if (deps?.reloadIMConfig) {
+        try {
+          await deps.reloadIMConfig('wechat');
+        } catch (err) {
+          logger.warn({ err }, 'Failed to hot-reload WeChat after QR login');
         }
-        throw err;
-      }
-
-      if (!res.ok) {
-        const body = await res.text().catch(() => '');
-        return c.json(
-          { error: `QR status poll failed: ${res.status}`, body },
-          502,
-        );
-      }
-
-      const data = (await res.json()) as {
-        status?: 'wait' | 'scaned' | 'confirmed' | 'expired';
-        bot_token?: string;
-        ilink_bot_id?: string;
-        baseurl?: string;
-        ilink_user_id?: string;
-      };
-
-      if (data.status === 'confirmed' && data.bot_token && data.ilink_bot_id) {
-        // Auto-save credentials and connect
-        const saved = saveImWeChatConfig({
-          botToken: data.bot_token,
-          ilinkBotId: data.ilink_bot_id.replace(/[^a-zA-Z0-9@._-]/g, ''),
-          baseUrl: data.baseurl || undefined,
-          enabled: true,
-        });
-
-        // Note: ilink_user_id (the QR scanner) is NOT auto-paired here.
-        // The scanner needs to send a message to the bot and use /pair <code>
-        // to complete pairing, same as QQ/Telegram flow.
-        // This ensures proper group registration via buildOnNewChat/registerGroup.
-
-        // Hot-reload: connect WeChat
-        if (deps?.reloadIMConfig) {
-          try {
-            await deps.reloadIMConfig('wechat');
-          } catch (err) {
-            logger.warn({ err }, 'Failed to hot-reload WeChat after QR login');
-          }
-        }
-
-        return c.json({
-          status: 'confirmed',
-          ilinkBotId: saved.ilinkBotId,
-        });
       }
 
       return c.json({
-        status: data.status || 'wait',
+        status: 'confirmed',
+        ilinkBotId: saved.ilinkBotId,
       });
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'QR status poll failed';
-      logger.error({ err }, 'WeChat QR status poll failed');
-      return c.json({ error: message }, 500);
     }
-  },
-);
+
+    return c.json({
+      status: data.status || 'wait',
+    });
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : 'QR status poll failed';
+    logger.error({ err }, 'WeChat QR status poll failed');
+    return c.json({ error: message }, 500);
+  }
+});
 
 // Disconnect WeChat and clear token
 configRoutes.post('/im/wechat/disconnect', authMiddleware, async (c) => {
@@ -1630,15 +1629,13 @@ configRoutes.put('/im/bindings/:imJid', authMiddleware, async (c) => {
       reply_policy: replyPolicy ?? imGroup.reply_policy,
       activation_mode: activationMode ?? imGroup.activation_mode,
       require_mention:
-        requireMention !== undefined
-          ? requireMention
-          : imGroup.require_mention,
+        requireMention !== undefined ? requireMention : imGroup.require_mention,
     };
     applyBindingUpdate(imJid, updated);
     applyExplicitSessionBinding(
       imJid,
-      getExplicitSessionBinding(imJid, imGroup)?.session_id
-        || resolveDefaultBindingSessionId(updated),
+      getExplicitSessionBinding(imJid, imGroup)?.session_id ||
+        resolveDefaultBindingSessionId(updated),
       updated,
       {},
     );
@@ -1652,9 +1649,7 @@ configRoutes.put('/im/bindings/:imJid', authMiddleware, async (c) => {
       reply_policy: replyPolicy ?? imGroup.reply_policy,
       activation_mode: activationMode ?? 'disabled',
       require_mention:
-        requireMention !== undefined
-          ? requireMention
-          : imGroup.require_mention,
+        requireMention !== undefined ? requireMention : imGroup.require_mention,
     };
     applyBindingUpdate(imJid, updated);
     applyExplicitSessionBinding(
@@ -1668,10 +1663,7 @@ configRoutes.put('/im/bindings/:imJid', authMiddleware, async (c) => {
   }
 
   if (!targetSessionId) {
-    return c.json(
-      { error: 'Must provide session_id or unbind' },
-      400,
-    );
+    return c.json({ error: 'Must provide session_id or unbind' }, 400);
   }
 
   const target = resolveSessionBindingAccessTarget(targetSessionId);
@@ -1710,12 +1702,12 @@ configRoutes.put('/im/bindings/:imJid', authMiddleware, async (c) => {
       ...imGroup,
       reply_policy: replyPolicy ?? imGroup.reply_policy,
       activation_mode:
-        activationMode
-        ?? (imGroup.activation_mode === 'disabled' ? 'auto' : imGroup.activation_mode),
+        activationMode ??
+        (imGroup.activation_mode === 'disabled'
+          ? 'auto'
+          : imGroup.activation_mode),
       require_mention:
-        requireMention !== undefined
-          ? requireMention
-          : imGroup.require_mention,
+        requireMention !== undefined ? requireMention : imGroup.require_mention,
     };
     applyBindingUpdate(imJid, updated);
     applyExplicitSessionBinding(imJid, targetSessionId, updated, {});
@@ -1745,12 +1737,12 @@ configRoutes.put('/im/bindings/:imJid', authMiddleware, async (c) => {
     ...imGroup,
     reply_policy: replyPolicy ?? imGroup.reply_policy,
     activation_mode:
-      activationMode
-      ?? (imGroup.activation_mode === 'disabled' ? 'auto' : imGroup.activation_mode),
+      activationMode ??
+      (imGroup.activation_mode === 'disabled'
+        ? 'auto'
+        : imGroup.activation_mode),
     require_mention:
-      requireMention !== undefined
-        ? requireMention
-        : imGroup.require_mention,
+      requireMention !== undefined ? requireMention : imGroup.require_mention,
   };
   applyBindingUpdate(imJid, updated);
   applyExplicitSessionBinding(imJid, targetSessionId, updated, {});

@@ -49,7 +49,7 @@ export function ImBindingRow({
   return (
     <div className={`flex items-center gap-3 p-3 rounded-lg border transition-colors ${
       hasBound
-        ? 'border-teal-200 bg-teal-50/50 dark:border-teal-800/30 dark:bg-teal-950/20'
+        ? 'border-brand-200 bg-brand-50/50'
         : 'border-border'
     }`}>
       {/* Avatar */}
@@ -78,10 +78,10 @@ export function ImBindingRow({
               {group.member_count}
             </span>
           )}
-          <span className={hasBound ? 'text-teal-600 dark:text-teal-400' : 'text-slate-400'}>
+          <span className={hasBound ? 'text-primary' : 'text-muted-foreground/80'}>
             → {bindingLabel()}
           </span>
-          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">
+          <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">
             {bindingModeLabel}
           </span>
         </div>
@@ -126,7 +126,7 @@ export function ImBindingRow({
               onChange={(e) =>
                 onUpdatePolicy(group, { require_mention: e.target.checked })
               }
-              className="rounded border-gray-300"
+              className="rounded border-border-strong"
             />
             群聊需 @
           </label>
@@ -141,7 +141,7 @@ export function ImBindingRow({
             variant="ghost"
             onClick={() => onUnbind(group)}
             disabled={isActioning}
-            className="text-slate-400 hover:text-red-500"
+            className="text-muted-foreground/80 hover:text-error"
           >
             {isActioning ? (
               <Loader2 className="w-3.5 h-3.5 animate-spin" />

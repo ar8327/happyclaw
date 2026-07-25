@@ -83,12 +83,12 @@ export function WeChatChannelCard({ setNotice, setError }: WeChatChannelCardProp
   return (
     <>
       <div className="rounded-xl border border-border bg-card overflow-hidden">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 bg-slate-50/50">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border-subtle bg-surface/50">
           <div className="flex items-center gap-2">
-            <span className={`inline-block w-2 h-2 rounded-full ${config?.connected ? 'bg-emerald-500' : 'bg-slate-300'}`} />
+            <span className={`inline-block w-2 h-2 rounded-full ${config?.connected ? 'bg-success' : 'bg-border-strong'}`} />
             <div>
-              <h3 className="text-sm font-semibold text-slate-800">微信</h3>
-              <p className="text-xs text-slate-500 mt-0.5">通过微信接收和回复消息</p>
+              <h3 className="text-sm font-semibold text-foreground">微信</h3>
+              <p className="text-xs text-muted-foreground mt-0.5">通过微信接收和回复消息</p>
             </div>
           </div>
           <ToggleSwitch checked={enabled} disabled={loading || toggling} onChange={handleToggle} />
@@ -96,16 +96,16 @@ export function WeChatChannelCard({ setNotice, setError }: WeChatChannelCardProp
 
         <div className={`px-5 py-4 space-y-4 transition-opacity ${!enabled ? 'opacity-50 pointer-events-none' : ''}`}>
           {loading ? (
-            <div className="text-sm text-slate-500">加载中...</div>
+            <div className="text-sm text-muted-foreground">加载中...</div>
           ) : (
             <>
               {/* Connection status */}
               {config?.connected ? (
-                <div className="flex items-center justify-between rounded-lg bg-emerald-50 px-4 py-3">
+                <div className="flex items-center justify-between rounded-lg bg-success-bg px-4 py-3">
                   <div>
-                    <div className="text-sm font-medium text-emerald-700">已连接</div>
+                    <div className="text-sm font-medium text-success">已连接</div>
                     {config.ilinkBotId && (
-                      <div className="text-xs text-emerald-600 mt-0.5">Bot ID: {config.ilinkBotId}</div>
+                      <div className="text-xs text-success mt-0.5">Bot ID: {config.ilinkBotId}</div>
                     )}
                   </div>
                   <Button
@@ -113,7 +113,7 @@ export function WeChatChannelCard({ setNotice, setError }: WeChatChannelCardProp
                     size="sm"
                     onClick={handleDisconnect}
                     disabled={disconnecting}
-                    className="text-red-600 hover:text-red-700 hover:bg-red-50 border-red-200"
+                    className="text-error hover:text-error hover:bg-error-bg border-error-border"
                   >
                     {disconnecting ? <Loader2 className="size-3.5 animate-spin" /> : <LogOut className="size-3.5" />}
                     退出登录
@@ -122,15 +122,15 @@ export function WeChatChannelCard({ setNotice, setError }: WeChatChannelCardProp
               ) : (
                 <div className="space-y-3">
                   {config?.hasBotToken && (
-                    <div className="flex items-center justify-between rounded-lg bg-amber-50 px-4 py-3">
-                      <div className="text-sm text-amber-700">Session 已过期，请重新扫码登录</div>
+                    <div className="flex items-center justify-between rounded-lg bg-warning-bg px-4 py-3">
+                      <div className="text-sm text-warning">Session 已过期，请重新扫码登录</div>
                     </div>
                   )}
                   <Button onClick={() => setQrDialogOpen(true)}>
                     <QrCode className="size-4" />
                     扫码登录
                   </Button>
-                  <p className="text-xs text-slate-400">
+                  <p className="text-xs text-muted-foreground/80">
                     点击扫码登录，使用微信扫描二维码完成绑定
                   </p>
                 </div>

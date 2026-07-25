@@ -78,32 +78,32 @@ interface RunnerOption {
 function RunnerCapabilityCard({ runner }: { runner: RunnerOption | null }) {
   if (!runner) return null;
   return (
-    <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 space-y-2">
+    <div className="rounded-md border border-border bg-surface px-3 py-2 space-y-2">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="text-xs font-medium text-slate-700">{runner.label}</div>
-          <div className="text-[11px] text-slate-500 font-mono">{runner.id}</div>
+          <div className="text-xs font-medium text-foreground">{runner.label}</div>
+          <div className="text-[11px] text-muted-foreground font-mono">{runner.id}</div>
         </div>
-        <div className="text-[11px] text-slate-500 text-right">
+        <div className="text-[11px] text-muted-foreground text-right">
           <div>chat: {runner.compatibility.chat}</div>
           <div>IM: {runner.compatibility.im}</div>
         </div>
       </div>
       <div className="grid grid-cols-2 gap-2 text-[11px]">
-        <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
-          恢复: <span className="font-medium text-slate-700">{runner.capabilities.sessionResume}</span>
+        <div className="rounded border border-border bg-card px-2 py-1.5">
+          恢复: <span className="font-medium text-foreground">{runner.capabilities.sessionResume}</span>
         </div>
-        <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
-          中断: <span className="font-medium text-slate-700">{runner.capabilities.interrupt}</span>
+        <div className="rounded border border-border bg-card px-2 py-1.5">
+          中断: <span className="font-medium text-foreground">{runner.capabilities.interrupt}</span>
         </div>
-        <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
-          工具流: <span className="font-medium text-slate-700">{runner.capabilities.toolStreaming}</span>
+        <div className="rounded border border-border bg-card px-2 py-1.5">
+          工具流: <span className="font-medium text-foreground">{runner.capabilities.toolStreaming}</span>
         </div>
-        <div className="rounded border border-slate-200 bg-white px-2 py-1.5">
-          后台任务: <span className="font-medium text-slate-700">{runner.capabilities.backgroundTasks ? '支持' : '不支持'}</span>
+        <div className="rounded border border-border bg-card px-2 py-1.5">
+          后台任务: <span className="font-medium text-foreground">{runner.capabilities.backgroundTasks ? '支持' : '不支持'}</span>
         </div>
       </div>
-      <div className="text-[11px] text-slate-500 space-y-1">
+      <div className="text-[11px] text-muted-foreground space-y-1">
         <div>归档触发: {runner.lifecycle.archivalTrigger.join(' / ') || 'none'}</div>
         <div>上下文收缩: {runner.lifecycle.contextShrinkTrigger}</div>
         <div>Hook 观测: {runner.lifecycle.hookStreaming}</div>
@@ -111,10 +111,10 @@ function RunnerCapabilityCard({ runner }: { runner: RunnerOption | null }) {
         <div>中途注入: {runner.capabilities.midQueryPush ? '支持' : '不支持'}</div>
       </div>
       {runner.degradation_reasons.length > 0 && (
-        <div className="rounded border border-amber-200 bg-amber-50 px-2 py-2 space-y-1">
-          <div className="text-[11px] font-medium text-amber-700">退化说明</div>
+        <div className="rounded border border-warning-border bg-warning-bg px-2 py-2 space-y-1">
+          <div className="text-[11px] font-medium text-warning">退化说明</div>
           {runner.degradation_reasons.map((reason) => (
-            <div key={reason} className="text-[11px] text-amber-700">
+            <div key={reason} className="text-[11px] text-warning">
               {reason}
             </div>
           ))}
@@ -316,12 +316,12 @@ export function RuntimeEnvPanel({
 
   return (
     <div className="flex flex-col h-full min-h-0">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200">
-        <h3 className="font-semibold text-slate-900 text-sm">{title}</h3>
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+        <h3 className="font-semibold text-foreground text-sm">{title}</h3>
         <div className="flex items-center gap-1">
           <button
             onClick={() => void reloadSessionState()}
-            className="text-slate-400 hover:text-slate-600 p-2 rounded-md hover:bg-slate-100 cursor-pointer"
+            className="text-muted-foreground/80 hover:text-muted-foreground p-2 rounded-md hover:bg-surface-2 cursor-pointer"
             title="刷新"
           >
             <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
@@ -329,7 +329,7 @@ export function RuntimeEnvPanel({
           {onClose && (
             <button
               onClick={onClose}
-              className="text-slate-400 hover:text-slate-600 p-2 rounded-md hover:bg-slate-100 cursor-pointer"
+              className="text-muted-foreground/80 hover:text-muted-foreground p-2 rounded-md hover:bg-surface-2 cursor-pointer"
             >
               <X className="w-5 h-5" />
             </button>
@@ -340,10 +340,10 @@ export function RuntimeEnvPanel({
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-4">
         {!hideSessionFields && (
           <div className="space-y-3">
-            <div className="text-xs font-medium text-slate-500 uppercase tracking-wide">Runner</div>
+            <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Runner</div>
 
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">
+              <label className="block text-xs font-medium text-muted-foreground mb-1">
                 Runner
               </label>
               <Select value={currentRunnerId} onValueChange={handleProviderChange}>
@@ -362,9 +362,9 @@ export function RuntimeEnvPanel({
                   ))}
                 </SelectContent>
               </Select>
-              <div className="flex items-start gap-1.5 mt-1.5 px-2 py-1.5 rounded bg-amber-50 border border-amber-200">
-                <AlertTriangle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0 mt-0.5" />
-                <p className="text-[11px] text-amber-700 leading-relaxed">
+              <div className="flex items-start gap-1.5 mt-1.5 px-2 py-1.5 rounded bg-warning-bg border border-warning-border">
+                <AlertTriangle className="w-3.5 h-3.5 text-warning flex-shrink-0 mt-0.5" />
+                <p className="text-[11px] text-warning leading-relaxed">
                   切换 Runner 会开始新对话，当前上下文不会继承。
                 </p>
               </div>
@@ -374,7 +374,7 @@ export function RuntimeEnvPanel({
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">
+              <label className="block text-xs font-medium text-muted-foreground mb-1">
                 Runner Profile
               </label>
               <Select value={runnerProfileId} onValueChange={handleRunnerProfileChange}>
@@ -401,7 +401,7 @@ export function RuntimeEnvPanel({
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">
+              <label className="block text-xs font-medium text-muted-foreground mb-1">
                 模型
               </label>
               <Select
@@ -422,7 +422,7 @@ export function RuntimeEnvPanel({
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">
+              <label className="block text-xs font-medium text-muted-foreground mb-1">
                 Thinking Effort
               </label>
               <Select value={thinkingEffort} onValueChange={handleThinkingEffortChange}>
@@ -440,7 +440,7 @@ export function RuntimeEnvPanel({
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">
+              <label className="block text-xs font-medium text-muted-foreground mb-1">
                 工作目录
               </label>
               <Input
@@ -456,14 +456,14 @@ export function RuntimeEnvPanel({
           </div>
         )}
 
-        {!hideSessionFields && <div className="border-t border-slate-100" />}
+        {!hideSessionFields && <div className="border-t border-border-subtle" />}
 
         <div className="space-y-3">
-          <div className="text-xs font-medium text-slate-500 uppercase tracking-wide">本机命令模式</div>
-          <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600 leading-6">
+          <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">本机命令模式</div>
+          <div className="rounded-lg border border-border bg-surface p-4 text-sm text-muted-foreground leading-6">
             {resolvedHostCommandDescription}
           </div>
-          <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 leading-6">
+          <div className="rounded-lg border border-warning-border bg-warning-bg p-4 text-sm text-warning-foreground leading-6">
             如果当前 Runner 声明的宿主机命令没有先跑通，切换 Runner 以后会直接启动失败。
           </div>
         </div>

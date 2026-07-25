@@ -123,7 +123,7 @@ export function McpServerDetail({ server, onDeleted }: McpServerDetailProps) {
             <div className="flex items-center gap-2 mb-2">
               <h2 className="text-xl font-bold text-foreground">{server.id}</h2>
               {server.syncedFromHost && (
-                <span className="px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700 inline-flex items-center gap-1">
+                <span className="px-2 py-0.5 rounded text-xs font-medium bg-warning-bg text-warning inline-flex items-center gap-1">
                   <Download size={10} />
                   已同步
                 </span>
@@ -131,7 +131,7 @@ export function McpServerDetail({ server, onDeleted }: McpServerDetailProps) {
               <span
                 className={`px-2 py-0.5 rounded text-xs font-medium ${
                   server.enabled
-                    ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                    ? 'tag-green'
                     : 'bg-muted text-muted-foreground'
                 }`}
               >
@@ -156,7 +156,7 @@ export function McpServerDetail({ server, onDeleted }: McpServerDetailProps) {
             <button
               disabled={deleting}
               onClick={handleDelete}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-950 transition-colors disabled:opacity-50"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm text-error hover:bg-error-bg transition-colors disabled:opacity-50"
             >
               <Trash2 size={16} />
               {deleting ? '删除中...' : '删除'}
@@ -210,7 +210,7 @@ export function McpServerDetail({ server, onDeleted }: McpServerDetailProps) {
                       <button
                         type="button"
                         onClick={() => setEditHeaders(editHeaders.filter((_, j) => j !== i))}
-                        className="p-1.5 text-muted-foreground hover:text-red-500 transition-colors"
+                        className="p-1.5 text-muted-foreground hover:text-error transition-colors"
                       >
                         <X size={16} />
                       </button>
@@ -257,7 +257,7 @@ export function McpServerDetail({ server, onDeleted }: McpServerDetailProps) {
                       <button
                         type="button"
                         onClick={() => setEditArgs(editArgs.filter((_, j) => j !== i))}
-                        className="p-1.5 text-muted-foreground hover:text-red-500 transition-colors"
+                        className="p-1.5 text-muted-foreground hover:text-error transition-colors"
                       >
                         <X size={16} />
                       </button>
@@ -303,7 +303,7 @@ export function McpServerDetail({ server, onDeleted }: McpServerDetailProps) {
                       <button
                         type="button"
                         onClick={() => setEditEnv(editEnv.filter((_, j) => j !== i))}
-                        className="p-1.5 text-muted-foreground hover:text-red-500 transition-colors"
+                        className="p-1.5 text-muted-foreground hover:text-error transition-colors"
                       >
                         <X size={16} />
                       </button>
@@ -352,7 +352,7 @@ export function McpServerDetail({ server, onDeleted }: McpServerDetailProps) {
                 {/* Type */}
                 <div>
                   <span className="text-sm text-muted-foreground">类型</span>
-                  <p className="font-mono text-sm text-foreground mt-1 bg-blue-50 dark:bg-blue-950 rounded px-3 py-2">
+                  <p className="font-mono text-sm text-foreground mt-1 bg-info-bg rounded px-3 py-2">
                     {server.type?.toUpperCase()}
                   </p>
                 </div>

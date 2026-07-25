@@ -89,9 +89,9 @@ function RunnerCapabilitySummary({ runner }: { runner: RunnerOption | null }) {
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="text-sm font-medium text-foreground">{runner.label}</div>
-          <div className="text-[11px] text-slate-500 font-mono">{runner.value}</div>
+          <div className="text-[11px] text-muted-foreground font-mono">{runner.value}</div>
         </div>
-        <div className="text-[11px] text-slate-500 text-right">
+        <div className="text-[11px] text-muted-foreground text-right">
           <div>chat: {runner.compatibility.chat}</div>
           <div>IM: {runner.compatibility.im}</div>
         </div>
@@ -110,7 +110,7 @@ function RunnerCapabilitySummary({ runner }: { runner: RunnerOption | null }) {
           后台任务: <span className="font-medium text-foreground">{runner.capabilities.backgroundTasks ? '支持' : '不支持'}</span>
         </div>
       </div>
-      <div className="text-[11px] text-slate-500 space-y-1">
+      <div className="text-[11px] text-muted-foreground space-y-1">
         <div>归档触发: {runner.lifecycle.archivalTrigger.join(' / ') || 'none'}</div>
         <div>上下文收缩: {runner.lifecycle.contextShrinkTrigger}</div>
         <div>Hook 观测: {runner.lifecycle.hookStreaming}</div>
@@ -118,10 +118,10 @@ function RunnerCapabilitySummary({ runner }: { runner: RunnerOption | null }) {
         <div>中途注入: {runner.capabilities.midQueryPush ? '支持' : '不支持'}</div>
       </div>
       {runner.degradationReasons && runner.degradationReasons.length > 0 && (
-        <div className="rounded border border-amber-200 bg-amber-50 px-2 py-2 space-y-1">
-          <div className="text-[11px] font-medium text-amber-700">退化说明</div>
+        <div className="rounded border border-warning-border bg-warning-bg px-2 py-2 space-y-1">
+          <div className="text-[11px] font-medium text-warning">退化说明</div>
           {runner.degradationReasons.map((reason) => (
-            <div key={reason} className="text-[11px] text-amber-700">
+            <div key={reason} className="text-[11px] text-warning">
               {reason}
             </div>
           ))}
@@ -327,7 +327,7 @@ export function SessionDetail({ session }: SessionDetailProps) {
     <div className="p-4 bg-background space-y-3">
       {/* JID */}
       <div>
-        <div className="text-xs text-slate-500 mb-1">
+        <div className="text-xs text-muted-foreground mb-1">
           {isSessionView ? '会话 ID' : '完整 JID'}
         </div>
         <code className="block text-xs font-mono bg-card px-3 py-2 rounded border border-border break-all">
@@ -338,7 +338,7 @@ export function SessionDetail({ session }: SessionDetailProps) {
       {/* Folder / cwd */}
       {(!isMemorySession || session.cwd) && (
         <div>
-          <div className="text-xs text-slate-500 mb-1">
+          <div className="text-xs text-muted-foreground mb-1">
             {isSessionView ? '工作目录' : '文件夹'}
           </div>
           <div className="text-sm text-foreground font-medium">
@@ -349,7 +349,7 @@ export function SessionDetail({ session }: SessionDetailProps) {
 
       {/* Added At */}
       <div>
-        <div className="text-xs text-slate-500 mb-1">创建时间</div>
+        <div className="text-xs text-muted-foreground mb-1">创建时间</div>
         <div className="text-sm text-foreground">
           {formatDate(session.created_at)}
         </div>
@@ -357,25 +357,25 @@ export function SessionDetail({ session }: SessionDetailProps) {
 
       {/* Runner & Model */}
       <div>
-        <div className="text-xs text-slate-500 mb-1">运行引擎 / 模型</div>
+        <div className="text-xs text-muted-foreground mb-1">运行引擎 / 模型</div>
         <div className="text-sm text-foreground">
           {session.runner_label || runnerId}
-          {session.model && <span className="text-slate-400"> / {session.model}</span>}
+          {session.model && <span className="text-muted-foreground/80"> / {session.model}</span>}
         </div>
         {!isMemorySession && session.binding_summary && (
-          <div className="text-xs text-slate-400 mt-1">
+          <div className="text-xs text-muted-foreground/80 mt-1">
             绑定: {session.binding_summary}
           </div>
         )}
         {isMemorySession && (
-          <div className="text-xs text-slate-400 mt-1">
+          <div className="text-xs text-muted-foreground/80 mt-1">
             这是 memory runner 的配置投影，只决定单次记忆请求用哪个 runner，不保存可恢复对话状态。
           </div>
         )}
         {session.degradation_reasons && session.degradation_reasons.length > 0 && (
           <div className="mt-2 space-y-1">
             {session.degradation_reasons.map((reason) => (
-              <div key={reason} className="text-xs text-amber-600">
+              <div key={reason} className="text-xs text-warning">
                 {reason}
               </div>
             ))}
@@ -389,7 +389,7 @@ export function SessionDetail({ session }: SessionDetailProps) {
       {session.editable && (
         <div className="space-y-3">
           <div>
-            <div className="text-xs text-slate-500 mb-1">运行引擎</div>
+            <div className="text-xs text-muted-foreground mb-1">运行引擎</div>
             <Select
               value={runnerId || undefined}
               onValueChange={(value) => {
@@ -419,7 +419,7 @@ export function SessionDetail({ session }: SessionDetailProps) {
           </div>
 
           <div>
-            <div className="text-xs text-slate-500 mb-1">运行配置</div>
+            <div className="text-xs text-muted-foreground mb-1">运行配置</div>
             <Select
               value={runnerProfileId || '__default__'}
               onValueChange={(value) =>
@@ -448,7 +448,7 @@ export function SessionDetail({ session }: SessionDetailProps) {
           </div>
 
           <div>
-            <div className="text-xs text-slate-500 mb-1">模型</div>
+            <div className="text-xs text-muted-foreground mb-1">模型</div>
             <Input
               value={model}
               onChange={(e) => setModel(e.target.value)}
@@ -458,7 +458,7 @@ export function SessionDetail({ session }: SessionDetailProps) {
           </div>
 
           <div>
-            <div className="text-xs text-slate-500 mb-1">思考强度</div>
+            <div className="text-xs text-muted-foreground mb-1">思考强度</div>
             <Select
               value={thinkingEffort || '__default__'}
               onValueChange={(value) =>
@@ -479,7 +479,7 @@ export function SessionDetail({ session }: SessionDetailProps) {
           </div>
           {!isMemorySession && (
             <div>
-              <div className="text-xs text-slate-500 mb-1">工作目录</div>
+              <div className="text-xs text-muted-foreground mb-1">工作目录</div>
               <Input
                 value={cwd}
                 onChange={(e) => setCwd(e.target.value)}
@@ -497,24 +497,24 @@ export function SessionDetail({ session }: SessionDetailProps) {
           <button
             onClick={handleSave}
             disabled={saving}
-            className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded transition-colors disabled:opacity-50"
+            className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-primary-foreground bg-info hover:bg-info rounded transition-colors disabled:opacity-50"
           >
             {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
             保存设置
           </button>
-          {saved && <span className="text-xs text-green-600">已保存</span>}
+          {saved && <span className="text-xs text-success">已保存</span>}
         </div>
       )}
 
       {/* Last Message */}
       {session.lastMessage && (
         <div>
-          <div className="text-xs text-slate-500 mb-1">最后消息</div>
+          <div className="text-xs text-muted-foreground mb-1">最后消息</div>
           <div className="text-sm text-foreground bg-card px-3 py-2 rounded border border-border line-clamp-3 break-words">
             {session.lastMessage}
           </div>
           {session.lastMessageTime && (
-            <div className="text-xs text-slate-400 mt-1">
+            <div className="text-xs text-muted-foreground/80 mt-1">
               {formatDate(session.lastMessageTime)}
             </div>
           )}

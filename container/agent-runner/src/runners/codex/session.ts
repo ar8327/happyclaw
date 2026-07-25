@@ -194,6 +194,7 @@ interface JsonRpcMessage {
 interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
+  timer?: ReturnType<typeof setTimeout>;
 }
 
 interface AppNotification {
@@ -564,9 +565,29 @@ export class CodexSession {
     }
   }
 
+  async steer(
+    input: Array<Record<string, unknown>>,
+    clientUserMessageId?: string,
+  ): Promise<void> {
+    if (!this.threadId || !this.activeTurnId) {
+      throw new Error('CodexSession: no active turn to steer');
+    }
+    await this.request(
+      'turn/steer',
+      {
+        threadId: this.threadId,
+        expectedTurnId: this.activeTurnId,
+        input,
+        ...(clientUserMessageId ? { clientUserMessageId } : {}),
+      },
+      15_000,
+    );
+  }
+
   async close(): Promise<void> {
     this.notifications.close();
     for (const pending of this.pending.values()) {
+      if (pending.timer) clearTimeout(pending.timer);
       pending.reject(new Error('Codex app-server closed'));
     }
     this.pending.clear();
@@ -681,17 +702,31 @@ export class CodexSession {
     return input;
   }
 
-  private request(method: string, params: unknown): Promise<unknown> {
+  private request(
+    method: string,
+    params: unknown,
+    timeoutMs?: number,
+  ): Promise<unknown> {
     if (!this.child) {
       return Promise.reject(new Error('Codex app-server is not running'));
     }
     const id = this.nextRequestId++;
     const payload = JSON.stringify({ id, method, params });
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const pending: PendingRequest = { resolve, reject };
+      if (timeoutMs && timeoutMs > 0) {
+        pending.timer = setTimeout(() => {
+          if (!this.pending.delete(id)) return;
+          reject(new Error(`${method} timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+        pending.timer.unref?.();
+      }
+      this.pending.set(id, pending);
       this.child?.stdin.write(`${payload}\n`, (error) => {
         if (!error) return;
+        const removed = this.pending.get(id);
         this.pending.delete(id);
+        if (removed?.timer) clearTimeout(removed.timer);
         reject(error);
       });
     });
@@ -720,6 +755,7 @@ export class CodexSession {
         return;
       }
       this.pending.delete(message.id);
+      if (pending.timer) clearTimeout(pending.timer);
       if (message.error) {
         pending.reject(
           new Error(
@@ -743,6 +779,7 @@ export class CodexSession {
 
   private failAll(error: Error): void {
     for (const pending of this.pending.values()) {
+      if (pending.timer) clearTimeout(pending.timer);
       pending.reject(error);
     }
     this.pending.clear();

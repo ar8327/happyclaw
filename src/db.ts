@@ -722,11 +722,33 @@ export function initDatabase(): void {
       attachments TEXT,
       token_usage TEXT,
       reply_to_id TEXT,
+      thread_id TEXT,
+      root_id TEXT,
       PRIMARY KEY (id, chat_jid),
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
     CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp);
     CREATE INDEX IF NOT EXISTS idx_messages_jid_ts ON messages(chat_jid, timestamp);
+
+    CREATE TABLE IF NOT EXISTS im_outbox (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT NOT NULL UNIQUE,
+      source_chat_jid TEXT NOT NULL,
+      target_jid TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at INTEGER NOT NULL,
+      external_id TEXT,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_im_outbox_ready
+      ON im_outbox(status, next_attempt_at, sequence);
+    CREATE INDEX IF NOT EXISTS idx_im_outbox_target_order
+      ON im_outbox(target_jid, sequence);
 
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       id TEXT PRIMARY KEY,
@@ -1173,6 +1195,12 @@ export function initDatabase(): void {
   // v25→v26 migration: cost_usd on messages
   ensureColumn('messages', 'cost_usd', 'REAL');
   ensureColumn('messages', 'reply_to_id', 'TEXT');
+  ensureColumn('messages', 'thread_id', 'TEXT');
+  ensureColumn('messages', 'root_id', 'TEXT');
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_messages_thread
+      ON messages(chat_jid, source_jid, thread_id);
+  `);
 
   // v27→v28: Token usage tables + history migration
   const v28Check = getRouterStateInternal('schema_version');
@@ -1331,10 +1359,181 @@ export function initDatabase(): void {
 
   syncSessionWorkbenchProjection();
 
-  const SCHEMA_VERSION = '47';
+  // Any process killed while calling a remote IM API is retried with the same
+  // stable outbox id. Feishu uses it as its API idempotency UUID.
+  db.prepare(
+    `UPDATE im_outbox
+       SET status = 'pending',
+           next_attempt_at = ?,
+           updated_at = ?
+     WHERE status = 'sending'`,
+  ).run(Date.now(), new Date().toISOString());
+
+  const SCHEMA_VERSION = '49';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
+}
+
+export type ImOutboxKind = 'text' | 'image' | 'file';
+export type ImOutboxStatus = 'pending' | 'sending' | 'delivered' | 'failed';
+
+export interface ImOutboxRecord {
+  sequence: number;
+  id: string;
+  source_chat_jid: string;
+  target_jid: string;
+  kind: ImOutboxKind;
+  payload_json: string;
+  status: ImOutboxStatus;
+  attempts: number;
+  next_attempt_at: number;
+  external_id: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export function enqueueImOutbox(input: {
+  id: string;
+  sourceChatJid: string;
+  targetJid: string;
+  kind: ImOutboxKind;
+  payload: Record<string, unknown>;
+}): ImOutboxRecord {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT OR IGNORE INTO im_outbox (
+       id, source_chat_jid, target_jid, kind, payload_json, status,
+       attempts, next_attempt_at, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)`,
+  ).run(
+    input.id,
+    input.sourceChatJid,
+    input.targetJid,
+    input.kind,
+    JSON.stringify(input.payload),
+    Date.now(),
+    now,
+    now,
+  );
+  return getImOutbox(input.id)!;
+}
+
+export function getImOutbox(id: string): ImOutboxRecord | null {
+  return (
+    (db.prepare('SELECT * FROM im_outbox WHERE id = ?').get(id) as
+      | ImOutboxRecord
+      | undefined) ?? null
+  );
+}
+
+export function claimReadyImOutbox(limit = 10): ImOutboxRecord[] {
+  return db.transaction(() => {
+    const now = Date.now();
+    const rows = db
+      .prepare(
+        `SELECT candidate.*
+           FROM im_outbox candidate
+          WHERE candidate.status = 'pending'
+            AND candidate.next_attempt_at <= ?
+            AND NOT EXISTS (
+              SELECT 1
+                FROM im_outbox earlier
+               WHERE earlier.target_jid = candidate.target_jid
+                 AND earlier.sequence < candidate.sequence
+                 AND earlier.status IN ('pending', 'sending')
+            )
+          ORDER BY candidate.sequence ASC
+          LIMIT ?`,
+      )
+      .all(now, limit) as ImOutboxRecord[];
+    const mark = db.prepare(
+      `UPDATE im_outbox
+          SET status = 'sending', updated_at = ?
+        WHERE id = ? AND status = 'pending'`,
+    );
+    const updatedAt = new Date().toISOString();
+    return rows.filter((row) => mark.run(updatedAt, row.id).changes === 1);
+  })();
+}
+
+export function markImOutboxDelivered(id: string, externalId?: string): void {
+  db.prepare(
+    `UPDATE im_outbox
+        SET status = 'delivered', external_id = ?, last_error = NULL,
+            updated_at = ?
+      WHERE id = ?`,
+  ).run(externalId || null, new Date().toISOString(), id);
+}
+
+export function rescheduleImOutbox(
+  id: string,
+  attempts: number,
+  nextAttemptAt: number,
+  error: string,
+): void {
+  db.prepare(
+    `UPDATE im_outbox
+        SET status = 'pending', attempts = ?, next_attempt_at = ?,
+            last_error = ?, updated_at = ?
+      WHERE id = ?`,
+  ).run(attempts, nextAttemptAt, error, new Date().toISOString(), id);
+}
+
+export function failImOutbox(
+  id: string,
+  attempts: number,
+  error: string,
+): void {
+  db.prepare(
+    `UPDATE im_outbox
+        SET status = 'failed', attempts = ?, last_error = ?, updated_at = ?
+      WHERE id = ?`,
+  ).run(attempts, error, new Date().toISOString(), id);
+}
+
+export function countFailedImOutbox(): number {
+  return (
+    db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM im_outbox WHERE status = 'failed'",
+      )
+      .get() as { count: number }
+  ).count;
+}
+
+export function listFailedImOutbox(limit = 100): ImOutboxRecord[] {
+  return db
+    .prepare(
+      `SELECT *
+         FROM im_outbox
+        WHERE status = 'failed'
+        ORDER BY updated_at DESC
+        LIMIT ?`,
+    )
+    .all(Math.max(1, Math.min(limit, 500))) as ImOutboxRecord[];
+}
+
+export function retryFailedImOutbox(id: string): boolean {
+  return (
+    db
+      .prepare(
+        `UPDATE im_outbox
+            SET status = 'pending', attempts = 0, next_attempt_at = ?,
+                last_error = NULL, updated_at = ?
+          WHERE id = ? AND status = 'failed'`,
+      )
+      .run(Date.now(), new Date().toISOString(), id).changes === 1
+  );
+}
+
+export function clearFailedImOutbox(id: string): boolean {
+  return (
+    db
+      .prepare("DELETE FROM im_outbox WHERE id = ? AND status = 'failed'")
+      .run(id).changes === 1
+  );
 }
 
 /**
@@ -1518,10 +1717,15 @@ export function storeMessageDirect(
   tokenUsage?: string,
   sourceJid?: string,
   replyToId?: string,
+  threadId?: string,
+  rootId?: string,
 ): number {
   const result = db
     .prepare(
-      `INSERT OR REPLACE INTO messages (id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage, reply_to_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR REPLACE INTO messages (
+        id, chat_jid, source_jid, sender, sender_name, content, timestamp,
+        is_from_me, attachments, token_usage, reply_to_id, thread_id, root_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       msgId,
@@ -1535,6 +1739,8 @@ export function storeMessageDirect(
       attachments ?? null,
       tokenUsage ?? null,
       replyToId ?? null,
+      threadId ?? null,
+      rootId ?? null,
     );
   return Number(result.lastInsertRowid);
 }
@@ -1550,7 +1756,7 @@ export function getMessageById(
   return (
     (db
       .prepare(
-        `SELECT rowid, id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments, reply_to_id
+        `SELECT rowid, id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments, reply_to_id, thread_id, root_id
          FROM messages WHERE id = ? AND chat_jid = ? LIMIT 1`,
       )
       .get(msgId, chatJid) as DbMessage | undefined) ?? null
@@ -2046,18 +2252,66 @@ export function getUsageUsers(): Array<{ id: string; username: string }> {
 export function getLastInboundMessage(
   chatJid: string,
   sourceJid?: string,
-): { id: string; sender: string } | null {
+): {
+  id: string;
+  sender: string;
+  thread_id?: string;
+  root_id?: string;
+} | null {
   const sql = sourceJid
-    ? `SELECT id, sender FROM messages WHERE chat_jid = ? AND source_jid = ? AND is_from_me = 0 ORDER BY timestamp DESC, id DESC LIMIT 1`
-    : `SELECT id, sender FROM messages WHERE chat_jid = ? AND is_from_me = 0 ORDER BY timestamp DESC, id DESC LIMIT 1`;
+    ? `SELECT id, sender, thread_id, root_id FROM messages WHERE chat_jid = ? AND source_jid = ? AND is_from_me = 0 ORDER BY rowid DESC LIMIT 1`
+    : `SELECT id, sender, thread_id, root_id FROM messages WHERE chat_jid = ? AND is_from_me = 0 ORDER BY rowid DESC LIMIT 1`;
   const row = sourceJid
     ? (db.prepare(sql).get(chatJid, sourceJid) as
-        | { id: string; sender: string }
+        | {
+            id: string;
+            sender: string;
+            thread_id?: string;
+            root_id?: string;
+          }
         | undefined)
     : (db.prepare(sql).get(chatJid) as
-        | { id: string; sender: string }
+        | {
+            id: string;
+            sender: string;
+            thread_id?: string;
+            root_id?: string;
+          }
         | undefined);
   return row || null;
+}
+
+export function getLastInboundMessageInThread(
+  chatJid: string,
+  sourceJid: string,
+  threadId: string,
+): {
+  id: string;
+  sender: string;
+  thread_id?: string;
+  root_id?: string;
+} | null {
+  return (
+    (db
+      .prepare(
+        `SELECT id, sender, thread_id, root_id
+           FROM messages
+          WHERE chat_jid = ?
+            AND source_jid = ?
+            AND thread_id = ?
+            AND is_from_me = 0
+          ORDER BY rowid DESC
+          LIMIT 1`,
+      )
+      .get(chatJid, sourceJid, threadId) as
+      | {
+          id: string;
+          sender: string;
+          thread_id?: string;
+          root_id?: string;
+        }
+      | undefined) ?? null
+  );
 }
 
 export function getNewMessages(
@@ -2069,7 +2323,7 @@ export function getNewMessages(
   const placeholders = jids.map(() => '?').join(',');
   // Filter out assistant outputs.
   const sql = `
-    SELECT rowid, id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments, reply_to_id
+    SELECT rowid, id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments, reply_to_id, thread_id, root_id
     FROM messages
     WHERE
       rowid > ?
@@ -2092,7 +2346,7 @@ export function getMessagesSince(
 ): DbMessage[] {
   // Filter out assistant outputs.
   const sql = `
-    SELECT rowid, id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments, reply_to_id
+    SELECT rowid, id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments, reply_to_id, thread_id, root_id
     FROM messages
     WHERE
       chat_jid = ?
@@ -2112,7 +2366,8 @@ export function getTranscriptMessagesSince(
   cursor: MessageCursor,
 ): Array<DbMessage & { is_from_me: boolean }> {
   const sql = `
-    SELECT rowid, id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments, is_from_me
+    SELECT rowid, id, chat_jid, source_jid, sender, sender_name, content,
+           timestamp, attachments, reply_to_id, thread_id, root_id, is_from_me
     FROM messages
     WHERE
       chat_jid = ?
@@ -4356,14 +4611,16 @@ export function getMessagesPage(
 ): Array<NewMessage & { is_from_me: boolean }> {
   const sql = before
     ? `
-      SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage
+      SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp,
+             is_from_me, attachments, token_usage, reply_to_id, thread_id, root_id
       FROM messages
       WHERE chat_jid = ? AND timestamp < ?
       ORDER BY timestamp DESC
       LIMIT ?
     `
     : `
-      SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage
+      SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp,
+             is_from_me, attachments, token_usage, reply_to_id, thread_id, root_id
       FROM messages
       WHERE chat_jid = ?
       ORDER BY timestamp DESC
@@ -4392,7 +4649,8 @@ export function getMessagesAfter(
 ): Array<NewMessage & { is_from_me: boolean }> {
   const rows = db
     .prepare(
-      `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage
+      `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp,
+              is_from_me, attachments, token_usage, reply_to_id, thread_id, root_id
        FROM messages
        WHERE chat_jid = ? AND timestamp > ?
        ORDER BY timestamp ASC
@@ -4419,12 +4677,14 @@ export function getMessagesPageMulti(
 
   const placeholders = chatJids.map(() => '?').join(',');
   const sql = before
-    ? `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage
+    ? `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp,
+              is_from_me, attachments, token_usage, reply_to_id, thread_id, root_id
        FROM messages
        WHERE chat_jid IN (${placeholders}) AND timestamp < ?
        ORDER BY timestamp DESC
        LIMIT ?`
-    : `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage
+    : `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp,
+              is_from_me, attachments, token_usage, reply_to_id, thread_id, root_id
        FROM messages
        WHERE chat_jid IN (${placeholders})
        ORDER BY timestamp DESC
@@ -4455,7 +4715,8 @@ export function getMessagesAfterMulti(
   const placeholders = chatJids.map(() => '?').join(',');
   const rows = db
     .prepare(
-      `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage
+      `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp,
+              is_from_me, attachments, token_usage, reply_to_id, thread_id, root_id
        FROM messages
        WHERE chat_jid IN (${placeholders}) AND timestamp > ?
        ORDER BY timestamp ASC

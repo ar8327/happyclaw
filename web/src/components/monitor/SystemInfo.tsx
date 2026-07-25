@@ -19,18 +19,18 @@ export function SystemInfo({ status }: SystemInfoProps) {
   return (
     <div className="bg-card rounded-xl border border-border p-6">
       <div className="flex items-center gap-3 mb-4">
-        <div className="p-2 bg-green-100 rounded-lg">
-          <Activity className="w-6 h-6 text-green-600" />
+        <div className="p-2 bg-success-bg rounded-lg">
+          <Activity className="w-6 h-6 text-success" />
         </div>
         <div>
-          <h3 className="text-sm font-medium text-slate-500">系统信息</h3>
+          <h3 className="text-sm font-medium text-muted-foreground">系统信息</h3>
           <p className="text-2xl font-bold text-foreground">运行中</p>
         </div>
       </div>
 
       <div className="space-y-2">
         <div className="flex items-center justify-between text-sm">
-          <span className="text-slate-500">运行时间</span>
+          <span className="text-muted-foreground">运行时间</span>
           <span className="text-foreground font-medium">
             {formatUptime(status.uptime)}
           </span>
@@ -38,7 +38,7 @@ export function SystemInfo({ status }: SystemInfoProps) {
 
         {status.claudeCodeVersion !== undefined && (
           <div className="flex items-center justify-between text-sm">
-            <span className="text-slate-500">Claude Code</span>
+            <span className="text-muted-foreground">Claude Code</span>
             <span className="text-foreground font-medium font-mono text-xs">
               {status.claudeCodeVersion || '未知'}
             </span>
@@ -47,7 +47,7 @@ export function SystemInfo({ status }: SystemInfoProps) {
 
         {status.activeRuntimes !== undefined && (
           <div className="flex items-center justify-between text-sm">
-            <span className="text-slate-500">活跃 Runtime</span>
+            <span className="text-muted-foreground">活跃 Runtime</span>
             <span className="text-foreground font-medium">
               {status.activeRuntimes}
             </span>
@@ -55,8 +55,8 @@ export function SystemInfo({ status }: SystemInfoProps) {
         )}
 
         <div className="flex items-center justify-between text-sm">
-          <span className="text-slate-500">飞书连接</span>
-          <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-600">
+          <span className="text-muted-foreground">飞书连接</span>
+          <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-success-bg text-success">
             已连接
           </span>
         </div>

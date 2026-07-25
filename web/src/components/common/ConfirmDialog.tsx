@@ -51,7 +51,7 @@ export function ConfirmDialog({
             disabled={loading}
             className={cn(
               confirmVariant === 'danger' &&
-                'bg-destructive text-white hover:bg-destructive/90',
+                'bg-destructive text-destructive-foreground hover:bg-destructive/90',
             )}
           >
             {loading && <Loader2 className="size-4 animate-spin" />}

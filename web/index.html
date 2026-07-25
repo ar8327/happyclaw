@@ -25,7 +25,8 @@
     <title>AgentDock</title>
   </head>
   <body>
-    <script>(function(){var s=localStorage.getItem('happyclaw-theme');var dark=s==='dark'||(s!=='light'&&window.matchMedia('(prefers-color-scheme: dark)').matches);if(dark)document.documentElement.classList.add('dark');})();</script>
+    <!-- 首屏前应用明暗 + 皮肤，避免闪白/闪错色 -->
+    <script>(function(){try{var r=document.documentElement;var m=localStorage.getItem('happyclaw-theme');if(m==='dark'||(m!=='light'&&window.matchMedia('(prefers-color-scheme: dark)').matches))r.classList.add('dark');r.dataset.skin=localStorage.getItem('happyclaw-skin')||'teal';}catch(e){}})();</script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

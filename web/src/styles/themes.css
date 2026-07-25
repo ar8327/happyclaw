@@ -1,0 +1,640 @@
+/* =====================================================================
+   AgentDock Skin System
+   ---------------------------------------------------------------------
+   每套皮肤只声明少量「种子色」(--seed-*)，文件末尾的派生层用 color-mix()
+   自动推导出全部语义 token。好处：
+
+   1. 新增皮肤只需 ~12 行，不可能出现「漏定义某个 token 导致暗色模式炸掉」
+   2. 亮色 / 暗色共用同一套派生公式，色阶跟随 --seed-card / --seed-fg，
+      因此 bg-brand-50 之类的浅色在暗色下自动变成深色微调面板
+   3. 皮肤可用可选种子 (--seed-surface / --seed-muted ...) 精确覆盖派生值
+
+   ⚠ 级联顺序必须保持：基础亮色 → 基础暗色 → 各皮肤亮色 → 各皮肤暗色
+     `:root` 与 `[data-skin=x]` 特异性同为 (0,1,0)，靠书写顺序决胜；
+     `:root.dark` 与 `[data-skin=x].dark` 同为 (0,2,0)，同理。
+
+   ⚠ 自定义属性继承在同一个 <html> 元素上：亮色块里声明的可选种子，
+     暗色块必须显式重置为 `initial`（= 走派生公式），否则会漏进暗色模式。
+   ===================================================================== */
+
+/* ─────────────────────────────────────────────────────────────
+   基础种子 · 亮色（同时是默认皮肤 teal 青瓷）
+   ───────────────────────────────────────────────────────────── */
+:root,
+[data-skin='teal'] {
+  --seed-scheme: light;
+  --seed-bg: #ffffff;
+  --seed-card: #ffffff;
+  --seed-elevated: #ffffff;
+  --seed-fg: #0f172a;
+  --seed-primary: #0d9488;
+  --seed-primary-fg: #ffffff;
+  --seed-border: #e3e8ef;
+  --seed-muted-fg: #64748b;
+  --seed-surface: #f7f9fb;
+  --seed-shadow-rgb: 15 23 42;
+  --seed-shadow-boost: 1;
+  /* 反馈色底色/边框的着色强度。暗色底吃色更多，需要调高才看得出色相 */
+  --seed-tint-bg: 14%;
+  --seed-tint-border: 32%;
+
+  --seed-success: #16a34a;
+  --seed-warning: #d97706;
+  --seed-error: #dc2626;
+  --seed-info: #2563eb;
+
+  /* 分类色相 — 用于「渠道 / 日志类型」等需要彼此区分、
+     但与成功/失败语义无关的标签。派生层会把它和当前皮肤的
+     card/fg 混合，因此明暗两色都能自动适配。 */
+  --hue-blue: #2563eb;
+  --hue-sky: #0284c7;
+  --hue-purple: #7c3aed;
+  --hue-green: #16a34a;
+  --hue-amber: #d97706;
+  --hue-rose: #e11d48;
+  --hue-cyan: #0891b2;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   基础种子 · 暗色（对所有皮肤生效，随后被具体皮肤的暗色块覆盖）
+   ───────────────────────────────────────────────────────────── */
+:root.dark,
+[data-skin='teal'].dark {
+  --seed-scheme: dark;
+  --seed-bg: #0a1120;
+  --seed-card: #121b2c;
+  --seed-elevated: #17223a;
+  --seed-fg: #e2e8f0;
+  --seed-primary: #2dd4bf;
+  --seed-primary-fg: #052e2b;
+  --seed-border: #26334a;
+  --seed-muted-fg: #94a3b8;
+  --seed-surface: initial;
+  --seed-shadow-rgb: 0 0 0;
+  --seed-shadow-boost: 2.6;
+  --seed-tint-bg: 22%;
+  --seed-tint-border: 40%;
+
+  --seed-success: #4ade80;
+  --seed-warning: #fbbf24;
+  --seed-error: #f87171;
+  --seed-info: #60a5fa;
+
+  --hue-blue: #60a5fa;
+  --hue-sky: #38bdf8;
+  --hue-purple: #a78bfa;
+  --hue-green: #4ade80;
+  --hue-amber: #fbbf24;
+  --hue-rose: #fb7185;
+  --hue-cyan: #22d3ee;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   靛蓝 Indigo
+   ───────────────────────────────────────────────────────────── */
+[data-skin='indigo'] {
+  --seed-bg: #ffffff;
+  --seed-card: #ffffff;
+  --seed-elevated: #ffffff;
+  --seed-fg: #1b1a3a;
+  --seed-primary: #4f46e5;
+  --seed-primary-fg: #ffffff;
+  --seed-border: #e5e5f4;
+  --seed-muted-fg: #6b7096;
+  --seed-surface: #f8f8fd;
+}
+[data-skin='indigo'].dark {
+  --seed-bg: #0b0d1a;
+  --seed-card: #15182b;
+  --seed-elevated: #1c2039;
+  --seed-fg: #e0e3f2;
+  --seed-primary: #818cf8;
+  --seed-primary-fg: #131634;
+  --seed-border: #2a2f4c;
+  --seed-muted-fg: #9298bd;
+  --seed-surface: initial;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   紫棠 Violet
+   ───────────────────────────────────────────────────────────── */
+[data-skin='violet'] {
+  --seed-bg: #ffffff;
+  --seed-card: #ffffff;
+  --seed-elevated: #ffffff;
+  --seed-fg: #2a1155;
+  --seed-primary: #7c3aed;
+  --seed-primary-fg: #ffffff;
+  --seed-border: #ece5f8;
+  --seed-muted-fg: #6f6690;
+  --seed-surface: #faf7ff;
+}
+[data-skin='violet'].dark {
+  --seed-bg: #0f0a1a;
+  --seed-card: #1a1230;
+  --seed-elevated: #22183c;
+  --seed-fg: #ece4fb;
+  --seed-primary: #a78bfa;
+  --seed-primary-fg: #1b0f36;
+  --seed-border: #33254f;
+  --seed-muted-fg: #a08fc4;
+  --seed-surface: initial;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   胭脂 Rose
+   ───────────────────────────────────────────────────────────── */
+[data-skin='rose'] {
+  --seed-bg: #ffffff;
+  --seed-card: #ffffff;
+  --seed-elevated: #ffffff;
+  --seed-fg: #3f0a1b;
+  --seed-primary: #e11d48;
+  --seed-primary-fg: #ffffff;
+  --seed-border: #f7e3e8;
+  --seed-muted-fg: #7d616a;
+  --seed-surface: #fff7f9;
+}
+[data-skin='rose'].dark {
+  --seed-bg: #150810;
+  --seed-card: #22121b;
+  --seed-elevated: #2c1823;
+  --seed-fg: #fbe6ec;
+  --seed-primary: #fb7185;
+  --seed-primary-fg: #2b0812;
+  --seed-border: #43242f;
+  --seed-muted-fg: #bd919e;
+  --seed-surface: initial;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   琥珀 Amber
+   ───────────────────────────────────────────────────────────── */
+[data-skin='amber'] {
+  --seed-bg: #fffdf8;
+  --seed-card: #ffffff;
+  --seed-elevated: #ffffff;
+  --seed-fg: #3b2008;
+  --seed-primary: #c2610c;
+  --seed-primary-fg: #ffffff;
+  --seed-border: #f1e7d6;
+  --seed-muted-fg: #7d6b53;
+  --seed-surface: #fdf8ee;
+}
+[data-skin='amber'].dark {
+  --seed-bg: #120e08;
+  --seed-card: #1f1810;
+  --seed-elevated: #291f14;
+  --seed-fg: #f8ecd9;
+  --seed-primary: #fbbf24;
+  --seed-primary-fg: #2a1c05;
+  --seed-border: #3d3122;
+  --seed-muted-fg: #bba689;
+  --seed-surface: initial;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   竹青 Emerald
+   ───────────────────────────────────────────────────────────── */
+[data-skin='emerald'] {
+  --seed-bg: #ffffff;
+  --seed-card: #ffffff;
+  --seed-elevated: #ffffff;
+  --seed-fg: #0a2a17;
+  --seed-primary: #059669;
+  --seed-primary-fg: #ffffff;
+  --seed-border: #ddeee4;
+  --seed-muted-fg: #5e7469;
+  --seed-surface: #f5fbf7;
+}
+[data-skin='emerald'].dark {
+  --seed-bg: #061109;
+  --seed-card: #0f1e15;
+  --seed-elevated: #14281c;
+  --seed-fg: #dcf3e4;
+  --seed-primary: #34d399;
+  --seed-primary-fg: #04291a;
+  --seed-border: #22392c;
+  --seed-muted-fg: #8cb29c;
+  --seed-surface: initial;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   石墨 Graphite · 单色极简
+   ───────────────────────────────────────────────────────────── */
+[data-skin='graphite'] {
+  --seed-bg: #ffffff;
+  --seed-card: #ffffff;
+  --seed-elevated: #ffffff;
+  --seed-fg: #18181b;
+  --seed-primary: #27272a;
+  --seed-primary-fg: #fafafa;
+  --seed-border: #e6e6e9;
+  --seed-muted-fg: #71717a;
+  --seed-surface: #f8f8f9;
+}
+[data-skin='graphite'].dark {
+  --seed-bg: #09090b;
+  --seed-card: #141416;
+  --seed-elevated: #1c1c1f;
+  --seed-fg: #fafafa;
+  --seed-primary: #e4e4e7;
+  --seed-primary-fg: #18181b;
+  --seed-border: #2a2a2e;
+  --seed-muted-fg: #a1a1aa;
+  --seed-surface: initial;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   北欧 Nord
+   ───────────────────────────────────────────────────────────── */
+[data-skin='nord'] {
+  --seed-bg: #eceff4;
+  --seed-card: #ffffff;
+  --seed-elevated: #ffffff;
+  --seed-fg: #2e3440;
+  --seed-primary: #5e81ac;
+  --seed-primary-fg: #ffffff;
+  --seed-border: #dde3ea;
+  --seed-muted-fg: #4c566a;
+  --seed-surface: #f4f6f9;
+  --seed-success: #7a9e5f;
+  --seed-warning: #b58e42;
+  --seed-error: #bf616a;
+  --seed-info: #5e81ac;
+}
+[data-skin='nord'].dark {
+  --seed-bg: #2e3440;
+  --seed-card: #3b4252;
+  --seed-elevated: #434c5e;
+  --seed-fg: #eceff4;
+  --seed-primary: #88c0d0;
+  --seed-primary-fg: #2e3440;
+  --seed-border: #4c566a;
+  --seed-muted-fg: #a9b4c8;
+  --seed-surface: initial;
+  --seed-success: #a3be8c;
+  --seed-warning: #ebcb8b;
+  --seed-error: #bf616a;
+  --seed-info: #81a1c1;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   德古拉 Dracula
+   ───────────────────────────────────────────────────────────── */
+[data-skin='dracula'] {
+  --seed-bg: #f6f5fb;
+  --seed-card: #ffffff;
+  --seed-elevated: #ffffff;
+  --seed-fg: #1f1d2b;
+  --seed-primary: #7c4dcc;
+  --seed-primary-fg: #ffffff;
+  --seed-border: #e6e2f1;
+  --seed-muted-fg: #6c6783;
+  --seed-surface: #faf9fd;
+  --seed-success: #2e9b57;
+  --seed-warning: #b8860b;
+  --seed-error: #d64550;
+  --seed-info: #3b82c4;
+}
+[data-skin='dracula'].dark {
+  --seed-bg: #1e1f29;
+  --seed-card: #282a36;
+  --seed-elevated: #343746;
+  --seed-fg: #f8f8f2;
+  --seed-primary: #bd93f9;
+  --seed-primary-fg: #21222c;
+  --seed-border: #44475a;
+  --seed-muted-fg: #8b91b8;
+  --seed-surface: initial;
+  --seed-success: #50fa7b;
+  --seed-warning: #f1fa8c;
+  --seed-error: #ff5555;
+  --seed-info: #8be9fd;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   曝晒 Solarized
+   ───────────────────────────────────────────────────────────── */
+[data-skin='solarized'] {
+  --seed-bg: #fdf6e3;
+  --seed-card: #fffcf2;
+  --seed-elevated: #fffdf7;
+  --seed-fg: #073642;
+  --seed-primary: #268bd2;
+  --seed-primary-fg: #ffffff;
+  --seed-border: #e9e1ca;
+  --seed-muted-fg: #657b83;
+  --seed-surface: #f7f0dc;
+  --seed-success: #6f7d00;
+  --seed-warning: #b58900;
+  --seed-error: #dc322f;
+  --seed-info: #268bd2;
+}
+[data-skin='solarized'].dark {
+  --seed-bg: #002b36;
+  --seed-card: #073642;
+  --seed-elevated: #0c4553;
+  --seed-fg: #eee8d5;
+  --seed-primary: #2aa198;
+  --seed-primary-fg: #00212b;
+  --seed-border: #17505e;
+  --seed-muted-fg: #93a1a1;
+  --seed-surface: initial;
+  --seed-success: #859900;
+  --seed-warning: #b58900;
+  --seed-error: #dc322f;
+  --seed-info: #268bd2;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   复古 Gruvbox
+   ───────────────────────────────────────────────────────────── */
+[data-skin='gruvbox'] {
+  --seed-bg: #fbf1c7;
+  --seed-card: #fdf8e3;
+  --seed-elevated: #fffbef;
+  --seed-fg: #3c3836;
+  --seed-primary: #af3a03;
+  --seed-primary-fg: #fbf1c7;
+  --seed-border: #e8dbb2;
+  --seed-muted-fg: #7c6f64;
+  --seed-surface: #f6ecc0;
+  --seed-success: #79740e;
+  --seed-warning: #b57614;
+  --seed-error: #9d0006;
+  --seed-info: #076678;
+}
+[data-skin='gruvbox'].dark {
+  --seed-bg: #1d2021;
+  --seed-card: #282828;
+  --seed-elevated: #32302f;
+  --seed-fg: #ebdbb2;
+  --seed-primary: #fe8019;
+  --seed-primary-fg: #1d2021;
+  --seed-border: #3c3836;
+  --seed-muted-fg: #a89984;
+  --seed-surface: initial;
+  --seed-success: #b8bb26;
+  --seed-warning: #fabd2f;
+  --seed-error: #fb4934;
+  --seed-info: #83a598;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   卡布 Catppuccin (Latte / Mocha)
+   ───────────────────────────────────────────────────────────── */
+[data-skin='catppuccin'] {
+  --seed-bg: #eff1f5;
+  --seed-card: #ffffff;
+  --seed-elevated: #ffffff;
+  --seed-fg: #4c4f69;
+  --seed-primary: #8839ef;
+  --seed-primary-fg: #ffffff;
+  --seed-border: #dee2e9;
+  --seed-muted-fg: #6c6f85;
+  --seed-surface: #f5f6f9;
+  --seed-success: #40a02b;
+  --seed-warning: #df8e1d;
+  --seed-error: #d20f39;
+  --seed-info: #1e66f5;
+}
+[data-skin='catppuccin'].dark {
+  --seed-bg: #181825;
+  --seed-card: #1e1e2e;
+  --seed-elevated: #272739;
+  --seed-fg: #cdd6f4;
+  --seed-primary: #cba6f7;
+  --seed-primary-fg: #1e1e2e;
+  --seed-border: #313244;
+  --seed-muted-fg: #a6adc8;
+  --seed-surface: initial;
+  --seed-success: #a6e3a1;
+  --seed-warning: #f9e2af;
+  --seed-error: #f38ba8;
+  --seed-info: #89b4fa;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   东京夜 Tokyo Night
+   ───────────────────────────────────────────────────────────── */
+[data-skin='tokyo'] {
+  --seed-bg: #e6e7ed;
+  --seed-card: #ffffff;
+  --seed-elevated: #ffffff;
+  --seed-fg: #343b58;
+  --seed-primary: #2e7de9;
+  --seed-primary-fg: #ffffff;
+  --seed-border: #d7dae5;
+  --seed-muted-fg: #6172b0;
+  --seed-surface: #f2f3f7;
+  --seed-success: #587539;
+  --seed-warning: #8f5e15;
+  --seed-error: #c64343;
+  --seed-info: #2e7de9;
+}
+[data-skin='tokyo'].dark {
+  --seed-bg: #16161e;
+  --seed-card: #1a1b26;
+  --seed-elevated: #24283b;
+  --seed-fg: #c0caf5;
+  --seed-primary: #7aa2f7;
+  --seed-primary-fg: #16161e;
+  --seed-border: #2c3049;
+  --seed-muted-fg: #8990b3;
+  --seed-surface: initial;
+  --seed-success: #9ece6a;
+  --seed-warning: #e0af68;
+  --seed-error: #f7768e;
+  --seed-info: #7dcfff;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   樱色 Sakura
+   ───────────────────────────────────────────────────────────── */
+[data-skin='sakura'] {
+  --seed-bg: #fff8fa;
+  --seed-card: #ffffff;
+  --seed-elevated: #ffffff;
+  --seed-fg: #4a2c38;
+  --seed-primary: #d1618a;
+  --seed-primary-fg: #ffffff;
+  --seed-border: #f5e0e8;
+  --seed-muted-fg: #8c6d78;
+  --seed-surface: #fdf2f6;
+}
+[data-skin='sakura'].dark {
+  --seed-bg: #181017;
+  --seed-card: #241823;
+  --seed-elevated: #2e2030;
+  --seed-fg: #f7e4ea;
+  --seed-primary: #f2a3bb;
+  --seed-primary-fg: #2a1119;
+  --seed-border: #3f2a38;
+  --seed-muted-fg: #bb96a4;
+  --seed-surface: initial;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   深海 Abyss
+   ───────────────────────────────────────────────────────────── */
+[data-skin='abyss'] {
+  --seed-bg: #f3f8fb;
+  --seed-card: #ffffff;
+  --seed-elevated: #ffffff;
+  --seed-fg: #0b2434;
+  --seed-primary: #0369a1;
+  --seed-primary-fg: #ffffff;
+  --seed-border: #dae7f0;
+  --seed-muted-fg: #55707f;
+  --seed-surface: #eef5fa;
+}
+[data-skin='abyss'].dark {
+  --seed-bg: #03111b;
+  --seed-card: #091d2b;
+  --seed-elevated: #0e2839;
+  --seed-fg: #d5e8f2;
+  --seed-primary: #38bdf8;
+  --seed-primary-fg: #03202e;
+  --seed-border: #163449;
+  --seed-muted-fg: #7fa4ba;
+  --seed-surface: initial;
+}
+
+/* =====================================================================
+   派生层 — 由种子色推导全部语义 token
+   只引用 --seed-*，因此与上面的皮肤块互不冲突。
+   ===================================================================== */
+:root {
+  color-scheme: var(--seed-scheme, light);
+
+  /* ── 表面层次 ── */
+  --background: var(--seed-bg);
+  --foreground: var(--seed-fg);
+  --card: var(--seed-card);
+  --card-foreground: var(--seed-fg);
+  --popover: var(--seed-elevated, var(--seed-card));
+  --popover-foreground: var(--seed-fg);
+  --elevated: var(--seed-elevated, var(--seed-card));
+
+  /* 微弱内嵌面板（原 bg-slate-50）→ 稍强面板（原 bg-slate-100/200） */
+  --surface: var(--seed-surface, color-mix(in oklab, var(--seed-card) 96.5%, var(--seed-fg)));
+  --surface-2: var(--seed-surface-2, color-mix(in oklab, var(--seed-card) 94%, var(--seed-fg)));
+  --surface-3: color-mix(in oklab, var(--seed-card) 88%, var(--seed-fg));
+
+  /* ── 品牌色阶 ── */
+  --primary: var(--seed-primary);
+  --primary-foreground: var(--seed-primary-fg);
+
+  --brand-50: color-mix(in oklab, var(--seed-primary) 8%, var(--seed-card));
+  --brand-100: color-mix(in oklab, var(--seed-primary) 16%, var(--seed-card));
+  --brand-200: color-mix(in oklab, var(--seed-primary) 30%, var(--seed-card));
+  --brand-300: color-mix(in oklab, var(--seed-primary) 48%, var(--seed-card));
+  --brand-400: color-mix(in oklab, var(--seed-primary) 72%, var(--seed-card));
+  --brand-500: var(--seed-primary);
+  --brand-600: color-mix(in oklab, var(--seed-primary) 84%, var(--seed-fg));
+  --brand-700: color-mix(in oklab, var(--seed-primary) 66%, var(--seed-fg));
+
+  /* ── 中性语义 ── */
+  --secondary: var(--surface-2);
+  --secondary-foreground: var(--seed-fg);
+  --muted: var(--seed-muted, color-mix(in oklab, var(--seed-card) 94%, var(--seed-fg)));
+  --muted-foreground: var(--seed-muted-fg);
+  --accent: color-mix(in oklab, var(--seed-primary) 11%, var(--seed-card));
+  --accent-foreground: color-mix(in oklab, var(--seed-primary) 72%, var(--seed-fg));
+
+  --border: var(--seed-border);
+  --border-strong: color-mix(in oklab, var(--seed-border) 58%, var(--seed-fg));
+  --border-subtle: color-mix(in oklab, var(--seed-border) 55%, var(--seed-card));
+  --input: var(--seed-border);
+  --ring: var(--seed-primary);
+
+  /* ── 反馈色：文本 / 底色 / 边框 / 底色上的文本 ── */
+  --success: var(--seed-success);
+  --success-bg: color-mix(in oklab, var(--seed-success) var(--seed-tint-bg, 14%), var(--seed-card));
+  --success-border: color-mix(in oklab, var(--seed-success) var(--seed-tint-border, 32%), var(--seed-card));
+  --success-foreground: color-mix(in oklab, var(--seed-success) 80%, var(--seed-fg));
+
+  --warning: var(--seed-warning);
+  --warning-bg: color-mix(in oklab, var(--seed-warning) var(--seed-tint-bg, 14%), var(--seed-card));
+  --warning-border: color-mix(in oklab, var(--seed-warning) var(--seed-tint-border, 32%), var(--seed-card));
+  --warning-foreground: color-mix(in oklab, var(--seed-warning) 80%, var(--seed-fg));
+
+  --error: var(--seed-error);
+  --error-bg: color-mix(in oklab, var(--seed-error) var(--seed-tint-bg, 14%), var(--seed-card));
+  --error-border: color-mix(in oklab, var(--seed-error) var(--seed-tint-border, 32%), var(--seed-card));
+  --error-foreground: color-mix(in oklab, var(--seed-error) 80%, var(--seed-fg));
+
+  --info: var(--seed-info);
+  --info-bg: color-mix(in oklab, var(--seed-info) var(--seed-tint-bg, 14%), var(--seed-card));
+  --info-border: color-mix(in oklab, var(--seed-info) var(--seed-tint-border, 32%), var(--seed-card));
+  --info-foreground: color-mix(in oklab, var(--seed-info) 80%, var(--seed-fg));
+
+  --destructive: var(--seed-error);
+  --destructive-foreground: #ffffff;
+
+  /* ── 分类标签色（见 globals.css 的 .tag-* 工具类）── */
+  --tag-blue-bg: color-mix(in oklab, var(--hue-blue) var(--seed-tint-bg, 14%), var(--seed-card));
+  --tag-blue-fg: color-mix(in oklab, var(--hue-blue) 80%, var(--seed-fg));
+  --tag-sky-bg: color-mix(in oklab, var(--hue-sky) var(--seed-tint-bg, 14%), var(--seed-card));
+  --tag-sky-fg: color-mix(in oklab, var(--hue-sky) 80%, var(--seed-fg));
+  --tag-purple-bg: color-mix(in oklab, var(--hue-purple) var(--seed-tint-bg, 14%), var(--seed-card));
+  --tag-purple-fg: color-mix(in oklab, var(--hue-purple) 80%, var(--seed-fg));
+  --tag-green-bg: color-mix(in oklab, var(--hue-green) var(--seed-tint-bg, 14%), var(--seed-card));
+  --tag-green-fg: color-mix(in oklab, var(--hue-green) 80%, var(--seed-fg));
+  --tag-amber-bg: color-mix(in oklab, var(--hue-amber) var(--seed-tint-bg, 14%), var(--seed-card));
+  --tag-amber-fg: color-mix(in oklab, var(--hue-amber) 80%, var(--seed-fg));
+  --tag-rose-bg: color-mix(in oklab, var(--hue-rose) var(--seed-tint-bg, 14%), var(--seed-card));
+  --tag-rose-fg: color-mix(in oklab, var(--hue-rose) 80%, var(--seed-fg));
+  --tag-cyan-bg: color-mix(in oklab, var(--hue-cyan) var(--seed-tint-bg, 14%), var(--seed-card));
+  --tag-cyan-fg: color-mix(in oklab, var(--hue-cyan) 80%, var(--seed-fg));
+
+  /* ── 侧边栏 ── */
+  --sidebar-background: color-mix(in oklab, var(--seed-bg) 97%, var(--seed-fg));
+  --sidebar-foreground: var(--seed-fg);
+  --sidebar-primary: var(--seed-primary);
+  --sidebar-primary-foreground: var(--seed-primary-fg);
+  --sidebar-accent: color-mix(in oklab, var(--seed-primary) 11%, var(--seed-card));
+  --sidebar-accent-foreground: color-mix(in oklab, var(--seed-primary) 72%, var(--seed-fg));
+  --sidebar-border: var(--seed-border);
+  --sidebar-ring: var(--seed-primary);
+
+  /* ── 图表 ── */
+  --chart-1: var(--seed-primary);
+  --chart-2: var(--seed-warning);
+  --chart-3: var(--seed-info);
+  --chart-4: var(--seed-success);
+  --chart-5: var(--seed-error);
+
+  /* ── 玻璃拟态 ── */
+  --glass-bg: color-mix(in srgb, var(--seed-card) 64%, transparent);
+  --glass-bg-heavy: color-mix(in srgb, var(--seed-card) 88%, transparent);
+  --glass-border: color-mix(in srgb, var(--seed-fg) 10%, transparent);
+  --glass-highlight: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--seed-card) 45%, transparent) 0%,
+    transparent 60%
+  );
+  --glass-inner-shadow: inset 0 1px 1px color-mix(in srgb, var(--seed-card) 55%, transparent);
+
+  /* ── 阴影（暗色下用 --seed-shadow-boost 加深）──
+     刻意不叫 --shadow-*，避免与 Tailwind v4 自带的 --shadow-* 主题命名空间
+     在 :root 上互相覆盖；globals.css 里再映射到 shadow-* 工具类。 */
+  --elev-rgb: var(--seed-shadow-rgb, 15 23 42);
+  --elev-boost: var(--seed-shadow-boost, 1);
+  --elev-xs: 0 1px 2px 0 rgb(var(--elev-rgb) / calc(0.05 * var(--elev-boost)));
+  --elev-sm: 0 1px 3px 0 rgb(var(--elev-rgb) / calc(0.07 * var(--elev-boost))),
+    0 1px 2px -1px rgb(var(--elev-rgb) / calc(0.06 * var(--elev-boost)));
+  --elev-md: 0 4px 12px -2px rgb(var(--elev-rgb) / calc(0.08 * var(--elev-boost))),
+    0 2px 4px -2px rgb(var(--elev-rgb) / calc(0.05 * var(--elev-boost)));
+  --elev-lg: 0 12px 28px -6px rgb(var(--elev-rgb) / calc(0.1 * var(--elev-boost))),
+    0 4px 10px -4px rgb(var(--elev-rgb) / calc(0.06 * var(--elev-boost)));
+  --elev-xl: 0 24px 48px -12px rgb(var(--elev-rgb) / calc(0.14 * var(--elev-boost)));
+  --glass-shadow: var(--elev-lg);
+
+  /* ── 代码块 ── */
+  --code-bg: color-mix(in oklab, var(--seed-card) 95%, var(--seed-fg));
+
+  /* ── 圆角 ── */
+  --radius: 0.625rem;
+}

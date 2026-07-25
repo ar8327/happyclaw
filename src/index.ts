@@ -50,6 +50,7 @@ import {
   getTaskById,
   getUserPrimarySessionChannel,
   getLastInboundMessage,
+  getLastInboundMessageInThread,
   initDatabase,
   getSessionBinding,
   getSessionRecord,
@@ -79,6 +80,7 @@ import {
   listAgentsByJid,
   getGroupsByOwner,
   getMessagesPage,
+  messageExists,
   insertUsageRecord,
   isPrimarySessionFolder,
   getTranscriptMessagesSince,
@@ -146,6 +148,9 @@ import type {
   WeChatConnectConfig,
 } from './im-manager.js';
 import { SessionRuntimeManager } from './session-runtime-manager.js';
+import type { IpcInjection } from './session-runtime-queue.js';
+import { interruptibleSleep } from './message-notifier.js';
+import { enqueueImDelivery, startImOutboxWorker } from './im-outbox.js';
 import { TurnManager } from './turn-manager.js';
 import { saveTurnTrace, cleanupOldTraces } from './turn-trace.js';
 import { startSchedulerLoop } from './task-scheduler.js';
@@ -239,89 +244,94 @@ function getIdleShutdownTimeoutMs(group?: RegisteredGroup): number {
  */
 const triggerMessagesByFolder = new Map<
   string,
-  Map<string, { id: string; sender: string }>
->();
-
-// IPC delivery watchdog: track piped messages awaiting agent acknowledgement.
-// When the agent-runner consumes an IPC message it emits a status stream_event
-// "ipc_message_received".  If no ack arrives within IPC_DELIVERY_TIMEOUT_MS the
-// host logs a warning — this helped us diagnose the "swallowed message" bug
-// where the SDK silently dropped an IPC-injected query.
-//
-// Uses a counter + per-entry timers so rapid-fire messages to the same JID
-// don't silently cancel each other's watchdogs.
-const IPC_DELIVERY_TIMEOUT_MS = 120_000;
-const pendingIpcDeliveries = new Map<
-  string,
-  {
-    count: number;
-    timers: ReturnType<typeof setTimeout>[];
-    firstSentAt: number;
-  }
->();
-function trackIpcDelivery(chatJid: string): void {
-  const existing = pendingIpcDeliveries.get(chatJid);
-  const now = Date.now();
-  const timer = setTimeout(() => {
-    const entry = pendingIpcDeliveries.get(chatJid);
-    if (entry) {
-      const idx = entry.timers.indexOf(timer);
-      if (idx >= 0) entry.timers.splice(idx, 1);
-      entry.count = Math.max(0, entry.count - 1);
-      logger.warn(
-        { chatJid, timeoutMs: IPC_DELIVERY_TIMEOUT_MS },
-        'IPC message not acknowledged by agent — possible SDK hang or dropped query',
-      );
-      if (entry.count <= 0) pendingIpcDeliveries.delete(chatJid);
+  Map<
+    string,
+    {
+      id: string;
+      sender: string;
+      threadId?: string;
+      rootId?: string;
     }
-  }, IPC_DELIVERY_TIMEOUT_MS);
-  if (existing) {
-    existing.count++;
-    existing.timers.push(timer);
-  } else {
-    pendingIpcDeliveries.set(chatJid, {
-      count: 1,
-      timers: [timer],
-      firstSentAt: now,
-    });
-  }
-}
-function ackIpcDelivery(chatJid: string): void {
-  const entry = pendingIpcDeliveries.get(chatJid);
-  if (entry && entry.count > 0) {
-    entry.count--;
-    const timer = entry.timers.shift();
-    if (timer) clearTimeout(timer);
-    logger.info(
-      {
-        chatJid,
-        pending: entry.count,
-        latencyMs: Date.now() - entry.firstSentAt,
-      },
-      'IPC delivery acknowledged by agent',
-    );
-    if (entry.count <= 0) pendingIpcDeliveries.delete(chatJid);
-  }
+  >
+>();
+
+// Monotonic per-runtime-folder counter advanced only after the host has
+// durably accepted a send_message/send_image/send_file IPC request. This is
+// the authoritative IM/Web reply signal; a provider tool-end event alone
+// cannot distinguish a successful tool result from an isError result.
+const durableOutboundAcceptances = new Map<string, number>();
+
+function markDurableOutboundAcceptance(folder: string): void {
+  durableOutboundAcceptances.set(
+    folder,
+    (durableOutboundAcceptances.get(folder) ?? 0) + 1,
+  );
 }
 
-function trackIpcDeliveries(chatJids: Iterable<string>): void {
-  for (const chatJid of new Set(chatJids)) {
-    if (chatJid) trackIpcDelivery(chatJid);
-  }
-}
+// Writing an IPC file is not delivery. Exact UUID delivery records below keep
+// the cursor uncommitted until the runner finishes the corresponding query.
+const IPC_DELIVERY_TIMEOUT_MS = 120_000;
 
 // Ack-driven cursor commits: writing an IPC file does NOT mean the agent
-// consumed it. The lastAgentTimestamp advance is deferred until the agent
-// emits "ipc_message_received". If the ack never arrives (wedged runner,
-// process death, SDK dropping the query) the entry expires or is discarded
-// on runtime exit, the leftover IPC file is removed, and the messages are
-// re-delivered from the DB on the next turn instead of being silently lost.
+// completed it. The lastAgentTimestamp advance is deferred until the agent
+// emits "ipc_message_delivered". A received event only converts the short
+// pickup timeout into a longer query lease.
 interface PendingIpcCursorCommit {
+  deliveryId: string;
+  chatJid: string;
+  groupFolder: string;
   rowid: number;
   ipcFilePath: string | null;
   timer: ReturnType<typeof setTimeout>;
+  received: boolean;
 }
-const pendingIpcCursorCommits = new Map<string, PendingIpcCursorCommit[]>();
+const pendingIpcCursorCommits = new Map<string, PendingIpcCursorCommit>();
+const IPC_DELIVERY_LEASE_MS = 30 * 60_000;
+const WORKER_REDELIVERY_DELAYS_MS = [
+  1_000,
+  5_000,
+  30_000,
+  2 * 60_000,
+  10 * 60_000,
+  30 * 60_000,
+];
+const workerRedeliveryAttempts = new Map<string, number>();
+const workerRedeliveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function clearWorkerRedeliveryState(chatJid: string): void {
+  const timer = workerRedeliveryTimers.get(chatJid);
+  if (timer) clearTimeout(timer);
+  workerRedeliveryTimers.delete(chatJid);
+  workerRedeliveryAttempts.delete(chatJid);
+}
+
+function enqueueIpcRedelivery(chatJid: string): void {
+  const { baseJid, agentId } = splitWorkerConversationJid(chatJid);
+  if (agentId) {
+    if (workerRedeliveryTimers.has(chatJid)) return;
+    const attempt = (workerRedeliveryAttempts.get(chatJid) ?? 0) + 1;
+    workerRedeliveryAttempts.set(chatJid, attempt);
+    const delay =
+      WORKER_REDELIVERY_DELAYS_MS[
+        Math.min(attempt - 1, WORKER_REDELIVERY_DELAYS_MS.length - 1)
+      ];
+    const workerSessionId = buildWorkerSessionRecordId(agentId);
+    const timer = setTimeout(() => {
+      workerRedeliveryTimers.delete(chatJid);
+      queue.enqueueTask(
+        workerSessionId,
+        `ipc-redelivery:${agentId}`,
+        async () => {
+          await processAgentConversation(baseJid, agentId);
+        },
+      );
+    }, delay);
+    timer.unref?.();
+    workerRedeliveryTimers.set(chatJid, timer);
+    return;
+  }
+  queue.enqueueMessageCheck(chatJid);
+}
 
 function removeUnconsumedIpcFile(
   chatJid: string,
@@ -347,89 +357,127 @@ function removeUnconsumedIpcFile(
 function deferIpcCursorCommit(
   chatJid: string,
   rowid: number,
-  ipcFilePath: string | null,
+  injection: {
+    deliveryId: string;
+    ipcFilePath: string;
+    groupFolder: string;
+  },
 ): void {
-  const timer = setTimeout(() => {
-    const entries = pendingIpcCursorCommits.get(chatJid);
-    if (!entries) return;
-    const idx = entries.findIndex((e) => e.timer === timer);
-    if (idx < 0) return;
-    const [expired] = entries.splice(idx, 1);
-    if (entries.length === 0) pendingIpcCursorCommits.delete(chatJid);
-    removeUnconsumedIpcFile(chatJid, expired.ipcFilePath);
+  const expire = () => {
+    const expired = pendingIpcCursorCommits.get(injection.deliveryId);
+    if (!expired) return;
+    pendingIpcCursorCommits.delete(injection.deliveryId);
+    removeUnconsumedIpcFile(expired.chatJid, expired.ipcFilePath);
     logger.warn(
-      { chatJid, rowid: expired.rowid, timeoutMs: IPC_DELIVERY_TIMEOUT_MS },
-      'IPC cursor commit expired without agent ack — re-queueing messages for delivery',
+      {
+        chatJid: expired.chatJid,
+        deliveryId: expired.deliveryId,
+        rowid: expired.rowid,
+        received: expired.received,
+      },
+      'IPC delivery lease expired — re-queueing messages for delivery',
     );
-    queue.enqueueMessageCheck(chatJid);
-  }, IPC_DELIVERY_TIMEOUT_MS);
-  const entries = pendingIpcCursorCommits.get(chatJid);
-  if (entries) entries.push({ rowid, ipcFilePath, timer });
-  else pendingIpcCursorCommits.set(chatJid, [{ rowid, ipcFilePath, timer }]);
+    enqueueIpcRedelivery(expired.chatJid);
+  };
+  const timer = setTimeout(expire, IPC_DELIVERY_TIMEOUT_MS);
+  timer.unref?.();
+  pendingIpcCursorCommits.set(injection.deliveryId, {
+    deliveryId: injection.deliveryId,
+    chatJid,
+    groupFolder: injection.groupFolder,
+    rowid,
+    ipcFilePath: injection.ipcFilePath,
+    timer,
+    received: false,
+  });
 }
 
-function commitIpcCursorOnAck(chatJid: string): void {
-  const entries = pendingIpcCursorCommits.get(chatJid);
-  if (!entries || entries.length === 0) return;
-  const entry = entries.shift()!;
-  clearTimeout(entry.timer);
-  if (entries.length === 0) pendingIpcCursorCommits.delete(chatJid);
-  const current = lastAgentTimestamp[chatJid];
-  if (!current || entry.rowid > current.rowid) {
-    lastAgentTimestamp[chatJid] = { rowid: entry.rowid };
-    saveState();
+function markIpcCursorReceived(deliveryIds: Iterable<string>): void {
+  for (const deliveryId of new Set(deliveryIds)) {
+    const entry = pendingIpcCursorCommits.get(deliveryId);
+    if (!entry) continue;
+    clearTimeout(entry.timer);
+    entry.received = true;
+    // The runner already removed the IPC file.  Do not let an old path delete
+    // a later file during recovery.
+    entry.ipcFilePath = null;
+    entry.timer = setTimeout(() => {
+      const current = pendingIpcCursorCommits.get(deliveryId);
+      if (!current) return;
+      pendingIpcCursorCommits.delete(deliveryId);
+      logger.warn(
+        {
+          chatJid: current.chatJid,
+          deliveryId,
+          leaseMs: IPC_DELIVERY_LEASE_MS,
+        },
+        'Runtime received IPC but never completed delivery — re-queueing',
+      );
+      enqueueIpcRedelivery(current.chatJid);
+    }, IPC_DELIVERY_LEASE_MS);
+    entry.timer.unref?.();
   }
+}
+
+function commitIpcCursorOnAck(deliveryIds: Iterable<string>): void {
+  let changed = false;
+  for (const deliveryId of new Set(deliveryIds)) {
+    const entry = pendingIpcCursorCommits.get(deliveryId);
+    if (!entry) continue;
+    pendingIpcCursorCommits.delete(deliveryId);
+    clearTimeout(entry.timer);
+    const current = lastAgentTimestamp[entry.chatJid];
+    if (!current || entry.rowid > current.rowid) {
+      lastAgentTimestamp[entry.chatJid] = { rowid: entry.rowid };
+      changed = true;
+    }
+    clearWorkerRedeliveryState(entry.chatJid);
+  }
+  if (changed) saveState();
+}
+
+function returnIpcDeliveries(deliveryIds: Iterable<string>): string[] {
+  const chatJids = new Set<string>();
+  for (const deliveryId of new Set(deliveryIds)) {
+    const entry = pendingIpcCursorCommits.get(deliveryId);
+    if (!entry) continue;
+    pendingIpcCursorCommits.delete(deliveryId);
+    clearTimeout(entry.timer);
+    removeUnconsumedIpcFile(entry.chatJid, entry.ipcFilePath);
+    chatJids.add(entry.chatJid);
+  }
+  for (const chatJid of chatJids) enqueueIpcRedelivery(chatJid);
+  return [...chatJids];
 }
 
 /**
- * Drop all deferred cursor commits for a chat without committing, removing
- * any IPC input files the runner never consumed. Returns the dropped count
- * so callers can trigger re-delivery.
+ * Drop all deferred cursor commits owned by a runtime folder.  Received but
+ * unfinished messages remain uncommitted and are fetched from DB again.
  */
-function discardPendingIpcCursorCommits(chatJid: string): number {
-  const entries = pendingIpcCursorCommits.get(chatJid);
-  if (!entries || entries.length === 0) return 0;
-  pendingIpcCursorCommits.delete(chatJid);
-  for (const entry of entries) {
+function discardPendingIpcCursorCommitsForFolder(
+  groupFolder: string,
+): string[] {
+  const chatJids = new Set<string>();
+  for (const [deliveryId, entry] of pendingIpcCursorCommits) {
+    if (entry.groupFolder !== groupFolder) continue;
+    pendingIpcCursorCommits.delete(deliveryId);
     clearTimeout(entry.timer);
-    removeUnconsumedIpcFile(chatJid, entry.ipcFilePath);
+    removeUnconsumedIpcFile(entry.chatJid, entry.ipcFilePath);
+    chatJids.add(entry.chatJid);
   }
-  return entries.length;
+  return [...chatJids];
 }
 
-function ackIpcDeliveries(chatJids: Iterable<string>): void {
-  for (const chatJid of new Set(chatJids)) {
-    if (chatJid) ackIpcDelivery(chatJid);
+function discardPendingIpcCursorCommits(chatJid: string): number {
+  let dropped = 0;
+  for (const [deliveryId, entry] of pendingIpcCursorCommits) {
+    if (entry.chatJid !== chatJid) continue;
+    pendingIpcCursorCommits.delete(deliveryId);
+    clearTimeout(entry.timer);
+    removeUnconsumedIpcFile(entry.chatJid, entry.ipcFilePath);
+    dropped++;
   }
-}
-
-function collectIpcDeliveryKeys(
-  chatJid: string,
-  messages: Array<Pick<DbMessage, 'chat_jid' | 'source_jid'>>,
-): string[] {
-  const keys = new Set<string>([chatJid]);
-  for (const message of messages) {
-    const sourceJid = message.source_jid || message.chat_jid;
-    if (sourceJid) keys.add(sourceJid);
-  }
-  return Array.from(keys);
-}
-
-function collectIpcAckKeys(
-  fallbackJids: string[],
-  streamEvent: NonNullable<RuntimeOutput['streamEvent']> & {
-    ipcAckTargets?: string[];
-    ipcAckSources?: string[];
-  },
-): string[] {
-  const keys = new Set<string>(fallbackJids);
-  for (const jid of streamEvent.ipcAckTargets || []) {
-    if (jid) keys.add(jid);
-  }
-  for (const jid of streamEvent.ipcAckSources || []) {
-    if (jid) keys.add(jid);
-  }
-  return Array.from(keys);
+  return dropped;
 }
 
 function persistRuntimeStateForSession(
@@ -702,14 +750,6 @@ function resolveChatOwnerKey(
     fallbackGroup ?? registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   if (!group) return undefined;
   return resolveSessionOwnerKey(group.folder);
-}
-
-function clearIpcDeliveryTracker(chatJid: string): void {
-  const entry = pendingIpcDeliveries.get(chatJid);
-  if (entry) {
-    for (const t of entry.timers) clearTimeout(t);
-    pendingIpcDeliveries.delete(chatJid);
-  }
 }
 
 function applyExplicitChatBinding(
@@ -1074,26 +1114,13 @@ function sendImWithFailTracking(
   localImagePaths: string[],
   options?: IMSendOptions,
 ): void {
-  imManager
-    .sendMessage(imJid, text, localImagePaths, options)
-    .then(() => {
-      imSendFailCounts.delete(imJid);
-    })
-    .catch((err) => {
-      logger.warn({ imJid, err }, 'Failed to relay message to IM');
-      const count = (imSendFailCounts.get(imJid) ?? 0) + 1;
-      imSendFailCounts.set(imJid, count);
-      if (count >= IM_SEND_FAIL_THRESHOLD && shouldAutoUnbindOnFailure(imJid)) {
-        try {
-          unbindImGroup(
-            imJid,
-            'Auto-unbound IM group after consecutive send failures',
-          );
-        } catch (unbindErr) {
-          logger.error({ imJid, unbindErr }, 'Failed to auto-unbind IM group');
-        }
-      }
-    });
+  enqueueImDelivery({
+    id: crypto.randomUUID(),
+    sourceChatJid: imJid,
+    targetJid: imJid,
+    kind: 'text',
+    payload: { text, localImagePaths, options },
+  });
 }
 
 function isNoopAgentReply(text: string): boolean {
@@ -2005,7 +2032,13 @@ function formatMessages(
     // so the agent can specify which message to reply to via send_message(reply_to_message_id=...)
     const isFeishuMsg = channelType === 'feishu';
     const idAttr =
-      feishuAgentReply && isFeishuMsg ? ` id="${escapeXml(m.id)}"` : '';
+      (feishuAgentReply || Boolean(m.thread_id)) && isFeishuMsg
+        ? ` id="${escapeXml(m.id)}"`
+        : '';
+    const threadAttr =
+      isFeishuMsg && m.thread_id ? ` thread="${escapeXml(m.thread_id)}"` : '';
+    const rootAttr =
+      isFeishuMsg && m.root_id ? ` root="${escapeXml(m.root_id)}"` : '';
 
     // Build reply-to attributes if the message is replying to another message.
     // Uses lightweight attribute references instead of embedding full content —
@@ -2022,7 +2055,7 @@ function formatMessages(
       }
     }
 
-    return `<message sender="${escapeXml(m.sender_name)}"${sourceAttr}${idAttr}${replyAttrs} time="${m.timestamp}">${escapeXml(content)}</message>`;
+    return `<message sender="${escapeXml(m.sender_name)}"${sourceAttr}${idAttr}${threadAttr}${rootAttr}${replyAttrs} time="${m.timestamp}">${escapeXml(content)}</message>`;
   });
   return `<messages>\n${lines.join('\n')}\n</messages>`;
 }
@@ -2184,6 +2217,42 @@ function syncPendingTurnObservability(folder: string): void {
   );
 }
 
+function handoffQueuedTurn(folder: string, currentChatJid?: string): boolean {
+  const nextEntry = turnManager.handoffNext(folder);
+  if (!nextEntry) return false;
+
+  logger.info(
+    {
+      folder,
+      nextChatJid: nextEntry.chatJid,
+      nextChannel: nextEntry.channel,
+    },
+    'Turn: handing off next queued entry',
+  );
+  const queuedDetail =
+    nextEntry.chatJid === currentChatJid
+      ? '上一轮已结束，等待下一轮开始'
+      : `正在等待当前 Turn 结束 · ${nextEntry.channel}`;
+  broadcastRunnerState(nextEntry.chatJid, 'queued', queuedDetail);
+  queue.enqueueMessageCheck(nextEntry.chatJid);
+  syncPendingTurnObservability(folder);
+  return true;
+}
+
+const turnQueuePatrolTimer = setInterval(() => {
+  for (const folder of turnManager.getPendingFolders()) {
+    if (turnManager.getActiveTurn(folder)) continue;
+    if (turnManager.hasHandoffInFlight(folder)) continue;
+    if (queue.hasActiveRuntimeForFolder(folder)) continue;
+    logger.warn(
+      { folder },
+      'Pending Turn has no active owner; repairing handoff',
+    );
+    handoffQueuedTurn(folder);
+  }
+}, 30_000);
+turnQueuePatrolTimer.unref?.();
+
 function broadcastInterruptedTurn(
   folder: string,
   chatJid: string,
@@ -2206,6 +2275,7 @@ function broadcastInterruptedTurn(
   });
   turnObservabilityManager.clear(folder);
   syncPendingTurnObservability(folder);
+  handoffQueuedTurn(folder, chatJid);
 }
 
 /**
@@ -2307,8 +2377,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   await setTyping(chatJid, true);
   let hadError = false;
-  let sentReply = false;
+  // Cumulative for the whole runtime invocation. Unlike the per-message
+  // silent-fallback flag below, this must never be reset after an IPC inject:
+  // once a user-visible reply has been durably accepted, a later idle close
+  // must not roll the cursor back and duplicate that reply.
+  let deliveredUserVisibleReply = false;
   let sawSendMessageTool = false;
+  const outboundAcceptanceBaseline =
+    durableOutboundAcceptances.get(group.folder) ?? 0;
+  const hasDurableUserVisibleReply = () =>
+    deliveredUserVisibleReply ||
+    (durableOutboundAcceptances.get(group.folder) ?? 0) >
+      outboundAcceptanceBaseline;
   let lastError = '';
   let cursorCommitted = false;
   let lastReplyMsgId: string | undefined;
@@ -2407,26 +2487,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   };
 
   const drainQueuedTurn = (): boolean => {
-    const nextEntry = turnManager.drainNext(group.folder);
-    if (!nextEntry) return false;
-
-    logger.info(
-      {
-        folder: group.folder,
-        nextChatJid: nextEntry.chatJid,
-        nextChannel: nextEntry.channel,
-      },
-      'Turn: draining next queued entry',
-    );
-    // The next message poll cycle will pick up the queued chatJid's messages
-    // via the normal cursor mechanism since we didn't advance cursor for queued messages.
-    const queuedDetail =
-      nextEntry.chatJid === chatJid
-        ? '上一轮已结束，等待下一轮开始'
-        : `正在等待当前 Turn 结束 · ${nextEntry.channel}`;
-    broadcastRunnerState(nextEntry.chatJid, 'queued', queuedDetail);
-    queue.enqueueMessageCheck(nextEntry.chatJid);
-    return true;
+    return handoffQueuedTurn(group.folder, chatJid);
   };
 
   const completeSuccessfulTurn = (): void => {
@@ -2454,11 +2515,24 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // Build per-sourceJid trigger message map so IPC handler can thread
   // replies to the correct triggering message (not whatever DB says is latest).
-  const triggerMap = new Map<string, { id: string; sender: string }>();
+  const triggerMap = new Map<
+    string,
+    {
+      id: string;
+      sender: string;
+      threadId?: string;
+      rootId?: string;
+    }
+  >();
   for (const m of missedMessages) {
     const srcJid = m.source_jid || m.chat_jid;
     // Last message per source wins (chronological order)
-    triggerMap.set(srcJid, { id: m.id, sender: m.sender });
+    triggerMap.set(srcJid, {
+      id: m.id,
+      sender: m.sender,
+      threadId: m.thread_id,
+      rootId: m.root_id,
+    });
   }
   triggerMessagesByFolder.set(effectiveGroup.folder, triggerMap);
 
@@ -2475,7 +2549,39 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     sourceChannelType === 'feishu' &&
     feishuConfig?.streamingCard
   ) {
-    progressCard = imManager.createProgressCard(sourceChannel);
+    const progressTrigger = [...missedMessages]
+      .reverse()
+      .find(
+        (message) => (message.source_jid || message.chat_jid) === sourceChannel,
+      );
+    const titleSource = progressTrigger?.content.replace(/\s+/g, ' ').trim();
+    progressCard = imManager.createProgressCard(sourceChannel, {
+      // A chat-root message must create at the root. Only an explicit thread
+      // trigger is eligible for reply_in_thread.
+      replyToMsgId: progressTrigger?.thread_id ? progressTrigger.id : undefined,
+      threadId: progressTrigger?.thread_id,
+      title: titleSource
+        ? titleSource.length > 48
+          ? `${titleSource.slice(0, 47)}…`
+          : titleSource
+        : undefined,
+      modelLabel: effectiveGroup.model,
+      onStop: feishuConfig.cardVerificationToken
+        ? () => {
+            const active = turnManager.getActiveTurn(group.folder);
+            if (!active) return false;
+            const interrupted = queue.interruptQuery(chatJid);
+            if (interrupted) {
+              broadcastInterruptedTurn(
+                group.folder,
+                sourceChannel,
+                '用户通过飞书卡片停止',
+              );
+            }
+            return interrupted;
+          }
+        : undefined,
+    });
     if (progressCard) {
       registerProgressSession(sourceChannel, progressCard, group.folder);
     }
@@ -2502,11 +2608,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
           // IM Commentary: update the progress card with human-readable explanation (fire-and-forget)
           const _se = result.streamEvent;
-          if (
-            _se.eventType === 'tool_use_start' &&
+          const isOutboundTool =
             typeof _se.toolName === 'string' &&
-            _se.toolName.endsWith('__send_message')
-          ) {
+            /(?:^|__)send_(?:message|image|file)$/.test(_se.toolName);
+          if (_se.eventType === 'tool_use_start' && isOutboundTool) {
             sawSendMessageTool = true;
           }
 
@@ -2537,20 +2642,23 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             se.statusText === 'ipc_message_received'
           ) {
             lastTurnCompletedSuccessfully = false;
-            ackIpcDeliveries(collectIpcAckKeys([chatJid], se));
-            // Cursor commits are keyed by the JID queue.sendMessage() was
-            // called with (= the ack targets), never by source channels.
-            // Fall back to chatJid only for acks without explicit targets.
-            const ackCursorTargets = se.ipcAckTargets?.length
-              ? se.ipcAckTargets
-              : [chatJid];
-            for (const target of new Set(ackCursorTargets)) {
-              commitIpcCursorOnAck(target);
-            }
+            markIpcCursorReceived(se.ipcDeliveryIds || []);
             // The agent just consumed a new user message — it owes a fresh
             // send_message. Reset the flag so the silent-success fallback
             // also covers messages injected mid-turn.
             sawSendMessageTool = false;
+          }
+          if (
+            se.eventType === 'status' &&
+            se.statusText === 'ipc_message_delivered'
+          ) {
+            commitIpcCursorOnAck(se.ipcDeliveryIds || []);
+          }
+          if (
+            se.eventType === 'status' &&
+            se.statusText === 'ipc_messages_returned'
+          ) {
+            returnIpcDeliveries(se.ipcDeliveryIds || []);
           }
           if (se.eventType === 'status' && se.statusText === 'interrupted') {
             wasInterrupted = true;
@@ -2763,7 +2871,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             lastReplyMsgId = await sendMessage(chatJid, text, {
               sendToIM: false,
             });
-            sentReply = true;
+            deliveredUserVisibleReply = true;
             // Persist cursor as soon as a visible reply is emitted.
             // Long-lived runners may stay alive for idleTimeout, and waiting
             // until process exit would cause duplicate replay after restart.
@@ -2803,17 +2911,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   await setTyping(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
-  clearIpcDeliveryTracker(chatJid);
-  // Runtime exited with injected messages never acked: the cursor was never
-  // advanced past them, so re-queue a message check to deliver them in a
-  // fresh turn (their leftover IPC files are removed by the discard).
-  const droppedUnackedIpc = discardPendingIpcCursorCommits(chatJid);
-  if (droppedUnackedIpc > 0) {
+  // A shared folder runtime can receive IPC for several JIDs. Roll back every
+  // unfinished delivery owned by this runtime, not only its launch JID.
+  const droppedIpcJids = discardPendingIpcCursorCommitsForFolder(group.folder);
+  if (droppedIpcJids.length > 0) {
     logger.warn(
-      { chatJid, droppedUnackedIpc },
-      'Runtime exited with unacked IPC messages — re-queueing for delivery',
+      { chatJid, droppedIpcJids },
+      'Runtime exited with unfinished IPC messages — re-queueing for delivery',
     );
-    queue.enqueueMessageCheck(chatJid);
+    for (const droppedJid of droppedIpcJids) {
+      enqueueIpcRedelivery(droppedJid);
+    }
   }
 
   // Complete or abort ALL Feishu progress cards for this folder
@@ -2861,10 +2969,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             : 'completed',
       { errorDetail: output.error || lastError },
     );
-
-    // Check if there are queued turns to process next
-    drainQueuedTurn();
   }
+  // Always attempt the idempotent handoff. This covers paths where an
+  // interrupt callback already removed the active turn.
+  drainQueuedTurn();
 
   streamingBlocksManager.remove(group.folder);
 
@@ -2902,10 +3010,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return true;
   }
 
-  // Container closed during query (e.g. primary Session drain) without sending a reply:
-  // don't commit cursor so the message gets retried on the next poll cycle.
-  // If sentReply is true the cursor was already committed at line 722, no action needed.
-  if (output.status === 'closed' && !sentReply) {
+  // Container closed during query without any durable user-visible reply:
+  // don't commit the cursor so the message gets retried on the next poll cycle.
+  if (output.status === 'closed' && !hasDurableUserVisibleReply()) {
     logger.warn(
       { group: group.name, chatJid },
       'Container closed during query without reply, keeping cursor for retry',
@@ -2994,7 +3101,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   }
 
-  if (isErrorExit && !sentReply) {
+  if (isErrorExit && !hasDurableUserVisibleReply()) {
     // Only roll back cursor if no reply was sent — if the agent already
     // replied successfully, a subsequent timeout is not a real error and
     // rolling back would cause the same messages to be re-processed,
@@ -3080,25 +3187,29 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   );
   if (!isErrorExit && latestSourceChannel && !sawSendMessageTool) {
     const fallbackText = latestSubstantiveAssistantReply?.content || '收到啦。';
-    let imMsgId: string | undefined;
-    try {
-      imMsgId = await imManager.sendMessage(latestSourceChannel, fallbackText);
-      imSendFailCounts.delete(latestSourceChannel);
-    } catch (err) {
-      logger.warn(
-        { imJid: latestSourceChannel, err },
-        'Failed to relay silent-success fallback to IM',
-      );
-      const count = (imSendFailCounts.get(latestSourceChannel) ?? 0) + 1;
-      imSendFailCounts.set(latestSourceChannel, count);
-    }
+    const fallbackOutboxId = crypto.randomUUID();
+    const fallbackOptions: IMSendOptions = latestConsumedMessage.thread_id
+      ? {
+          replyToMsgId: latestConsumedMessage.id,
+          threadId: latestConsumedMessage.thread_id,
+        }
+      : {};
+    enqueueImDelivery({
+      id: fallbackOutboxId,
+      sourceChatJid: chatJid,
+      targetJid: latestSourceChannel,
+      kind: 'text',
+      payload: {
+        text: fallbackText,
+        options: fallbackOptions,
+      },
+    });
     if (!latestSubstantiveAssistantReply) {
       lastReplyMsgId = await sendMessage(chatJid, fallbackText, {
         sendToIM: false,
-        externalMsgId: imMsgId,
       });
     }
-    sentReply = true;
+    deliveredUserVisibleReply = true;
     logger.warn(
       {
         chatJid,
@@ -3367,26 +3478,27 @@ async function sendMessage(
   const isIMChannel = getChannelType(jid) !== null;
   const sendToIM = options.sendToIM ?? isIMChannel;
   try {
-    let externalMsgId: string | undefined;
+    const msgId = options.externalMsgId || crypto.randomUUID();
     if (sendToIM && isIMChannel) {
-      try {
-        const groupForImages = registeredGroups[jid] ?? getRegisteredGroup(jid);
-        const localImagePaths =
-          options.localImagePaths ??
-          extractLocalImImagePaths(
-            text,
-            resolveEffectiveFolder(jid),
-            resolveChatOwnerKey(jid, groupForImages),
-          );
-        externalMsgId = await imManager.sendMessage(jid, text, localImagePaths);
-      } catch (err) {
-        logger.error({ jid, err }, 'Failed to send message to IM channel');
-      }
+      const groupForImages = registeredGroups[jid] ?? getRegisteredGroup(jid);
+      const localImagePaths =
+        options.localImagePaths ??
+        extractLocalImImagePaths(
+          text,
+          resolveEffectiveFolder(jid),
+          resolveChatOwnerKey(jid, groupForImages),
+        );
+      enqueueImDelivery({
+        id: `reply:${msgId}`,
+        sourceChatJid: jid,
+        targetJid: jid,
+        kind: 'text',
+        payload: { text, localImagePaths },
+      });
     }
 
     // Persist assistant reply so Web polling can render it and clear waiting state.
     // Prefer the IM-returned message ID (e.g. Feishu om_xxx) so inbound reply_to references can match.
-    const msgId = options.externalMsgId || externalMsgId || crypto.randomUUID();
     const timestamp = new Date().toISOString();
     ensureChatExists(jid);
     storeMessageDirect(
@@ -3448,6 +3560,20 @@ function startIpcWatcher(): void {
 
   const ipcBaseDir = path.join(DATA_DIR, 'ipc');
   fs.mkdirSync(ipcBaseDir, { recursive: true });
+  const ipcErrorDir = path.join(ipcBaseDir, 'errors');
+  try {
+    const retainedErrors = fs.existsSync(ipcErrorDir)
+      ? fs.readdirSync(ipcErrorDir).filter((name) => name.endsWith('.json'))
+      : [];
+    if (retainedErrors.length > 0) {
+      logger.warn(
+        { count: retainedErrors.length },
+        'Retained IPC error files require operator review',
+      );
+    }
+  } catch (err) {
+    logger.warn({ err }, 'Failed to inspect retained IPC error files');
+  }
 
   const processIpcFiles = async () => {
     if (shuttingDown) return;
@@ -3490,17 +3616,27 @@ function startIpcWatcher(): void {
       for (const ipcRoot of ipcRoots) {
         const messagesDir = path.join(ipcRoot, 'messages');
         const tasksDir = path.join(ipcRoot, 'tasks');
+        const runtimeAcceptanceKey =
+          ipcRoot === groupIpcRoot
+            ? sourceGroup
+            : `${sourceGroup}#${path.basename(ipcRoot)}`;
 
         // Process messages from this Session workspace IPC directory
         try {
           if (fs.existsSync(messagesDir)) {
             const messageFiles = fs
               .readdirSync(messagesDir)
-              .filter((f) => f.endsWith('.json'));
+              .filter((f) => f.endsWith('.json'))
+              .sort();
             for (const file of messageFiles) {
               const filePath = path.join(messagesDir, file);
+              let deliveryRequestId: string | undefined;
               try {
                 const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+                deliveryRequestId =
+                  typeof data.requestId === 'string'
+                    ? data.requestId
+                    : undefined;
                 if (data.type === 'message' && data.chatJid && data.text) {
                   const targetGroup = registeredGroups[data.chatJid];
                   if (
@@ -3531,70 +3667,106 @@ function startIpcWatcher(): void {
                       const triggerMap =
                         triggerMessagesByFolder.get(sourceGroup);
                       const triggerMsg = triggerMap?.get(data.targetChannel);
-                      const lastInbound =
-                        triggerMsg ||
-                        getLastInboundMessage(
-                          data.chatJid,
-                          data.targetChannel, // source_jid = the IM channel
-                        );
+                      const requestedThread =
+                        agentReplyMode &&
+                        typeof data.threadId === 'string' &&
+                        data.threadId.trim()
+                          ? data.threadId.trim()
+                          : undefined;
+                      const lastInbound = requestedThread
+                        ? triggerMsg?.threadId === requestedThread
+                          ? triggerMsg
+                          : getLastInboundMessageInThread(
+                              data.chatJid,
+                              data.targetChannel,
+                              requestedThread,
+                            )
+                        : triggerMsg ||
+                          getLastInboundMessage(
+                            data.chatJid,
+                            data.targetChannel,
+                          );
                       const sendOptions: IMSendOptions = {};
-                      // Agent-driven reply: use agent-specified ID if available and mode is 'agent'
+                      const resolvedThread =
+                        requestedThread || triggerMsg?.threadId;
                       if (agentReplyMode && data.replyToMsgId) {
                         sendOptions.replyToMsgId = data.replyToMsgId;
-                      } else if (lastInbound?.id) {
+                      } else if (resolvedThread && lastInbound?.id) {
                         sendOptions.replyToMsgId = lastInbound.id;
+                      }
+                      if (resolvedThread) {
+                        sendOptions.threadId = resolvedThread;
                       }
                       if (data.urgent && lastInbound?.sender) {
                         sendOptions.urgent = true;
                         sendOptions.urgentUserIds = [lastInbound.sender];
                       }
-                      // Await IM send to capture external message ID (e.g. Feishu om_xxx)
-                      // so DB stores the platform ID for reply-to matching.
-                      let imMsgId: string | undefined;
-                      try {
-                        imMsgId = await imManager.sendMessage(
-                          data.targetChannel,
-                          data.text,
+                      enqueueImDelivery({
+                        id:
+                          typeof data.requestId === 'string'
+                            ? data.requestId
+                            : `${sourceGroup}:${file}`,
+                        sourceChatJid: data.chatJid,
+                        targetJid: data.targetChannel,
+                        kind: 'text',
+                        payload: {
+                          text: data.text,
                           localImagePaths,
-                          Object.keys(sendOptions).length > 0
-                            ? sendOptions
-                            : undefined,
+                          options:
+                            Object.keys(sendOptions).length > 0
+                              ? sendOptions
+                              : undefined,
+                        },
+                      });
+                      // The durable outbox owns IM delivery. Persist a stable,
+                      // idempotent Web copy before acknowledging the tool.
+                      const webCopyId =
+                        typeof data.requestId === 'string'
+                          ? `outbound:${data.requestId}`
+                          : undefined;
+                      if (!webCopyId || !messageExists(webCopyId)) {
+                        const storedId = await sendMessage(
+                          data.chatJid,
+                          data.text,
+                          {
+                            sendToIM: false,
+                            externalMsgId: webCopyId,
+                          },
                         );
-                        imSendFailCounts.delete(data.targetChannel);
-                      } catch (err) {
-                        logger.warn(
-                          { imJid: data.targetChannel, err },
-                          'Failed to relay message to IM',
-                        );
-                        const count =
-                          (imSendFailCounts.get(data.targetChannel) ?? 0) + 1;
-                        imSendFailCounts.set(data.targetChannel, count);
-                        if (
-                          count >= IM_SEND_FAIL_THRESHOLD &&
-                          shouldAutoUnbindOnFailure(data.targetChannel)
-                        ) {
-                          try {
-                            unbindImGroup(
-                              data.targetChannel,
-                              'Auto-unbound IM group after consecutive send failures',
-                            );
-                          } catch (unbindErr) {
-                            logger.error(
-                              { imJid: data.targetChannel, unbindErr },
-                              'Failed to auto-unbind IM group',
-                            );
-                          }
+                        if (!storedId) {
+                          throw new Error(
+                            'failed to persist outbound Web message',
+                          );
                         }
                       }
-                      // 存 DB + 广播 Web（不发 IM），用 IM 平台返回的消息 ID
-                      await sendMessage(data.chatJid, data.text, {
-                        sendToIM: false,
-                        externalMsgId: imMsgId,
-                      });
                     } else {
                       // No IM target — just store in DB + broadcast Web
-                      await sendMessage(data.chatJid, data.text, {
-                        sendToIM: false,
+                      const webCopyId =
+                        typeof data.requestId === 'string'
+                          ? `outbound:${data.requestId}`
+                          : undefined;
+                      if (!webCopyId || !messageExists(webCopyId)) {
+                        const storedId = await sendMessage(
+                          data.chatJid,
+                          data.text,
+                          {
+                            sendToIM: false,
+                            externalMsgId: webCopyId,
+                          },
+                        );
+                        if (!storedId) {
+                          throw new Error(
+                            'failed to persist outbound Web message',
+                          );
+                        }
+                      }
+                    }
+                    markDurableOutboundAcceptance(runtimeAcceptanceKey);
+                    if (deliveryRequestId) {
+                      writeIpcResponseFile(ipcRoot, {
+                        type: 'im_delivery_result',
+                        requestId: deliveryRequestId,
+                        success: true,
                       });
                     }
                     logger.info(
@@ -3610,6 +3782,14 @@ function startIpcWatcher(): void {
                       { chatJid: data.chatJid, sourceGroup },
                       'Unauthorized IPC message attempt blocked',
                     );
+                    if (deliveryRequestId) {
+                      writeIpcResponseFile(ipcRoot, {
+                        type: 'im_delivery_result',
+                        requestId: deliveryRequestId,
+                        success: false,
+                        error: 'unauthorized cross-session delivery',
+                      });
+                    }
                   }
                 } else if (
                   data.type === 'image' &&
@@ -3639,6 +3819,7 @@ function startIpcWatcher(): void {
                       if (data.targetChannel) {
                         // Resolve reply target for Feishu images (same logic as send_message)
                         let imageReplyToMsgId: string | undefined;
+                        let imageThreadId: string | undefined;
                         const isFeishuTarget =
                           data.targetChannel.startsWith('feishu:');
                         if (isFeishuTarget) {
@@ -3648,61 +3829,92 @@ function startIpcWatcher(): void {
                             ? getImFeishuConfig()?.replyThreadingMode ===
                               'agent'
                             : false;
+                          const triggerMsg = triggerMessagesByFolder
+                            .get(sourceGroup)
+                            ?.get(data.targetChannel);
+                          const requestedThread =
+                            agentReplyMode &&
+                            typeof data.threadId === 'string' &&
+                            data.threadId.trim()
+                              ? data.threadId.trim()
+                              : undefined;
+                          imageThreadId =
+                            requestedThread || triggerMsg?.threadId;
                           if (agentReplyMode && data.replyToMsgId) {
                             imageReplyToMsgId = data.replyToMsgId;
-                          } else {
-                            const triggerMap =
-                              triggerMessagesByFolder.get(sourceGroup);
-                            const triggerMsg = triggerMap?.get(
-                              data.targetChannel,
-                            );
+                          } else if (imageThreadId) {
                             const lastInbound =
-                              triggerMsg ||
-                              getLastInboundMessage(
-                                data.chatJid,
-                                data.targetChannel,
-                              );
+                              triggerMsg?.threadId === imageThreadId
+                                ? triggerMsg
+                                : getLastInboundMessageInThread(
+                                    data.chatJid,
+                                    data.targetChannel,
+                                    imageThreadId,
+                                  );
                             if (lastInbound?.id) {
                               imageReplyToMsgId = lastInbound.id;
                             }
                           }
                         }
-                        await imManager.sendImage(
-                          data.targetChannel,
-                          imageBuffer,
-                          mimeType,
-                          caption,
-                          fileName,
-                          imageReplyToMsgId,
-                        );
+                        enqueueImDelivery({
+                          id:
+                            typeof data.requestId === 'string'
+                              ? data.requestId
+                              : `${sourceGroup}:${file}`,
+                          sourceChatJid: data.chatJid,
+                          targetJid: data.targetChannel,
+                          kind: 'image',
+                          payload: {
+                            imageBase64: data.imageBase64,
+                            mimeType,
+                            caption,
+                            fileName,
+                            replyToMsgId: imageReplyToMsgId,
+                            threadId: imageThreadId,
+                          },
+                        });
                       }
 
                       // 始终在 Web 记录图片消息（文本占位符）
                       const displayText = caption
                         ? `[图片: ${fileName || 'image'}]\n${caption}`
                         : `[图片: ${fileName || 'image'}]`;
-                      const imgMsgId = crypto.randomUUID();
-                      const imgTimestamp = new Date().toISOString();
-                      ensureChatExists(data.chatJid);
-                      storeMessageDirect(
-                        imgMsgId,
-                        data.chatJid,
-                        'agentdock-agent',
-                        ASSISTANT_NAME,
-                        displayText,
-                        imgTimestamp,
-                        true,
-                      );
-                      broadcastNewMessage(data.chatJid, {
-                        id: imgMsgId,
-                        chat_jid: data.chatJid,
-                        sender: 'agentdock-agent',
-                        sender_name: ASSISTANT_NAME,
-                        content: displayText,
-                        timestamp: imgTimestamp,
-                        is_from_me: true,
-                      });
-                      broadcastToWebClients(data.chatJid, displayText);
+                      const imgMsgId =
+                        typeof data.requestId === 'string'
+                          ? `outbound-image:${data.requestId}`
+                          : crypto.randomUUID();
+                      if (!messageExists(imgMsgId)) {
+                        const imgTimestamp = new Date().toISOString();
+                        ensureChatExists(data.chatJid);
+                        storeMessageDirect(
+                          imgMsgId,
+                          data.chatJid,
+                          'agentdock-agent',
+                          ASSISTANT_NAME,
+                          displayText,
+                          imgTimestamp,
+                          true,
+                        );
+                        broadcastNewMessage(data.chatJid, {
+                          id: imgMsgId,
+                          chat_jid: data.chatJid,
+                          sender: 'agentdock-agent',
+                          sender_name: ASSISTANT_NAME,
+                          content: displayText,
+                          timestamp: imgTimestamp,
+                          is_from_me: true,
+                        });
+                        broadcastToWebClients(data.chatJid, displayText);
+                      }
+                      markDurableOutboundAcceptance(runtimeAcceptanceKey);
+
+                      if (deliveryRequestId) {
+                        writeIpcResponseFile(ipcRoot, {
+                          type: 'im_delivery_result',
+                          requestId: deliveryRequestId,
+                          success: true,
+                        });
+                      }
 
                       logger.info(
                         {
@@ -3719,12 +3931,29 @@ function startIpcWatcher(): void {
                         { chatJid: data.chatJid, sourceGroup, err },
                         'Failed to process IPC image',
                       );
+                      if (deliveryRequestId) {
+                        writeIpcResponseFile(ipcRoot, {
+                          type: 'im_delivery_result',
+                          requestId: deliveryRequestId,
+                          success: false,
+                          error:
+                            err instanceof Error ? err.message : String(err),
+                        });
+                      }
                     }
                   } else {
                     logger.warn(
                       { chatJid: data.chatJid, sourceGroup },
                       'Unauthorized IPC image attempt blocked',
                     );
+                    if (deliveryRequestId) {
+                      writeIpcResponseFile(ipcRoot, {
+                        type: 'im_delivery_result',
+                        requestId: deliveryRequestId,
+                        success: false,
+                        error: 'unauthorized cross-session image delivery',
+                      });
+                    }
                   }
                 }
                 fs.unlinkSync(filePath);
@@ -3733,6 +3962,14 @@ function startIpcWatcher(): void {
                   { file, sourceGroup, err },
                   'Error processing IPC message',
                 );
+                if (deliveryRequestId) {
+                  writeIpcResponseFile(ipcRoot, {
+                    type: 'im_delivery_result',
+                    requestId: deliveryRequestId,
+                    success: false,
+                    error: err instanceof Error ? err.message : String(err),
+                  });
+                }
                 const errorDir = path.join(ipcBaseDir, 'errors');
                 fs.mkdirSync(errorDir, { recursive: true });
                 try {
@@ -3770,7 +4007,8 @@ function startIpcWatcher(): void {
 
             const taskFiles = allEntries
               .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
-              .map((entry) => entry.name);
+              .map((entry) => entry.name)
+              .sort();
             for (const file of taskFiles) {
               const filePath = path.join(tasksDir, file);
               try {
@@ -3782,6 +4020,7 @@ function startIpcWatcher(): void {
                   sourceGroup,
                   isAdminHome,
                   isHome,
+                  runtimeAcceptanceKey,
                 );
                 fs.unlinkSync(filePath);
               } catch (err) {
@@ -3866,12 +4105,14 @@ async function processTaskIpc(
     fileName?: string;
     // For targetChannel routing (send_file via model-controlled channel)
     targetChannel?: string;
+    threadId?: string;
     archiveConversation?: boolean;
   },
   ipcRoot: string,
   sourceGroup: string, // Verified identity from IPC directory
   isAdminHome: boolean, // Compatibility flag: whether source is the primary Session runtime
   isHome: boolean, // Compatibility flag: whether source maps to a home-style alias
+  runtimeAcceptanceKey: string,
 ): Promise<void> {
   switch (data.type) {
     case 'schedule_task':
@@ -4092,8 +4333,29 @@ async function processTaskIpc(
       break;
 
     case 'send_file':
-      if (data.chatJid && data.filePath && data.fileName) {
-        // Cross-group authorization check (same as send_message)
+      {
+        const respond = (success: boolean, error?: string) => {
+          if (!data.requestId) return;
+          writeIpcResponseFile(ipcRoot, {
+            type: 'im_delivery_result',
+            requestId: data.requestId,
+            success,
+            ...(error ? { error } : {}),
+          });
+        };
+        if (
+          !data.chatJid ||
+          !data.filePath ||
+          !data.fileName ||
+          !data.targetChannel
+        ) {
+          const error =
+            'send_file requires chatJid, filePath, fileName and targetChannel';
+          logger.warn({ data }, error);
+          respond(false, error);
+          break;
+        }
+
         const targetGroup = registeredGroups[data.chatJid];
         if (
           !canSendCrossGroupMessage(
@@ -4103,68 +4365,105 @@ async function processTaskIpc(
             targetGroup,
           )
         ) {
+          const error = 'unauthorized cross-session file delivery';
           logger.warn(
             { chatJid: data.chatJid, sourceGroup },
             'Unauthorized IPC send_file attempt blocked',
           );
+          respond(false, error);
           break;
         }
 
         try {
-          let resolvedPath: string;
-          if (path.isAbsolute(data.filePath)) {
-            // Absolute paths are allowed intentionally: agents need to send files
-            // from outside the workspace (e.g. shared expression images in user-global/).
-            // No additional path restriction is enforced here because agents already
-            // have full filesystem read access via Bash/Read tools.
-            resolvedPath = path.resolve(data.filePath);
-          } else {
-            // Relative paths resolved against source group directory
-            const fullPath = path.join(GROUPS_DIR, sourceGroup, data.filePath);
-            resolvedPath = path.resolve(fullPath);
-            const safeRoot = path.resolve(GROUPS_DIR, sourceGroup) + path.sep;
-            if (!resolvedPath.startsWith(safeRoot)) {
-              logger.warn(
-                { sourceGroup, filePath: data.filePath, resolvedPath },
-                'Path traversal attempt blocked in send_file IPC',
-              );
-              break;
-            }
+          const workspaceRoot = path.resolve(GROUPS_DIR, sourceGroup);
+          const ownerKey = resolveSessionOwnerKey(sourceGroup);
+          const allowedRoots = [
+            workspaceRoot,
+            ...(ownerKey
+              ? [path.resolve(GROUPS_DIR, 'user-global', ownerKey)]
+              : []),
+          ];
+          const resolvedPath = path.resolve(
+            path.isAbsolute(data.filePath)
+              ? data.filePath
+              : path.join(workspaceRoot, data.filePath),
+          );
+          const withinAllowedRoot = allowedRoots.some((root) => {
+            const relative = path.relative(root, resolvedPath);
+            return (
+              relative === '' ||
+              (!relative.startsWith('..') && !path.isAbsolute(relative))
+            );
+          });
+          if (!withinAllowedRoot) {
+            throw new Error(
+              'file path must stay within the source workspace or user-global directory',
+            );
           }
 
           if (!fs.existsSync(resolvedPath)) {
-            logger.warn(
-              { sourceGroup, filePath: data.filePath, resolvedPath },
-              'File not found in send_file IPC',
-            );
-            break;
+            throw new Error(`file not found: ${data.filePath}`);
           }
+          const stat = fs.statSync(resolvedPath);
+          if (!stat.isFile())
+            throw new Error('file path is not a regular file');
+          if (stat.size === 0) throw new Error('file is empty');
+          if (stat.size > 30 * 1024 * 1024) {
+            throw new Error('file exceeds the 30MB limit');
+          }
+          const safeFileName = path.basename(data.fileName).trim();
+          if (!safeFileName) throw new Error('file name is empty');
 
-          // 只在有 targetChannel 时发送到 IM（文件只能发 IM）
-          if (data.targetChannel) {
-            await imManager.sendFile(
-              data.targetChannel,
-              resolvedPath,
-              data.fileName,
-            );
-          }
+          const requestedFileThread =
+            typeof data.threadId === 'string' && data.threadId.trim()
+              ? data.threadId.trim()
+              : undefined;
+          const fileTrigger = triggerMessagesByFolder
+            .get(sourceGroup)
+            ?.get(data.targetChannel);
+          const fileThreadId = requestedFileThread || fileTrigger?.threadId;
+          const fileReplyToMsgId = fileThreadId
+            ? fileTrigger?.threadId === fileThreadId
+              ? fileTrigger.id
+              : getLastInboundMessageInThread(
+                  data.chatJid,
+                  data.targetChannel,
+                  fileThreadId,
+                )?.id
+            : undefined;
+
+          enqueueImDelivery({
+            id: data.requestId || crypto.randomUUID(),
+            sourceChatJid: data.chatJid,
+            targetJid: data.targetChannel,
+            kind: 'file',
+            payload: {
+              filePath: resolvedPath,
+              fileName: safeFileName,
+              options: fileThreadId
+                ? {
+                    threadId: fileThreadId,
+                    replyToMsgId: fileReplyToMsgId,
+                  }
+                : undefined,
+            },
+          });
+          markDurableOutboundAcceptance(runtimeAcceptanceKey);
+          respond(true);
           logger.info(
             {
               sourceGroup,
               chatJid: data.chatJid,
               targetChannel: data.targetChannel,
-              fileName: data.fileName,
+              fileName: safeFileName,
             },
-            'File sent via IPC',
+            'File accepted into durable IM outbox',
           );
         } catch (err) {
-          logger.error({ err, data }, 'Failed to send file via IPC');
+          const error = err instanceof Error ? err.message : String(err);
+          logger.error({ err, data }, 'Failed to accept file delivery');
+          respond(false, error);
         }
-      } else {
-        logger.warn(
-          { data },
-          'Invalid send_file request - missing required fields',
-        );
       }
       break;
 
@@ -4311,6 +4610,12 @@ async function processAgentConversation(
 
   const virtualChatJid = buildWorkerConversationJid(chatJid, agentId);
   const workerSessionId = buildWorkerSessionRecordId(agentId);
+  const runtimeAcceptanceKey = `${effectiveGroup.folder}#${agentId}`;
+  const outboundAcceptanceBaseline =
+    durableOutboundAcceptances.get(runtimeAcceptanceKey) ?? 0;
+  const hasDurableWorkerReply = (): boolean =>
+    (durableOutboundAcceptances.get(runtimeAcceptanceKey) ?? 0) >
+    outboundAcceptanceBaseline;
 
   // Get pending messages
   const sinceCursor = lastAgentTimestamp[virtualChatJid] || EMPTY_CURSOR;
@@ -4348,6 +4653,7 @@ async function processAgentConversation(
     lastAgentTimestamp[virtualChatJid] = { rowid: lastProcessed.rowid };
     saveState();
     cursorCommitted = true;
+    clearWorkerRedeliveryState(virtualChatJid);
   };
 
   // Get or use agent-specific session
@@ -4394,9 +4700,19 @@ async function processAgentConversation(
         output.streamEvent.eventType === 'status' &&
         output.streamEvent.statusText === 'ipc_message_received'
       ) {
-        ackIpcDeliveries(
-          collectIpcAckKeys([workerSessionId], output.streamEvent),
-        );
+        markIpcCursorReceived(output.streamEvent.ipcDeliveryIds || []);
+      }
+      if (
+        output.streamEvent.eventType === 'status' &&
+        output.streamEvent.statusText === 'ipc_message_delivered'
+      ) {
+        commitIpcCursorOnAck(output.streamEvent.ipcDeliveryIds || []);
+      }
+      if (
+        output.streamEvent.eventType === 'status' &&
+        output.streamEvent.statusText === 'ipc_messages_returned'
+      ) {
+        returnIpcDeliveries(output.streamEvent.ipcDeliveryIds || []);
       }
 
       // Persist token usage for agent conversations
@@ -4588,12 +4904,31 @@ async function processAgentConversation(
       );
     }
 
-    commitCursor();
+    if (
+      (output.status !== 'error' && !hadError) ||
+      lastAgentReplyMsgId ||
+      hasDurableWorkerReply()
+    ) {
+      commitCursor();
+    } else {
+      logger.warn(
+        { chatJid, agentId },
+        'Conversation worker exited without a durable reply; retaining cursor for retry',
+      );
+    }
   } catch (err) {
     hadError = true;
     logger.error({ agentId, chatJid, err }, 'Agent conversation error');
   } finally {
     if (idleTimer) clearTimeout(idleTimer);
+    const returnedJids =
+      discardPendingIpcCursorCommitsForFolder(runtimeAcceptanceKey);
+    for (const returnedJid of returnedJids) {
+      enqueueIpcRedelivery(returnedJid);
+    }
+    if (!cursorCommitted && hadError) {
+      enqueueIpcRedelivery(virtualChatJid);
+    }
   }
 
   // Process ended → set status back to idle (conversation agents persist)
@@ -4678,7 +5013,7 @@ async function startMessageLoop(): Promise<void> {
           }
 
           if (route.action === 'queue') {
-            // Different channel or outside batch window — queue for later
+            // Different channel — queue for the next explicit turn boundary.
             // Do NOT advance cursor so these messages are re-read when drained
             if (route.needsDrain) {
               queue.sendDrain(chatJid);
@@ -4686,7 +5021,7 @@ async function startMessageLoop(): Promise<void> {
             syncPendingTurnObservability(folder);
             logger.info(
               { chatJid, channel, folder, needsDrain: route.needsDrain },
-              'Turn: message queued (different channel or window expired)',
+              'Turn: message queued behind a different active channel',
             );
             continue;
           }
@@ -4708,26 +5043,31 @@ async function startMessageLoop(): Promise<void> {
             if (existingTrigger) {
               for (const m of messagesToSend) {
                 const srcJid = m.source_jid || m.chat_jid;
-                existingTrigger.set(srcJid, { id: m.id, sender: m.sender });
+                existingTrigger.set(srcJid, {
+                  id: m.id,
+                  sender: m.sender,
+                  threadId: m.thread_id,
+                  rootId: m.root_id,
+                });
               }
             }
           };
 
           if (route.action === 'inject') {
-            // Same channel, within window — inject into running agent
+            // Same channel — inject into the runtime that owns the active turn.
             turnObservabilityManager.syncTurn(
               folder,
               turnManager.getActiveTurn(folder),
             );
             syncPendingTurnObservability(folder);
-            let injectedIpcFile: string | null = null;
+            let injectedIpc: IpcInjection | null = null;
             const sendResult = queue.sendMessage(
               chatJid,
               formatted,
               imagesForAgent,
               intent,
-              (ipcFilePath) => {
-                injectedIpcFile = ipcFilePath;
+              (injection) => {
+                injectedIpc = injection;
               },
             );
             if (sendResult === 'sent') {
@@ -4741,31 +5081,17 @@ async function startMessageLoop(): Promise<void> {
                 },
                 'Turn: injected messages into active turn via IPC',
               );
-              trackIpcDeliveries(
-                collectIpcDeliveryKeys(chatJid, messagesToSend),
-              );
               // Defer the cursor advance until the agent acks consumption —
               // a written IPC file is not a delivered message.
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
-              deferIpcCursorCommit(
-                chatJid,
-                lastProcessed.rowid,
-                injectedIpcFile,
-              );
+              if (injectedIpc) {
+                deferIpcCursorCommit(chatJid, lastProcessed.rowid, injectedIpc);
+              }
             } else if (sendResult === 'interrupted_stop') {
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
               lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
               saveState();
               broadcastInterruptedTurn(folder, chatJid, '用户主动中断');
-            } else if (sendResult === 'interrupted_correction') {
-              // Correction was written to IPC and is consumed after the query
-              // restarts — commit the cursor on ack like the 'sent' path.
-              const lastProcessed = messagesToSend[messagesToSend.length - 1];
-              deferIpcCursorCommit(
-                chatJid,
-                lastProcessed.rowid,
-                injectedIpcFile,
-              );
             } else {
               // no_active — shouldn't happen if TurnManager thinks there's an active turn,
               // but handle gracefully by treating as start_new
@@ -4794,14 +5120,14 @@ async function startMessageLoop(): Promise<void> {
             // Try to inject into an already-running agent first.
             // An agent might be idle in waitForIpcMessage() from a previous Turn
             // or from before the Turn system was deployed.
-            let injectedIpcFile: string | null = null;
+            let injectedIpc: IpcInjection | null = null;
             const sendResult = queue.sendMessage(
               chatJid,
               formatted,
               imagesForAgent,
               intent,
-              (ipcFilePath) => {
-                injectedIpcFile = ipcFilePath;
+              (injection) => {
+                injectedIpc = injection;
               },
             );
             if (sendResult === 'sent') {
@@ -4829,37 +5155,54 @@ async function startMessageLoop(): Promise<void> {
                 );
                 const fc = ownerId ? getImFeishuConfig() : null;
                 if (fc?.streamingCard) {
-                  const card = imManager.createProgressCard(channel);
+                  const progressTrigger =
+                    messagesToSend[messagesToSend.length - 1];
+                  const titleSource = progressTrigger?.content
+                    .replace(/\s+/g, ' ')
+                    .trim();
+                  const card = imManager.createProgressCard(channel, {
+                    replyToMsgId: progressTrigger?.thread_id
+                      ? progressTrigger.id
+                      : undefined,
+                    threadId: progressTrigger?.thread_id,
+                    title: titleSource
+                      ? titleSource.length > 48
+                        ? `${titleSource.slice(0, 47)}…`
+                        : titleSource
+                      : undefined,
+                    modelLabel: resolved.effectiveGroup.model,
+                    onStop: fc.cardVerificationToken
+                      ? () => {
+                          const active = turnManager.getActiveTurn(folder);
+                          if (!active) return false;
+                          const interrupted = queue.interruptQuery(chatJid);
+                          if (interrupted) {
+                            broadcastInterruptedTurn(
+                              folder,
+                              channel,
+                              '用户通过飞书卡片停止',
+                            );
+                          }
+                          return interrupted;
+                        }
+                      : undefined,
+                  });
                   if (card) {
                     registerProgressSession(channel, card, folder);
                   }
                 }
               }
-              trackIpcDeliveries(
-                collectIpcDeliveryKeys(chatJid, messagesToSend),
-              );
               // Defer the cursor advance until the agent acks consumption —
               // a written IPC file is not a delivered message.
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
-              deferIpcCursorCommit(
-                chatJid,
-                lastProcessed.rowid,
-                injectedIpcFile,
-              );
+              if (injectedIpc) {
+                deferIpcCursorCommit(chatJid, lastProcessed.rowid, injectedIpc);
+              }
             } else if (sendResult === 'interrupted_stop') {
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
               lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
               saveState();
               broadcastInterruptedTurn(folder, chatJid, '用户主动中断');
-            } else if (sendResult === 'interrupted_correction') {
-              // Correction was written to IPC and is consumed after the query
-              // restarts — commit the cursor on ack like the 'sent' path.
-              const lastProcessed = messagesToSend[messagesToSend.length - 1];
-              deferIpcCursorCommit(
-                chatJid,
-                lastProcessed.rowid,
-                injectedIpcFile,
-              );
             } else {
               // no_active — truly no agent running, start a new one
               broadcastRunnerState(
@@ -4875,7 +5218,7 @@ async function startMessageLoop(): Promise<void> {
     } catch (err) {
       logger.error({ err }, 'Error in message loop');
     }
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
+    await interruptibleSleep(POLL_INTERVAL);
   }
 }
 
@@ -5280,14 +5623,25 @@ function buildOnAgentMessage(): (baseChatJid: string, agentId: string) => void {
       const images = collectMessageImages(virtualChatJid, missedMessages);
       const imagesForAgent = images.length > 0 ? images : undefined;
 
+      let injectedIpc: IpcInjection | null = null;
       const sendResult = formatted
         ? queue.sendMessage(
             workerSessionId,
             formatted,
             imagesForAgent,
             undefined,
+            (injection) => {
+              injectedIpc = injection;
+            },
           )
         : 'no_active';
+      if (sendResult === 'sent' && injectedIpc && missedMessages.length > 0) {
+        deferIpcCursorCommit(
+          virtualChatJid,
+          missedMessages[missedMessages.length - 1].rowid,
+          injectedIpc,
+        );
+      }
       if (sendResult === 'no_active') {
         const taskId = `agent-conv:${agentId}:${Date.now()}`;
         queue.enqueueTask(workerSessionId, taskId, async () => {
@@ -5338,6 +5692,7 @@ function handleIMInterruptRequest(
   chatJid: string,
   intent: 'stop' | 'correction',
 ): void {
+  if (intent !== 'stop') return;
   const interrupted = queue.interruptQuery(chatJid);
   if (interrupted) {
     logger.info(
@@ -5954,7 +6309,7 @@ async function main(): Promise<void> {
         saveState();
       }
     },
-    trackIpcDelivery,
+    deferIpcCursorCommit,
     reloadFeishuConnection,
     reloadTelegramConnection,
     reloadIMConfig,
@@ -6095,6 +6450,15 @@ async function main(): Promise<void> {
     },
   });
   startIpcWatcher();
+  startImOutboxWorker({
+    onPermanentFailure: (record, error) => {
+      sendSystemMessage(
+        record.source_chat_jid,
+        'im_delivery_failed',
+        `消息投递失败（${record.target_jid}）：${error}`,
+      );
+    },
+  });
   // Mark any turns that were running when the process crashed/restarted
   try {
     markStaleTurnsAsError();

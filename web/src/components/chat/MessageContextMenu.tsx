@@ -101,11 +101,11 @@ export function MessageContextMenu({ content, position, onClose, chatJid, messag
               onClick={handleDelete}
               className={`group/item w-full flex items-center gap-3 mx-1 px-3 py-2.5 text-sm rounded-lg transition-colors ${
                 confirmDelete
-                  ? 'text-red-400 bg-red-500/20 hover:bg-red-500/30'
-                  : 'text-red-400 hover:bg-foreground/10 hover:text-red-500 active:bg-foreground/15'
+                  ? 'text-error bg-error/20 hover:bg-error/30'
+                  : 'text-error hover:bg-foreground/10 hover:text-error active:bg-foreground/15'
               }`}
             >
-              <Trash2 className={`w-4 h-4 transition-colors ${confirmDelete ? '' : 'group-hover/item:text-red-500'}`} />
+              <Trash2 className={`w-4 h-4 transition-colors ${confirmDelete ? '' : 'group-hover/item:text-error'}`} />
               {confirmDelete ? '确认删除' : '删除消息'}
             </button>
           </>

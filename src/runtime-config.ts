@@ -77,6 +77,8 @@ interface EncryptedSecrets {
 
 interface FeishuSecretPayload {
   appSecret: string;
+  cardVerificationToken?: string;
+  cardEncryptKey?: string;
 }
 
 /** OAuth token payload stored encrypted alongside IM credentials. */
@@ -216,6 +218,14 @@ function decryptFeishuSecret(secrets: EncryptedSecrets): FeishuSecretPayload {
   const parsed = JSON.parse(decrypted) as Record<string, unknown>;
   return {
     appSecret: normalizeSecret(parsed.appSecret ?? '', 'appSecret'),
+    cardVerificationToken:
+      typeof parsed.cardVerificationToken === 'string'
+        ? normalizeSecret(parsed.cardVerificationToken, 'cardVerificationToken')
+        : '',
+    cardEncryptKey:
+      typeof parsed.cardEncryptKey === 'string'
+        ? normalizeSecret(parsed.cardEncryptKey, 'cardEncryptKey')
+        : '',
   };
 }
 
@@ -660,6 +670,10 @@ export interface UserFeishuConfig {
   streamingCard?: boolean;
   /** Send tool-call IM commentary during long-running tasks. */
   imCommentary?: boolean;
+  /** Card callback verification token (encrypted at rest). */
+  cardVerificationToken?: string;
+  /** Optional card callback encryption key (encrypted at rest). */
+  cardEncryptKey?: string;
 }
 
 export interface UserFeishuOAuthTokens {
@@ -819,6 +833,8 @@ export function getImFeishuConfig(): UserFeishuConfig | null {
         stored.replyThreadingMode === 'agent' ? 'agent' : 'auto',
       streamingCard: stored.streamingCard ?? false,
       imCommentary: stored.imCommentary ?? false,
+      cardVerificationToken: secret.cardVerificationToken || '',
+      cardEncryptKey: secret.cardEncryptKey || '',
     };
   } catch (err) {
     logger.warn({ err }, 'Failed to read global Feishu IM config');
@@ -838,6 +854,14 @@ export function saveImFeishuConfig(
     replyThreadingMode: next.replyThreadingMode === 'agent' ? 'agent' : 'auto',
     streamingCard: next.streamingCard ?? false,
     imCommentary: next.imCommentary ?? false,
+    cardVerificationToken: normalizeSecret(
+      next.cardVerificationToken || '',
+      'cardVerificationToken',
+    ),
+    cardEncryptKey: normalizeSecret(
+      next.cardEncryptKey || '',
+      'cardEncryptKey',
+    ),
   };
 
   // Preserve existing OAuth tokens when saving IM config
@@ -848,7 +872,11 @@ export function saveImFeishuConfig(
     appId: normalized.appId,
     enabled: normalized.enabled,
     updatedAt: normalized.updatedAt || new Date().toISOString(),
-    secret: encryptFeishuSecret({ appSecret: normalized.appSecret }),
+    secret: encryptFeishuSecret({
+      appSecret: normalized.appSecret,
+      cardVerificationToken: normalized.cardVerificationToken,
+      cardEncryptKey: normalized.cardEncryptKey,
+    }),
     replyThreadingMode: normalized.replyThreadingMode,
     streamingCard: normalized.streamingCard,
     imCommentary: normalized.imCommentary,

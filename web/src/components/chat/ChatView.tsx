@@ -423,7 +423,7 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
     return (
       <div className="h-full flex items-center justify-center bg-background">
         <div className="text-center">
-          <p className="text-slate-500">会话不存在</p>
+          <p className="text-muted-foreground">会话不存在</p>
         </div>
       </div>
     );
@@ -436,37 +436,37 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
         {onBack && (
           <button
             onClick={onBack}
-            className="lg:hidden p-2 -ml-2 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+            className="lg:hidden p-2 -ml-2 hover:bg-surface-2 rounded-lg transition-colors cursor-pointer"
             aria-label="返回"
           >
-            <ArrowLeft className="w-5 h-5 text-slate-600" />
+            <ArrowLeft className="w-5 h-5 text-muted-foreground" />
           </button>
         )}
         {headerLeft}
         <div className="flex-1 min-w-0">
-          <h2 className="font-semibold text-slate-900 text-[15px] truncate">{session.name}</h2>
-          <div className="flex items-center gap-1.5 text-xs text-slate-500">
+          <h2 className="font-semibold text-foreground text-[15px] truncate">{session.name}</h2>
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
             <span>{isWaiting ? '正在思考...' : isHome ? '主会话' : '工作会话'}</span>
             {!isWaiting && session && (
               <>
-                <span className="text-slate-300">·</span>
-                <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-medium bg-emerald-100 text-emerald-700">
+                <span className="text-muted-foreground/50">·</span>
+                <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-medium bg-success-bg text-success">
                   本地运行
                 </span>
               </>
             )}
             {isOwnHome && imStatus && (imStatus.feishu || imStatus.telegram) && (
               <>
-                <span className="text-slate-300">·</span>
+                <span className="text-muted-foreground/50">·</span>
                 {imStatus.feishu && (
                   <span className="inline-flex items-center gap-0.5">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-success" />
                     飞书
                   </span>
                 )}
                 {imStatus.telegram && (
                   <span className="inline-flex items-center gap-0.5">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-success" />
                     Telegram
                   </span>
                 )}
@@ -525,12 +525,12 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
 
       {/* IM channel setup banner for home container without IM */}
       {isOwnHome && imStatus && !imStatus.feishu && !imStatus.telegram && !imBannerDismissed && (
-        <div className="flex items-center gap-2 px-4 py-2 bg-amber-50 border-b border-amber-200 text-amber-800 text-sm">
+        <div className="flex items-center gap-2 px-4 py-2 bg-warning-bg border-b border-warning-border text-warning-foreground text-sm">
           <Link className="w-4 h-4 flex-shrink-0" />
           <span className="flex-1 min-w-0">未配置 IM 渠道，飞书 / Telegram 消息无法与主会话互通</span>
           <button
             onClick={() => navigate('/settings?tab=channels')}
-            className="flex-shrink-0 px-3 py-1 text-xs font-medium rounded-md bg-amber-600 text-white hover:bg-amber-700 transition-colors cursor-pointer"
+            className="flex-shrink-0 px-3 py-1 text-xs font-medium rounded-md bg-warning text-background hover:bg-warning/90 transition-colors cursor-pointer"
           >
             去配置
           </button>
@@ -539,7 +539,7 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
               setImBannerDismissed(true);
               localStorage.setItem('im-banner-dismissed', '1');
             }}
-            className="flex-shrink-0 p-0.5 rounded hover:bg-amber-200/60 transition-colors cursor-pointer"
+            className="flex-shrink-0 p-0.5 rounded hover:bg-warning-bg/60 transition-colors cursor-pointer"
             aria-label="关闭"
           >
             <X className="w-4 h-4" />
@@ -624,9 +624,9 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
                     if (taskStatus === 'completed') {
                       return (
                         <div className="text-center py-8 space-y-2">
-                          <div className="text-sm font-medium text-emerald-600">子 Agent 已完成</div>
+                          <div className="text-sm font-medium text-success">子 Agent 已完成</div>
                           {task?.summary && (
-                            <div className="text-xs text-slate-500 max-w-md mx-auto">{task.summary}</div>
+                            <div className="text-xs text-muted-foreground max-w-md mx-auto">{task.summary}</div>
                           )}
                         </div>
                       );
@@ -635,9 +635,9 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
                     if (taskStatus === 'error') {
                       return (
                         <div className="text-center py-8 space-y-2">
-                          <div className="text-sm font-medium text-red-600">子 Agent 执行出错</div>
+                          <div className="text-sm font-medium text-error">子 Agent 执行出错</div>
                           {task?.summary && (
-                            <div className="text-xs text-slate-500 max-w-md mx-auto">{task.summary}</div>
+                            <div className="text-xs text-muted-foreground max-w-md mx-auto">{task.summary}</div>
                           )}
                         </div>
                       );
@@ -659,16 +659,16 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
                       <div className="flex flex-col items-center justify-center py-12 px-4 space-y-4">
                         {/* 动画 spinner */}
                         <div className="relative">
-                          <div className="w-12 h-12 rounded-full border-2 border-teal-100" />
-                          <div className="absolute inset-0 w-12 h-12 rounded-full border-2 border-transparent border-t-teal-500 animate-spin" />
+                          <div className="w-12 h-12 rounded-full border-2 border-brand-200" />
+                          <div className="absolute inset-0 w-12 h-12 rounded-full border-2 border-transparent border-t-primary animate-spin" />
                         </div>
 
                         <div className="text-center space-y-2 max-w-md">
-                          <div className="text-sm font-medium text-slate-700">
+                          <div className="text-sm font-medium text-foreground">
                             Teammate 正在后台执行中
                           </div>
                           {task?.description && (
-                            <div className="text-xs text-slate-500 leading-relaxed">
+                            <div className="text-xs text-muted-foreground leading-relaxed">
                               {task.description}
                             </div>
                           )}
@@ -676,12 +676,12 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
 
                         {/* 实时计时器 */}
                         {task?.startedAt && (
-                          <div className="text-xs text-slate-400 tabular-nums">
+                          <div className="text-xs text-muted-foreground/80 tabular-nums">
                             已运行 <ElapsedTimer startTime={task.startedAt} />
                           </div>
                         )}
 
-                        <div className="text-[11px] text-slate-400 text-center max-w-sm leading-relaxed">
+                        <div className="text-[11px] text-muted-foreground/80 text-center max-w-sm leading-relaxed">
                           后台任务不传播中间过程，完成后将显示结果摘要
                         </div>
                       </div>
@@ -711,7 +711,7 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
                   return (
                     /* Teammate 标签页：通过主会话中转发送消息给 Team Lead */
                     <div className="border-t">
-                      <div className="px-4 pt-1.5 pb-0.5 text-[10px] text-amber-600 bg-amber-50/50 text-center">
+                      <div className="px-4 pt-1.5 pb-0.5 text-[10px] text-warning bg-warning-bg/50 text-center">
                         消息将发送到主会话，由 Team Lead 转发
                       </div>
                       <MessageInput
@@ -727,7 +727,7 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
                   );
                 }
                 return (
-                  <div className="px-4 py-2 text-center text-xs text-slate-400 border-t">
+                  <div className="px-4 py-2 text-center text-xs text-muted-foreground/80 border-t">
                     {isSdkTask
                       ? (activeSdkTask?.status === 'running'
                         ? '子 Agent 独立运行中 — 仅主会话可发送消息'
@@ -828,13 +828,13 @@ export function ChatView({ sessionId, onBack, headerLeft }: ChatViewProps) {
               onTouchStart={handleTouchDragStart}
               className="hidden lg:flex h-1 bg-muted hover:bg-brand-400 cursor-row-resize items-center justify-center transition-colors group"
             >
-              <div className="w-8 h-0.5 rounded-full bg-slate-400 group-hover:bg-primary transition-colors" />
+              <div className="w-8 h-0.5 rounded-full bg-border-strong group-hover:bg-primary transition-colors" />
             </div>
           )}
           {/* Terminal panel */}
           <div
             className={`hidden lg:block flex-shrink-0 overflow-hidden transition-[height] duration-200 ${
-              terminalVisible ? 'border-t border-slate-300' : 'border-t-0'
+              terminalVisible ? 'border-t border-border-strong' : 'border-t-0'
             }`}
             style={{ height: terminalVisible ? terminalHeight : 0 }}
           >

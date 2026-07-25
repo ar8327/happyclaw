@@ -69,7 +69,7 @@ export function ToolActivityCard({ tool, localElapsed }: ToolActivityCardProps) 
         {/* Param line */}
         {param && (
           <div className={`mt-1 text-muted-foreground break-all max-h-16 overflow-y-auto ${isBash ? 'font-mono' : ''}`}>
-            <span className="text-slate-400">{param.label}: </span>
+            <span className="text-muted-foreground/80">{param.label}: </span>
             {param.value}
           </div>
         )}
