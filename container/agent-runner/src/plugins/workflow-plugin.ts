@@ -67,9 +67,16 @@ export class WorkflowPlugin implements ContextPlugin {
             max_agents: { type: 'number' },
             node_timeout_ms: { type: 'number' },
             script_timeout_ms: { type: 'number' },
-            provider: { type: 'string', description: 'Default provider, e.g. codex, claude, echo' },
+            provider: {
+              type: 'string',
+              description:
+                'Default provider, e.g. codex, traex, claude, agy, echo',
+            },
             model: { type: 'string' },
-            thinking_effort: { type: 'string', enum: ['low', 'medium', 'high', 'max'] },
+            thinking_effort: {
+              type: 'string',
+              enum: ['low', 'medium', 'high', 'xhigh', 'max'],
+            },
             retry: {
               type: 'object',
               properties: {
@@ -89,7 +96,10 @@ export class WorkflowPlugin implements ContextPlugin {
               prompt: { type: 'string' },
               provider: { type: 'string' },
               model: { type: 'string' },
-              thinking_effort: { type: 'string', enum: ['low', 'medium', 'high', 'max'] },
+              thinking_effort: {
+                type: 'string',
+                enum: ['low', 'medium', 'high', 'xhigh', 'max'],
+              },
               depends_on: { type: 'array', items: { type: 'string' } },
               timeout_ms: { type: 'number' },
               max_turns: { type: 'number' },
@@ -214,7 +224,10 @@ export class WorkflowPlugin implements ContextPlugin {
                 script_timeout_ms: { type: 'number' },
                 provider: { type: 'string' },
                 model: { type: 'string' },
-                thinking_effort: { type: 'string', enum: ['low', 'medium', 'high', 'max'] },
+                thinking_effort: {
+                  type: 'string',
+                  enum: ['low', 'medium', 'high', 'xhigh', 'max'],
+                },
               },
             },
           },

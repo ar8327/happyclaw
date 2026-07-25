@@ -21,6 +21,7 @@
     "test:memory-retention": "tsx src/memory-retention.test.ts",
     "test:session-list-query": "tsx src/session-list-query.test.ts",
     "test:session-pagination-smoke": "tsx scripts/session-pagination-smoke.ts",
+    "test:workflow-traex": "tsx src/workflow-traex.test.ts",
     "test:context-conformance": "tsx container/agent-runner/tests/context-conformance.test.ts",
     "test:runner-contracts": "tsx container/agent-runner/tests/runner-contract.test.ts",
     "test:steering-feishu": "tsx src/steering-feishu-improvements.test.ts",

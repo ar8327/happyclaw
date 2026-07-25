@@ -177,6 +177,63 @@ async function invokeCodex(
   }
 }
 
+function traexCommand(): string {
+  return process.env.HAPPYCLAW_TRAEX_COMMAND?.trim() || 'traex';
+}
+
+async function invokeTraex(
+  input: WorkflowInvokeInput,
+): Promise<WorkflowInvokeResult> {
+  const model = input.model || process.env.HAPPYCLAW_TRAEX_MODEL || undefined;
+  const command = traexCommand();
+  const tmpDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'agentdock-workflow-traex-'),
+  );
+  const outFile = path.join(tmpDir, 'last-message.txt');
+  const args = buildCodexExecArgs({
+    cwd: input.cwd,
+    model,
+    thinkingEffort: input.thinkingEffort,
+    outputLastMessageFile: outFile,
+  });
+  try {
+    const child = spawn(command, args, {
+      cwd: input.cwd,
+      env: sanitizedEnv(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: true,
+    });
+    const prompt = input.maxTurns
+      ? [
+          `You must complete this task within at most ${input.maxTurns} tool-use turns.`,
+          '',
+          input.prompt,
+        ].join('\n')
+      : input.prompt;
+    child.stdin?.end(prompt);
+    const result = await collectProcess(child, input.timeoutMs, input.signal);
+    const output = fs.existsSync(outFile)
+      ? fs.readFileSync(outFile, 'utf8')
+      : result.stdout.trim();
+    if (result.code !== 0) {
+      throw new Error(
+        result.stderr.trim() ||
+          output ||
+          `${command} exited with ${result.code}`,
+      );
+    }
+    return {
+      provider: 'traex',
+      model: model || null,
+      output: output.trim(),
+      stdout: result.stdout,
+      stderr: result.stderr,
+    };
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 async function invokeClaude(
   input: WorkflowInvokeInput,
 ): Promise<WorkflowInvokeResult> {
@@ -300,6 +357,14 @@ export function listWorkflowProviders(): WorkflowProviderInfo[] {
       description: 'Runs `codex exec` with no AgentDock MCP tools injected.',
     },
     {
+      id: 'traex',
+      label: 'TraeX CLI',
+      available: commandExists(traexCommand()),
+      defaultModel: process.env.HAPPYCLAW_TRAEX_MODEL || 'TraeX CLI default',
+      description:
+        'Runs `traex exec` with the Codex-compatible CLI contract and no HappyClaw MCP tools injected.',
+    },
+    {
       id: 'claude',
       label: 'Claude CLI',
       available: commandExists('claude'),
@@ -335,6 +400,11 @@ export async function invokeWorkflowNode(
   if (provider === 'codex') {
     if (!commandExists('codex')) throw new Error('codex CLI is not available');
     return invokeCodex(input);
+  }
+  if (provider === 'traex') {
+    const command = traexCommand();
+    if (!commandExists(command)) throw new Error('traex CLI is not available');
+    return invokeTraex(input);
   }
   if (provider === 'claude') {
     if (!commandExists('claude'))

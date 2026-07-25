@@ -123,7 +123,7 @@ interface ScriptAgentInput {
   __phase?: string | null;
   provider?: string;
   model?: string;
-  thinking_effort?: 'low' | 'medium' | 'high' | 'max';
+  thinking_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   timeout_ms?: number;
   max_turns?: number;
   retry?: {

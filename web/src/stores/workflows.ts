@@ -17,7 +17,7 @@ export interface WorkflowDefinition {
     script_timeout_ms?: number;
     provider?: string;
     model?: string;
-    thinking_effort?: 'low' | 'medium' | 'high' | 'max';
+    thinking_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
     retry?: {
       max_attempts?: number;
       backoff_ms?: number;
@@ -29,7 +29,7 @@ export interface WorkflowDefinition {
     prompt: string;
     provider?: string;
     model?: string;
-    thinking_effort?: 'low' | 'medium' | 'high' | 'max';
+    thinking_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
     depends_on?: string[];
     timeout_ms?: number;
     max_turns?: number;
