@@ -111,6 +111,12 @@ function assertCodexResumeFailureClassification(): void {
     isCodexSessionResumeFailedError('failed to resume thread abc'),
     true,
   );
+  assert.equal(
+    isCodexSessionResumeFailedError(
+      'JSON-RPC error: no rollout found for thread id 0199',
+    ),
+    true,
+  );
   assert.equal(isCodexSessionResumeFailedError('rate limit exceeded'), false);
 }
 
@@ -553,6 +559,29 @@ function assertDescriptorAuthProbeWorks(): void {
     assert.equal(result.authenticated, true);
     assert.equal(result.detected, true);
     assert.equal(result.details.accountId, 'acco...6789');
+
+    fs.writeFileSync(
+      authFile,
+      JSON.stringify({
+        auth_mode: 'apikey',
+        OPENAI_API_KEY: 'sk-test',
+      }),
+    );
+    const apiKeyResult = evaluateRunnerAuthProbe({
+      type: 'json_file',
+      files: [
+        {
+          path: authFile,
+          requiredAnyJsonPaths: [['tokens'], ['OPENAI_API_KEY']],
+        },
+      ],
+    });
+    assert.equal(apiKeyResult.authenticated, true);
+    const codexApiKeyResult = evaluateRunnerAuthProbe(
+      RUNNER_DESCRIPTORS.codex.runtimeContract.authProbe,
+      { CODEX_HOME: dir },
+    );
+    assert.equal(codexApiKeyResult.authenticated, true);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

@@ -58,6 +58,7 @@ export interface RunnerAuthProbeFile {
   relativeToHome?: string;
   path?: string;
   requiredJsonPaths?: string[][];
+  requiredAnyJsonPaths?: string[][];
   detailJsonFields?: RunnerAuthProbeJsonField[];
 }
 
@@ -364,7 +365,7 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
             envPath: 'CODEX_HOME',
             relativeToEnv: 'auth.json',
             relativeToHome: '.codex/auth.json',
-            requiredJsonPaths: [['tokens']],
+            requiredAnyJsonPaths: [['tokens'], ['OPENAI_API_KEY']],
             detailJsonFields: [
               { name: 'authMode', path: ['auth_mode'] },
               { name: 'accountId', path: ['tokens', 'account_id'] },

@@ -19,6 +19,7 @@ export interface RunnerAuthProbeFile {
   relativeToHome?: string;
   path?: string;
   requiredJsonPaths?: string[][];
+  requiredAnyJsonPaths?: string[][];
   detailJsonFields?: RunnerAuthProbeJsonField[];
 }
 
@@ -270,9 +271,16 @@ function probeJsonFile(
 
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as unknown;
-    const authenticated = (file.requiredJsonPaths || []).every((jsonPath) =>
-      hasValue(readPath(parsed, jsonPath)),
-    );
+    const requiredJsonPaths = file.requiredJsonPaths || [];
+    const requiredAnyJsonPaths = file.requiredAnyJsonPaths || [];
+    const authenticated =
+      requiredJsonPaths.every((jsonPath) =>
+        hasValue(readPath(parsed, jsonPath)),
+      ) &&
+      (requiredAnyJsonPaths.length === 0 ||
+        requiredAnyJsonPaths.some((jsonPath) =>
+          hasValue(readPath(parsed, jsonPath)),
+        ));
     const details: Record<string, unknown> = {};
     for (const field of file.detailJsonFields || []) {
       const value = readPath(parsed, field.path);

@@ -181,6 +181,7 @@ export function isCodexSessionResumeFailedError(message: string): boolean {
     /thread.*does not exist/i,
     /failed to (?:load|resume).*thread/i,
     /conversation.*not found/i,
+    /no rollout found for thread id/i,
   ].some((pattern) => pattern.test(message));
 }
 

@@ -24,7 +24,10 @@ import { getSystemSettings } from './runtime-config.js';
 import { buildStaticReplyCard } from './feishu-card-builder.js';
 import { handleProgressCardAction } from './feishu-progress-card.js';
 import type { IMRouteContext } from './im-channel.js';
-import { shouldReplyInFeishuThread } from './feishu-conversation-mode.js';
+import {
+  isFeishuBotMentioned,
+  shouldReplyInFeishuThread,
+} from './feishu-conversation-mode.js';
 
 // ─── FeishuConnection Interface ────────────────────────────────
 
@@ -1208,9 +1211,8 @@ export function createFeishuConnection(
 
     // ── 群聊 Mention 过滤：require_mention 模式下，bot 未被 @ 则丢弃 ──
     if (chatType === 'group' && shouldProcessGroupMessage) {
-      const isBotMentioned = botOpenId
-        ? (mentions?.some((m) => m.id?.open_id === botOpenId) ?? false)
-        : true; // 无 bot open_id 时默认放行（安全降级）
+      // 无 bot open_id 时至少要求存在 @mention，不能退化为全量响应。
+      const isBotMentioned = isFeishuBotMentioned(mentions, botOpenId);
       if (!isBotMentioned && !shouldProcessGroupMessage(chatJid)) {
         logger.debug(
           { chatJid, messageId },
@@ -1571,13 +1573,13 @@ export function createFeishuConnection(
           );
         } else {
           logger.warn(
-            'Could not fetch bot open_id, mention gating will be bypassed',
+            'Could not fetch bot open_id, mention gating will fall back to any @mention',
           );
         }
       } catch (err) {
         logger.warn(
           { err },
-          'Failed to fetch bot info, mention gating will be bypassed',
+          'Failed to fetch bot info, mention gating will fall back to any @mention',
         );
         botOpenId = '';
       }

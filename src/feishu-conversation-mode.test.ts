@@ -6,6 +6,7 @@ import path from 'node:path';
 import {
   applyFeishuConversationMode,
   hasFeishuThreadContext,
+  isFeishuBotMentioned,
   normalizeFeishuConversationMode,
   resolveFeishuThreadRootMsgId,
   shouldReplyInFeishuThread,
@@ -18,6 +19,19 @@ import { buildFeishuTopicNameSuffix } from './feishu-topic-title.js';
 
 assert.equal(normalizeFeishuConversationMode('thread'), 'thread');
 assert.equal(normalizeFeishuConversationMode('invalid'), 'chat');
+assert.equal(isFeishuBotMentioned(undefined, ''), false);
+assert.equal(
+  isFeishuBotMentioned([{ id: { open_id: 'ou_someone' } }], ''),
+  true,
+);
+assert.equal(
+  isFeishuBotMentioned([{ id: { open_id: 'ou_someone' } }], 'ou_bot'),
+  false,
+);
+assert.equal(
+  isFeishuBotMentioned([{ id: { open_id: 'ou_bot' } }], 'ou_bot'),
+  true,
+);
 assert.equal(hasFeishuThreadContext({ thread_id: ' omt_thread ' }), true);
 assert.equal(hasFeishuThreadContext({ root_id: 'om_root' }), false);
 assert.equal(

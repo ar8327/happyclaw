@@ -15,6 +15,15 @@ export interface FeishuThreadReplyOptions {
   threadFallbackReason?: string;
 }
 
+export function isFeishuBotMentioned(
+  mentions: Array<{ id?: { open_id?: string } }> | undefined,
+  botOpenId: string,
+): boolean {
+  return botOpenId
+    ? (mentions?.some((mention) => mention.id?.open_id === botOpenId) ?? false)
+    : Boolean(mentions?.length);
+}
+
 function cleanId(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
