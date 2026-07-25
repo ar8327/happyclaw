@@ -184,6 +184,7 @@ import {
   exportTranscriptSnapshotForUser,
 } from './memory-agent.js';
 import { injectMemoryOrchestratorDeps } from './routes/memory-agent.js';
+import { injectExternalKnowledgeDeps } from './routes/external-knowledge.js';
 import { injectFeishuApiDeps } from './routes/feishu-api.js';
 import { injectMemoryDeps } from './routes/memory.js';
 import {
@@ -5945,6 +5946,7 @@ async function main(): Promise<void> {
   });
   injectFeishuApiDeps({ token: memoryAgentToken }); // Reuse same internal token
   injectMemoryDeps({ orchestrator: memoryOrchestrator, queue });
+  injectExternalKnowledgeDeps({ orchestrator: memoryOrchestrator });
   memoryOrchestrator.start();
   logger.info('Memory orchestrator initialized');
 

@@ -16,6 +16,7 @@
     "test:memory-timeout": "tsx src/memory-agent-timeout.test.ts",
     "test:memory-lanes": "tsx src/memory-lanes.test.ts",
     "test:memory-write-queue": "tsx src/memory-write-queue.test.ts",
+    "test:external-knowledge": "tsx src/external-knowledge.test.ts",
     "test:memory-search": "tsx src/memory-search.test.ts",
     "test:memory-retention": "tsx src/memory-retention.test.ts",
     "test:session-list-query": "tsx src/session-list-query.test.ts",

@@ -57,6 +57,7 @@ import feishuApiRoutes, { injectFeishuApiDeps } from './routes/feishu-api.js';
 import searchRoutes from './routes/search.js';
 import workflowsRoutes from './routes/workflows.js';
 import outboxRoutes from './routes/outbox.js';
+import externalKnowledgeRoutes from './routes/external-knowledge.js';
 import { getSystemSettings } from './runtime-config.js';
 
 // Database and types (only for handleWebUserMessage and broadcast)
@@ -219,6 +220,7 @@ app.route('/api/sessions', sessionRoutes);
 app.route('/api/agent-definitions', agentDefinitionsRoutes);
 app.route('/api', monitorRoutes);
 app.route('/api/search', searchRoutes);
+app.route('/api/external/knowledge', externalKnowledgeRoutes);
 app.route('/api/internal/memory', memoryAgentInternalRoutes);
 app.route('/api/internal/feishu', feishuApiRoutes);
 

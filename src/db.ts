@@ -1024,6 +1024,7 @@ export function initDatabase(): void {
       attempts INTEGER NOT NULL DEFAULT 0,
       available_at TEXT NOT NULL,
       last_error TEXT,
+      result_json TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -1043,6 +1044,9 @@ export function initDatabase(): void {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_write_queue_pending_dedup
       ON memory_write_queue(owner_key, kind, dedup_key)
       WHERE dedup_key IS NOT NULL AND status IN ('pending', 'running');
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_write_queue_external_dedup
+      ON memory_write_queue(owner_key, kind, dedup_key)
+      WHERE kind = 'external_knowledge_ingest' AND dedup_key IS NOT NULL;
   `);
 
   dropLegacySessionRuntimeModeColumn();
@@ -1088,6 +1092,7 @@ export function initDatabase(): void {
   ensureColumn('session_channels', 'thinking_effort', 'TEXT');
   ensureColumn('session_channels', 'context_compression', "TEXT DEFAULT 'off'");
   ensureColumn('scheduled_tasks', 'model', 'TEXT');
+  ensureColumn('memory_write_queue', 'result_json', 'TEXT');
   db.prepare(
     `UPDATE scheduled_tasks
        SET session_id = 'main:' || group_folder
@@ -1369,7 +1374,7 @@ export function initDatabase(): void {
      WHERE status = 'sending'`,
   ).run(Date.now(), new Date().toISOString());
 
-  const SCHEMA_VERSION = '49';
+  const SCHEMA_VERSION = '50';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -2920,6 +2925,7 @@ export function deleteContextSummary(
 
 export type MemoryWriteQueueKind =
   | 'remember'
+  | 'external_knowledge_ingest'
   | 'index_repair'
   | 'session_wrapup'
   | 'repair_sweep'
@@ -2942,6 +2948,7 @@ export interface MemoryWriteQueueRecord {
   attempts: number;
   available_at: string;
   last_error: string | null;
+  result_json: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -2997,6 +3004,21 @@ export function enqueueMemoryWrite(input: {
       | MemoryWriteQueueRecord
       | undefined;
     if (existing) return existing;
+
+    // External ingest idempotency survives completion for as long as the
+    // retained queue record exists. Its dedicated partial unique index is
+    // broader than the generic pending/running dedupe index.
+    const completedExternalIngest = db
+      .prepare(
+        `SELECT * FROM memory_write_queue
+         WHERE owner_key = ? AND kind = ? AND dedup_key = ?
+         ORDER BY created_at ASC
+         LIMIT 1`,
+      )
+      .get(input.ownerKey, input.kind, dedupKey) as
+      | MemoryWriteQueueRecord
+      | undefined;
+    if (completedExternalIngest) return completedExternalIngest;
   }
   throw new Error('Failed to enqueue memory write');
 }
@@ -3018,8 +3040,9 @@ export function claimNextMemoryWrite(
                    WHEN 'global_sleep' THEN 0
                    WHEN 'session_wrapup' THEN 1
                    WHEN 'remember' THEN 2
-                   WHEN 'repair_sweep' THEN 3
-                   ELSE 4
+                   WHEN 'external_knowledge_ingest' THEN 3
+                   WHEN 'repair_sweep' THEN 4
+                   ELSE 5
                  END,
                  created_at ASC
                LIMIT 1`,
@@ -3034,8 +3057,9 @@ export function claimNextMemoryWrite(
                    WHEN 'global_sleep' THEN 0
                    WHEN 'session_wrapup' THEN 1
                    WHEN 'remember' THEN 2
-                   WHEN 'repair_sweep' THEN 3
-                   ELSE 4
+                   WHEN 'external_knowledge_ingest' THEN 3
+                   WHEN 'repair_sweep' THEN 4
+                   ELSE 5
                  END,
                  created_at ASC
                LIMIT 1`,
@@ -3098,12 +3122,18 @@ export function completeMemoryWrite(
     MemoryWriteQueueStatus,
     'done' | 'obsolete' | 'dropped'
   > = 'done',
+  result?: Record<string, unknown>,
 ): void {
+  const resultJson = result ? JSON.stringify(result) : null;
+  const lastError =
+    status === 'dropped' && typeof result?.error === 'string'
+      ? result.error.slice(0, 4000)
+      : null;
   db.prepare(
     `UPDATE memory_write_queue
-     SET status = ?, last_error = NULL, updated_at = ?
+     SET status = ?, last_error = ?, result_json = ?, updated_at = ?
      WHERE id = ?`,
-  ).run(status, new Date().toISOString(), id);
+  ).run(status, lastError, resultJson, new Date().toISOString(), id);
 }
 
 export function retryMemoryWrite(
@@ -3114,7 +3144,8 @@ export function retryMemoryWrite(
   const now = new Date();
   db.prepare(
     `UPDATE memory_write_queue
-     SET status = 'pending', last_error = ?, available_at = ?, updated_at = ?
+     SET status = 'pending', last_error = ?, result_json = NULL,
+         available_at = ?, updated_at = ?
      WHERE id = ?`,
   ).run(
     error.slice(0, 4000),

@@ -549,8 +549,31 @@ cd web && npx vite --port 3001
 | `MAX_CONCURRENT_RUNTIMES` | `20` | 同时运行的 Session runtime 上限 |
 | `TRUST_PROXY` | `false` | 信任反向代理的 `X-Forwarded-For` 头 |
 | `TZ` | 系统时区 | 定时任务时区 |
+| `HAPPYCLAW_EXTERNAL_KNOWLEDGE_TOKEN` | - | 外部知识导入 API 的 Bearer Token；未配置时 API 返回 503 |
+| `HAPPYCLAW_EXTERNAL_KNOWLEDGE_OWNER` | 当前本地 operator | 外部知识写入的 Memory owner |
 
 兼容提示：`CONTAINER_TIMEOUT`、`CONTAINER_MAX_OUTPUT_SIZE`、`MAX_CONCURRENT_CONTAINERS` 等旧变量仍可作为回退值读取，但不建议继续扩散。
+
+### External Knowledge Ingest API
+
+`POST /api/external/knowledge/ingest` 接收不可信的外部材料，并通过 Memory
+Orchestrator 的持久化写队列只抽取可复用知识。请求可携带 `dedupe_key`
+实现幂等；默认返回 `202`，随后通过
+`GET /api/external/knowledge/requests/{request_id}` 查询状态。
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/external/knowledge/ingest \
+  -H "Authorization: Bearer $HAPPYCLAW_EXTERNAL_KNOWLEDGE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "待抽取的外部材料",
+    "source": {"type": "document", "uri": "https://example.test/doc"},
+    "dedupe_key": "document:example:1"
+  }'
+```
+
+原始材料独立保存在 `data/external-knowledge/{ownerKey}/incoming/`，不会进入
+Memory 检索目录。单次 `content` 上限为 100 KiB。
 
 ### 管理员密码恢复
 
