@@ -115,7 +115,7 @@ export interface ProgressCardOptions {
   threadId?: string;
   title?: string;
   modelLabel?: string;
-  /** Present only when a verified card-action callback is configured. */
+  /** Stop handler exposed through the Feishu persistent-connection callback. */
   onStop?: () => boolean | Promise<boolean>;
 }
 
@@ -152,7 +152,7 @@ interface CompletedSubAgent {
   agentName?: string;
 }
 
-// ─── Verified stop-action registry ─────────────────────────────
+// ─── Stop-action capability registry ───────────────────────────
 
 interface StopActionEntry {
   expiresAt: number;

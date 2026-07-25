@@ -8,16 +8,16 @@
 
 ### 0.1 已修正的原方案假设
 
-| 原草案假设                                    | 验证后的问题                                                           | 最终方案                                                                                                                           |
-| --------------------------------------------- | ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| 同渠道消息只在 batch/max window 内注入        | 长任务中的正常追问会被强制 drain 和冷启动，steering 实际无法命中       | 活跃 turn 的**同渠道消息始终注入现有 runtime**；runner 能 steer 就在 tool 边界注入，暂时不能就由 runner 缓冲到下一个 provider turn |
-| `pushMessage()` 返回 `string[]` 即表示拒绝    | 无法区分“已 steer”和“已安全缓冲”，异步 stdin/app-server 错误也表达不了 | `pushMessage()` 改为异步显式结果；Claude、Codex 声明支持 mid-query push，Agy 明确缓冲                                              |
-| runner 读到 IPC 即可提交宿主游标              | runtime/runner 在收到后、真正完成 provider query 前仍可能退出          | 使用 UUID `deliveryId` 精确跟踪；区分 `received`、`delivered`、`returned`，只有 query 成功后才发 `delivered`，异常退出则按 ID 重排 |
-| 把 `send_file` 从 tasks IPC 搬到 messages IPC | 通道迁移本身不能解决静默失败，且会扩大协议改动                         | 保留 tasks 通道，增加 `requestId`、宿主持久化接收回执、10 秒超时和明确错误                                                         |
-| CardKit 流式更新发送增量文本                  | CardKit `cardElement.content` 需要累计内容，增量会覆盖/错乱            | 所有更新发送**完整累计 Markdown**，单元素、全局严格递增 sequence、串行 mutation                                                    |
-| 停止按钮由飞书 WebSocket 事件处理             | 卡片 action 是独立 HTTP 回调，并要求签名/解密验证                      | 提供 `/api/feishu/card-action` 公网回调，使用 SDK `CardActionHandler` 校验；action ID 一次性消费并带 TTL                           |
-| 文件 outbox 足以做可靠投递                    | 文件状态迁移、并发 claim、FIFO、失败检索和恢复复杂且脆弱               | 使用 SQLite `im_outbox`：原子 claim、按目标 FIFO、跨目标并行、指数退避、启动恢复、失败管理 API/UI                                  |
-| “exactly once” 可统一承诺                     | Telegram/QQ 等上游没有等价幂等键                                       | 内部处理保证精确 delivery ID 和不重复确认；飞书通过稳定 UUID 获得 API 幂等，其他渠道为**持久化 at-least-once**                     |
+| 原草案假设                                    | 验证后的问题                                                           | 最终方案                                                                                                                             |
+| --------------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| 同渠道消息只在 batch/max window 内注入        | 长任务中的正常追问会被强制 drain 和冷启动，steering 实际无法命中       | 活跃 turn 的**同渠道消息始终注入现有 runtime**；runner 能 steer 就在 tool 边界注入，暂时不能就由 runner 缓冲到下一个 provider turn   |
+| `pushMessage()` 返回 `string[]` 即表示拒绝    | 无法区分“已 steer”和“已安全缓冲”，异步 stdin/app-server 错误也表达不了 | `pushMessage()` 改为异步显式结果；Claude、Codex 声明支持 mid-query push，Agy 明确缓冲                                                |
+| runner 读到 IPC 即可提交宿主游标              | runtime/runner 在收到后、真正完成 provider query 前仍可能退出          | 使用 UUID `deliveryId` 精确跟踪；区分 `received`、`delivered`、`returned`，只有 query 成功后才发 `delivered`，异常退出则按 ID 重排   |
+| 把 `send_file` 从 tasks IPC 搬到 messages IPC | 通道迁移本身不能解决静默失败，且会扩大协议改动                         | 保留 tasks 通道，增加 `requestId`、宿主持久化接收回执、10 秒超时和明确错误                                                           |
+| CardKit 流式更新发送增量文本                  | CardKit `cardElement.content` 需要累计内容，增量会覆盖/错乱            | 所有更新发送**完整累计 Markdown**，单元素、全局严格递增 sequence、串行 mutation                                                      |
+| 停止按钮必须走独立 HTTP 回调                  | 新版飞书回调与 Node SDK 已支持长连接 `card.action.trigger`             | 复用消息 `WSClient` 的 `EventDispatcher` 接收卡片回调；无需公网地址、Verification Token 或 Encrypt Key；action ID 一次性消费并带 TTL |
+| 文件 outbox 足以做可靠投递                    | 文件状态迁移、并发 claim、FIFO、失败检索和恢复复杂且脆弱               | 使用 SQLite `im_outbox`：原子 claim、按目标 FIFO、跨目标并行、指数退避、启动恢复、失败管理 API/UI                                    |
+| “exactly once” 可统一承诺                     | Telegram/QQ 等上游没有等价幂等键                                       | 内部处理保证精确 delivery ID 和不重复确认；飞书通过稳定 UUID 获得 API 幂等，其他渠道为**持久化 at-least-once**                       |
 
 ### 0.2 最终数据流
 

@@ -57,7 +57,6 @@ import feishuApiRoutes, { injectFeishuApiDeps } from './routes/feishu-api.js';
 import searchRoutes from './routes/search.js';
 import workflowsRoutes from './routes/workflows.js';
 import outboxRoutes from './routes/outbox.js';
-import feishuCardActionRoutes from './routes/feishu-card-action.js';
 import { getSystemSettings } from './runtime-config.js';
 
 // Database and types (only for handleWebUserMessage and broadcast)
@@ -213,7 +212,6 @@ app.route('/api/mcp-servers', mcpServersRoutes);
 app.route('/api/runners', runnersRoutes);
 app.route('/api/workflows', workflowsRoutes);
 app.route('/api/outbox', outboxRoutes);
-app.route('/api/feishu', feishuCardActionRoutes);
 app.route('/api/sessions', agentRoutes);
 app.route('/api/logs', logsRoutes);
 app.route('/api/sessions', turnsRoutes);

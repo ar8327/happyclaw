@@ -587,8 +587,6 @@ configRoutes.get('/im/feishu', authMiddleware, (c) => {
         replyThreadingMode: 'auto',
         streamingCard: false,
         imCommentary: false,
-        hasCardVerificationToken: false,
-        hasCardEncryptKey: false,
       });
     }
     return c.json({
@@ -597,8 +595,6 @@ configRoutes.get('/im/feishu', authMiddleware, (c) => {
       replyThreadingMode: config.replyThreadingMode ?? 'auto',
       streamingCard: config.streamingCard ?? false,
       imCommentary: config.imCommentary ?? false,
-      hasCardVerificationToken: !!config.cardVerificationToken,
-      hasCardEncryptKey: !!config.cardEncryptKey,
     });
   } catch (err) {
     logger.error({ err }, 'Failed to load Feishu IM config');
@@ -625,8 +621,6 @@ configRoutes.put('/im/feishu', authMiddleware, async (c) => {
     replyThreadingMode?: 'auto' | 'agent';
     streamingCard?: boolean;
     imCommentary?: boolean;
-    cardVerificationToken?: string;
-    cardEncryptKey?: string;
   } = {
     appId: current?.appId || '',
     appSecret: current?.appSecret || '',
@@ -635,8 +629,6 @@ configRoutes.put('/im/feishu', authMiddleware, async (c) => {
     replyThreadingMode: current?.replyThreadingMode ?? 'auto',
     streamingCard: current?.streamingCard ?? false,
     imCommentary: current?.imCommentary ?? false,
-    cardVerificationToken: current?.cardVerificationToken ?? '',
-    cardEncryptKey: current?.cardEncryptKey ?? '',
   };
   if (typeof validation.data.appId === 'string') {
     const appId = validation.data.appId.trim();
@@ -663,17 +655,6 @@ configRoutes.put('/im/feishu', authMiddleware, async (c) => {
   if (typeof validation.data.imCommentary === 'boolean') {
     next.imCommentary = validation.data.imCommentary;
   }
-  if (typeof validation.data.cardVerificationToken === 'string') {
-    next.cardVerificationToken = validation.data.cardVerificationToken.trim();
-  } else if (validation.data.clearCardVerificationToken === true) {
-    next.cardVerificationToken = '';
-  }
-  if (typeof validation.data.cardEncryptKey === 'string') {
-    next.cardEncryptKey = validation.data.cardEncryptKey.trim();
-  } else if (validation.data.clearCardEncryptKey === true) {
-    next.cardEncryptKey = '';
-  }
-
   try {
     const saved = saveImFeishuConfig({
       appId: next.appId,
@@ -682,8 +663,6 @@ configRoutes.put('/im/feishu', authMiddleware, async (c) => {
       replyThreadingMode: next.replyThreadingMode,
       streamingCard: next.streamingCard,
       imCommentary: next.imCommentary,
-      cardVerificationToken: next.cardVerificationToken,
-      cardEncryptKey: next.cardEncryptKey,
     });
 
     // Hot-reload: reconnect user's Feishu channel
@@ -702,14 +681,54 @@ configRoutes.put('/im/feishu', authMiddleware, async (c) => {
       replyThreadingMode: saved.replyThreadingMode ?? 'auto',
       streamingCard: saved.streamingCard ?? false,
       imCommentary: saved.imCommentary ?? false,
-      hasCardVerificationToken: !!saved.cardVerificationToken,
-      hasCardEncryptKey: !!saved.cardEncryptKey,
     });
   } catch (err) {
     const message =
       err instanceof Error ? err.message : 'Invalid Feishu config payload';
     logger.warn({ err }, 'Invalid Feishu IM config payload');
     return c.json({ error: message }, 400);
+  }
+});
+
+configRoutes.post('/im/feishu/test-connection', authMiddleware, async (c) => {
+  const config = getImFeishuConfig();
+  if (!config?.appId || !config.appSecret) {
+    return c.json(
+      { connected: false, error: '请先保存 App ID 和 App Secret' },
+      400,
+    );
+  }
+  if (config.enabled === false) {
+    return c.json({ connected: false, error: '请先启用飞书渠道' }, 409);
+  }
+
+  try {
+    let connected = deps?.isIMFeishuConnected?.() ?? false;
+    if (!connected && deps?.reloadIMConfig) {
+      connected = await deps.reloadIMConfig('feishu');
+    }
+    if (!connected) {
+      return c.json(
+        {
+          connected: false,
+          error: '飞书长连接未建立，请检查应用凭证和开放平台配置',
+        },
+        503,
+      );
+    }
+    return c.json({
+      connected: true,
+      message: '飞书长连接已建立',
+    });
+  } catch (err) {
+    logger.warn({ err }, 'Failed to test Feishu persistent connection');
+    return c.json(
+      {
+        connected: false,
+        error: err instanceof Error ? err.message : '飞书长连接验证失败',
+      },
+      503,
+    );
   }
 });
 

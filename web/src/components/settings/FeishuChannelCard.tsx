@@ -27,8 +27,6 @@ interface UserFeishuConfig {
   replyThreadingMode?: 'auto' | 'agent';
   streamingCard?: boolean;
   imCommentary?: boolean;
-  hasCardVerificationToken?: boolean;
-  hasCardEncryptKey?: boolean;
 }
 
 interface OAuthStatus {
@@ -107,8 +105,6 @@ export function FeishuChannelCard({
   const [config, setConfig] = useState<UserFeishuConfig | null>(null);
   const [appId, setAppId] = useState('');
   const [appSecret, setAppSecret] = useState('');
-  const [cardVerificationToken, setCardVerificationToken] = useState('');
-  const [cardEncryptKey, setCardEncryptKey] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [toggling, setToggling] = useState(false);
@@ -117,7 +113,7 @@ export function FeishuChannelCard({
   const [savingThreadingMode, setSavingThreadingMode] = useState(false);
   const [savingStreamingCard, setSavingStreamingCard] = useState(false);
   const [savingImCommentary, setSavingImCommentary] = useState(false);
-  const [savingCardCallback, setSavingCardCallback] = useState(false);
+  const [testingConnection, setTestingConnection] = useState(false);
 
   const enabled = config?.enabled ?? false;
 
@@ -128,8 +124,6 @@ export function FeishuChannelCard({
       setConfig(data);
       setAppId(data.appId || '');
       setAppSecret('');
-      setCardVerificationToken('');
-      setCardEncryptKey('');
     } catch {
       setConfig(null);
     } finally {
@@ -258,51 +252,27 @@ export function FeishuChannelCard({
     }
   };
 
-  const handleSaveCardCallback = async () => {
-    const token = cardVerificationToken.trim();
-    const encryptKey = cardEncryptKey.trim();
-    if (!token && !encryptKey) {
-      setError('请填写 Verification Token 或 Encrypt Key');
-      return;
-    }
-    setSavingCardCallback(true);
+  const handleTestConnection = async () => {
+    setTestingConnection(true);
     setNotice(null);
     setError(null);
     try {
-      const payload: Record<string, string> = {};
-      if (token) payload.cardVerificationToken = token;
-      if (encryptKey) payload.cardEncryptKey = encryptKey;
-      const data = await api.put<UserFeishuConfig>(
-        '/api/config/im/feishu',
-        payload,
+      const data = await api.post<{ connected: boolean; message?: string }>(
+        '/api/config/im/feishu/test-connection',
+        {},
+        45_000,
       );
-      setConfig(data);
-      setCardVerificationToken('');
-      setCardEncryptKey('');
-      setNotice('飞书卡片回调配置已保存');
+      setConfig((current) =>
+        current ? { ...current, connected: data.connected } : current,
+      );
+      setNotice(data.message || '飞书长连接已建立');
     } catch (err) {
-      setError(getErrorMessage(err, '保存卡片回调配置失败'));
+      setConfig((current) =>
+        current ? { ...current, connected: false } : current,
+      );
+      setError(getErrorMessage(err, '飞书长连接验证失败'));
     } finally {
-      setSavingCardCallback(false);
-    }
-  };
-
-  const clearCardCallbackSecret = async (
-    field: 'clearCardVerificationToken' | 'clearCardEncryptKey',
-  ) => {
-    setSavingCardCallback(true);
-    setNotice(null);
-    setError(null);
-    try {
-      const data = await api.put<UserFeishuConfig>('/api/config/im/feishu', {
-        [field]: true,
-      });
-      setConfig(data);
-      setNotice('飞书卡片回调配置已清除');
-    } catch (err) {
-      setError(getErrorMessage(err, '清除卡片回调配置失败'));
-    } finally {
-      setSavingCardCallback(false);
+      setTestingConnection(false);
     }
   };
 
@@ -493,96 +463,40 @@ export function FeishuChannelCard({
               </div>
             </div>
 
-            {/* Verified card action callback */}
+            {/* Persistent connection card action callback */}
             <div className="pt-3 border-t border-border-subtle space-y-3">
               <div>
                 <h4 className="text-xs font-semibold text-foreground">
-                  卡片按钮回调
+                  长连接回调
                 </h4>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  配置后，执行进度卡会显示「停止」按钮。请在飞书开放平台把卡片回调地址设为：
+                  在飞书开放平台「事件与回调」中，将回调订阅方式设为「使用长连接接收回调」，并添加
+                  <code className="mx-1 rounded bg-surface-2 px-1 py-0.5 text-[11px] text-foreground">
+                    card.action.trigger
+                  </code>
+                  。执行进度卡的「停止」按钮会通过当前 Lark SDK 长连接回传。
                 </p>
-                <code className="mt-1.5 block rounded bg-surface-2 px-2 py-1 text-[11px] break-all select-all text-foreground">
-                  {`${window.location.origin}/api/feishu/card-action`}
-                </code>
+                <p className="text-xs text-muted-foreground/80 mt-1">
+                  无需公网域名、回调地址、Verification Token 或 Encrypt Key。
+                </p>
               </div>
-              <div className="grid md:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs text-muted-foreground mb-1">
-                    Verification Token
-                    {config?.hasCardVerificationToken && (
-                      <span className="ml-1 text-success">已配置</span>
-                    )}
-                  </label>
-                  <Input
-                    type="password"
-                    value={cardVerificationToken}
-                    onChange={(e) => setCardVerificationToken(e.target.value)}
-                    placeholder={
-                      config?.hasCardVerificationToken
-                        ? '留空不修改'
-                        : '输入 Verification Token'
-                    }
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-muted-foreground mb-1">
-                    Encrypt Key（可选）
-                    {config?.hasCardEncryptKey && (
-                      <span className="ml-1 text-success">已配置</span>
-                    )}
-                  </label>
-                  <Input
-                    type="password"
-                    value={cardEncryptKey}
-                    onChange={(e) => setCardEncryptKey(e.target.value)}
-                    placeholder={
-                      config?.hasCardEncryptKey
-                        ? '留空不修改'
-                        : '未启用加密回调可留空'
-                    }
-                  />
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <Button
                   size="sm"
                   variant="outline"
-                  onClick={handleSaveCardCallback}
-                  disabled={
-                    savingCardCallback ||
-                    (!cardVerificationToken.trim() && !cardEncryptKey.trim())
-                  }
+                  onClick={handleTestConnection}
+                  disabled={testingConnection || !config?.hasAppSecret}
                 >
-                  {savingCardCallback && (
+                  {testingConnection && (
                     <Loader2 className="size-3 animate-spin" />
                   )}
-                  保存回调配置
+                  验证长连接
                 </Button>
-                {config?.hasCardVerificationToken && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() =>
-                      clearCardCallbackSecret('clearCardVerificationToken')
-                    }
-                    disabled={savingCardCallback}
-                  >
-                    清除 Token
-                  </Button>
-                )}
-                {config?.hasCardEncryptKey && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() =>
-                      clearCardCallbackSecret('clearCardEncryptKey')
-                    }
-                    disabled={savingCardCallback}
-                  >
-                    清除 Encrypt Key
-                  </Button>
-                )}
+                <span
+                  className={`text-xs ${config?.connected ? 'text-success' : 'text-muted-foreground'}`}
+                >
+                  {config?.connected ? '连接正常' : '尚未连接'}
+                </span>
               </div>
             </div>
 

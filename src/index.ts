@@ -2566,21 +2566,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           : titleSource
         : undefined,
       modelLabel: effectiveGroup.model,
-      onStop: feishuConfig.cardVerificationToken
-        ? () => {
-            const active = turnManager.getActiveTurn(group.folder);
-            if (!active) return false;
-            const interrupted = queue.interruptQuery(chatJid);
-            if (interrupted) {
-              broadcastInterruptedTurn(
-                group.folder,
-                sourceChannel,
-                '用户通过飞书卡片停止',
-              );
-            }
-            return interrupted;
-          }
-        : undefined,
+      onStop: () => {
+        const active = turnManager.getActiveTurn(group.folder);
+        if (!active) return false;
+        const interrupted = queue.interruptQuery(chatJid);
+        if (interrupted) {
+          broadcastInterruptedTurn(
+            group.folder,
+            sourceChannel,
+            '用户通过飞书卡片停止',
+          );
+        }
+        return interrupted;
+      },
     });
     if (progressCard) {
       registerProgressSession(sourceChannel, progressCard, group.folder);
@@ -5171,21 +5169,19 @@ async function startMessageLoop(): Promise<void> {
                         : titleSource
                       : undefined,
                     modelLabel: resolved.effectiveGroup.model,
-                    onStop: fc.cardVerificationToken
-                      ? () => {
-                          const active = turnManager.getActiveTurn(folder);
-                          if (!active) return false;
-                          const interrupted = queue.interruptQuery(chatJid);
-                          if (interrupted) {
-                            broadcastInterruptedTurn(
-                              folder,
-                              channel,
-                              '用户通过飞书卡片停止',
-                            );
-                          }
-                          return interrupted;
-                        }
-                      : undefined,
+                    onStop: () => {
+                      const active = turnManager.getActiveTurn(folder);
+                      if (!active) return false;
+                      const interrupted = queue.interruptQuery(chatJid);
+                      if (interrupted) {
+                        broadcastInterruptedTurn(
+                          folder,
+                          channel,
+                          '用户通过飞书卡片停止',
+                        );
+                      }
+                      return interrupted;
+                    },
                   });
                   if (card) {
                     registerProgressSession(channel, card, folder);

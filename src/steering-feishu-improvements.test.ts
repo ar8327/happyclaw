@@ -7,8 +7,9 @@ import {
   STREAMING_CONTENT_ELEMENT_ID,
 } from './feishu-card-builder.js';
 import { StreamingCardController } from './feishu-streaming-card.js';
+import { ProgressCardController } from './feishu-progress-card.js';
 import { interruptibleSleep, notifyNewImMessage } from './message-notifier.js';
-import { extractMessageContent } from './feishu.js';
+import { extractMessageContent, handleFeishuCardAction } from './feishu.js';
 
 function testCardBuilders(): void {
   const reply = buildStaticReplyCard('# 这不是标题\n正文');
@@ -185,8 +186,47 @@ async function testWakeupBeforeSleepIsNotLost(): Promise<void> {
   assert.ok(Date.now() - startedAt < 100);
 }
 
+async function testPersistentConnectionCardAction(): Promise<void> {
+  let stopCount = 0;
+  const controller = new ProgressCardController({
+    client: {} as lark.Client,
+    chatId: 'oc_test',
+    onStop: () => {
+      stopCount++;
+      return true;
+    },
+  });
+  const actionId = (
+    controller as unknown as {
+      stopActionId?: string;
+    }
+  ).stopActionId;
+  assert.ok(actionId);
+
+  const first = await handleFeishuCardAction({
+    action: {
+      value: { action: 'stop_turn', action_id: actionId },
+    },
+  });
+  assert.deepEqual(first, {
+    toast: { type: 'success', content: '已停止当前执行' },
+  });
+  assert.equal(stopCount, 1);
+
+  const duplicate = await handleFeishuCardAction({
+    action: {
+      value: { action: 'stop_turn', action_id: actionId },
+    },
+  });
+  assert.deepEqual(duplicate, {
+    toast: { type: 'info', content: '该执行已结束' },
+  });
+  assert.equal(stopCount, 1);
+}
+
 testCardBuilders();
 testFeishuMediaExtraction();
 await testCardKitSequenceAndCumulativeContent();
 await testWakeupBeforeSleepIsNotLost();
+await testPersistentConnectionCardAction();
 console.log('steering and Feishu improvement tests passed');

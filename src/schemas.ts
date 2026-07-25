@@ -266,10 +266,6 @@ export const FeishuConfigSchema = z
     replyThreadingMode: z.enum(['auto', 'agent']).optional(),
     streamingCard: z.boolean().optional(),
     imCommentary: z.boolean().optional(),
-    cardVerificationToken: z.string().max(2000).optional(),
-    clearCardVerificationToken: z.boolean().optional(),
-    cardEncryptKey: z.string().max(2000).optional(),
-    clearCardEncryptKey: z.boolean().optional(),
   })
   .refine(
     (data) =>
@@ -279,11 +275,7 @@ export const FeishuConfigSchema = z
       typeof data.enabled === 'boolean' ||
       typeof data.replyThreadingMode === 'string' ||
       typeof data.streamingCard === 'boolean' ||
-      typeof data.imCommentary === 'boolean' ||
-      typeof data.cardVerificationToken === 'string' ||
-      data.clearCardVerificationToken === true ||
-      typeof data.cardEncryptKey === 'string' ||
-      data.clearCardEncryptKey === true,
+      typeof data.imCommentary === 'boolean',
     { message: 'At least one config field must be provided' },
   );
 

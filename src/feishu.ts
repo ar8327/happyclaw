@@ -22,6 +22,7 @@ import { detectImageMimeType } from './image-detector.js';
 import { analyzeIntent } from './intent-analyzer.js';
 import { getSystemSettings } from './runtime-config.js';
 import { buildStaticReplyCard } from './feishu-card-builder.js';
+import { handleProgressCardAction } from './feishu-progress-card.js';
 
 // ─── FeishuConnection Interface ────────────────────────────────
 
@@ -128,10 +129,11 @@ export interface FeishuConnection {
 
 // ─── Shared Helpers (pure functions, no instance state) ────────
 
-const FEISHU_WS_READY_STATE_OPEN = 1;
 const WS_HEALTH_CHECK_INTERVAL_MS = 15_000;
 const WS_RECONNECT_CHECK_THRESHOLD = 4;
 const WS_RECONNECT_MIN_INTERVAL_MS = 30_000;
+const WS_CONNECT_TIMEOUT_MS = 30_000;
+const WS_CONNECT_POLL_INTERVAL_MS = 100;
 const BACKFILL_LOOKBACK_MS = 5 * 60 * 1000;
 const BACKFILL_PAGE_SIZE = 50;
 const BACKFILL_MAX_PAGES_PER_CHAT = 5;
@@ -182,6 +184,38 @@ interface WsConnectionState {
   connected: boolean;
   isConnecting: boolean;
   nextConnectTime: number;
+}
+
+interface FeishuCardActionPayload {
+  action?: {
+    value?: unknown;
+  };
+}
+
+export interface FeishuCardActionResponse {
+  toast: {
+    type: 'success' | 'info' | 'warning' | 'error';
+    content: string;
+  };
+}
+
+export async function handleFeishuCardAction(
+  data: FeishuCardActionPayload,
+): Promise<FeishuCardActionResponse> {
+  const result = await handleProgressCardAction(data.action?.value);
+  if (result === 'stopped') {
+    return {
+      toast: { type: 'success', content: '已停止当前执行' },
+    };
+  }
+  if (result === 'already_finished') {
+    return {
+      toast: { type: 'info', content: '该执行已结束' },
+    };
+  }
+  return {
+    toast: { type: 'warning', content: '无法识别此操作' },
+  };
 }
 
 function toEpochMs(value: string | number | undefined): number {
@@ -518,34 +552,51 @@ export function createFeishuConnection(
     }
   }
 
-  /**
-   * 通过访问飞书 SDK 的私有属性（wsConfig、isConnecting）获取 WebSocket 连接状态。
-   *
-   * 注意事项：
-   * 1. 该函数依赖 @larksuiteoapi/node-sdk 内部未公开的属性结构，SDK 版本升级可能导致失效
-   * 2. 失效时函数会静默降级（捕获异常后返回 null），健康检查将跳过状态判断，不会触发误重连
-   * 3. 后续可考虑使用 SDK 公开 API getReconnectInfo() 替代私有属性访问
-   */
   function getWsConnectionState(): WsConnectionState | null {
-    const rawClient = wsClient as unknown as {
-      wsConfig?: {
-        getWSInstance?: () => { readyState?: number } | undefined;
-      };
-      getReconnectInfo?: () => { nextConnectTime?: number };
-      isConnecting?: boolean;
-    };
+    if (!wsClient) return null;
     try {
-      const wsInstance = rawClient.wsConfig?.getWSInstance?.();
-      const reconnectInfo = rawClient.getReconnectInfo?.() || {};
+      const status = wsClient.getConnectionStatus();
       return {
-        connected: wsInstance?.readyState === FEISHU_WS_READY_STATE_OPEN,
-        isConnecting: rawClient.isConnecting === true,
-        nextConnectTime: Number(reconnectInfo.nextConnectTime || 0),
+        connected: status.state === 'connected',
+        isConnecting:
+          status.state === 'connecting' || status.state === 'reconnecting',
+        nextConnectTime: Number(status.nextConnectTime || 0),
       };
     } catch (err) {
       logger.debug({ err }, 'Failed to inspect Feishu WebSocket state');
       return null;
     }
+  }
+
+  async function createConnectedWsClient(
+    dispatcher: lark.EventDispatcher,
+  ): Promise<lark.WSClient> {
+    const nextClient = new lark.WSClient({
+      appId: config.appId,
+      appSecret: config.appSecret,
+      domain: sdkDomain,
+      loggerLevel: lark.LoggerLevel.info,
+      handshakeTimeoutMs: 10_000,
+    });
+
+    await nextClient.start({ eventDispatcher: dispatcher });
+    const deadline = Date.now() + WS_CONNECT_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const status = nextClient.getConnectionStatus();
+      if (status.state === 'connected') return nextClient;
+      if (status.state === 'failed') {
+        nextClient.close({ force: true });
+        throw new Error('Feishu WebSocket connection failed');
+      }
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, WS_CONNECT_POLL_INTERVAL_MS);
+      });
+    }
+
+    nextClient.close({ force: true });
+    throw new Error(
+      `Feishu WebSocket connection timed out after ${WS_CONNECT_TIMEOUT_MS}ms`,
+    );
   }
 
   function stopHealthMonitor(): void {
@@ -1375,13 +1426,7 @@ export function createFeishuConnection(
         }
       }
 
-      wsClient = new lark.WSClient({
-        appId: config.appId,
-        appSecret: config.appSecret,
-        domain: sdkDomain,
-        loggerLevel: lark.LoggerLevel.info,
-      });
-      await wsClient.start({ eventDispatcher });
+      wsClient = await createConnectedWsClient(eventDispatcher);
 
       lastWsStateConnected = true;
       logger.info({ reason }, 'Feishu WebSocket reconnected');
@@ -1514,6 +1559,21 @@ export function createFeishuConnection(
             logger.error({ err }, 'Error handling Feishu message');
           }
         },
+        'card.action.trigger': async (data: FeishuCardActionPayload) => {
+          try {
+            const response = await handleFeishuCardAction(data);
+            logger.info(
+              { toastType: response.toast.type },
+              'Handled Feishu card action through WebSocket',
+            );
+            return response;
+          } catch (err) {
+            logger.error({ err }, 'Error handling Feishu card action');
+            return {
+              toast: { type: 'error', content: '操作失败，请稍后重试' },
+            };
+          }
+        },
         'im.chat.member.bot.added_v1': async (data) => {
           try {
             const chatId = data.chat_id;
@@ -1555,16 +1615,11 @@ export function createFeishuConnection(
       });
 
       // Initialize WebSocket client
-      wsClient = new lark.WSClient({
-        appId: config.appId,
-        appSecret: config.appSecret,
-        domain: sdkDomain,
-        loggerLevel: lark.LoggerLevel.info,
-      });
-
       try {
-        await wsClient.start({ eventDispatcher });
-        logger.info('Feishu WebSocket client started');
+        wsClient = await createConnectedWsClient(eventDispatcher);
+        logger.info(
+          'Feishu WebSocket client connected; card callbacks use the persistent connection',
+        );
         lastWsStateConnected = true;
         disconnectedSince = null;
         startHealthMonitor();
@@ -2052,7 +2107,7 @@ export function createFeishuConnection(
     },
 
     isConnected(): boolean {
-      return wsClient != null;
+      return getWsConnectionState()?.connected ?? false;
     },
 
     async getChatInfo(chatId: string): Promise<FeishuChatInfo | null> {
