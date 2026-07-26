@@ -25,6 +25,7 @@
     "test:workflow-traex": "tsx src/workflow-traex.test.ts",
     "test:context-conformance": "tsx container/agent-runner/tests/context-conformance.test.ts",
     "test:runner-contracts": "tsx container/agent-runner/tests/runner-contract.test.ts",
+    "test:runner-images": "tsx container/agent-runner/tests/image-utils.test.ts",
     "test:steering-feishu": "tsx src/steering-feishu-improvements.test.ts",
     "test:feishu-conversation-mode": "tsx src/feishu-conversation-mode.test.ts",
     "test:im-outbox": "tsx src/im-outbox.test.ts",

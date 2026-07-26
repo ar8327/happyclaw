@@ -15,13 +15,22 @@ export function saveImagesToTempFiles(
   images: Array<{ data: string; mimeType?: string }>,
   tmpDir?: string,
 ): string[] {
-  const dir = tmpDir || fs.mkdtempSync(path.join(os.tmpdir(), 'happyclaw-codex-'));
+  const dir =
+    tmpDir || fs.mkdtempSync(path.join(os.tmpdir(), 'happyclaw-codex-'));
+  fs.mkdirSync(dir, { recursive: true });
+
+  // A long-lived runner can receive many IPC image messages in one provider
+  // turn. Starting every call again at image-0.jpg overwrites files referenced
+  // by earlier localImage inputs before Codex has necessarily read them.
+  // Give each delivery/batch its own directory while keeping deterministic
+  // image-N names inside that batch.
+  const batchDir = fs.mkdtempSync(path.join(dir, 'images-'));
   const paths: string[] = [];
 
   for (let i = 0; i < images.length; i++) {
     const img = images[i];
     const ext = mimeToExtension(img.mimeType || 'image/png');
-    const filePath = path.join(dir, `image-${i}.${ext}`);
+    const filePath = path.join(batchDir, `image-${i}.${ext}`);
 
     // Strip data URL prefix if present
     let base64Data = img.data;
