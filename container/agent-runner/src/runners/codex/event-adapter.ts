@@ -5,7 +5,11 @@
  * query-loop and frontend.
  */
 
-import type { CodexThreadEvent, CodexThreadItem } from './session.js';
+import {
+  formatCodexAppServerError,
+  type CodexThreadEvent,
+  type CodexThreadItem,
+} from './session.js';
 import type { StreamEvent } from '../../types.js';
 
 /**
@@ -222,7 +226,12 @@ function handleTurnFailed(
   return [
     {
       eventType: 'status',
-      statusText: `Turn failed: ${event.error.message}`,
+      statusText: `Runner 当前 turn 无法继续：${event.error.message}`,
+      runnerError: {
+        message: event.error.message,
+        detail: event.error.message,
+        willRetry: false,
+      },
     },
   ];
 }
@@ -230,10 +239,18 @@ function handleTurnFailed(
 function handleError(
   event: Extract<CodexThreadEvent, { type: 'error' }>,
 ): StreamEvent[] {
+  const detail = formatCodexAppServerError(event);
   return [
     {
       eventType: 'status',
-      statusText: `Error: ${event.message}`,
+      statusText: event.willRetry
+        ? `Runner 暂时异常，正在自动重试：${event.message}`
+        : `Runner 当前 turn 无法继续：${event.message}`,
+      runnerError: {
+        message: event.message,
+        detail,
+        willRetry: event.willRetry,
+      },
     },
   ];
 }

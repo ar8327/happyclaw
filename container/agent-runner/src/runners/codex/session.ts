@@ -158,6 +158,16 @@ export interface CodexUsage {
   reasoning_output_tokens: number;
 }
 
+export interface CodexAppServerErrorEvent {
+  type: 'error';
+  message: string;
+  additionalDetails?: string;
+  errorInfo?: unknown;
+  willRetry: boolean;
+  turn_id?: string;
+  thread_id?: string;
+}
+
 export type CodexThreadEvent =
   | { type: 'thread.started'; thread_id: string }
   | { type: 'turn.started'; turn_id?: string; thread_id?: string }
@@ -204,7 +214,7 @@ export type CodexThreadEvent =
       turn_id?: string;
       thread_id?: string;
     }
-  | { type: 'error'; message: string };
+  | CodexAppServerErrorEvent;
 
 interface JsonRpcMessage {
   id?: string | number;
@@ -284,6 +294,76 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Parse the app-server v2 ErrorNotification shape. Older builds exposed a
+ * top-level message, so retain that fallback while preferring params.error.
+ */
+export function parseCodexErrorNotification(
+  value: unknown,
+): CodexAppServerErrorEvent {
+  const params = isObject(value) ? value : {};
+  const error = isObject(params.error) ? params.error : {};
+  const message =
+    stringValue(error.message) ||
+    stringValue(params.message) ||
+    'Codex app-server error';
+  const additionalDetails = stringValue(error.additionalDetails);
+  const errorInfo =
+    error.codexErrorInfo === null || error.codexErrorInfo === undefined
+      ? undefined
+      : error.codexErrorInfo;
+
+  return {
+    type: 'error',
+    message,
+    ...(additionalDetails ? { additionalDetails } : {}),
+    ...(errorInfo !== undefined ? { errorInfo } : {}),
+    willRetry: params.willRetry === true,
+    thread_id: stringValue(params.threadId),
+    turn_id: stringValue(params.turnId),
+  };
+}
+
+function describeCodexErrorInfo(value: unknown): string | undefined {
+  if (typeof value === 'string' && value) return value;
+  if (!isObject(value)) return undefined;
+
+  const entries = Object.entries(value);
+  if (entries.length !== 1) {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+
+  const [kind, payload] = entries[0];
+  if (!isObject(payload)) return kind;
+  const annotations: string[] = [];
+  const httpStatusCode = numberValue(payload.httpStatusCode);
+  if (httpStatusCode !== undefined) {
+    annotations.push(`HTTP ${httpStatusCode}`);
+  }
+  const turnKind = stringValue(payload.turnKind);
+  if (turnKind) annotations.push(`turn=${turnKind}`);
+  return annotations.length > 0 ? `${kind}（${annotations.join('，')}）` : kind;
+}
+
+export function formatCodexAppServerError(
+  event: CodexAppServerErrorEvent,
+): string {
+  const lines = [event.message];
+  const errorInfo = describeCodexErrorInfo(event.errorInfo);
+  if (errorInfo) lines.push(`错误类型：${errorInfo}`);
+  if (
+    event.additionalDetails &&
+    event.additionalDetails.trim() !== event.message.trim()
+  ) {
+    lines.push(`附加详情：${event.additionalDetails.trim()}`);
+  }
+  return lines.join('\n');
 }
 
 function numberValue(value: unknown): number | undefined {
@@ -1051,8 +1131,7 @@ export class CodexSession {
         ];
       }
       case 'error': {
-        const message = stringValue(params.message) || 'Codex app-server error';
-        return [{ type: 'error', message }];
+        return [parseCodexErrorNotification(params)];
       }
       default:
         return [];

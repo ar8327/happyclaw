@@ -11,6 +11,11 @@ import { listRunnerManifests } from '../src/runners/index.js';
 import { fakeJsonManifest } from '../src/runners/fake-json/manifest.js';
 import { isCodexSessionResumeFailedError } from '../src/runners/codex/runner.js';
 import { convertThreadEvent } from '../src/runners/codex/event-adapter.js';
+import {
+  formatCodexAppServerError,
+  parseCodexErrorNotification,
+} from '../src/runners/codex/session.js';
+import { traexManifest } from '../src/runners/traex/manifest.js';
 import { evaluateSafetyLite } from '../src/runners/claude/hooks.js';
 import { readMcpServersFromCodexToml } from '../src/mcp-config-loader.js';
 import { buildIpcAckStreamEvent } from '../src/ipc-handler.js';
@@ -398,6 +403,107 @@ function assertCodexEventDetail(): void {
   assert.deepEqual(
     todo.todos?.map((item) => item.status),
     ['completed', 'pending'],
+  );
+}
+
+function assertCodexErrorNotificationSemantics(): void {
+  const retrying = parseCodexErrorNotification({
+    error: {
+      message: 'stream disconnected before completion',
+      additionalDetails: 'retry 1/5',
+      codexErrorInfo: {
+        responseStreamDisconnected: { httpStatusCode: 502 },
+      },
+    },
+    willRetry: true,
+    threadId: 'thread-1',
+    turnId: 'turn-1',
+  });
+  assert.equal(retrying.message, 'stream disconnected before completion');
+  assert.equal(retrying.willRetry, true);
+  assert.equal(retrying.thread_id, 'thread-1');
+  assert.equal(retrying.turn_id, 'turn-1');
+  assert.equal(
+    formatCodexAppServerError(retrying),
+    [
+      'stream disconnected before completion',
+      '错误类型：responseStreamDisconnected（HTTP 502）',
+      '附加详情：retry 1/5',
+    ].join('\n'),
+  );
+
+  const retryStatus = convertThreadEvent(retrying)[0];
+  assert.match(retryStatus.statusText || '', /正在自动重试/);
+  assert.equal(retryStatus.runnerError?.willRetry, true);
+  assert.match(retryStatus.runnerError?.detail || '', /HTTP 502/);
+
+  const fatal = parseCodexErrorNotification({
+    error: {
+      message: 'invalid model configuration',
+      codexErrorInfo: 'badRequest',
+    },
+    willRetry: false,
+    threadId: 'thread-1',
+    turnId: 'turn-1',
+  });
+  assert.equal(fatal.willRetry, false);
+  assert.match(formatCodexAppServerError(fatal), /错误类型：badRequest/);
+  const fatalStatus = convertThreadEvent(fatal)[0];
+  assert.match(fatalStatus.statusText || '', /无法继续/);
+  assert.equal(fatalStatus.runnerError?.willRetry, false);
+}
+
+async function assertTraexSupportsTurnSteering(): Promise<void> {
+  const runner = await traexManifest.createRunner({
+    containerInput: {
+      prompt: 'hello',
+      chatJid: 'web:test',
+      workspaceFolder: 'test',
+      runnerId: 'traex',
+      isHome: false,
+      isAdminHome: false,
+    },
+    state: {} as never,
+    ipcPaths: {} as never,
+    log: () => undefined,
+    writeOutput: () => undefined,
+    imChannelsFile: '',
+    groupDir: process.cwd(),
+    globalDir: process.cwd(),
+    memoryDir: process.cwd(),
+    loadUserMcpServers: () => ({}),
+    skillsDir: process.cwd(),
+    disableSyntheticArchive: true,
+    toolScope: 'default',
+  });
+  assert.equal(RUNNER_DESCRIPTORS.traex.capabilities.midQueryPush, true);
+  assert.equal(runner.ipcCapabilities.supportsMidQueryPush, true);
+
+  let clientUserMessageId: string | undefined = 'not-called';
+  (
+    runner as unknown as {
+      session: {
+        steer: (
+          input: Array<Record<string, unknown>>,
+          deliveryId?: string,
+        ) => Promise<void>;
+      };
+    }
+  ).session = {
+    steer: async (_input, deliveryId) => {
+      clientUserMessageId = deliveryId;
+    },
+  };
+  const pushed = await runner.pushMessage(
+    '任务中补充一条消息',
+    undefined,
+    'delivery-1',
+  );
+  assert.equal(pushed.status, 'accepted');
+  assert.equal(
+    clientUserMessageId,
+    undefined,
+    'TraeX turn/steer schema must not receive Codex-only clientUserMessageId',
   );
 }
 
@@ -863,6 +969,7 @@ assertRuntimeProfileInjectionContract();
 assertClaudeRunnerSupportsTurnSteering();
 assertClaudeSafetyLite();
 assertCodexEventDetail();
+assertCodexErrorNotificationSemantics();
 assertRemediationWiring();
 assertCodexMcpTomlParsing();
 assertRunnerProfileSchemaValidation();
@@ -874,6 +981,7 @@ assertTraexModelCacheCapabilities();
 assertTraexModelCatalogNormalization();
 assertMemoryRouteUsesDynamicRunnerModels();
 assertIpcDeliveryAcknowledgement();
+await assertTraexSupportsTurnSteering();
 await assertFakeRunnerContract();
 await assertBaseCliRunnerRecoverableError();
 await assertBaseCliRunnerGenericError();

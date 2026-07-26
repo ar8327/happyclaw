@@ -39,6 +39,7 @@ import {
   type CodexItemType,
   type CodexSessionConfig,
   type CodexThreadEvent,
+  formatCodexAppServerError,
 } from './session.js';
 import { convertThreadEvent } from './event-adapter.js';
 import { saveImagesToTempFiles } from './image-utils.js';
@@ -73,6 +74,8 @@ export interface CodexRunnerOptions {
   aliasBuiltinMcpServer?: boolean;
   useDynamicTools?: boolean;
   supportsMidQueryPush?: boolean;
+  /** TraeX supports turn/steer but not Codex's clientUserMessageId extension. */
+  includeSteerClientUserMessageId?: boolean;
   loadUserMcpServers: () => Record<string, unknown>;
   skillsDir: string;
   disableSyntheticArchive?: boolean;
@@ -571,6 +574,7 @@ export class CodexRunner implements AgentRunner {
     let fallbackUsage: UsageInfo | undefined;
     let finalText: string | null = null;
     let threadId: string | null = null;
+    let fatalError: string | undefined;
     const compactKeysThisTurn: string[] = [];
     this.activeToolCalls.clear();
 
@@ -623,19 +627,31 @@ export class CodexRunner implements AgentRunner {
         }
 
         // Handle errors
-        if (event.type === 'turn.failed') {
+        if (event.type === 'turn.failed' && !fatalError) {
+          fatalError = event.error.message;
           yield {
             kind: 'error',
-            message: event.error.message,
+            message: fatalError,
             recoverable: false,
           };
         }
         if (event.type === 'error') {
-          yield {
-            kind: 'error',
-            message: event.message,
-            recoverable: false,
-          };
+          const detail = formatCodexAppServerError(event);
+          if (event.willRetry) {
+            log(`Codex app-server error, retrying current turn: ${detail}`);
+          } else {
+            const firstFatalError = fatalError === undefined;
+            if (!fatalError || detail.length > fatalError.length) {
+              fatalError = detail;
+            }
+            if (firstFatalError) {
+              yield {
+                kind: 'error',
+                message: fatalError,
+                recoverable: false,
+              };
+            }
+          }
         }
       }
     } catch (err) {
@@ -653,8 +669,11 @@ export class CodexRunner implements AgentRunner {
       yield { kind: 'stream_event', event: { eventType: 'usage', usage } };
     }
 
-    // Emit result
-    yield { kind: 'result', text: finalText, usage };
+    // A fatal app-server error can be followed by turn/completed(status=failed).
+    // Do not emit a misleading success result before query-loop reports failure.
+    if (!fatalError) {
+      yield { kind: 'result', text: finalText, usage };
+    }
 
     if (!this.opts.disableSyntheticArchive) {
       this.archiveMgr.recordTurn(usage);
@@ -686,6 +705,7 @@ export class CodexRunner implements AgentRunner {
       closedDuringQuery: false,
       interruptedDuringQuery: false,
       drainDetectedDuringQuery: false,
+      ...(fatalError ? { genericError: fatalError } : {}),
     };
   }
 
@@ -712,7 +732,12 @@ export class CodexRunner implements AgentRunner {
       })),
     ];
     try {
-      await this.session.steer(input, deliveryId);
+      await this.session.steer(
+        input,
+        this.opts.includeSteerClientUserMessageId === false
+          ? undefined
+          : deliveryId,
+      );
       return { status: 'accepted' };
     } catch (err) {
       return {

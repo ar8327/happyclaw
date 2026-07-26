@@ -37,7 +37,8 @@ export const traexManifest: RunnerManifest = {
       mcpServersMode: 'none',
       aliasBuiltinMcpServer: false,
       useDynamicTools: !disableMcp,
-      supportsMidQueryPush: false,
+      supportsMidQueryPush: true,
+      includeSteerClientUserMessageId: false,
       builtinMcpServerName: undefined,
     });
   },

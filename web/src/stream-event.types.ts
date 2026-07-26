@@ -54,6 +54,15 @@ export interface StreamEvent {
   archivedFolders?: string[];
   transcriptFiles?: string[];
   statusText?: string;
+  /** Structured runner error metadata for progress UIs and diagnostics. */
+  runnerError?: {
+    /** Concise provider error message. */
+    message: string;
+    /** Full formatted provider error, including category and extra details. */
+    detail?: string;
+    /** Whether the provider will retry inside the current turn. */
+    willRetry: boolean;
+  };
   taskDescription?: string;
   taskId?: string;
   taskStatus?: string;

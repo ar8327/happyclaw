@@ -64,6 +64,50 @@ function testCardBuilders(): void {
   assert.match(serialized, /tool-29/);
   assert.match(serialized, /stop-action/);
   assert.doesNotMatch(serialized, /wide_screen_mode/);
+
+  const retrying = buildProgressCard({
+    title: '同步 upstream',
+    modelLabel: 'traex',
+    activeTools: [],
+    completedTools: [],
+    isThinking: false,
+    thinkingText: '',
+    elapsedMs: 8_000,
+    state: 'active',
+    runnerError: {
+      message: 'stream disconnected before completion',
+      detail:
+        'stream disconnected before completion\n错误类型：responseStreamDisconnected（HTTP 502）',
+      willRetry: true,
+    },
+    activeSubAgents: [],
+    completedSubAgents: [],
+  });
+  const retryingSerialized = JSON.stringify(retrying);
+  assert.match(retryingSerialized, /自动重试中/);
+  assert.match(retryingSerialized, /HTTP 502/);
+  assert.equal((retrying.header as { template: string }).template, 'orange');
+
+  const failed = buildProgressCard({
+    title: '同步 upstream',
+    modelLabel: 'traex',
+    activeTools: [],
+    completedTools: tools.slice(0, 2),
+    isThinking: false,
+    thinkingText: '',
+    elapsedMs: 12_000,
+    state: 'failed',
+    failureDetail:
+      'invalid model configuration\n错误类型：badRequest\n附加详情：model gpt-x is unavailable',
+    activeSubAgents: [],
+    completedSubAgents: [],
+  });
+  const failedSerialized = JSON.stringify(failed);
+  assert.equal((failed.header as { template: string }).template, 'red');
+  assert.match(failedSerialized, /执行失败/);
+  assert.match(failedSerialized, /Runner 错误详情/);
+  assert.match(failedSerialized, /badRequest/);
+  assert.match(failedSerialized, /当前 turn 已停止/);
 }
 
 function testFeishuMediaExtraction(): void {
@@ -224,9 +268,51 @@ async function testPersistentConnectionCardAction(): Promise<void> {
   assert.equal(stopCount, 1);
 }
 
+async function testFailureCardCreatedBeforeProgressEvents(): Promise<void> {
+  let sentCard: Record<string, unknown> | undefined;
+  const client = {
+    im: {
+      message: {
+        reply: async () => {
+          throw new Error('unexpected reply');
+        },
+      },
+      v1: {
+        message: {
+          create: async (payload: { data: { content: string } }) => {
+            sentCard = JSON.parse(payload.data.content);
+            return { data: { message_id: 'failed-card-1' } };
+          },
+          patch: async () => {
+            throw new Error('unexpected patch');
+          },
+          delete: async () => ({ code: 0 }),
+        },
+      },
+    },
+  } as unknown as lark.Client;
+
+  const controller = new ProgressCardController({
+    client,
+    chatId: 'oc_failure',
+    title: '运行任务',
+    modelLabel: 'traex',
+  });
+  await controller.fail(
+    'permission denied\n错误类型：unauthorized\n附加详情：token expired',
+  );
+  assert.equal(
+    (sentCard?.header as { template?: string } | undefined)?.template,
+    'red',
+  );
+  assert.match(JSON.stringify(sentCard), /token expired/);
+  controller.dispose();
+}
+
 testCardBuilders();
 testFeishuMediaExtraction();
 await testCardKitSequenceAndCumulativeContent();
 await testWakeupBeforeSleepIsNotLost();
 await testPersistentConnectionCardAction();
+await testFailureCardCreatedBeforeProgressEvents();
 console.log('steering and Feishu improvement tests passed');

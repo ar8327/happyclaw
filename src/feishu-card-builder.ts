@@ -34,8 +34,14 @@ export interface ProgressCardRenderData {
   isThinking: boolean;
   thinkingText: string;
   elapsedMs: number;
-  state: 'active' | 'completed' | 'aborted';
+  state: 'active' | 'completed' | 'aborted' | 'failed';
   abortReason?: string;
+  failureDetail?: string;
+  runnerError?: {
+    message: string;
+    detail?: string;
+    willRetry: boolean;
+  };
   activeSubAgents: ProgressCardAgent[];
   completedSubAgents: ProgressCardAgent[];
   latestCommentary?: string;
@@ -43,6 +49,7 @@ export interface ProgressCardRenderData {
 }
 
 const MAX_PANEL_CHARS = 24_000;
+const MAX_ERROR_CHARS = 8_000;
 export const STREAMING_CONTENT_ELEMENT_ID = 'happyclaw_reply_content';
 export const STREAMING_PRINT_FREQUENCY_MS = 40;
 export const STREAMING_PRINT_STEP = 10;
@@ -68,6 +75,35 @@ function formatElapsed(ms: number): string {
 function compactLine(value: string, max = 80): string {
   const text = value.replace(/\s+/g, ' ').trim();
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+function cleanErrorText(value: string): string {
+  return value
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\r\n?/g, '\n')
+    .trim();
+}
+
+function errorSummary(value: string): string {
+  const cleaned = cleanErrorText(value);
+  const firstLine = cleaned
+    .split('\n')
+    .map((line) => line.trim())
+    .find(Boolean);
+  return compactLine(firstLine || 'Runner 未返回具体错误信息', 110);
+}
+
+function escapeInlineMarkdown(value: string): string {
+  return value.replace(/([\\`*_[\]<>])/g, '\\$1');
+}
+
+function errorDetailBlock(value: string): string {
+  const cleaned = cleanErrorText(value) || 'Runner 未返回具体错误信息';
+  const fitted =
+    cleaned.length <= MAX_ERROR_CHARS
+      ? cleaned
+      : `${cleaned.slice(0, MAX_ERROR_CHARS)}\n\n[错误详情过长，后续内容已截断]`;
+  return `\`\`\`text\n${fitted.replace(/```/g, '``\u200b`')}\n\`\`\``;
 }
 
 function toolName(tool: ProgressCardTool): string {
@@ -208,25 +244,56 @@ export function buildCardKitStreamingCard(
 export function buildProgressCard(
   data: ProgressCardRenderData,
 ): Record<string, unknown> {
-  const statusLabel =
-    data.state === 'active'
+  const finalFailureDetail =
+    data.state === 'failed'
+      ? cleanErrorText(
+          data.failureDetail ||
+            data.runnerError?.detail ||
+            data.runnerError?.message ||
+            'Runner 未返回具体错误信息',
+        )
+      : undefined;
+  const visibleRunnerError =
+    data.state === 'failed'
+      ? {
+          message: errorSummary(finalFailureDetail || ''),
+          detail: finalFailureDetail,
+          willRetry: false,
+        }
+      : data.runnerError;
+  const statusLabel = visibleRunnerError
+    ? visibleRunnerError.willRetry
+      ? '自动重试中'
+      : '执行失败'
+    : data.state === 'active'
       ? '执行中'
       : data.state === 'completed'
         ? '已完成'
-        : data.abortReason || '已中断';
-  const template =
-    data.state === 'active'
+        : data.state === 'failed'
+          ? '执行失败'
+          : data.abortReason || '已中断';
+  const template = visibleRunnerError
+    ? visibleRunnerError.willRetry
+      ? 'orange'
+      : 'red'
+    : data.state === 'active'
       ? 'wathet'
       : data.state === 'completed'
         ? 'green'
-        : 'orange';
-  const currentAction = data.activeTools[0]
-    ? `${toolName(data.activeTools[0])}${data.activeTools[0].inputSummary ? ` · ${compactLine(data.activeTools[0].inputSummary, 48)}` : ''}`
-    : data.isThinking
-      ? '正在思考'
-      : data.latestCommentary
-        ? compactLine(data.latestCommentary, 60)
-        : statusLabel;
+        : data.state === 'failed'
+          ? 'red'
+          : 'orange';
+  const currentAction = visibleRunnerError
+    ? errorSummary(
+        visibleRunnerError.detail || visibleRunnerError.message || statusLabel,
+      )
+    : data.activeTools[0]
+      ? `${toolName(data.activeTools[0])}${data.activeTools[0].inputSummary ? ` · ${compactLine(data.activeTools[0].inputSummary, 48)}` : ''}`
+      : data.isThinking
+        ? '正在思考'
+        : data.latestCommentary
+          ? compactLine(data.latestCommentary, 60)
+          : statusLabel;
   const title =
     compactLine(data.title || data.latestCommentary || 'Agent 执行', 48) ||
     'Agent 执行';
@@ -238,7 +305,8 @@ export function buildProgressCard(
     {
       tag: 'text_tag',
       text: plain(formatElapsed(data.elapsedMs)),
-      color: data.state === 'active' ? 'blue' : 'neutral',
+      color:
+        data.state === 'active' && !visibleRunnerError ? 'blue' : 'neutral',
     },
   ];
   if (data.modelLabel) {
@@ -246,6 +314,15 @@ export function buildProgressCard(
       tag: 'text_tag',
       text: plain(compactLine(data.modelLabel, 18)),
       color: 'indigo',
+    });
+  }
+  if (visibleRunnerError) {
+    textTags.push({
+      tag: 'text_tag',
+      text: plain(
+        visibleRunnerError.willRetry ? '自动重试中' : '当前 turn 已停止',
+      ),
+      color: visibleRunnerError.willRetry ? 'orange' : 'red',
     });
   }
   if (totalTools > 0) {
@@ -257,6 +334,32 @@ export function buildProgressCard(
   }
 
   const elements: Array<Record<string, unknown>> = [];
+
+  if (visibleRunnerError) {
+    const retrying = visibleRunnerError.willRetry;
+    const headline = retrying
+      ? 'Runner 暂时异常，正在自动重试'
+      : 'Runner 无法继续当前 turn';
+    const color = retrying ? 'orange' : 'red';
+    elements.push(
+      markdown(
+        `<font color='${color}'>**${headline}**</font>\n${escapeInlineMarkdown(errorSummary(visibleRunnerError.message))}`,
+      ),
+      collapsiblePanel(
+        'Runner 错误详情',
+        errorDetailBlock(
+          visibleRunnerError.detail || visibleRunnerError.message,
+        ),
+        'warning_outlined',
+      ),
+      markdown(
+        retrying
+          ? "<font color='grey'>app-server 正在当前 turn 内自动重试，无需重新发送消息。</font>"
+          : "<font color='grey'>当前 turn 已停止；后续消息仍会按可靠投递策略处理。</font>",
+        { text_size: 'notation' },
+      ),
+    );
+  }
 
   for (const tool of data.activeTools) {
     const elapsed =
@@ -355,7 +458,11 @@ export function buildProgressCard(
     );
   }
 
-  if (data.state === 'active' && data.stopActionId) {
+  if (
+    data.state === 'active' &&
+    data.stopActionId &&
+    visibleRunnerError?.willRetry !== false
+  ) {
     elements.push({
       tag: 'button',
       text: plain('停止'),
@@ -396,8 +503,9 @@ export function buildProgressCard(
       template,
       icon: {
         tag: 'standard_icon',
-        token:
-          data.state === 'active'
+        token: visibleRunnerError
+          ? 'warning_outlined'
+          : data.state === 'active'
             ? 'loading_outlined'
             : data.state === 'completed'
               ? 'yes_outlined'

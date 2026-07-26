@@ -3184,19 +3184,31 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   }
 
-  // Complete or abort ALL Feishu progress cards for this folder
-  // (includes cards created via IPC injection for sibling Feishu chats).
-  {
-    const isError = output.status === 'error' || hadError;
-    if (isError || wasInterrupted) {
-      await finalizeProgressSessionsForFolder(
-        group.folder,
-        'abort',
-        isError ? '执行出错' : '已中断',
-      );
-    } else {
-      await finalizeProgressSessionsForFolder(group.folder, 'complete');
-    }
+  const processReportedError = output.status === 'error' || hadError;
+  // The streamed error marker contains the provider's structured diagnostic;
+  // process-exit stderr is only a fallback and is commonly less specific.
+  const runnerErrorDetail =
+    lastError || output.error || 'Runner 未返回具体错误信息';
+  const idleTimeoutAfterSuccessfulTurn =
+    output.status === 'error' &&
+    lastTurnCompletedSuccessfully &&
+    /timed out after \d+ms/i.test(
+      [output.error, lastError].filter(Boolean).join(' '),
+    );
+  const isErrorExit = processReportedError && !idleTimeoutAfterSuccessfulTurn;
+
+  // Finalize ALL Feishu progress cards for this folder (including cards
+  // created via IPC injection for sibling Feishu chats).
+  if (wasInterrupted) {
+    await finalizeProgressSessionsForFolder(group.folder, 'abort', '已中断');
+  } else if (isErrorExit) {
+    await finalizeProgressSessionsForFolder(
+      group.folder,
+      'fail',
+      runnerErrorDetail,
+    );
+  } else {
+    await finalizeProgressSessionsForFolder(group.folder, 'complete');
   }
 
   // Agent 进程已退出：通知前端清除流式状态（"正在思考..."）。
@@ -3204,30 +3216,20 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // 无可见回复（result 为 null）或异常退出时 streaming 状态也能被清除。
   broadcastRunnerState(chatJid, 'idle');
 
-  const idleTimeoutAfterSuccessfulTurn =
-    output.status === 'error' &&
-    lastTurnCompletedSuccessfully &&
-    /timed out after \d+ms/i.test(
-      [output.error, lastError].filter(Boolean).join(' '),
-    );
-
   // --- Turn lifecycle: complete/fail turn and save trace ---
   const activeTurn = turnManager.getActiveTurn(group.folder);
   if (activeTurn) {
-    const isErrorExit_ =
-      (output.status === 'error' || hadError) &&
-      !idleTimeoutAfterSuccessfulTurn;
     const isDrained = output.status === 'drained';
     const isInterrupted = wasInterrupted;
     finalizeCurrentTurn(
       isInterrupted
         ? 'interrupted'
-        : isErrorExit_
+        : isErrorExit
           ? 'error'
           : isDrained
             ? 'drained'
             : 'completed',
-      { errorDetail: output.error || lastError },
+      { errorDetail: isErrorExit ? runnerErrorDetail : undefined },
     );
   }
   // Always attempt the idempotent handoff. This covers paths where an
@@ -3290,8 +3292,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // Query 出错时，将残留 running task 标记为 error，避免长期僵尸状态。
   // 正常退出不做强制 completed，避免把未确认完成的任务误判为已完成。
-  const isErrorExit =
-    (output.status === 'error' || hadError) && !idleTimeoutAfterSuccessfulTurn;
   if (isErrorExit) {
     try {
       // 先获取 running agents（广播需要 agent 详情），再批量标记 error
@@ -3366,7 +3366,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // replied successfully, a subsequent timeout is not a real error and
     // rolling back would cause the same messages to be re-processed,
     // leading to duplicate replies.
-    const errorDetail = output.error || lastError || '未知错误';
+    const errorDetail = runnerErrorDetail;
 
     // Resolve IM source for error forwarding
     const errorSourceJid =

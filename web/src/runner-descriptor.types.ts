@@ -425,7 +425,7 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       interrupt: 'weak',
       imageInput: true,
       usage: 'approx',
-      midQueryPush: false,
+      midQueryPush: true,
       runtimeModeSwitch: false,
       toolStreaming: 'coarse',
       backgroundTasks: false,

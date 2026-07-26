@@ -103,7 +103,9 @@ type ProgressState =
   | 'active'
   | 'completed'
   | 'aborted'
+  | 'failed'
   | 'error';
+type ProgressDisplayState = 'active' | 'completed' | 'aborted' | 'failed';
 
 export interface ProgressCardOptions {
   /** Pre-resolved client (used by im-channel adapter) */
@@ -205,6 +207,12 @@ export class ProgressCardController {
   private latestCommentary = '';
   private dirty = false;
   private abortReason?: string;
+  private failureDetail?: string;
+  private runnerError?: {
+    message: string;
+    detail?: string;
+    willRetry: boolean;
+  };
   private patchFailCount = 0;
   private readonly maxPatchFailures = 3;
 
@@ -268,7 +276,12 @@ export class ProgressCardController {
 
   /** Whether this session can still receive events (idle, creating, or active). */
   canReceiveEvents(): boolean {
-    return this.state !== 'error' && this.state !== 'aborted';
+    return (
+      this.state !== 'error' &&
+      this.state !== 'aborted' &&
+      this.state !== 'completed' &&
+      this.state !== 'failed'
+    );
   }
 
   /**
@@ -277,6 +290,22 @@ export class ProgressCardController {
    */
   feedEvent(event: StreamEvent): void {
     const type = event.eventType;
+
+    if (event.runnerError) {
+      const next = event.runnerError;
+      const previous = this.runnerError;
+      const previousLength = (previous?.detail || previous?.message || '')
+        .length;
+      const nextLength = (next.detail || next.message).length;
+      if (
+        !previous ||
+        previous.willRetry !== next.willRetry ||
+        nextLength >= previousLength
+      ) {
+        this.runnerError = { ...next };
+      }
+      this.dirty = true;
+    }
 
     if (type === 'thinking_delta') {
       this.isThinking = true;
@@ -382,6 +411,9 @@ export class ProgressCardController {
     }
     this.state = 'completed';
     this.abortReason = undefined; // Clear any abort reason since we're completing successfully
+    if (this.runnerError?.willRetry) {
+      this.runnerError = undefined;
+    }
     this.clearFlushTimer();
     this.clearStopAction();
 
@@ -412,7 +444,12 @@ export class ProgressCardController {
    * Abort the progress card.
    */
   async abort(reason?: string): Promise<void> {
-    if (this.state === 'completed' || this.state === 'aborted') return;
+    if (
+      this.state === 'completed' ||
+      this.state === 'aborted' ||
+      this.state === 'failed'
+    )
+      return;
     this.state = 'aborted';
     this.abortReason = reason;
     this.clearFlushTimer();
@@ -434,6 +471,63 @@ export class ProgressCardController {
         );
       }
     }
+  }
+
+  /**
+   * Finalize the card as a runner failure. Unlike successful progress cards,
+   * failed cards stay in the conversation so the diagnostic remains visible.
+   */
+  async fail(detail?: string): Promise<void> {
+    if (this.state === 'completed' || this.state === 'failed') return;
+    const previousState = this.state;
+    this.state = 'failed';
+    this.failureDetail =
+      detail?.trim() ||
+      this.runnerError?.detail ||
+      this.runnerError?.message ||
+      'Runner 未返回具体错误信息';
+    this.clearFlushTimer();
+    this.clearStopAction();
+
+    if (this.messageId) {
+      try {
+        await this.patchCard('failed');
+        removeFromCardStore(this.messageId);
+        logger.info(
+          {
+            chatId: this.chatId,
+            messageId: this.messageId,
+            error: this.failureDetail,
+          },
+          'Progress card: patched to failed',
+        );
+      } catch (err) {
+        logger.warn(
+          { err, chatId: this.chatId, messageId: this.messageId },
+          'Progress card: failed to patch runner error',
+        );
+      }
+      return;
+    }
+
+    // Errors can happen before the first thinking/tool event. Create a terminal
+    // card directly so startup and protocol failures are still visible.
+    if (previousState === 'idle' || previousState === 'error') {
+      try {
+        await this.sendCard('failed');
+        logger.info(
+          { chatId: this.chatId, messageId: this.messageId },
+          'Progress card: created failed card',
+        );
+      } catch (err) {
+        logger.warn(
+          { err, chatId: this.chatId },
+          'Progress card: failed to create runner error card',
+        );
+      }
+    }
+    // If creation is already in flight, createCard() observes state='failed'
+    // and patches the newly created card in its race-resolution path.
   }
 
   /**
@@ -484,6 +578,8 @@ export class ProgressCardController {
     this.latestCommentary = '';
     this.dirty = false;
     this.abortReason = undefined;
+    this.failureDetail = undefined;
+    this.runnerError = undefined;
     this.patchFailCount = 0;
     this.registerStopAction();
     // Don't clear deleteTimer — let the completed card be deleted on its own schedule
@@ -511,9 +607,7 @@ export class ProgressCardController {
   }
 
   /** Build a presentation-only snapshot for the shared JSON 2.0 builder. */
-  private getCardData(
-    state: 'active' | 'completed' | 'aborted',
-  ): ProgressCardRenderData {
+  private getCardData(state: ProgressDisplayState): ProgressCardRenderData {
     return {
       title: this.title,
       modelLabel: this.modelLabel,
@@ -524,6 +618,8 @@ export class ProgressCardController {
       elapsedMs: Date.now() - this.startedAt,
       state,
       abortReason: this.abortReason,
+      failureDetail: this.failureDetail,
+      runnerError: this.runnerError,
       activeSubAgents: Array.from(this.activeSubAgents.values()),
       completedSubAgents: this.completedSubAgents,
       latestCommentary: this.latestCommentary || undefined,
@@ -533,50 +629,51 @@ export class ProgressCardController {
 
   // ─── Internal ───────────────────────────────────────────
 
-  private async createCard(): Promise<void> {
+  private async sendCard(displayState: ProgressDisplayState): Promise<void> {
     const client = this.resolveClient();
     if (!client) {
-      logger.warn(
-        { chatId: this.chatId },
-        'Progress card: no lark client available (connection not ready?)',
-      );
-      this.state = 'error';
-      return;
+      throw new Error('No Lark client available');
     }
 
-    const card = buildProgressCard(this.getCardData('active'));
+    const card = buildProgressCard(this.getCardData(displayState));
     const content = JSON.stringify(card);
+    let resp: any;
+    if (this.replyToMsgId) {
+      resp = await client.im.message.reply({
+        path: { message_id: this.replyToMsgId },
+        data: {
+          content,
+          msg_type: 'interactive',
+          reply_in_thread: shouldReplyInFeishuThread({
+            threadId: this.threadId,
+            replyInThread: this.replyInThread,
+          }),
+        },
+      });
+    } else {
+      resp = await client.im.v1.message.create({
+        params: { receive_id_type: 'chat_id' },
+        data: { receive_id: this.chatId, msg_type: 'interactive', content },
+      });
+    }
 
-    try {
-      let resp: any;
-      if (this.replyToMsgId) {
-        resp = await client.im.message.reply({
-          path: { message_id: this.replyToMsgId },
-          data: {
-            content,
-            msg_type: 'interactive',
-            reply_in_thread: shouldReplyInFeishuThread({
-              threadId: this.threadId,
-              replyInThread: this.replyInThread,
-            }),
-          },
-        });
-      } else {
-        resp = await client.im.v1.message.create({
-          params: { receive_id_type: 'chat_id' },
-          data: { receive_id: this.chatId, msg_type: 'interactive', content },
-        });
-      }
-
-      this.messageId = resp?.data?.message_id || null;
-      if (!this.messageId) throw new Error('No message_id in response');
-
-      // Persist to disk so it can be cleaned up after restart
+    this.messageId = resp?.data?.message_id || null;
+    if (!this.messageId) throw new Error('No message_id in response');
+    if (displayState === 'active') {
       addToCardStore(this.chatId, this.messageId);
+    }
+  }
+
+  private async createCard(): Promise<void> {
+    try {
+      await this.sendCard('active');
 
       // State may have changed during await (complete/abort called while creating)
       if (this.state !== 'creating') {
-        const finalState = this.state as 'completed' | 'aborted';
+        const finalState = this.state as Exclude<
+          ProgressDisplayState,
+          'active'
+        >;
         logger.info(
           { chatId: this.chatId, finalState, messageId: this.messageId },
           'Progress card: state changed during creation, patching to final state',
@@ -584,7 +681,15 @@ export class ProgressCardController {
         try {
           await this.patchCard(finalState);
           if (finalState === 'completed') {
-            this.deleteTimer = setTimeout(() => this.deleteCard(), 15000);
+            const messageId = this.messageId;
+            if (messageId) {
+              this.deleteTimer = setTimeout(
+                () => this.deleteCardById(messageId),
+                15000,
+              );
+            }
+          } else if (finalState === 'failed') {
+            if (this.messageId) removeFromCardStore(this.messageId);
           }
         } catch (err) {
           logger.warn(
@@ -603,7 +708,7 @@ export class ProgressCardController {
 
       if (this.dirty) this.scheduleFlush();
     } catch (err) {
-      this.state = 'error';
+      if (this.state !== 'failed') this.state = 'error';
       throw err;
     }
   }
@@ -639,9 +744,7 @@ export class ProgressCardController {
     }, delay);
   }
 
-  private async patchCard(
-    displayState: 'active' | 'completed' | 'aborted',
-  ): Promise<void> {
+  private async patchCard(displayState: ProgressDisplayState): Promise<void> {
     if (!this.messageId) return;
     const client = this.resolveClient();
     if (!client) return;
@@ -747,14 +850,16 @@ export async function completeAndResetProgressSessionsForFolder(
  */
 export async function finalizeProgressSessionsForFolder(
   folder: string,
-  mode: 'complete' | 'abort',
-  reason?: string,
+  mode: 'complete' | 'abort' | 'fail',
+  detail?: string,
 ): Promise<void> {
   const toRemove: string[] = [];
   for (const [chatJid, entry] of activeProgressSessions.entries()) {
     if (entry.folder !== folder) continue;
     if (mode === 'abort') {
-      await entry.session.abort(reason).catch(() => {});
+      await entry.session.abort(detail).catch(() => {});
+    } else if (mode === 'fail') {
+      await entry.session.fail(detail).catch(() => {});
     } else {
       await entry.session.complete().catch(() => {});
     }
