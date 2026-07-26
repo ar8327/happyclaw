@@ -46,6 +46,7 @@ export interface QueryLoopConfig {
   promptContract?: RunnerPromptContract;
   initialPrompt: string;
   initialImages?: Array<{ data: string; mimeType?: string }>;
+  initialMessages?: IpcMessage[];
   sessionRecordId: string;
   sessionId?: string;
   initialResumeAnchor?: string;
@@ -459,7 +460,7 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
     : config.initialResumeAnchor;
   let overflowRetryCount = 0;
   let pendingMessages: IpcMessage[] = [];
-  let nextTurnMessages: IpcMessage[] = [];
+  let nextTurnMessages: IpcMessage[] = [...(config.initialMessages || [])];
   const handleIdleDrain = async (): Promise<void> => {
     await runner.cleanup?.();
     emitRuntimeState(writeOutput, runner, state, {
@@ -501,6 +502,15 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
               }));
             if (pushed.status === 'accepted') {
               activeQueryMessages.push(msg);
+              writeOutput({
+                status: 'stream',
+                result: null,
+                streamEvent: buildIpcAckStreamEvent(
+                  config.sessionRecordId,
+                  msg,
+                  'ipc_message_accepted',
+                ),
+              });
               for (const warning of pushed.warnings || []) {
                 writeOutput({
                   status: 'success',
@@ -533,6 +543,17 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
         : prompt;
     const renderedContext = config.buildContext(prompt);
     await runner.applyContext(renderedContext);
+    if (activeQueryMessages.length > 0) {
+      writeOutput({
+        status: 'stream',
+        result: null,
+        streamEvent: buildIpcAckStreamEvent(
+          config.sessionRecordId,
+          activeQueryMessages,
+          'ipc_message_accepted',
+        ),
+      });
+    }
     const queryConfig: QueryConfig = {
       prompt: effectivePrompt,
       systemPrompt: combineRenderedContext(renderedContext),
@@ -571,6 +592,7 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
       !result.unrecoverableTranscriptError &&
       !result.sessionResumeFailed &&
       !result.genericError;
+    const failedQueryMessageCount = activeQueryMessages.length;
     if (queryCompletedSuccessfully && activeQueryMessages.length > 0) {
       writeOutput({
         status: 'stream',
@@ -607,6 +629,7 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
       log('Session resume failed, retrying with fresh session');
       sessionId = undefined;
       resumeAnchor = undefined;
+      nextTurnMessages = pendingMessages.splice(0, failedQueryMessageCount);
       continue;
     }
     if (result.unrecoverableTranscriptError) {
@@ -643,6 +666,7 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
         process.exit(1);
       }
       log(`Context overflow, retry ${overflowRetryCount}/${MAX_RETRIES}`);
+      nextTurnMessages = pendingMessages.splice(0, failedQueryMessageCount);
       await sleep(3000);
       continue;
     }

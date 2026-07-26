@@ -90,6 +90,11 @@ export interface ContainerInput {
   agentName?: string;
   userId?: string;
   turnId?: string;
+  initialDelivery?: {
+    deliveryIds: string[];
+    ackTargets: string[];
+    ackSourceChannels?: string[];
+  };
 }
 
 export interface ContainerOutput {

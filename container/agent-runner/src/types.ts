@@ -44,6 +44,12 @@ export interface ContainerInput {
   userId?: string;
   /** Turn ID for tracking this execution. */
   turnId?: string;
+  /** Durable acknowledgement metadata for the initial DB message batch. */
+  initialDelivery?: {
+    deliveryIds: string[];
+    ackTargets: string[];
+    ackSourceChannels?: string[];
+  };
   /** Compressed conversation summary from previous session. */
   contextSummary?: string;
   bootstrapState?: {

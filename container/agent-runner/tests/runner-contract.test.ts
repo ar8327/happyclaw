@@ -907,6 +907,18 @@ function assertIpcDeliveryAcknowledgement(): void {
   ]);
   assert.deepEqual(acknowledgement.ipcAckTargets, ['feishu:chat-1']);
   assert.equal(acknowledgement.ipcAckMessageCount, 2);
+
+  const accepted = buildIpcAckStreamEvent(
+    'session-1',
+    {
+      text: 'initial batch',
+      deliveryIds: ['delivery-initial'],
+      ackTargets: ['web:main'],
+    },
+    'ipc_message_accepted',
+  );
+  assert.equal(accepted.statusText, 'ipc_message_accepted');
+  assert.deepEqual(accepted.ipcDeliveryIds, ['delivery-initial']);
 }
 
 async function assertFakeRunnerContract(): Promise<void> {

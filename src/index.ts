@@ -84,7 +84,6 @@ import {
   insertUsageRecord,
   isPrimarySessionFolder,
   getTranscriptMessagesSince,
-  markStaleTurnsAsError,
   cleanupOldTurns,
   getMessageById,
   getContextSummary,
@@ -92,6 +91,14 @@ import {
   deleteSessionBinding,
   saveSessionBinding,
   upsertSessionRuntimeState,
+  ensureTurnDelivery,
+  getTurnDelivery,
+  getTurnDeliveries,
+  getRecoverableTurns,
+  getCompletedTurnDeliveryCursors,
+  hasIncompleteTurnDeliveries,
+  updateTurnDeliveryStatus,
+  updateTurn,
 } from './db.js';
 // feishu.js deprecated exports are no longer needed; imManager handles all connections
 import { imManager } from './im-manager.js';
@@ -164,6 +171,7 @@ import type { IpcInjection } from './session-runtime-queue.js';
 import { interruptibleSleep } from './message-notifier.js';
 import { enqueueImDelivery, startImOutboxWorker } from './im-outbox.js';
 import { TurnManager } from './turn-manager.js';
+import { DurableOutboundTracker } from './durable-outbound-tracker.js';
 import { saveTurnTrace, cleanupOldTraces } from './turn-trace.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import {
@@ -331,17 +339,15 @@ function buildFeishuCardOptionsForSource(params: {
   return Object.keys(options).length > 0 ? options : undefined;
 }
 
-// Monotonic per-runtime-folder counter advanced only after the host has
-// durably accepted a send_message/send_image/send_file IPC request. This is
-// the authoritative IM/Web reply signal; a provider tool-end event alone
-// cannot distinguish a successful tool result from an isError result.
-const durableOutboundAcceptances = new Map<string, number>();
+// A provider tool-end event cannot distinguish a successful tool result from
+// an isError result. Only host-accepted IPC writes advance this tracker.
+const durableOutboundTracker = new DurableOutboundTracker();
 
-function markDurableOutboundAcceptance(folder: string): void {
-  durableOutboundAcceptances.set(
-    folder,
-    (durableOutboundAcceptances.get(folder) ?? 0) + 1,
-  );
+function markDurableOutboundAcceptance(
+  runtimeKey: string,
+  textRecord?: { messageId: string; chatJid: string; text: string },
+): void {
+  durableOutboundTracker.mark(runtimeKey, textRecord);
 }
 
 // Writing an IPC file is not delivery. Exact UUID delivery records below keep
@@ -354,12 +360,14 @@ const IPC_DELIVERY_TIMEOUT_MS = 120_000;
 // pickup timeout into a longer query lease.
 interface PendingIpcCursorCommit {
   deliveryId: string;
+  turnId?: string;
   chatJid: string;
   groupFolder: string;
   rowid: number;
   ipcFilePath: string | null;
   timer: ReturnType<typeof setTimeout>;
   received: boolean;
+  accepted: boolean;
 }
 const pendingIpcCursorCommits = new Map<string, PendingIpcCursorCommit>();
 const IPC_DELIVERY_LEASE_MS = 30 * 60_000;
@@ -438,38 +446,78 @@ function deferIpcCursorCommit(
     ipcFilePath: string;
     groupFolder: string;
   },
+  turn?: {
+    turnId: string;
+    messageIds: string[];
+  },
 ): void {
+  if (turn) {
+    ensureTurnDelivery({
+      deliveryId: injection.deliveryId,
+      turnId: turn.turnId,
+      chatJid,
+      groupFolder: injection.groupFolder,
+      maxRowid: rowid,
+      messageIds: turn.messageIds,
+    });
+  }
+  trackIpcCursorCommit({
+    deliveryId: injection.deliveryId,
+    turnId: turn?.turnId,
+    chatJid,
+    groupFolder: injection.groupFolder,
+    rowid,
+    ipcFilePath: injection.ipcFilePath,
+  });
+}
+
+function trackIpcCursorCommit(input: {
+  deliveryId: string;
+  turnId?: string;
+  chatJid: string;
+  groupFolder: string;
+  rowid: number;
+  ipcFilePath: string | null;
+}): void {
+  const previous = pendingIpcCursorCommits.get(input.deliveryId);
+  if (previous) clearTimeout(previous.timer);
   const expire = () => {
-    const expired = pendingIpcCursorCommits.get(injection.deliveryId);
+    const expired = pendingIpcCursorCommits.get(input.deliveryId);
     if (!expired) return;
-    pendingIpcCursorCommits.delete(injection.deliveryId);
+    pendingIpcCursorCommits.delete(input.deliveryId);
     removeUnconsumedIpcFile(expired.chatJid, expired.ipcFilePath);
+    const persisted = getTurnDelivery(expired.deliveryId);
+    if (persisted && persisted.status !== 'accepted') {
+      updateTurnDeliveryStatus([expired.deliveryId], 'queued');
+    }
     logger.warn(
       {
         chatJid: expired.chatJid,
         deliveryId: expired.deliveryId,
         rowid: expired.rowid,
         received: expired.received,
+        accepted: persisted?.status === 'accepted' || expired.accepted,
       },
-      'IPC delivery lease expired — re-queueing messages for delivery',
+      'IPC delivery lease expired — scheduling ACK-aware recovery',
     );
     enqueueIpcRedelivery(expired.chatJid);
   };
   const timer = setTimeout(expire, IPC_DELIVERY_TIMEOUT_MS);
   timer.unref?.();
-  pendingIpcCursorCommits.set(injection.deliveryId, {
-    deliveryId: injection.deliveryId,
-    chatJid,
-    groupFolder: injection.groupFolder,
-    rowid,
-    ipcFilePath: injection.ipcFilePath,
+  const persisted = getTurnDelivery(input.deliveryId);
+  pendingIpcCursorCommits.set(input.deliveryId, {
+    ...input,
     timer,
-    received: false,
+    received:
+      persisted?.status === 'received' || persisted?.status === 'accepted',
+    accepted: persisted?.status === 'accepted',
   });
 }
 
 function markIpcCursorReceived(deliveryIds: Iterable<string>): void {
-  for (const deliveryId of new Set(deliveryIds)) {
+  const uniqueIds = [...new Set(deliveryIds)];
+  updateTurnDeliveryStatus(uniqueIds, 'received');
+  for (const deliveryId of uniqueIds) {
     const entry = pendingIpcCursorCommits.get(deliveryId);
     if (!entry) continue;
     clearTimeout(entry.timer);
@@ -481,13 +529,17 @@ function markIpcCursorReceived(deliveryIds: Iterable<string>): void {
       const current = pendingIpcCursorCommits.get(deliveryId);
       if (!current) return;
       pendingIpcCursorCommits.delete(deliveryId);
+      const persisted = getTurnDelivery(deliveryId);
+      if (persisted?.status === 'received') {
+        updateTurnDeliveryStatus([deliveryId], 'queued');
+      }
       logger.warn(
         {
           chatJid: current.chatJid,
           deliveryId,
           leaseMs: IPC_DELIVERY_LEASE_MS,
         },
-        'Runtime received IPC but never completed delivery — re-queueing',
+        'Runtime received IPC but never completed delivery — scheduling recovery',
       );
       enqueueIpcRedelivery(current.chatJid);
     }, IPC_DELIVERY_LEASE_MS);
@@ -495,32 +547,74 @@ function markIpcCursorReceived(deliveryIds: Iterable<string>): void {
   }
 }
 
-function commitIpcCursorOnAck(deliveryIds: Iterable<string>): void {
-  let changed = false;
-  for (const deliveryId of new Set(deliveryIds)) {
+function markIpcCursorAccepted(deliveryIds: Iterable<string>): void {
+  const uniqueIds = [...new Set(deliveryIds)];
+  updateTurnDeliveryStatus(uniqueIds, 'accepted');
+  for (const deliveryId of uniqueIds) {
     const entry = pendingIpcCursorCommits.get(deliveryId);
     if (!entry) continue;
-    pendingIpcCursorCommits.delete(deliveryId);
     clearTimeout(entry.timer);
-    const current = lastAgentTimestamp[entry.chatJid];
-    if (!current || entry.rowid > current.rowid) {
-      lastAgentTimestamp[entry.chatJid] = { rowid: entry.rowid };
+    entry.received = true;
+    entry.accepted = true;
+    entry.ipcFilePath = null;
+    entry.timer = setTimeout(() => {
+      const current = pendingIpcCursorCommits.get(deliveryId);
+      if (!current) return;
+      pendingIpcCursorCommits.delete(deliveryId);
+      logger.warn(
+        {
+          chatJid: current.chatJid,
+          deliveryId,
+          leaseMs: IPC_DELIVERY_LEASE_MS,
+        },
+        'Runtime accepted a message but completion ACK is missing — resuming the turn',
+      );
+      queue.closeStdin(current.chatJid);
+      enqueueIpcRedelivery(current.chatJid);
+    }, IPC_DELIVERY_LEASE_MS);
+    entry.timer.unref?.();
+  }
+}
+
+function commitIpcCursorOnAck(deliveryIds: Iterable<string>): void {
+  const uniqueIds = [...new Set(deliveryIds)];
+  updateTurnDeliveryStatus(uniqueIds, 'completed');
+  let changed = false;
+  for (const deliveryId of uniqueIds) {
+    const persisted = getTurnDelivery(deliveryId);
+    const entry = pendingIpcCursorCommits.get(deliveryId);
+    if (entry) {
+      pendingIpcCursorCommits.delete(deliveryId);
+      clearTimeout(entry.timer);
+    }
+    const chatJid = entry?.chatJid || persisted?.chat_jid;
+    const rowid = entry?.rowid ?? persisted?.max_rowid;
+    if (!chatJid || rowid === undefined) continue;
+    const current = lastAgentTimestamp[chatJid];
+    if (!current || rowid > current.rowid) {
+      lastAgentTimestamp[chatJid] = { rowid };
       changed = true;
     }
-    clearWorkerRedeliveryState(entry.chatJid);
+    clearWorkerRedeliveryState(chatJid);
   }
   if (changed) saveState();
 }
 
 function returnIpcDeliveries(deliveryIds: Iterable<string>): string[] {
+  const uniqueIds = [...new Set(deliveryIds)];
+  updateTurnDeliveryStatus(uniqueIds, 'queued');
   const chatJids = new Set<string>();
-  for (const deliveryId of new Set(deliveryIds)) {
+  for (const deliveryId of uniqueIds) {
     const entry = pendingIpcCursorCommits.get(deliveryId);
-    if (!entry) continue;
-    pendingIpcCursorCommits.delete(deliveryId);
-    clearTimeout(entry.timer);
-    removeUnconsumedIpcFile(entry.chatJid, entry.ipcFilePath);
-    chatJids.add(entry.chatJid);
+    const persisted = getTurnDelivery(deliveryId);
+    if (entry) {
+      pendingIpcCursorCommits.delete(deliveryId);
+      clearTimeout(entry.timer);
+      removeUnconsumedIpcFile(entry.chatJid, entry.ipcFilePath);
+      chatJids.add(entry.chatJid);
+    } else if (persisted) {
+      chatJids.add(persisted.chat_jid);
+    }
   }
   for (const chatJid of chatJids) enqueueIpcRedelivery(chatJid);
   return [...chatJids];
@@ -2570,9 +2664,167 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // Get all messages since last agent interaction
   const sinceCursor = lastAgentTimestamp[chatJid] || EMPTY_CURSOR;
-  const missedMessages = getMessagesSince(chatJid, sinceCursor);
+  const pendingDbMessages = getMessagesSince(chatJid, sinceCursor);
 
-  if (missedMessages.length === 0) return true;
+  if (pendingDbMessages.length === 0) return true;
+
+  const folder = group.folder;
+  const runtimeBootstrapForPrompt = getRuntimeBootstrapState(
+    effectiveGroup.folder,
+  );
+  let activeTurn = turnManager.getActiveTurn(folder);
+  if (!activeTurn) {
+    const route = turnManager.routeMessage(
+      folder,
+      chatJid,
+      resolveChannel(pendingDbMessages),
+      pendingDbMessages.map((message) => message.id),
+    );
+    if (route.action === 'queue' || route.action === 'already_queued') {
+      return true;
+    }
+    activeTurn = turnManager.getActiveTurn(folder);
+  }
+  if (activeTurn) {
+    updateTurn(activeTurn.id, { status: 'running' });
+  }
+
+  const turnDeliveries = activeTurn ? getTurnDeliveries(activeTurn.id) : [];
+  const coveredMessageIds = new Set(
+    turnDeliveries.flatMap((delivery) => {
+      try {
+        const parsed = JSON.parse(delivery.message_ids);
+        return Array.isArray(parsed)
+          ? parsed.filter((id): id is string => typeof id === 'string')
+          : [];
+      } catch {
+        return [];
+      }
+    }),
+  );
+  const uncoveredMessages = pendingDbMessages.filter(
+    (message) => !coveredMessageIds.has(message.id),
+  );
+  if (activeTurn && uncoveredMessages.length > 0) {
+    const lastUncovered = uncoveredMessages[uncoveredMessages.length - 1];
+    const deliveryId = `turn:${activeTurn.id}:${lastUncovered.rowid}`;
+    turnDeliveries.push(
+      ensureTurnDelivery({
+        deliveryId,
+        turnId: activeTurn.id,
+        chatJid,
+        groupFolder: folder,
+        maxRowid: lastUncovered.rowid,
+        messageIds: uncoveredMessages.map((message) => message.id),
+      }),
+    );
+  }
+
+  const incompleteDeliveries = turnDeliveries.filter(
+    (delivery) => delivery.status !== 'completed',
+  );
+  const acceptedDeliveries = incompleteDeliveries.filter(
+    (delivery) => delivery.status === 'accepted',
+  );
+  const canResumeAcceptedDelivery =
+    acceptedDeliveries.length > 0 &&
+    !!runtimeBootstrapForPrompt.providerSessionId;
+  if (acceptedDeliveries.length > 0 && !canResumeAcceptedDelivery) {
+    updateTurnDeliveryStatus(
+      acceptedDeliveries.map((delivery) => delivery.delivery_id),
+      'queued',
+      { allowAcceptedReplay: true },
+    );
+    logger.warn(
+      {
+        chatJid,
+        turnId: activeTurn?.id,
+        acceptedDeliveryIds: acceptedDeliveries.map(
+          (delivery) => delivery.delivery_id,
+        ),
+      },
+      'Accepted delivery has no resumable provider session; replaying original input',
+    );
+  }
+  const acceptedMessageIds = new Set(
+    (canResumeAcceptedDelivery ? acceptedDeliveries : []).flatMap(
+      (delivery) => {
+        try {
+          const parsed = JSON.parse(delivery.message_ids);
+          return Array.isArray(parsed)
+            ? parsed.filter((id): id is string => typeof id === 'string')
+            : [];
+        } catch {
+          return [];
+        }
+      },
+    ),
+  );
+  const isAckRecovery = acceptedMessageIds.size > 0;
+  const acceptedInputReferences = pendingDbMessages
+    .filter((message) => acceptedMessageIds.has(message.id))
+    .map((message) => message.content);
+  let missedMessages: DbMessage[] = pendingDbMessages.filter(
+    (message) => !acceptedMessageIds.has(message.id),
+  );
+  if (isAckRecovery && activeTurn) {
+    const recoveryControl: DbMessage = {
+      rowid: pendingDbMessages[pendingDbMessages.length - 1].rowid,
+      id: `recovery:${activeTurn.id}`,
+      chat_jid: chatJid,
+      source_jid: activeTurn.channel,
+      sender: '__system__',
+      sender_name: '[系统恢复控制]',
+      content: [
+        '服务在上一轮执行期间发生重启。',
+        '原始输入已经被 provider turn 接受，但宿主没有收到完成 ACK。',
+        '请沿用当前 provider session 检查已有上下文与执行状态后继续收尾；',
+        '不要重做已经完成的外部副作用，也不要重复发送已经发出的消息。',
+        '以下是已接受输入的目标引用（不是一次新的投递，仅在 provider session 无法恢复时用于识别任务）：',
+        ...acceptedInputReferences.map((content) => `- ${content}`),
+      ].join('\n'),
+      timestamp: new Date().toISOString(),
+    };
+    missedMessages = [recoveryControl, ...missedMessages];
+    logger.info(
+      {
+        chatJid,
+        turnId: activeTurn.id,
+        acceptedDeliveryIds: incompleteDeliveries
+          .filter((delivery) => delivery.status === 'accepted')
+          .map((delivery) => delivery.delivery_id),
+        newMessageCount: missedMessages.length - 1,
+      },
+      'Recovering accepted turn without replaying accepted input',
+    );
+  }
+
+  const initialDelivery =
+    incompleteDeliveries.length > 0
+      ? {
+          deliveryIds: incompleteDeliveries.map(
+            (delivery) => delivery.delivery_id,
+          ),
+          ackTargets: [...new Set(incompleteDeliveries.map((d) => d.chat_jid))],
+          ackSourceChannels: [
+            ...new Set(
+              pendingDbMessages.map(
+                (message) => message.source_jid || message.chat_jid,
+              ),
+            ),
+          ],
+        }
+      : undefined;
+  for (const delivery of incompleteDeliveries) {
+    trackIpcCursorCommit({
+      deliveryId: delivery.delivery_id,
+      turnId: delivery.turn_id,
+      chatJid: delivery.chat_jid,
+      groupFolder: delivery.group_folder,
+      rowid: delivery.max_rowid,
+      ipcFilePath: null,
+    });
+  }
 
   // Admin home is shared as web:main, so select runtime owner from the latest
   // active admin sender to avoid writing global memory into another admin's
@@ -2601,9 +2853,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const feishuAgentReply = ownerUserId
     ? getImFeishuConfig()?.replyThreadingMode === 'agent'
     : false;
-  const runtimeBootstrapForPrompt = getRuntimeBootstrapState(
-    effectiveGroup.folder,
-  );
   const prompt = prependRecentContextForFreshThread(
     chatJid,
     missedMessages,
@@ -2646,17 +2895,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // must not roll the cursor back and duplicate that reply.
   let deliveredUserVisibleReply = false;
   let sawSendMessageTool = false;
-  const outboundAcceptanceBaseline =
-    durableOutboundAcceptances.get(group.folder) ?? 0;
+  const outboundAcceptanceBaseline = durableOutboundTracker.snapshot(
+    group.folder,
+  );
+  let canonicalResultCursor = outboundAcceptanceBaseline;
   const hasDurableUserVisibleReply = () =>
     deliveredUserVisibleReply ||
-    (durableOutboundAcceptances.get(group.folder) ?? 0) >
-      outboundAcceptanceBaseline;
+    durableOutboundTracker.snapshot(group.folder) > outboundAcceptanceBaseline;
   let lastError = '';
   let cursorCommitted = false;
   let lastReplyMsgId: string | undefined;
   const queryTaskIds = new Set<string>();
-  const lastProcessed = missedMessages[missedMessages.length - 1];
+  const lastProcessed = pendingDbMessages[pendingDbMessages.length - 1];
   let lastTurnCompletedSuccessfully = false;
 
   const pickRunningTaskForNotification = (): string | null => {
@@ -2681,6 +2931,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const commitCursor = (): void => {
     if (cursorCommitted) return;
+    const currentTurn = turnManager.getActiveTurn(group.folder);
+    if (currentTurn && hasIncompleteTurnDeliveries(currentTurn.id)) {
+      logger.debug(
+        { chatJid, turnId: currentTurn.id },
+        'Deferring cursor commit until delivery completion ACK',
+      );
+      return;
+    }
     // Only advance, never regress — the message loop may have already
     // advanced the cursor via IPC injection while the agent was running.
     const current = lastAgentTimestamp[chatJid];
@@ -2753,12 +3011,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return handoffQueuedTurn(group.folder, chatJid);
   };
 
-  const completeSuccessfulTurn = (): void => {
+  const completeSuccessfulTurn = (): boolean => {
     const activeTurn = turnManager.getActiveTurn(group.folder);
     if (!activeTurn) {
       broadcastRunnerState(chatJid, 'idle');
       resetIdleTimer();
-      return;
+      return true;
+    }
+    if (hasIncompleteTurnDeliveries(activeTurn.id)) {
+      logger.debug(
+        { chatJid, turnId: activeTurn.id },
+        'Provider result arrived before delivery completion ACK; keeping turn open',
+      );
+      return false;
     }
 
     finalizeCurrentTurn('completed');
@@ -2766,6 +3031,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       broadcastRunnerState(chatJid, 'idle');
       resetIdleTimer();
     }
+    return true;
   };
 
   // 新一轮从干净状态开始
@@ -2781,6 +3047,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const triggerMap = new Map<string, RuntimeTriggerMessage>();
   for (const m of missedMessages) {
     const srcJid = m.source_jid || m.chat_jid;
+    if (m.id.startsWith('recovery:')) {
+      const lastInbound = getLastInboundMessage(chatJid, srcJid);
+      if (lastInbound) {
+        triggerMap.set(srcJid, {
+          id: lastInbound.id,
+          sender: lastInbound.sender,
+          replyToId: lastInbound.reply_to_id,
+          threadId: lastInbound.thread_id,
+          rootId: lastInbound.root_id,
+        });
+      }
+      continue;
+    }
     // Last message per source wins (chronological order)
     triggerMap.set(srcJid, {
       id: m.id,
@@ -2810,7 +3089,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     sourceChannelType === 'feishu' &&
     feishuConfig?.streamingCard
   ) {
-    const progressTrigger = [...missedMessages]
+    const progressTrigger = [...pendingDbMessages]
       .reverse()
       .find(
         (message) => (message.source_jid || message.chat_jid) === sourceChannel,
@@ -2906,9 +3185,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           }
           if (
             se.eventType === 'status' &&
+            se.statusText === 'ipc_message_accepted'
+          ) {
+            markIpcCursorAccepted(se.ipcDeliveryIds || []);
+          }
+          if (
+            se.eventType === 'status' &&
             se.statusText === 'ipc_message_delivered'
           ) {
             commitIpcCursorOnAck(se.ipcDeliveryIds || []);
+            if (lastTurnCompletedSuccessfully && completeSuccessfulTurn()) {
+              await completeAndResetProgressSessionsForFolder(group.folder);
+            }
           }
           if (
             se.eventType === 'status' &&
@@ -3123,14 +3411,37 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             // Stop typing indicator before sending — clears the 4s refresh timer
             // so it doesn't keep firing while the agent stays alive in idle state.
             await setTyping(chatJid, false);
-            // Web 存储 + 广播，不发 IM（模型通过 send_message 工具主动发 IM）
-            lastReplyMsgId = await sendMessage(chatJid, text, {
-              sendToIM: false,
-              sourceJid: sourceChannelType ? sourceChannel : undefined,
-              replyToId: sourceFeishuOptions?.replyToMsgId,
-              threadId: sourceFeishuOptions?.threadId,
-              rootId: sourceFeishuOptions?.threadRootMsgId,
-            });
+            const canonicalOutbound = durableOutboundTracker.latestTextSince(
+              group.folder,
+              canonicalResultCursor,
+            );
+            if (canonicalOutbound?.chatJid === chatJid) {
+              // send_message already persisted the exact user-visible reply.
+              // Provider stdout remains in the trace/Web stream, but must not
+              // become a second assistant message in recent_context.
+              lastReplyMsgId = canonicalOutbound.messageId;
+              canonicalResultCursor = canonicalOutbound.sequence;
+              logger.debug(
+                {
+                  chatJid,
+                  canonicalMessageId: canonicalOutbound.messageId,
+                },
+                'Reused explicit outbound message as canonical turn result',
+              );
+            } else {
+              // No explicit outbound exists, so stdout is the canonical Web
+              // fallback for this provider result.
+              lastReplyMsgId = await sendMessage(chatJid, text, {
+                sendToIM: false,
+                sourceJid: sourceChannelType ? sourceChannel : undefined,
+                replyToId: sourceFeishuOptions?.replyToMsgId,
+                threadId: sourceFeishuOptions?.threadId,
+                rootId: sourceFeishuOptions?.threadRootMsgId,
+              });
+              canonicalResultCursor = durableOutboundTracker.snapshot(
+                group.folder,
+              );
+            }
             deliveredUserVisibleReply = true;
             // Persist cursor as soon as a visible reply is emitted.
             // Long-lived runners may stay alive for idleTimeout, and waiting
@@ -3149,12 +3460,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         // Cards reset to idle and will lazily create new ones on the next turn.
         if (result.status === 'success') {
           lastTurnCompletedSuccessfully = true;
-          await completeAndResetProgressSessionsForFolder(group.folder);
           // Long-lived IPC runners stay alive after each result and wait for
           // more input, so the Turn must finish when the result arrives rather
           // than waiting for process exit. This covers both visible replies and
           // tool-only turns (for example send_message over IM with result:null).
-          completeSuccessfulTurn();
+          if (completeSuccessfulTurn()) {
+            await completeAndResetProgressSessionsForFolder(group.folder);
+          }
         }
 
         if (result.status === 'error') {
@@ -3167,6 +3479,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       }
     },
     imagesForAgent,
+    initialDelivery,
   );
 
   await setTyping(chatJid, false);
@@ -3217,8 +3530,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   broadcastRunnerState(chatJid, 'idle');
 
   // --- Turn lifecycle: complete/fail turn and save trace ---
-  const activeTurn = turnManager.getActiveTurn(group.folder);
-  if (activeTurn) {
+  const activeTurnAtExit = turnManager.getActiveTurn(group.folder);
+  const hasUnfinishedAcceptedWork =
+    !!activeTurnAtExit &&
+    hasIncompleteTurnDeliveries(activeTurnAtExit.id) &&
+    !wasInterrupted;
+  if (activeTurnAtExit && hasUnfinishedAcceptedWork) {
+    turnManager.markRecoverable(group.folder, runnerErrorDetail);
+    logger.warn(
+      {
+        chatJid,
+        turnId: activeTurnAtExit.id,
+        isErrorExit,
+      },
+      'Runtime exited before delivery completion ACK; preserving turn for recovery',
+    );
+  } else if (activeTurnAtExit) {
     const isDrained = output.status === 'drained';
     const isInterrupted = wasInterrupted;
     finalizeCurrentTurn(
@@ -3234,7 +3561,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
   // Always attempt the idempotent handoff. This covers paths where an
   // interrupt callback already removed the active turn.
-  drainQueuedTurn();
+  if (!hasUnfinishedAcceptedWork) {
+    drainQueuedTurn();
+  }
 
   streamingBlocksManager.remove(group.folder);
 
@@ -3435,6 +3764,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return false;
   }
 
+  if (hasUnfinishedAcceptedWork) {
+    logger.warn(
+      { chatJid, turnId: activeTurnAtExit?.id },
+      'Keeping cursor uncommitted and retrying with ACK-aware recovery',
+    );
+    triggerMessagesByFolder.delete(effectiveGroup.folder);
+    return false;
+  }
+
   // Final fallback for silent-success paths (no visible reply).
   // Judge the turn by the latest user message the agent actually consumed —
   // including messages injected mid-turn (their ack advanced the cursor) —
@@ -3611,6 +3949,7 @@ async function runAgent(
   chatJid: string,
   onOutput?: (output: RuntimeOutput) => Promise<void>,
   images?: Array<{ data: string; mimeType?: string }>,
+  initialDelivery?: RuntimeInput['initialDelivery'],
 ): Promise<{
   status: 'success' | 'error' | 'closed' | 'drained';
   error?: string;
@@ -3697,6 +4036,7 @@ async function runAgent(
           sessionRecord?.owner_key ||
           resolveStableSessionOwnerKey(group.folder),
         turnId: activeTurnId,
+        initialDelivery,
         contextSummary,
         bootstrapState: runtimeBootstrap.bootstrapState,
       },
@@ -3937,6 +4277,7 @@ function startIpcWatcher(): void {
                       targetGroup,
                     )
                   ) {
+                    let canonicalMessageId: string | undefined;
                     // 模型指定了 IM 渠道 — 发送到 IM
                     if (data.targetChannel) {
                       const localImagePaths = extractLocalImImagePaths(
@@ -4020,6 +4361,7 @@ function startIpcWatcher(): void {
                         typeof data.requestId === 'string'
                           ? `outbound:${data.requestId}`
                           : undefined;
+                      canonicalMessageId = webCopyId;
                       if (!webCopyId || !messageExists(webCopyId)) {
                         const storedId = await sendMessage(
                           data.chatJid,
@@ -4038,6 +4380,7 @@ function startIpcWatcher(): void {
                             'failed to persist outbound Web message',
                           );
                         }
+                        canonicalMessageId = storedId;
                       }
                     } else {
                       // No IM target — just store in DB + broadcast Web
@@ -4045,6 +4388,7 @@ function startIpcWatcher(): void {
                         typeof data.requestId === 'string'
                           ? `outbound:${data.requestId}`
                           : undefined;
+                      canonicalMessageId = webCopyId;
                       if (!webCopyId || !messageExists(webCopyId)) {
                         const storedId = await sendMessage(
                           data.chatJid,
@@ -4059,9 +4403,19 @@ function startIpcWatcher(): void {
                             'failed to persist outbound Web message',
                           );
                         }
+                        canonicalMessageId = storedId;
                       }
                     }
-                    markDurableOutboundAcceptance(runtimeAcceptanceKey);
+                    if (!canonicalMessageId) {
+                      throw new Error(
+                        'failed to identify canonical outbound Web message',
+                      );
+                    }
+                    markDurableOutboundAcceptance(runtimeAcceptanceKey, {
+                      messageId: canonicalMessageId,
+                      chatJid: data.chatJid,
+                      text: data.text,
+                    });
                     if (deliveryRequestId) {
                       writeIpcResponseFile(ipcRoot, {
                         type: 'im_delivery_result',
@@ -4942,9 +5296,10 @@ async function processAgentConversation(
   const workerSessionId = buildWorkerSessionRecordId(agentId);
   const runtimeAcceptanceKey = `${effectiveGroup.folder}#${agentId}`;
   const outboundAcceptanceBaseline =
-    durableOutboundAcceptances.get(runtimeAcceptanceKey) ?? 0;
+    durableOutboundTracker.snapshot(runtimeAcceptanceKey);
+  let canonicalResultCursor = outboundAcceptanceBaseline;
   const hasDurableWorkerReply = (): boolean =>
-    (durableOutboundAcceptances.get(runtimeAcceptanceKey) ?? 0) >
+    durableOutboundTracker.snapshot(runtimeAcceptanceKey) >
     outboundAcceptanceBaseline;
 
   // Get pending messages
@@ -5034,6 +5389,12 @@ async function processAgentConversation(
       }
       if (
         output.streamEvent.eventType === 'status' &&
+        output.streamEvent.statusText === 'ipc_message_accepted'
+      ) {
+        markIpcCursorAccepted(output.streamEvent.ipcDeliveryIds || []);
+      }
+      if (
+        output.streamEvent.eventType === 'status' &&
         output.streamEvent.statusText === 'ipc_message_delivered'
       ) {
         commitIpcCursorOnAck(output.streamEvent.ipcDeliveryIds || []);
@@ -5086,32 +5447,43 @@ async function processAgentConversation(
           : JSON.stringify(output.result);
       const text = raw.trim();
       if (text) {
-        const msgId = crypto.randomUUID();
-        lastAgentReplyMsgId = msgId;
-        const timestamp = new Date().toISOString();
-        ensureChatExists(virtualChatJid);
-        storeMessageDirect(
-          msgId,
-          virtualChatJid,
-          'agentdock-agent',
-          ASSISTANT_NAME,
-          text,
-          timestamp,
-          true,
+        const canonicalOutbound = durableOutboundTracker.latestTextSince(
+          runtimeAcceptanceKey,
+          canonicalResultCursor,
         );
-        broadcastNewMessage(
-          virtualChatJid,
-          {
-            id: msgId,
-            chat_jid: virtualChatJid,
-            sender: 'agentdock-agent',
-            sender_name: ASSISTANT_NAME,
-            content: text,
+        if (canonicalOutbound?.chatJid === virtualChatJid) {
+          lastAgentReplyMsgId = canonicalOutbound.messageId;
+          canonicalResultCursor = canonicalOutbound.sequence;
+        } else {
+          const msgId = crypto.randomUUID();
+          lastAgentReplyMsgId = msgId;
+          const timestamp = new Date().toISOString();
+          ensureChatExists(virtualChatJid);
+          storeMessageDirect(
+            msgId,
+            virtualChatJid,
+            'agentdock-agent',
+            ASSISTANT_NAME,
+            text,
             timestamp,
-            is_from_me: true,
-          },
-          agentId,
-        );
+            true,
+          );
+          broadcastNewMessage(
+            virtualChatJid,
+            {
+              id: msgId,
+              chat_jid: virtualChatJid,
+              sender: 'agentdock-agent',
+              sender_name: ASSISTANT_NAME,
+              content: text,
+              timestamp,
+              is_from_me: true,
+            },
+            agentId,
+          );
+          canonicalResultCursor =
+            durableOutboundTracker.snapshot(runtimeAcceptanceKey);
+        }
 
         commitCursor();
         resetIdleTimer();
@@ -5416,7 +5788,15 @@ async function startMessageLoop(): Promise<void> {
               // a written IPC file is not a delivered message.
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
               if (injectedIpc) {
-                deferIpcCursorCommit(chatJid, lastProcessed.rowid, injectedIpc);
+                deferIpcCursorCommit(
+                  chatJid,
+                  lastProcessed.rowid,
+                  injectedIpc,
+                  {
+                    turnId: route.turnId,
+                    messageIds,
+                  },
+                );
               }
             } else if (sendResult === 'interrupted_stop') {
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
@@ -5527,7 +5907,15 @@ async function startMessageLoop(): Promise<void> {
               // a written IPC file is not a delivered message.
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
               if (injectedIpc) {
-                deferIpcCursorCommit(chatJid, lastProcessed.rowid, injectedIpc);
+                deferIpcCursorCommit(
+                  chatJid,
+                  lastProcessed.rowid,
+                  injectedIpc,
+                  {
+                    turnId: route.turnId,
+                    messageIds,
+                  },
+                );
               }
             } else if (sendResult === 'interrupted_stop') {
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
@@ -5553,122 +5941,130 @@ async function startMessageLoop(): Promise<void> {
   }
 }
 
-// ─── Active Groups Store ─────────────────────────────────────
-// Tracks which groups had running agents, so we can auto-resume after restart.
-// Uses atomic write (tmp + rename) to avoid corruption on hard crash.
-
-const ACTIVE_GROUPS_STORE_PATH = path.join(
-  DATA_DIR,
-  'state',
-  'active-groups.json',
-);
-
-interface ActiveGroupEntry {
-  chatJid: string;
-  folder: string;
-  startedAt: number;
-}
-
-function loadActiveGroupsStore(): ActiveGroupEntry[] {
-  try {
-    const data = fs.readFileSync(ACTIVE_GROUPS_STORE_PATH, 'utf-8');
-    return JSON.parse(data);
-  } catch {
-    return [];
-  }
-}
-
-function saveActiveGroupsStore(entries: ActiveGroupEntry[]): void {
-  try {
-    const dir = path.dirname(ACTIVE_GROUPS_STORE_PATH);
-    fs.mkdirSync(dir, { recursive: true });
-    const tmpPath = ACTIVE_GROUPS_STORE_PATH + '.tmp';
-    fs.writeFileSync(tmpPath, JSON.stringify(entries), 'utf-8');
-    fs.renameSync(tmpPath, ACTIVE_GROUPS_STORE_PATH);
-  } catch (err) {
-    logger.warn({ err }, 'Failed to save active groups store');
-  }
-}
-
-function addActiveGroup(chatJid: string, folder: string): void {
-  const entries = loadActiveGroupsStore().filter((e) => e.chatJid !== chatJid);
-  entries.push({ chatJid, folder, startedAt: Date.now() });
-  saveActiveGroupsStore(entries);
-}
-
-function removeActiveGroup(chatJid: string): void {
-  const entries = loadActiveGroupsStore().filter((e) => e.chatJid !== chatJid);
-  saveActiveGroupsStore(entries);
-}
-
 /**
- * Startup recovery: check for unprocessed messages in registered groups,
- * AND auto-resume groups that had active agents before restart.
+ * Startup recovery uses persisted Turn + delivery ACK state:
+ * - completed delivery: reconcile the cursor and do nothing;
+ * - queued/received: replay the original DB messages;
+ * - accepted without completion: resume the provider session with a hidden
+ *   recovery control message, without replaying accepted user input.
  */
 function recoverPendingMessages(): void {
   const recoveredJids = new Set<string>();
+  try {
+    const legacyActiveGroupsPath = path.join(
+      DATA_DIR,
+      'state',
+      'active-groups.json',
+    );
+    if (fs.existsSync(legacyActiveGroupsPath)) {
+      fs.unlinkSync(legacyActiveGroupsPath);
+      logger.info(
+        'Recovery: removed obsolete process-liveness active-groups state',
+      );
+    }
+  } catch (err) {
+    logger.warn({ err }, 'Recovery: failed to remove obsolete active-groups');
+  }
+  let cursorChanged = false;
+  for (const cursor of getCompletedTurnDeliveryCursors()) {
+    const current = lastAgentTimestamp[cursor.chat_jid];
+    if (!current || cursor.max_rowid > current.rowid) {
+      lastAgentTimestamp[cursor.chat_jid] = { rowid: cursor.max_rowid };
+      cursorChanged = true;
+    }
+  }
+  if (cursorChanged) saveState();
 
-  // Phase 1: recover groups that had active agents before restart
-  const activeEntries = loadActiveGroupsStore();
-  if (activeEntries.length > 0) {
-    const maxAge = getSystemSettings().runtimeTimeout * 2; // 2x timeout = stale
-    const now = Date.now();
-    // Deduplicate by folder — multiple JIDs can map to the same folder
-    const seenFolders = new Set<string>();
+  const seenFolders = new Set<string>();
+  for (const turn of getRecoverableTurns()) {
+    if (seenFolders.has(turn.group_folder)) {
+      updateTurn(turn.id, {
+        status: 'error',
+        completed_at: new Date().toISOString(),
+        summary: '同一工作区存在更新的非终态 Turn，已停止旧 Turn',
+      });
+      continue;
+    }
+    seenFolders.add(turn.group_folder);
+    if (!registeredGroups[turn.chat_jid]) {
+      logger.warn(
+        { turnId: turn.id, chatJid: turn.chat_jid },
+        'Recovery: persisted turn has no registered chat',
+      );
+      continue;
+    }
 
+    const pending = getMessagesSince(
+      turn.chat_jid,
+      lastAgentTimestamp[turn.chat_jid] || EMPTY_CURSOR,
+    );
+    const deliveries = getTurnDeliveries(turn.id);
+    if (
+      deliveries.length > 0 &&
+      deliveries.every((delivery) => delivery.status === 'completed')
+    ) {
+      updateTurn(turn.id, {
+        status: 'completed',
+        completed_at: new Date().toISOString(),
+      });
+      continue;
+    }
+    if (pending.length === 0) {
+      updateTurn(turn.id, {
+        status: 'completed',
+        completed_at: new Date().toISOString(),
+        summary: '重启恢复时没有待处理消息',
+      });
+      continue;
+    }
+
+    turnManager.restoreTurn(turn);
+    const accepted =
+      deliveries.some((delivery) => delivery.status === 'accepted') &&
+      !!getRuntimeBootstrapState(turn.group_folder).providerSessionId;
+    broadcastRunnerState(
+      turn.chat_jid,
+      'queued',
+      accepted ? '服务重启，按已接受投递续跑' : '服务重启，重新投递未接受消息',
+    );
+    queue.enqueueMessageCheck(turn.chat_jid);
+    recoveredJids.add(turn.chat_jid);
     logger.info(
       {
-        count: activeEntries.length,
-        groups: activeEntries.map((e) => e.folder),
+        turnId: turn.id,
+        chatJid: turn.chat_jid,
+        deliveryStatuses: deliveries.map((delivery) => delivery.status),
       },
-      'Recovery: found previously active groups, injecting resume messages',
+      'Recovery: restored non-terminal turn from delivery ACK state',
     );
-    for (const entry of activeEntries) {
-      if (!registeredGroups[entry.chatJid]) continue;
-      // Skip stale entries (crashed long ago, likely not useful to resume)
-      if (now - entry.startedAt > maxAge) {
-        logger.info(
-          { folder: entry.folder, age: now - entry.startedAt },
-          'Recovery: skipping stale active group entry',
-        );
-        continue;
-      }
-      // Deduplicate by folder — only recover the first JID per folder
-      if (seenFolders.has(entry.folder)) continue;
-      seenFolders.add(entry.folder);
-
-      // Inject a system message to trigger the agent
-      const msgId = `recovery-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
-      ensureChatExists(entry.chatJid);
-      storeMessageDirect(
-        msgId,
-        entry.chatJid,
-        '__system__',
-        '[系统]',
-        '服务已重启，请继续之前的工作。',
-        new Date().toISOString(),
-        false,
-      );
-      broadcastRunnerState(entry.chatJid, 'queued', '服务重启后自动恢复');
-      queue.enqueueMessageCheck(entry.chatJid);
-      recoveredJids.add(entry.chatJid);
-    }
-    // Clear the store — these groups will be re-added when they start running
-    saveActiveGroupsStore([]);
   }
 
-  // Phase 2: recover groups with unprocessed messages (existing logic)
+  // Messages can arrive after the last persisted turn boundary. Route them
+  // through TurnManager before scheduling so recovery never starts ownerless.
   for (const [chatJid, group] of Object.entries(registeredGroups)) {
-    if (recoveredJids.has(chatJid)) continue; // already recovered above
+    if (recoveredJids.has(chatJid)) continue;
     const sinceCursor = lastAgentTimestamp[chatJid] || EMPTY_CURSOR;
     const pending = getMessagesSince(chatJid, sinceCursor);
     if (pending.length > 0) {
+      const folder = resolveGroupFolder(chatJid);
+      const route = turnManager.routeMessage(
+        folder,
+        chatJid,
+        resolveChannel(pending),
+        pending.map((message) => message.id),
+      );
       logger.info(
-        { group: group.name, pendingCount: pending.length },
+        {
+          group: group.name,
+          pendingCount: pending.length,
+          route: route.action,
+        },
         'Recovery: found unprocessed messages',
       );
       broadcastRunnerState(chatJid, 'queued', '发现未处理消息，等待重新接管');
-      queue.enqueueMessageCheck(chatJid);
+      if (route.action === 'start_new' || route.action === 'inject') {
+        queue.enqueueMessageCheck(chatJid);
+      }
     }
   }
 }
@@ -6354,6 +6750,36 @@ async function main(): Promise<void> {
     shutdownInProgress = true;
     shuttingDown = true;
     logger.info({ signal }, 'Shutdown signal received, cleaning up...');
+    try {
+      // One-time compatibility bridge for runtimes started before delivery
+      // rows were introduced. Only a folder with a live runtime is treated as
+      // accepted; a merely queued turn remains replayable after restart.
+      for (const turn of turnManager.getActiveTurns()) {
+        if (
+          getTurnDeliveries(turn.id).length > 0 ||
+          !queue.hasActiveRuntimeForFolder(turn.folder)
+        ) {
+          continue;
+        }
+        const pending = getMessagesSince(
+          turn.chatJid,
+          lastAgentTimestamp[turn.chatJid] || EMPTY_CURSOR,
+        );
+        if (pending.length === 0) continue;
+        ensureTurnDelivery({
+          deliveryId: `legacy-restart:${turn.id}`,
+          turnId: turn.id,
+          chatJid: turn.chatJid,
+          groupFolder: turn.folder,
+          maxRowid: pending[pending.length - 1].rowid,
+          messageIds: pending.map((message) => message.id),
+          status: 'accepted',
+        });
+      }
+      turnManager.suspendForRestart();
+    } catch (err) {
+      logger.warn({ err }, 'Error suspending turns for restart');
+    }
 
     if (feishuSyncInterval) {
       clearInterval(feishuSyncInterval);
@@ -6394,11 +6820,6 @@ async function main(): Promise<void> {
       await queue.shutdown(10000);
     } catch (err) {
       logger.warn({ err }, 'Error shutting down queue');
-    }
-    try {
-      markStaleTurnsAsError();
-    } catch (err) {
-      logger.warn({ err }, 'Error marking stale turns as error');
     }
     try {
       closeDatabase();
@@ -6758,14 +7179,6 @@ async function main(): Promise<void> {
       turnManager.getActiveTurn(folder),
     );
     syncPendingTurnObservability(folder);
-
-    // Track active groups for restart recovery (only on 'starting' to avoid redundant writes)
-    if (state === 'starting') {
-      addActiveGroup(groupJid, folder);
-    }
-  });
-  queue.addOnRuntimeExitListener((groupJid) => {
-    removeActiveGroup(groupJid);
   });
   queue.setHostModeChecker(() => false);
   queue.setSerializationKeyResolver((groupJid: string) => {
@@ -6826,12 +7239,6 @@ async function main(): Promise<void> {
       );
     },
   });
-  // Mark any turns that were running when the process crashed/restarted
-  try {
-    markStaleTurnsAsError();
-  } catch (err) {
-    logger.warn({ err }, 'Failed to recover stale turns');
-  }
   turnManager.recoverOnStartup();
   recoverPendingMessages();
   startMessageLoop();

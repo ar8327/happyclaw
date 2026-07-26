@@ -68,6 +68,7 @@ export function buildIpcAckStreamEvent(
   messageOrMessages: IpcMessage | IpcMessage[],
   statusText:
     | 'ipc_message_received'
+    | 'ipc_message_accepted'
     | 'ipc_message_delivered'
     | 'ipc_messages_returned' = 'ipc_message_received',
 ): NonNullable<ContainerOutput['streamEvent']> {

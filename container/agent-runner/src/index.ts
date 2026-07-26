@@ -378,16 +378,36 @@ async function main(): Promise<void> {
   let prompt = containerInput.prompt;
   let promptImages = containerInput.images;
   const pendingDrain = drainIpcInput(ipcPaths, log);
+  const initialDeliveryIds = new Set(
+    containerInput.initialDelivery?.deliveryIds || [],
+  );
+  const drainedDeliveryIds = new Set(
+    pendingDrain.messages.flatMap((message) => message.deliveryIds || []),
+  );
+  const pendingPromptMessages = pendingDrain.messages.filter(
+    (message) =>
+      !(message.deliveryIds || []).some((id) => initialDeliveryIds.has(id)) &&
+      !(
+        initialDeliveryIds.size > 0 &&
+        message.text.length > 0 &&
+        prompt.includes(message.text)
+      ),
+  );
+  const missingInitialDeliveryIds = [...initialDeliveryIds].filter(
+    (id) => !drainedDeliveryIds.has(id),
+  );
   if (pendingDrain.modeChange) {
     state.currentPermissionMode = pendingDrain.modeChange;
     log(`Initial mode change via IPC: ${pendingDrain.modeChange}`);
   }
-  if (pendingDrain.messages.length > 0) {
+  if (pendingPromptMessages.length > 0) {
     log(
-      `Draining ${pendingDrain.messages.length} pending IPC messages into initial prompt`,
+      `Draining ${pendingPromptMessages.length} pending IPC messages into initial prompt`,
     );
-    prompt += '\n' + pendingDrain.messages.map((m) => m.text).join('\n');
-    const pendingImages = pendingDrain.messages.flatMap((m) => m.images || []);
+    prompt += '\n' + pendingPromptMessages.map((m) => m.text).join('\n');
+    const pendingImages = pendingPromptMessages.flatMap(
+      (message) => message.images || [],
+    );
     if (pendingImages.length > 0) {
       promptImages = [...(promptImages || []), ...pendingImages];
     }
@@ -431,6 +451,20 @@ async function main(): Promise<void> {
     promptContract: runnerManifest.descriptor.promptContract,
     initialPrompt: prompt,
     initialImages: promptImages,
+    initialMessages: [
+      ...pendingDrain.messages,
+      ...(containerInput.initialDelivery && missingInitialDeliveryIds.length > 0
+        ? [
+            {
+              text: '',
+              deliveryIds: missingInitialDeliveryIds,
+              ackTargets: containerInput.initialDelivery.ackTargets,
+              ackSourceChannels:
+                containerInput.initialDelivery.ackSourceChannels,
+            },
+          ]
+        : []),
+    ],
     sessionRecordId,
     sessionId: containerInput.sessionId,
     initialResumeAnchor: containerInput.resumeAnchor,

@@ -102,6 +102,12 @@ export interface RuntimeInput {
   agentName?: string;
   userId?: string;
   turnId?: string;
+  /** Durable acknowledgement metadata for the initial DB message batch. */
+  initialDelivery?: {
+    deliveryIds: string[];
+    ackTargets: string[];
+    ackSourceChannels?: string[];
+  };
   contextSummary?: string;
   bootstrapState?: {
     providerState?: Record<string, unknown>;

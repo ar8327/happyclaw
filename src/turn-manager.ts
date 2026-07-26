@@ -6,7 +6,7 @@
  */
 
 import crypto from 'crypto';
-import { insertTurn, updateTurn, markStaleTurnsAsError } from './db.js';
+import { insertTurn, updateTurn, type TurnRow } from './db.js';
 import { logger } from './logger.js';
 
 export interface ActiveTurn {
@@ -216,6 +216,66 @@ export class TurnManager {
   }
 
   /**
+   * Keep an unfinished turn resumable across either a graceful restart or a
+   * retryable runtime failure. Unlike failTurn(), this does not set a terminal
+   * completion timestamp.
+   */
+  markRecoverable(folder: string, detail?: string): void {
+    const active = this.activeTurns.get(folder);
+    if (!active) return;
+    try {
+      updateTurn(active.id, {
+        status: 'recoverable',
+        summary: detail?.slice(0, 200),
+      });
+    } catch (err) {
+      logger.warn(
+        { err, turnId: active.id },
+        'Failed to mark turn recoverable',
+      );
+    }
+  }
+
+  /** Restore a persisted non-terminal turn into the in-memory router. */
+  restoreTurn(row: TurnRow): ActiveTurn {
+    const messageIds = (() => {
+      try {
+        const parsed = JSON.parse(row.message_ids || '[]');
+        return Array.isArray(parsed)
+          ? parsed.filter((id): id is string => typeof id === 'string')
+          : [];
+      } catch {
+        return [];
+      }
+    })();
+    const startedAt = Date.parse(row.started_at) || Date.now();
+    const restored: ActiveTurn = {
+      id: row.id,
+      folder: row.group_folder,
+      chatJid: row.chat_jid,
+      channel: row.channel || row.chat_jid,
+      messageIds,
+      startedAt,
+      lastInjectedAt: startedAt,
+    };
+    this.activeTurns.set(row.group_folder, restored);
+    this.handoffInFlight.delete(row.group_folder);
+    try {
+      updateTurn(row.id, { status: 'running' });
+    } catch (err) {
+      logger.warn({ err, turnId: row.id }, 'Failed to restore turn status');
+    }
+    return restored;
+  }
+
+  /** Persist every live turn as resumable before processes are stopped. */
+  suspendForRestart(): void {
+    for (const folder of this.activeTurns.keys()) {
+      this.markRecoverable(folder, '服务重启，等待按投递 ACK 恢复');
+    }
+  }
+
+  /**
    * Get the next queued entry for a folder (FIFO).
    * Returns null if nothing is queued.
    */
@@ -264,6 +324,10 @@ export class TurnManager {
     return this.activeTurns.get(folder) || null;
   }
 
+  getActiveTurns(): ActiveTurn[] {
+    return [...this.activeTurns.values()];
+  }
+
   /**
    * Get pending message counts per channel for a folder.
    */
@@ -286,18 +350,11 @@ export class TurnManager {
     return queue.some((q) => q.chatJid === chatJid);
   }
 
-  /**
-   * Startup recovery: clear in-memory state and mark DB turns as error.
-   */
+  /** Startup recovery begins from persisted non-terminal turns. */
   recoverOnStartup(): void {
     this.activeTurns.clear();
     this.pendingQueue.clear();
     this.handoffInFlight.clear();
-    try {
-      cleanupStaleTurns();
-    } catch (err) {
-      logger.warn({ err }, 'Failed to recover turns on startup');
-    }
   }
 
   private getQueue(folder: string): QueuedTurnEntry[] {
@@ -307,17 +364,5 @@ export class TurnManager {
       this.pendingQueue.set(folder, queue);
     }
     return queue;
-  }
-}
-
-/**
- * Mark all running turns as error (crash recovery).
- * Called from recoverOnStartup() via the DB function markStaleTurnsAsError.
- */
-function cleanupStaleTurns(): void {
-  try {
-    markStaleTurnsAsError();
-  } catch {
-    // DB function may not be available yet during init
   }
 }

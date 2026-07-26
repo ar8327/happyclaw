@@ -1373,6 +1373,32 @@ export function initDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_turns_result_msg ON turns(result_message_id);
   `);
 
+  // v53: durable per-turn delivery acknowledgements. A cursor advances only
+  // after the runner completes the provider query that accepted the batch.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS turn_deliveries (
+      delivery_id TEXT PRIMARY KEY,
+      turn_id TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      group_folder TEXT NOT NULL,
+      max_rowid INTEGER NOT NULL,
+      message_ids TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'queued',
+      received_at TEXT,
+      accepted_at TEXT,
+      completed_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (turn_id) REFERENCES turns(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_turn_deliveries_batch
+      ON turn_deliveries(turn_id, chat_jid, max_rowid);
+    CREATE INDEX IF NOT EXISTS idx_turn_deliveries_turn_status
+      ON turn_deliveries(turn_id, status);
+    CREATE INDEX IF NOT EXISTS idx_turn_deliveries_chat_status
+      ON turn_deliveries(chat_jid, status);
+  `);
+
   // v32: FTS5 full-text search index for messages
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
@@ -1420,7 +1446,7 @@ export function initDatabase(): void {
      WHERE status = 'sending'`,
   ).run(Date.now(), new Date().toISOString());
 
-  const SCHEMA_VERSION = '52';
+  const SCHEMA_VERSION = '53';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -5836,6 +5862,27 @@ export interface TurnRow {
   group_folder: string;
 }
 
+export type TurnDeliveryStatus =
+  | 'queued'
+  | 'received'
+  | 'accepted'
+  | 'completed';
+
+export interface TurnDeliveryRow {
+  delivery_id: string;
+  turn_id: string;
+  chat_jid: string;
+  group_folder: string;
+  max_rowid: number;
+  message_ids: string;
+  status: TurnDeliveryStatus;
+  received_at: string | null;
+  accepted_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export function insertTurn(turn: {
   id: string;
   chat_jid: string;
@@ -5896,9 +5943,146 @@ export function getTurnById(id: string): TurnRow | undefined {
 export function getActiveTurnByFolder(folder: string): TurnRow | undefined {
   return db
     .prepare(
-      "SELECT * FROM turns WHERE group_folder = ? AND status = 'running' ORDER BY started_at DESC LIMIT 1",
+      "SELECT * FROM turns WHERE group_folder = ? AND status IN ('running', 'recoverable') ORDER BY started_at DESC LIMIT 1",
     )
     .get(folder) as TurnRow | undefined;
+}
+
+export function getRecoverableTurns(): TurnRow[] {
+  return db
+    .prepare(
+      `SELECT *
+         FROM turns
+        WHERE status IN ('running', 'recoverable')
+        ORDER BY started_at DESC`,
+    )
+    .all() as TurnRow[];
+}
+
+export function ensureTurnDelivery(input: {
+  deliveryId: string;
+  turnId: string;
+  chatJid: string;
+  groupFolder: string;
+  maxRowid: number;
+  messageIds: string[];
+  status?: TurnDeliveryStatus;
+}): TurnDeliveryRow {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT OR IGNORE INTO turn_deliveries (
+       delivery_id, turn_id, chat_jid, group_folder, max_rowid, message_ids,
+       status, received_at, accepted_at, completed_at, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    input.deliveryId,
+    input.turnId,
+    input.chatJid,
+    input.groupFolder,
+    input.maxRowid,
+    JSON.stringify(input.messageIds),
+    input.status ?? 'queued',
+    input.status === 'received' ? now : null,
+    input.status === 'accepted' ? now : null,
+    input.status === 'completed' ? now : null,
+    now,
+    now,
+  );
+  const row = getTurnDelivery(input.deliveryId);
+  if (!row) {
+    throw new Error(`Failed to persist turn delivery ${input.deliveryId}`);
+  }
+  return row;
+}
+
+export function getTurnDelivery(
+  deliveryId: string,
+): TurnDeliveryRow | undefined {
+  return db
+    .prepare('SELECT * FROM turn_deliveries WHERE delivery_id = ?')
+    .get(deliveryId) as TurnDeliveryRow | undefined;
+}
+
+export function getTurnDeliveries(turnId: string): TurnDeliveryRow[] {
+  return db
+    .prepare(
+      'SELECT * FROM turn_deliveries WHERE turn_id = ? ORDER BY max_rowid, created_at',
+    )
+    .all(turnId) as TurnDeliveryRow[];
+}
+
+export function hasIncompleteTurnDeliveries(turnId: string): boolean {
+  const row = db
+    .prepare(
+      "SELECT 1 AS found FROM turn_deliveries WHERE turn_id = ? AND status != 'completed' LIMIT 1",
+    )
+    .get(turnId) as { found: number } | undefined;
+  return !!row;
+}
+
+export function updateTurnDeliveryStatus(
+  deliveryIds: Iterable<string>,
+  status: TurnDeliveryStatus,
+  options?: { allowAcceptedReplay?: boolean },
+): void {
+  const ids = [...new Set(deliveryIds)];
+  if (ids.length === 0) return;
+  const now = new Date().toISOString();
+  const timestampColumn =
+    status === 'received'
+      ? 'received_at'
+      : status === 'accepted'
+        ? 'accepted_at'
+        : status === 'completed'
+          ? 'completed_at'
+          : null;
+  const allowedCurrentStatuses =
+    status === 'received'
+      ? "'queued', 'received'"
+      : status === 'accepted'
+        ? "'queued', 'received', 'accepted'"
+        : status === 'completed'
+          ? "'queued', 'received', 'accepted'"
+          : options?.allowAcceptedReplay
+            ? "'queued', 'received', 'accepted'"
+            : "'queued', 'received'";
+  const statement = timestampColumn
+    ? db.prepare(
+        `UPDATE turn_deliveries
+            SET status = ?, ${timestampColumn} = COALESCE(${timestampColumn}, ?), updated_at = ?
+          WHERE delivery_id = ?
+            AND status IN (${allowedCurrentStatuses})`,
+      )
+    : db.prepare(
+        `UPDATE turn_deliveries
+            SET status = 'queued', updated_at = ?
+          WHERE delivery_id = ?
+            AND status IN (${allowedCurrentStatuses})`,
+      );
+  const update = db.transaction((deliveryIdsToUpdate: string[]) => {
+    for (const id of deliveryIdsToUpdate) {
+      if (timestampColumn) {
+        statement.run(status, now, now, id);
+      } else {
+        statement.run(now, id);
+      }
+    }
+  });
+  update(ids);
+}
+
+export function getCompletedTurnDeliveryCursors(): Array<{
+  chat_jid: string;
+  max_rowid: number;
+}> {
+  return db
+    .prepare(
+      `SELECT chat_jid, MAX(max_rowid) AS max_rowid
+         FROM turn_deliveries
+        WHERE status = 'completed'
+        GROUP BY chat_jid`,
+    )
+    .all() as Array<{ chat_jid: string; max_rowid: number }>;
 }
 
 export function getTurnsByJid(
@@ -5929,10 +6113,14 @@ export function cleanupOldTurns(olderThanDays: number): number {
   const cutoff = new Date(
     Date.now() - olderThanDays * 24 * 60 * 60 * 1000,
   ).toISOString();
-  const result = db
-    .prepare('DELETE FROM turns WHERE started_at < ?')
-    .run(cutoff);
-  return result.changes;
+  return db.transaction(() => {
+    db.prepare(
+      `DELETE FROM turn_deliveries
+        WHERE turn_id IN (SELECT id FROM turns WHERE started_at < ?)`,
+    ).run(cutoff);
+    return db.prepare('DELETE FROM turns WHERE started_at < ?').run(cutoff)
+      .changes;
+  })();
 }
 
 export function getTurnByResultMessageId(
@@ -5952,13 +6140,6 @@ export function getMessageIdsWithTrace(messageIds: string[]): Set<string> {
     )
     .all(...messageIds) as Array<{ result_message_id: string }>;
   return new Set(rows.map((r) => r.result_message_id));
-}
-
-export function markStaleTurnsAsError(): void {
-  const now = new Date().toISOString();
-  db.prepare(
-    "UPDATE turns SET status = 'error', completed_at = ? WHERE status = 'running'",
-  ).run(now);
 }
 
 /**
