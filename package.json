@@ -18,6 +18,7 @@
     "test:memory-write-queue": "tsx src/memory-write-queue.test.ts",
     "test:external-knowledge": "tsx src/external-knowledge.test.ts",
     "test:memory-search": "tsx src/memory-search.test.ts",
+    "test:progress-card-routing": "tsx src/progress-card-routing.test.ts",
     "test:memory-retention": "tsx src/memory-retention.test.ts",
     "test:session-list-query": "tsx src/session-list-query.test.ts",
     "test:session-pagination-smoke": "tsx scripts/session-pagination-smoke.ts",

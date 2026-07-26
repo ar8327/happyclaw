@@ -3136,10 +3136,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           streamingBlocksManager
             .getOrCreate(group.folder)
             .feed(result.streamEvent);
-          // Feed progress cards (Feishu real-time tool trace) — feeds ALL
-          // active sessions for this folder, including cards created for
-          // IPC-injected Feishu chats that share the same workspace.
-          feedProgressSessionsForFolder(group.folder, result.streamEvent);
+          // Feed only the card owned by the active Turn's source channel.
+          // Several Feishu chats can share one folder/runtime.
+          const progressSourceChannel =
+            turnManager.getActiveTurn(group.folder)?.channel ?? sourceChannel;
+          feedProgressSessionsForFolder(
+            group.folder,
+            progressSourceChannel,
+            result.streamEvent,
+          );
 
           // IM Commentary: update the progress card with human-readable explanation (fire-and-forget)
           const _se = result.streamEvent;
@@ -5858,7 +5863,7 @@ async function startMessageLoop(): Promise<void> {
               // collide with the Web progress session and skip creation.
               if (
                 getChannelType(channel) === 'feishu' &&
-                !hasActiveProgressSession(channel)
+                !hasActiveProgressSession(channel, folder)
               ) {
                 const resolved = resolveEffectiveGroup(chatJid, group);
                 const ownerId = resolveSessionOwnerKey(

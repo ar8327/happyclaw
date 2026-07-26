@@ -37,6 +37,7 @@ function testCardBuilders(): void {
   ).elements;
   assert.equal(streamingElements.length, 1);
   assert.equal(streamingElements[0].element_id, STREAMING_CONTENT_ELEMENT_ID);
+  assert.match(STREAMING_CONTENT_ELEMENT_ID, /^[A-Za-z][A-Za-z0-9_]{0,19}$/);
 
   const tools = Array.from({ length: 30 }, (_, index) => ({
     toolName: `tool-${index}`,

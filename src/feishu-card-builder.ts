@@ -50,7 +50,8 @@ export interface ProgressCardRenderData {
 
 const MAX_PANEL_CHARS = 24_000;
 const MAX_ERROR_CHARS = 8_000;
-export const STREAMING_CONTENT_ELEMENT_ID = 'happyclaw_reply_content';
+// CardKit requires 1-20 alphanumeric/underscore characters.
+export const STREAMING_CONTENT_ELEMENT_ID = 'hc_reply_content';
 export const STREAMING_PRINT_FREQUENCY_MS = 40;
 export const STREAMING_PRINT_STEP = 10;
 

@@ -9,7 +9,7 @@ import crypto from 'crypto';
 import type { ChildProcess } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import { gunzipSync, gzipSync } from 'node:zlib';
+import { gzipSync } from 'node:zlib';
 
 import { DATA_DIR, GROUPS_DIR } from './config.js';
 import type {
@@ -61,6 +61,10 @@ import { getSystemSettings } from './runtime-config.js';
 import { runSessionAgent } from './session-launcher.js';
 import type { MessageCursor, SessionRecord } from './types.js';
 import { buildMemoryProfile } from './memory-profile.js';
+import {
+  searchMemoryMarkdownRoot,
+  type MemoryMarkdownSearchHit,
+} from './memory-search.js';
 
 // Limits
 const IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
@@ -118,11 +122,7 @@ export interface MemoryRepairSuggestion {
   suggestion?: string;
 }
 
-export interface MemorySearchHit {
-  file: string;
-  score: number;
-  excerpt: string;
-}
+export type MemorySearchHit = MemoryMarkdownSearchHit;
 
 const MEMORY_TIMEOUT_KILL_GRACE_MS = 5_000;
 const MEMORY_TIMEOUT_SETTLE_GRACE_MS = 7_000;
@@ -428,109 +428,13 @@ export function ensureMemoryDir(ownerKey: string): string {
   return memDir;
 }
 
-function buildMemorySearchTerms(query: string): string[] {
-  const normalized = query.normalize('NFKC').toLowerCase().trim();
-  if (!normalized) return [];
-  const terms = new Set<string>();
-  for (const token of normalized.match(/[\p{L}\p{N}_-]+/gu) || []) {
-    if (token.length >= 2) terms.add(token);
-    if (/^[\p{Script=Han}]+$/u.test(token) && token.length > 2) {
-      for (let index = 0; index < token.length - 1; index += 1) {
-        terms.add(token.slice(index, index + 2));
-      }
-    }
-  }
-  return Array.from(terms).slice(0, 40);
-}
-
 export function searchMemoryMarkdown(
   ownerKey: string,
   query: string,
   limit = 8,
 ): MemorySearchHit[] {
-  const terms = buildMemorySearchTerms(query);
-  if (terms.length === 0) return [];
   const root = ensureMemoryDir(ownerKey);
-  const files: string[] = [];
-  const pending = [root];
-  while (pending.length > 0 && files.length < 1_000) {
-    const directory = pending.pop()!;
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(directory, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (entry.name.startsWith('.')) continue;
-      const fullPath = path.join(directory, entry.name);
-      if (entry.isDirectory()) {
-        pending.push(fullPath);
-      } else if (
-        entry.isFile() &&
-        (entry.name.endsWith('.md') || entry.name.endsWith('.md.gz'))
-      ) {
-        files.push(fullPath);
-      }
-    }
-  }
-
-  const hits: MemorySearchHit[] = [];
-  for (const file of files) {
-    let content: string;
-    try {
-      if (fs.statSync(file).size > 2 * 1024 * 1024) continue;
-      const raw = fs.readFileSync(file);
-      content = file.endsWith('.gz')
-        ? gunzipSync(raw).toString('utf-8')
-        : raw.toString('utf-8');
-    } catch {
-      continue;
-    }
-    const lower = content.normalize('NFKC').toLowerCase();
-    const relative = path.relative(root, file);
-    let score = 0;
-    const matchedTerms: string[] = [];
-    for (const term of terms) {
-      let count = 0;
-      let from = 0;
-      while (count < 20) {
-        const found = lower.indexOf(term, from);
-        if (found < 0) break;
-        count += 1;
-        from = found + term.length;
-      }
-      if (count > 0) {
-        matchedTerms.push(term);
-        score += count;
-        if (relative.toLowerCase().includes(term)) score += 4;
-      }
-    }
-    if (score === 0) continue;
-
-    const lines = content.split(/\r?\n/);
-    const matchingLine = lines.findIndex((line) => {
-      const normalizedLine = line.normalize('NFKC').toLowerCase();
-      return matchedTerms.some((term) => normalizedLine.includes(term));
-    });
-    const start = Math.max(0, matchingLine - 2);
-    const excerpt = lines
-      .slice(start, Math.min(lines.length, start + 7))
-      .join('\n')
-      .trim()
-      .slice(0, 1_500);
-    hits.push({
-      file: relative,
-      score: score + matchedTerms.length * 2,
-      excerpt,
-    });
-  }
-  return hits
-    .sort(
-      (left, right) =>
-        right.score - left.score || left.file.localeCompare(right.file),
-    )
-    .slice(0, Math.max(1, Math.min(20, Math.floor(limit))));
+  return searchMemoryMarkdownRoot(root, query, limit);
 }
 
 function listFilesRecursively(root: string): string[] {

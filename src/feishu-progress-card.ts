@@ -51,7 +51,9 @@ function saveCardStore(entries: CardStoreEntry[]): void {
 }
 
 function addToCardStore(chatId: string, messageId: string): void {
-  const entries = loadCardStore().filter((e) => e.chatId !== chatId);
+  // One Feishu chat may contain several independent thread/topic sessions.
+  // Persist every active card so restart cleanup cannot lose older siblings.
+  const entries = loadCardStore().filter((e) => e.messageId !== messageId);
   entries.push({ chatId, messageId, createdAt: Date.now() });
   saveCardStore(entries);
 }
@@ -792,39 +794,55 @@ export class ProgressCardController {
 interface ProgressSessionEntry {
   session: ProgressCardController;
   folder: string;
+  sourceChannel: string;
 }
 
 const activeProgressSessions = new Map<string, ProgressSessionEntry>();
 
+function progressSessionKey(folder: string, sourceChannel: string): string {
+  return `${folder}\0${sourceChannel}`;
+}
+
 export function registerProgressSession(
-  chatJid: string,
+  sourceChannel: string,
   session: ProgressCardController,
   folder: string,
 ): void {
-  const existing = activeProgressSessions.get(chatJid);
+  const key = progressSessionKey(folder, sourceChannel);
+  const existing = activeProgressSessions.get(key);
   if (existing?.session.isActive()) {
     existing.session.abort('新的执行已开始').catch(() => {});
   }
-  activeProgressSessions.set(chatJid, { session, folder });
+  activeProgressSessions.set(key, { session, folder, sourceChannel });
 }
 
-export function unregisterProgressSession(chatJid: string): void {
-  activeProgressSessions.delete(chatJid);
+export function unregisterProgressSession(
+  sourceChannel: string,
+  folder: string,
+): void {
+  activeProgressSessions.delete(progressSessionKey(folder, sourceChannel));
 }
 
 /**
- * Feed a stream event to ALL active progress sessions for the given folder.
- * Used so that IPC-injected Feishu chats also see progress while the agent runs.
+ * Feed an event only to the card that owns the active Turn.
+ *
+ * A folder can be shared by several Web/Feishu chats. Folder-wide fan-out
+ * makes an event from chat A create or update a stale card in chat B.
  */
 export function feedProgressSessionsForFolder(
   folder: string,
+  sourceChannel: string,
   event: StreamEvent,
 ): void {
   for (const entry of activeProgressSessions.values()) {
     // Use canReceiveEvents() instead of isActive() — feedEvent() is what
     // transitions from 'idle' to 'creating' (lazy init), so we must allow
     // events to reach idle cards, not just active ones.
-    if (entry.folder === folder && entry.session.canReceiveEvents()) {
+    if (
+      entry.folder === folder &&
+      entry.sourceChannel === sourceChannel &&
+      entry.session.canReceiveEvents()
+    ) {
       entry.session.feedEvent(event);
     }
   }
@@ -874,8 +892,13 @@ export async function finalizeProgressSessionsForFolder(
 /**
  * Check if an active progress session exists for a chatJid.
  */
-export function hasActiveProgressSession(chatJid: string): boolean {
-  const entry = activeProgressSessions.get(chatJid);
+export function hasActiveProgressSession(
+  sourceChannel: string,
+  folder: string,
+): boolean {
+  const entry = activeProgressSessions.get(
+    progressSessionKey(folder, sourceChannel),
+  );
   return !!entry?.session.isActive();
 }
 
