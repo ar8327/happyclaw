@@ -319,9 +319,19 @@ async function testCardKitFinalizationFallsBackToMessagePatch(): Promise<void> {
 
 function testRetryStateClearsAfterExecutionResumes(): void {
   const controller = new ProgressCardController({
-    client: {} as lark.Client,
+    client: {
+      im: {
+        v1: {
+          message: {
+            create: async () => ({
+              data: { message_id: 'progress-card-retry' },
+            }),
+            patch: async () => ({}),
+          },
+        },
+      },
+    } as unknown as lark.Client,
     chatId: 'oc_retry',
-    existingMessageId: 'progress-card-1',
   });
   const internal = controller as unknown as {
     runnerError?: { willRetry: boolean };

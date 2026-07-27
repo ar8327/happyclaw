@@ -124,7 +124,7 @@ import {
   type ProgressCardController,
   claimProgressSession,
   abortAllProgressSessions,
-  restoreProgressCardSessions,
+  cleanupStaleProgressCards,
   feedProgressSessionsForFolder,
   completeAndResetProgressSessionsForFolder,
   finalizeProgressSessionsForFolder,
@@ -3512,8 +3512,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           streamingBlocksManager.finalize(folder);
         }
 
-        // Complete the Session card after each turn so it does not stay at
-        // "执行中" while the runtime idles. The next turn reuses this card.
+        // Complete the active Turn card after each result. Its registry slot is
+        // released immediately and the message is withdrawn after a short
+        // visibility delay, so the next Turn creates a card by its own trigger.
         if (result.status === 'success') {
           lastTurnCompletedSuccessfully = true;
           // Long-lived IPC runners stay alive after each result and wait for
@@ -7410,10 +7411,10 @@ async function main(): Promise<void> {
     }
   }
 
-  // Clean up progress cards left over from previous process
+  // Clean up progress cards left over from an interrupted previous process.
   if (anyFeishuConnected) {
-    restoreProgressCardSessions(() => imManager.getAnyLarkClient()).catch(
-      (err) => logger.warn({ err }, 'Failed to restore progress cards'),
+    cleanupStaleProgressCards(() => imManager.getAnyLarkClient()).catch((err) =>
+      logger.warn({ err }, 'Failed to clean up stale progress cards'),
     );
   }
 

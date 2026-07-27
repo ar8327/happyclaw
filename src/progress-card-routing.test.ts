@@ -52,6 +52,7 @@ try {
     chatId: 'chat-a',
     anchorFolder: 'shared-folder',
     anchorSourceChannel: 'feishu:chat-a',
+    completionDeleteDelayMs: 10,
   });
   const cardB = new progress.ProgressCardController({
     client: fakeClient('B'),
@@ -77,17 +78,31 @@ try {
   assert.deepEqual(created, ['A']);
 
   await progress.completeAndResetProgressSessionsForFolder('shared-folder');
+  assert.equal(
+    progress.hasProgressSession('shared-folder'),
+    false,
+    'a completed Turn must release the Session slot immediately',
+  );
+  assert.equal(
+    progress.claimProgressSession('feishu:chat-b', cardB, 'shared-folder'),
+    true,
+    'the next Turn must be able to claim a fresh card',
+  );
   progress.feedProgressSessionsForFolder('shared-folder', {
     eventType: 'thinking_delta',
     text: 'next turn from another source',
   });
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await new Promise((resolve) => setTimeout(resolve, 30));
   assert.deepEqual(
     created,
-    ['A'],
-    'later turns must patch the same card instead of creating another one',
+    ['A', 'B'],
+    'a later Turn must create a new card next to its own trigger',
   );
   assert.ok(patched.includes('message-A'));
+  assert.ok(
+    deleted.includes('message-A'),
+    'the completed Turn card must be withdrawn after its visibility delay',
+  );
 
   // Different Sessions remain isolated even when they share one source chat.
   const topic1 = new progress.ProgressCardController({
@@ -122,6 +137,37 @@ try {
   assert.ok(created.includes('topic-1'));
   assert.ok(created.includes('topic-2'));
 
+  const failedCard = new progress.ProgressCardController({
+    client: fakeClient('failed'),
+    chatId: 'failed-chat',
+    anchorFolder: 'failed-folder',
+    anchorSourceChannel: 'feishu:failed-chat',
+  });
+  assert.equal(
+    progress.claimProgressSession(
+      'feishu:failed-chat',
+      failedCard,
+      'failed-folder',
+    ),
+    true,
+  );
+  progress.feedProgressSessionsForFolder('failed-folder', {
+    eventType: 'thinking_delta',
+    text: 'work before failure',
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await progress.finalizeProgressSessionsForFolder(
+    'failed-folder',
+    'fail',
+    'provider failed',
+  );
+  assert.equal(progress.hasProgressSession('failed-folder'), false);
+  assert.equal(
+    deleted.includes('message-failed'),
+    false,
+    'failure diagnostics must remain visible',
+  );
+
   const storePath = path.join(
     fixtureRoot,
     'data',
@@ -139,30 +185,40 @@ try {
   );
   assert.equal(
     persisted.find((entry) => entry.folder === 'shared-folder')?.sourceChannel,
-    'feishu:chat-a',
+    'feishu:chat-b',
+  );
+  assert.equal(
+    persisted.some((entry) => entry.folder === 'failed-folder'),
+    false,
+    'failure diagnostics must not be treated as restart-cleanup anchors',
   );
 
   await progress.abortAllProgressSessions('test restart');
-  assert.deepEqual(
-    deleted,
-    [],
-    'shutdown must preserve the anchored card for restart restoration',
+  assert.ok(
+    deleted.includes('message-B'),
+    'shutdown must withdraw the active Turn card',
   );
 
-  await progress.restoreProgressCardSessions(() => fakeClient('restored'));
-  assert.equal(progress.hasProgressSession('shared-folder'), true);
-  progress.feedProgressSessionsForFolder('shared-folder', {
-    eventType: 'thinking_delta',
-    text: 'resumed after restart',
-  });
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.ok(patched.includes('message-A'));
-  assert.equal(created.includes('restored'), false);
+  // Simulate a crash that left an active-card store entry behind.
+  fs.writeFileSync(
+    storePath,
+    JSON.stringify([
+      {
+        folder: 'crashed-folder',
+        sourceChannel: 'feishu:crashed-chat',
+        chatId: 'crashed-chat',
+        messageId: 'message-crashed',
+        createdAt: Date.now(),
+      },
+    ]),
+  );
+  await progress.cleanupStaleProgressCards(() => fakeClient('restart-cleanup'));
+  assert.equal(progress.hasProgressSession('shared-folder'), false);
+  assert.ok(deleted.includes('message-crashed'));
 
   await progress.deleteProgressSession('shared-folder', () =>
     fakeClient('delete-fallback'),
   );
-  assert.ok((deleted as string[]).includes('message-A'));
   const afterDelete = JSON.parse(fs.readFileSync(storePath, 'utf-8')) as Array<{
     folder: string;
   }>;
