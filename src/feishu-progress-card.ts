@@ -365,6 +365,25 @@ export class ProgressCardController {
         this.runnerError = { ...next };
       }
       this.dirty = true;
+    } else if (
+      this.runnerError?.willRetry &&
+      (type === 'thinking_delta' ||
+        type === 'text_delta' ||
+        type === 'tool_use_start' ||
+        type === 'tool_use_end' ||
+        type === 'tool_progress' ||
+        type === 'hook_started' ||
+        type === 'hook_progress' ||
+        type === 'hook_response' ||
+        type === 'task_start' ||
+        type === 'task_notification' ||
+        type === 'todo_update')
+    ) {
+      // A retryable runner error is transient. Once the provider emits fresh
+      // execution progress, the retry has recovered and the orange error state
+      // must not remain pinned while tools and reasoning continue to update.
+      this.runnerError = undefined;
+      this.dirty = true;
     }
 
     if (type === 'thinking_delta') {

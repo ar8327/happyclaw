@@ -189,6 +189,8 @@ export function buildStaticReplyCard(
     config: {
       width_mode: 'fill',
       update_multi: true,
+      enable_forward: true,
+      streaming_mode: false,
       summary: { content: compactLine(body, 80) || '回复' },
     },
     header: {

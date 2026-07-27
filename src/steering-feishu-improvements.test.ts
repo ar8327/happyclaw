@@ -19,6 +19,14 @@ function testCardBuilders(): void {
     '回复',
   );
   assert.match(JSON.stringify(reply), /# 这不是标题/);
+  const replyConfig = reply.config as {
+    enable_forward?: boolean;
+    streaming_mode?: boolean;
+    summary?: { content?: string };
+  };
+  assert.equal(replyConfig.enable_forward, true);
+  assert.equal(replyConfig.streaming_mode, false);
+  assert.notEqual(replyConfig.summary?.content, '回复生成中');
 
   const streaming = buildCardKitStreamingCard('hello');
   const streamingConfig = (
@@ -159,6 +167,7 @@ async function testCardKitSequenceAndCumulativeContent(): Promise<void> {
   const sequences: number[] = [];
   const contentUpdates: string[] = [];
   let createdCard: Record<string, unknown> | undefined;
+  let finalizedCard: Record<string, unknown> | undefined;
   let sentContent = '';
 
   const client = {
@@ -176,6 +185,17 @@ async function testCardKitSequenceAndCumulativeContent(): Promise<void> {
             assert.deepEqual(JSON.parse(payload.data.settings), {
               streaming_mode: false,
             });
+            return { code: 0 };
+          },
+          update: async (payload: {
+            data: {
+              sequence: number;
+              card: { type: string; data: string };
+            };
+          }) => {
+            sequences.push(payload.data.sequence);
+            assert.equal(payload.data.card.type, 'card_json');
+            finalizedCard = JSON.parse(payload.data.card.data);
             return { code: 0 };
           },
         },
@@ -221,7 +241,127 @@ async function testCardKitSequenceAndCumulativeContent(): Promise<void> {
     data: { card_id: 'card-1' },
   });
   assert.deepEqual(contentUpdates, ['完整累计文本']);
-  assert.deepEqual(sequences, [1, 2]);
+  assert.deepEqual(sequences, [1, 2, 3]);
+  const finalizedConfig = finalizedCard?.config as
+    | {
+        enable_forward?: boolean;
+        streaming_mode?: boolean;
+        summary?: { content?: string };
+      }
+    | undefined;
+  assert.equal(finalizedCard?.schema, '2.0');
+  assert.equal(finalizedConfig?.enable_forward, true);
+  assert.equal(finalizedConfig?.streaming_mode, false);
+  assert.equal(finalizedConfig?.summary?.content, '完整累计文本');
+  assert.match(JSON.stringify(finalizedCard), /完整累计文本/);
+  assert.doesNotMatch(JSON.stringify(finalizedCard), /回复生成中/);
+}
+
+async function testCardKitFinalizationFallsBackToMessagePatch(): Promise<void> {
+  const sequences: number[] = [];
+  let patchedCard: Record<string, unknown> | undefined;
+
+  const client = {
+    cardkit: {
+      v1: {
+        card: {
+          create: async () => ({ code: 0, data: { card_id: 'card-2' } }),
+          settings: async (payload: { data: { sequence: number } }) => {
+            sequences.push(payload.data.sequence);
+            return { code: 0 };
+          },
+          update: async (payload: { data: { sequence: number } }) => {
+            sequences.push(payload.data.sequence);
+            throw new Error('cardkit update unavailable');
+          },
+        },
+        cardElement: {
+          content: async (payload: { data: { sequence: number } }) => {
+            sequences.push(payload.data.sequence);
+            return { code: 0 };
+          },
+        },
+      },
+    },
+    im: {
+      message: {
+        reply: async () => {
+          throw new Error('unexpected reply');
+        },
+      },
+      v1: {
+        message: {
+          create: async () => ({ data: { message_id: 'message-2' } }),
+          patch: async (payload: { data: { content: string } }) => {
+            patchedCard = JSON.parse(payload.data.content);
+            return { code: 0 };
+          },
+        },
+      },
+    },
+  } as unknown as lark.Client;
+
+  const controller = new StreamingCardController({
+    client,
+    chatId: 'oc_fallback',
+  });
+  const externalId = await controller.complete('最终静态回复');
+  assert.equal(externalId, 'message-2');
+  assert.deepEqual(sequences, [1, 2, 3]);
+  assert.equal(patchedCard?.schema, '2.0');
+  assert.equal(
+    (patchedCard?.config as { streaming_mode?: boolean }).streaming_mode,
+    false,
+  );
+  assert.match(JSON.stringify(patchedCard), /最终静态回复/);
+  assert.doesNotMatch(JSON.stringify(patchedCard), /回复生成中/);
+}
+
+function testRetryStateClearsAfterExecutionResumes(): void {
+  const controller = new ProgressCardController({
+    client: {} as lark.Client,
+    chatId: 'oc_retry',
+    existingMessageId: 'progress-card-1',
+  });
+  const internal = controller as unknown as {
+    runnerError?: { willRetry: boolean };
+  };
+
+  controller.feedEvent({
+    eventType: 'status',
+    statusText: 'Runner 暂时异常，正在自动重试',
+    runnerError: {
+      message: 'Reconnecting... 2/5',
+      detail: 'responseStreamDisconnected (HTTP 515)',
+      willRetry: true,
+    },
+  });
+  assert.equal(internal.runnerError?.willRetry, true);
+
+  controller.feedEvent({
+    eventType: 'tool_use_start',
+    toolUseId: 'tool-after-retry',
+    toolName: 'Bash',
+  });
+  assert.equal(internal.runnerError, undefined);
+
+  controller.feedEvent({
+    eventType: 'status',
+    runnerError: {
+      message: 'fatal provider error',
+      willRetry: false,
+    },
+  });
+  controller.feedEvent({
+    eventType: 'tool_progress',
+    toolUseId: 'tool-after-retry',
+    toolInputSummary: 'must not clear a fatal error',
+  });
+  const fatalState = controller as unknown as {
+    runnerError?: { willRetry: boolean };
+  };
+  assert.equal(fatalState.runnerError?.willRetry, false);
+  controller.dispose();
 }
 
 async function testWakeupBeforeSleepIsNotLost(): Promise<void> {
@@ -313,6 +453,8 @@ async function testFailureCardCreatedBeforeProgressEvents(): Promise<void> {
 testCardBuilders();
 testFeishuMediaExtraction();
 await testCardKitSequenceAndCumulativeContent();
+await testCardKitFinalizationFallsBackToMessagePatch();
+testRetryStateClearsAfterExecutionResumes();
 await testWakeupBeforeSleepIsNotLost();
 await testPersistentConnectionCardAction();
 await testFailureCardCreatedBeforeProgressEvents();

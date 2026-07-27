@@ -162,7 +162,7 @@ export class StreamingCardController {
         if (this.legacyPatch) {
           await this.patchLegacyCard('completed');
         } else {
-          await this.setStreamingMode(false);
+          await this.finalizeCardKit('completed');
         }
       } catch (err) {
         logger.warn(
@@ -192,7 +192,7 @@ export class StreamingCardController {
         await this.patchLegacyCard('aborted');
       } else {
         await this.updateCardKitContent();
-        await this.setStreamingMode(false);
+        await this.finalizeCardKit('aborted');
       }
       this.state = 'aborted';
       this.clearRenewalTimer();
@@ -346,6 +346,52 @@ export class StreamingCardController {
       },
     })) as CardKitResponse;
     assertLarkSuccess(response, 'cardkit.card.settings');
+  }
+
+  /**
+   * Replace the streaming entity with a final static Card 2.0 payload. Closing
+   * only `streaming_mode` leaves the entity's original summary ("回复生成中")
+   * behind in the chat list. A full CardKit update both closes streaming and
+   * publishes the final summary/header, restoring normal forwarding behavior.
+   */
+  private async finalizeCardKit(state: 'completed' | 'aborted'): Promise<void> {
+    if (!this.cardId) return;
+
+    const finalCard = buildStaticReplyCard(this.accumulatedText, state);
+    try {
+      // CardKit documents settings(false) as the explicit end-of-stream
+      // signal. Do this even though the following static payload also
+      // declares streaming_mode=false so Feishu releases streaming-only
+      // restrictions (notably forwarding) before we refresh the preview.
+      await this.setStreamingMode(false);
+
+      const sequence = this.nextSequence();
+      const response = (await this.client.cardkit.v1.card.update({
+        path: { card_id: this.cardId },
+        data: {
+          card: {
+            type: 'card_json',
+            data: JSON.stringify(finalCard),
+          },
+          sequence,
+          uuid: randomUUID(),
+        },
+      })) as CardKitResponse;
+      assertLarkSuccess(response, 'cardkit.card.update');
+    } catch (err) {
+      // The message already exists. Fall back to replacing that exact message
+      // with an inline static card rather than letting the durable outbox send
+      // a duplicate reply or leaving the stale "回复生成中" summary behind.
+      logger.warn(
+        { err, chatId: this.chatId, messageId: this.messageId },
+        'CardKit final static update failed, falling back to message patch',
+      );
+      if (!this.messageId) throw err;
+      await this.client.im.v1.message.patch({
+        path: { message_id: this.messageId },
+        data: { content: JSON.stringify(finalCard) },
+      });
+    }
   }
 
   private async patchLegacyCard(
