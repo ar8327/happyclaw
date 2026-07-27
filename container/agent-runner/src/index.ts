@@ -18,7 +18,9 @@ import { normalizeHomeFlags } from 'agentdock-agent-runner-core';
 import { SessionState } from './session-state.js';
 import {
   buildIpcPaths,
+  writeCurrentDeliveryRoute,
   drainIpcInput,
+  mergeIpcMessages,
   isInterruptRelatedError,
 } from './ipc-handler.js';
 import { runQueryLoop } from './query-loop.js';
@@ -396,6 +398,14 @@ async function main(): Promise<void> {
   const missingInitialDeliveryIds = [...initialDeliveryIds].filter(
     (id) => !drainedDeliveryIds.has(id),
   );
+  const initialSourceChannels = [
+    ...(containerInput.initialDelivery?.ackSourceChannels || []),
+    ...pendingDrain.messages.flatMap(
+      (message) => message.ackSourceChannels || [],
+    ),
+  ];
+  state.setCurrentSourceChannels(initialSourceChannels);
+  writeCurrentDeliveryRoute(ipcPaths, initialSourceChannels);
   if (pendingDrain.modeChange) {
     state.currentPermissionMode = pendingDrain.modeChange;
     log(`Initial mode change via IPC: ${pendingDrain.modeChange}`);
@@ -452,7 +462,6 @@ async function main(): Promise<void> {
     initialPrompt: prompt,
     initialImages: promptImages,
     initialMessages: [
-      ...pendingDrain.messages,
       ...(containerInput.initialDelivery && missingInitialDeliveryIds.length > 0
         ? [
             {
@@ -463,6 +472,9 @@ async function main(): Promise<void> {
                 containerInput.initialDelivery.ackSourceChannels,
             },
           ]
+        : []),
+      ...(pendingDrain.messages.length > 0
+        ? [mergeIpcMessages(pendingDrain.messages)]
         : []),
     ],
     sessionRecordId,

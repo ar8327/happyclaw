@@ -16,10 +16,16 @@ export type SendMessageResult =
   | 'interrupted_correction';
 
 function extractSourceChannels(text: string): string[] | undefined {
-  const sources = [...text.matchAll(/source="([^"]+)"/g)]
+  const matches = [...text.matchAll(/source="([^"]+)"/g)]
     .map((match) => match[1]?.trim())
     .filter((source): source is string => !!source);
-  return sources.length > 0 ? [...new Set(sources)] : undefined;
+  const sources: string[] = [];
+  for (const source of matches) {
+    const previous = sources.indexOf(source);
+    if (previous >= 0) sources.splice(previous, 1);
+    sources.push(source);
+  }
+  return sources.length > 0 ? sources : undefined;
 }
 
 interface QueuedTask {

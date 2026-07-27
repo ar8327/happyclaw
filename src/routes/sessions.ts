@@ -2590,10 +2590,11 @@ sessionRoutes.delete('/:id', authMiddleware, async (c) => {
       deps.queue.stopSession(backingJid),
       ...workerRuntimeJids.map((jid) => deps.queue.stopSession(jid)),
     ]);
+    await deps.deleteProgressSession?.(backingGroup.folder);
   } catch (err) {
     return c.json(
       {
-        error: `Failed to stop runtime, session not deleted: ${err instanceof Error ? err.message : String(err)}`,
+        error: `Failed to stop runtime or remove progress card, session not deleted: ${err instanceof Error ? err.message : String(err)}`,
       },
       500,
     );

@@ -25,6 +25,7 @@ import type { SessionState } from './session-state.js';
 import {
   IPC_POLL_MS,
   buildIpcAckStreamEvent,
+  writeCurrentDeliveryRoute,
   shouldClose,
   shouldDrain,
   shouldInterrupt,
@@ -472,6 +473,10 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
   while (true) {
     const activeQueryMessages = nextTurnMessages;
     nextTurnMessages = [];
+    state.setCurrentSourceChannels(
+      activeQueryMessages.flatMap((message) => message.ackSourceChannels || []),
+    );
+    writeCurrentDeliveryRoute(ipcPaths, state.getCurrentSourceChannels());
     // Clear stale interrupt sentinel
     try {
       fs.unlinkSync(ipcPaths.interruptSentinel);
@@ -492,6 +497,12 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
       sessionRecordId: config.sessionRecordId,
       onMessage: runner.ipcCapabilities.supportsMidQueryPush
         ? async (msg) => {
+            const previousSourceChannels = state.getCurrentSourceChannels();
+            state.setCurrentSourceChannels(msg.ackSourceChannels);
+            writeCurrentDeliveryRoute(
+              ipcPaths,
+              state.getCurrentSourceChannels(),
+            );
             const pushed = await runner
               .pushMessage(msg.text, msg.images, msg.deliveryIds?.[0])
               .catch((err) => ({
@@ -520,6 +531,8 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
               }
               return;
             }
+            state.setCurrentSourceChannels(previousSourceChannels);
+            writeCurrentDeliveryRoute(ipcPaths, previousSourceChannels);
             log(`Steering unavailable (${pushed.reason}), buffering`);
             pendingMessages.push(msg);
           }

@@ -42,18 +42,47 @@ export interface IpcPaths {
   interruptSentinel: string;
 }
 
+const CURRENT_DELIVERY_ROUTE_FILE = '.current-delivery.json';
+
+export function writeCurrentDeliveryRoute(
+  paths: IpcPaths,
+  sourceChannels: string[] | undefined,
+): void {
+  const sourceChannel = normalizeStringArray(sourceChannels)?.at(-1);
+  const workspaceIpc = path.dirname(paths.inputDir);
+  const target = path.join(workspaceIpc, CURRENT_DELIVERY_ROUTE_FILE);
+  const temp = `${target}.tmp`;
+  try {
+    fs.writeFileSync(
+      temp,
+      JSON.stringify({ sourceChannel, updatedAt: Date.now() }),
+    );
+    fs.renameSync(temp, target);
+  } catch {
+    try {
+      fs.unlinkSync(temp);
+    } catch {
+      // Best effort: static runtime JID remains the fallback.
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 export const IPC_POLL_MS = 500;
 
-function normalizeStringArray(value: unknown): string[] | undefined {
+export function normalizeStringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
-  const normalized = value.filter(
-    (item): item is string => typeof item === 'string' && item.length > 0,
-  );
-  return normalized.length > 0 ? [...new Set(normalized)] : undefined;
+  const normalized: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string' || item.length === 0) continue;
+    const previous = normalized.indexOf(item);
+    if (previous >= 0) normalized.splice(previous, 1);
+    normalized.push(item);
+  }
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 function extractAckSourceChannels(text: string): string[] | undefined {
@@ -61,6 +90,28 @@ function extractAckSourceChannels(text: string): string[] | undefined {
     .map((match) => match[1])
     .filter(Boolean);
   return sources.length > 0 ? [...new Set(sources)] : undefined;
+}
+
+export function mergeIpcMessages(messages: IpcMessage[]): IpcMessage {
+  return {
+    text: messages.map((message) => message.text).join('\n'),
+    images: (() => {
+      const images = messages.flatMap((message) => message.images || []);
+      return images.length > 0 ? images : undefined;
+    })(),
+    deliveryIds: normalizeStringArray(
+      messages.flatMap((message) => message.deliveryIds || []),
+    ),
+    ackTargets: normalizeStringArray(
+      messages.flatMap((message) => message.ackTargets || []),
+    ),
+    ackSourceChannels: normalizeStringArray(
+      messages.flatMap((message) => message.ackSourceChannels || []),
+    ),
+    intent: messages.some((message) => message.intent === 'correction')
+      ? 'correction'
+      : 'continue',
+  };
 }
 
 export function buildIpcAckStreamEvent(
@@ -296,13 +347,11 @@ export function waitForIpcMessage(
         log(`Mode change during idle: ${modeChange}`);
       }
       if (messages.length > 0) {
-        // 合并多条消息的文本和图片
-        const combinedText = messages.map((m) => m.text).join('\n');
-        const allImages = messages.flatMap((m) => m.images || []);
+        const combined = mergeIpcMessages(messages);
         // Track IM channels for post-compaction routing reminder
-        state.extractSourceChannels(combinedText, imChannelsFile);
+        state.extractSourceChannels(combined.text, imChannelsFile);
         log(
-          `Idle IPC pickup: ${messages.length} message(s), ${combinedText.length} chars`,
+          `Idle IPC pickup: ${messages.length} message(s), ${combined.text.length} chars`,
         );
         // Emit one acknowledgement per IPC message file so host-side counts stay balanced.
         for (const message of messages) {
@@ -312,19 +361,7 @@ export function waitForIpcMessage(
             streamEvent: buildIpcAckStreamEvent(sessionRecordId, message),
           });
         }
-        resolve({
-          text: combinedText,
-          images: allImages.length > 0 ? allImages : undefined,
-          deliveryIds: normalizeStringArray(
-            messages.flatMap((message) => message.deliveryIds || []),
-          ),
-          ackTargets: normalizeStringArray(
-            messages.flatMap((message) => message.ackTargets || []),
-          ),
-          ackSourceChannels: normalizeStringArray(
-            messages.flatMap((message) => message.ackSourceChannels || []),
-          ),
-        });
+        resolve(combined);
         return;
       }
       setTimeout(poll, IPC_POLL_MS);

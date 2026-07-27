@@ -77,11 +77,15 @@ export class ContextManager {
    */
   updateDynamicContext(updates: {
     recentImChannels?: Set<string>;
+    currentSourceChannel?: string;
     contextSummary?: string;
     providerInfo?: string;
   }): void {
     if (updates.recentImChannels !== undefined) {
       this.ctx.recentImChannels = updates.recentImChannels;
+    }
+    if (updates.currentSourceChannel !== undefined) {
+      this.ctx.currentSourceChannel = updates.currentSourceChannel;
     }
     if (updates.contextSummary !== undefined) {
       this.ctx.contextSummary = updates.contextSummary;

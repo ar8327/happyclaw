@@ -75,6 +75,7 @@ function mergeHostRuntimeState(
 export class SessionState {
   // --- IM channel tracking ---
   recentImChannels = new Set<string>();
+  private currentSourceChannels: string[] = [];
   imChannelLastSeen = new Map<string, number>();
   private imPersistTimer: ReturnType<typeof setTimeout> | null = null;
   private providerState?: Record<string, unknown>;
@@ -201,6 +202,25 @@ export class SessionState {
     }
     // Persist on every update (new or existing channel) to keep lastSeen fresh on disk
     if (anyUpdate) this.schedulePersistImChannels(channelsFile);
+  }
+
+  setCurrentSourceChannels(channels: string[] | undefined): void {
+    this.currentSourceChannels = [];
+    for (const channel of channels || []) {
+      const normalized = channel.trim();
+      if (!normalized) continue;
+      const previous = this.currentSourceChannels.indexOf(normalized);
+      if (previous >= 0) this.currentSourceChannels.splice(previous, 1);
+      this.currentSourceChannels.push(normalized);
+    }
+  }
+
+  getCurrentSourceChannels(): string[] {
+    return [...this.currentSourceChannels];
+  }
+
+  getCurrentSourceChannel(): string | undefined {
+    return this.currentSourceChannels.at(-1);
   }
 
   /** Return active IM channels (filtered by 24h TTL) */

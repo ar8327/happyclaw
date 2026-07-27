@@ -26,15 +26,32 @@ import {
 const CARD_STORE_PATH = path.join(DATA_DIR, 'state', 'progress-cards.json');
 
 interface CardStoreEntry {
+  folder?: string;
+  sourceChannel?: string;
   chatId: string;
   messageId: string;
   createdAt: number;
+  replyToMsgId?: string;
+  threadId?: string;
+  replyInThread?: boolean;
+}
+
+interface RestorableCardStoreEntry extends CardStoreEntry {
+  folder: string;
+  sourceChannel: string;
+}
+
+function isRestorableCardStoreEntry(
+  entry: CardStoreEntry,
+): entry is RestorableCardStoreEntry {
+  return Boolean(entry.folder && entry.sourceChannel);
 }
 
 function loadCardStore(): CardStoreEntry[] {
   try {
     const data = fs.readFileSync(CARD_STORE_PATH, 'utf-8');
-    return JSON.parse(data);
+    const parsed = JSON.parse(data);
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
@@ -50,11 +67,15 @@ function saveCardStore(entries: CardStoreEntry[]): void {
   }
 }
 
-function addToCardStore(chatId: string, messageId: string): void {
-  // One Feishu chat may contain several independent thread/topic sessions.
-  // Persist every active card so restart cleanup cannot lose older siblings.
-  const entries = loadCardStore().filter((e) => e.messageId !== messageId);
-  entries.push({ chatId, messageId, createdAt: Date.now() });
+function addToCardStore(entry: CardStoreEntry): void {
+  // A logical Session owns at most one progress card. The first Feishu source
+  // claims the anchor; later messages from any channel keep patching it.
+  const entries = loadCardStore().filter(
+    (candidate) =>
+      candidate.messageId !== entry.messageId &&
+      (!entry.folder || candidate.folder !== entry.folder),
+  );
+  entries.push(entry);
   saveCardStore(entries);
 }
 
@@ -63,38 +84,67 @@ function removeFromCardStore(messageId: string): void {
   saveCardStore(entries);
 }
 
-/**
- * Clean up stale progress cards from a previous process.
- * Call this on startup after Feishu connections are established.
- */
-export async function cleanupStaleProgressCards(
+function isMissingProgressCardError(err: unknown): boolean {
+  const text = (() => {
+    if (err instanceof Error) {
+      return `${err.message} ${err.stack || ''}`;
+    }
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return String(err);
+    }
+  })().toLowerCase();
+  return (
+    text.includes('message not found') ||
+    text.includes('message has been deleted') ||
+    text.includes('230001') ||
+    text.includes('230011')
+  );
+}
+
+/** Restore the one persisted progress-card anchor per Session after restart. */
+export async function restoreProgressCardSessions(
   clientResolver: () => lark.Client | undefined,
 ): Promise<void> {
   const entries = loadCardStore();
   if (entries.length === 0) return;
 
-  logger.info(
-    `Progress card: cleaning up ${entries.length} stale card(s) from previous process`,
-  );
-  const client = clientResolver();
-  if (!client) {
-    logger.warn('Progress card: no lark client for stale card cleanup');
-    return;
-  }
-
-  for (const entry of entries) {
-    try {
-      await client.im.v1.message.delete({
-        path: { message_id: entry.messageId },
-      });
-      logger.info(
-        `Progress card: deleted stale card | chatId=${entry.chatId} messageId=${entry.messageId}`,
-      );
-    } catch {
-      // Card may already be deleted — that's fine
+  const restored = new Map<string, RestorableCardStoreEntry>();
+  for (const entry of entries.sort((a, b) => a.createdAt - b.createdAt)) {
+    if (!isRestorableCardStoreEntry(entry)) {
+      // Legacy stores did not record Session ownership and therefore cannot be
+      // restored safely. Best-effort delete only those pre-migration cards.
+      try {
+        await clientResolver()?.im.v1.message.delete({
+          path: { message_id: entry.messageId },
+        });
+      } catch {
+        // It may already be gone.
+      }
+      continue;
     }
+    const previous = restored.get(entry.folder);
+    if (previous) {
+      try {
+        await clientResolver()?.im.v1.message.delete({
+          path: { message_id: previous.messageId },
+        });
+      } catch {
+        // Keep the newest persisted anchor even if an older duplicate is gone.
+      }
+      removeFromCardStore(previous.messageId);
+    }
+    restored.set(entry.folder, entry);
   }
-  saveCardStore([]);
+  for (const entry of restored.values()) {
+    restoreProgressSessionFromStore(entry, clientResolver);
+  }
+  saveCardStore([...restored.values()]);
+  logger.info(
+    { restored: restored.size },
+    'Progress card: restored persisted Session anchors',
+  );
 }
 
 // ─── Types ────────────────────────────────────────────────────
@@ -123,6 +173,11 @@ export interface ProgressCardOptions {
   modelLabel?: string;
   /** Stop handler exposed through the Feishu persistent-connection callback. */
   onStop?: () => boolean | Promise<boolean>;
+  /** Existing card restored from the Session anchor store. */
+  existingMessageId?: string;
+  /** Session ownership used to persist the single-card anchor. */
+  anchorFolder?: string;
+  anchorSourceChannel?: string;
 }
 
 interface ActiveTool {
@@ -219,7 +274,6 @@ export class ProgressCardController {
   private readonly maxPatchFailures = 3;
 
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
-  private deleteTimer: ReturnType<typeof setTimeout> | null = null;
   private lastFlushTime = 0;
   private readonly flushInterval = 2000; // 2s throttle
 
@@ -232,6 +286,8 @@ export class ProgressCardController {
   private readonly title?: string;
   private readonly modelLabel?: string;
   private readonly onStop?: () => boolean | Promise<boolean>;
+  private readonly anchorFolder?: string;
+  private readonly anchorSourceChannel?: string;
   private stopActionId?: string;
 
   constructor(opts: ProgressCardOptions) {
@@ -244,6 +300,9 @@ export class ProgressCardController {
     this.title = opts.title;
     this.modelLabel = opts.modelLabel;
     this.onStop = opts.onStop;
+    this.messageId = opts.existingMessageId ?? null;
+    this.anchorFolder = opts.anchorFolder;
+    this.anchorSourceChannel = opts.anchorSourceChannel;
     this.registerStopAction();
   }
 
@@ -276,22 +335,21 @@ export class ProgressCardController {
     return this.state === 'active' || this.state === 'creating';
   }
 
-  /** Whether this session can still receive events (idle, creating, or active). */
-  canReceiveEvents(): boolean {
-    return (
-      this.state !== 'error' &&
-      this.state !== 'aborted' &&
-      this.state !== 'completed' &&
-      this.state !== 'failed'
-    );
-  }
-
   /**
    * Feed a StreamEvent into the progress card.
    * Creates the card lazily on first thinking or tool_use_start event.
    */
   feedEvent(event: StreamEvent): void {
     const type = event.eventType;
+
+    if (
+      this.state === 'completed' ||
+      this.state === 'aborted' ||
+      this.state === 'failed' ||
+      this.state === 'error'
+    ) {
+      this.beginNextTurn();
+    }
 
     if (event.runnerError) {
       const next = event.runnerError;
@@ -376,16 +434,22 @@ export class ProgressCardController {
       }
     }
 
-    // Lazy creation: create card on first thinking or tool event
+    // Lazy creation: create the Session card on its first meaningful event.
     if (this.dirty && this.state === 'idle') {
-      this.state = 'creating';
-      this.createCard().catch((err) => {
-        logger.warn(
-          { err, chatId: this.chatId },
-          'Progress card: create failed',
-        );
-        this.state = 'error';
-      });
+      this.registerStopAction();
+      if (this.messageId) {
+        this.state = 'active';
+        this.scheduleFlush();
+      } else {
+        this.state = 'creating';
+        this.createCard().catch((err) => {
+          logger.warn(
+            { err, chatId: this.chatId },
+            'Progress card: create failed',
+          );
+          this.state = 'error';
+        });
+      }
     }
 
     if (this.dirty && this.state === 'active') {
@@ -394,13 +458,10 @@ export class ProgressCardController {
   }
 
   /**
-   * Complete the progress card — patch to final "completed" state, then delete after delay.
+   * Mark the current turn completed while keeping the Session card anchored.
    */
   async complete(): Promise<void> {
     const prevState = this.state;
-    // Allow completion from 'aborted' state — the abort may have been triggered by
-    // registerProgressSession when a new run starts for the same chatJid, but the
-    // owning processGroupMessages still needs to finalize the card properly.
     if (
       prevState !== 'active' &&
       prevState !== 'creating' &&
@@ -425,10 +486,6 @@ export class ProgressCardController {
         logger.info(
           `Progress card: patched to completed | chatId=${this.chatId} messageId=${this.messageId}`,
         );
-        // Delete after 15s so user can see the "完成" state.
-        // Capture messageId in closure — completeAndReset() nulls this.messageId.
-        const msgId = this.messageId;
-        this.deleteTimer = setTimeout(() => this.deleteCardById(msgId), 15000);
       } catch (err) {
         logger.warn(
           { err },
@@ -457,10 +514,7 @@ export class ProgressCardController {
     this.clearFlushTimer();
     this.clearStopAction();
 
-    // Don't patch the card to "aborted" — let the owning process decide the final
-    // state via complete() or a real abort. The abort from registerProgressSession
-    // is just a state marker, not a user-visible transition.
-    if (this.messageId && reason !== '新的执行已开始') {
+    if (this.messageId) {
       try {
         await this.patchCard('aborted');
         logger.info(
@@ -476,8 +530,8 @@ export class ProgressCardController {
   }
 
   /**
-   * Finalize the card as a runner failure. Unlike successful progress cards,
-   * failed cards stay in the conversation so the diagnostic remains visible.
+   * Finalize the current turn as a runner failure. The diagnostic stays on the
+   * Session card until the next turn reuses that same anchored message.
    */
   async fail(detail?: string): Promise<void> {
     if (this.state === 'completed' || this.state === 'failed') return;
@@ -494,7 +548,6 @@ export class ProgressCardController {
     if (this.messageId) {
       try {
         await this.patchCard('failed');
-        removeFromCardStore(this.messageId);
         logger.info(
           {
             chatId: this.chatId,
@@ -539,11 +592,6 @@ export class ProgressCardController {
   async forceCleanup(_reason: string): Promise<void> {
     this.clearFlushTimer();
     this.clearStopAction();
-    if (this.deleteTimer) {
-      clearTimeout(this.deleteTimer);
-      this.deleteTimer = null;
-    }
-
     if (!this.messageId) return;
 
     // Just delete the card silently — no need to show "服务维护中" to the user
@@ -561,15 +609,19 @@ export class ProgressCardController {
   }
 
   /**
-   * Complete the current card and reset state so the controller can create a
-   * fresh card on the next feedEvent().  Used between turns when the agent
-   * stays alive via IPC — each turn gets its own card lifecycle.
+   * Complete the current turn while preserving the Session card anchor. The
+   * next event resets transient data and re-arms the stop action before patching.
    */
   async completeAndReset(): Promise<void> {
     await this.complete();
-    // Reset tracking state so next feedEvent() starts a new card
+  }
+
+  private beginNextTurn(): void {
     this.state = 'idle';
-    this.messageId = null;
+    this.resetTurnData();
+  }
+
+  private resetTurnData(): void {
     this.startedAt = Date.now();
     this.activeTools.clear();
     this.completedTools = [];
@@ -584,12 +636,10 @@ export class ProgressCardController {
     this.runnerError = undefined;
     this.patchFailCount = 0;
     this.registerStopAction();
-    // Don't clear deleteTimer — let the completed card be deleted on its own schedule
   }
 
   /**
-   * Dispose of active timers. The delete timer (post-completion cleanup)
-   * is intentionally preserved so the card gets deleted after the delay.
+   * Dispose of active timers without deleting the persistent Session anchor.
    */
   dispose(): void {
     this.clearFlushTimer();
@@ -661,9 +711,7 @@ export class ProgressCardController {
 
     this.messageId = resp?.data?.message_id || null;
     if (!this.messageId) throw new Error('No message_id in response');
-    if (displayState === 'active') {
-      addToCardStore(this.chatId, this.messageId);
-    }
+    this.persistAnchor();
   }
 
   private async createCard(): Promise<void> {
@@ -682,17 +730,6 @@ export class ProgressCardController {
         );
         try {
           await this.patchCard(finalState);
-          if (finalState === 'completed') {
-            const messageId = this.messageId;
-            if (messageId) {
-              this.deleteTimer = setTimeout(
-                () => this.deleteCardById(messageId),
-                15000,
-              );
-            }
-          } else if (finalState === 'failed') {
-            if (this.messageId) removeFromCardStore(this.messageId);
-          }
         } catch (err) {
           logger.warn(
             { err, chatId: this.chatId, finalState },
@@ -754,10 +791,21 @@ export class ProgressCardController {
     const card = buildProgressCard(this.getCardData(displayState));
     const content = JSON.stringify(card);
 
-    await client.im.v1.message.patch({
-      path: { message_id: this.messageId },
-      data: { content },
-    });
+    try {
+      await client.im.v1.message.patch({
+        path: { message_id: this.messageId },
+        data: { content },
+      });
+    } catch (err) {
+      if (isMissingProgressCardError(err)) {
+        const missingMessageId = this.messageId;
+        this.messageId = null;
+        removeFromCardStore(missingMessageId);
+        await this.sendCard(displayState);
+        return;
+      }
+      throw err;
+    }
   }
 
   private async deleteCard(): Promise<void> {
@@ -767,18 +815,36 @@ export class ProgressCardController {
 
   private async deleteCardById(messageId: string): Promise<void> {
     const client = this.resolveClient();
-    if (!client) return;
-    try {
-      await client.im.v1.message.delete({
-        path: { message_id: messageId },
-      });
-      logger.info(
-        `Progress card: deleted | chatId=${this.chatId} messageId=${messageId}`,
-      );
-    } catch {
-      // Deletion is best-effort
+    if (client) {
+      try {
+        await client.im.v1.message.delete({
+          path: { message_id: messageId },
+        });
+        logger.info(
+          `Progress card: deleted | chatId=${this.chatId} messageId=${messageId}`,
+        );
+      } catch {
+        // Deletion is best-effort, but the local Session anchor must still go.
+      }
     }
     removeFromCardStore(messageId);
+    if (this.messageId === messageId) this.messageId = null;
+  }
+
+  private persistAnchor(): void {
+    if (!this.messageId || !this.anchorFolder || !this.anchorSourceChannel) {
+      return;
+    }
+    addToCardStore({
+      folder: this.anchorFolder,
+      sourceChannel: this.anchorSourceChannel,
+      chatId: this.chatId,
+      messageId: this.messageId,
+      createdAt: Date.now(),
+      replyToMsgId: this.replyToMsgId,
+      threadId: this.threadId,
+      replyInThread: this.replyInThread,
+    });
   }
 
   private clearFlushTimer(): void {
@@ -799,53 +865,56 @@ interface ProgressSessionEntry {
 
 const activeProgressSessions = new Map<string, ProgressSessionEntry>();
 
-function progressSessionKey(folder: string, sourceChannel: string): string {
-  return `${folder}\0${sourceChannel}`;
-}
-
-export function registerProgressSession(
-  sourceChannel: string,
-  session: ProgressCardController,
-  folder: string,
+function restoreProgressSessionFromStore(
+  stored: RestorableCardStoreEntry,
+  clientResolver: () => lark.Client | undefined,
 ): void {
-  const key = progressSessionKey(folder, sourceChannel);
-  const existing = activeProgressSessions.get(key);
-  if (existing?.session.isActive()) {
-    existing.session.abort('新的执行已开始').catch(() => {});
-  }
-  activeProgressSessions.set(key, { session, folder, sourceChannel });
-}
-
-export function unregisterProgressSession(
-  sourceChannel: string,
-  folder: string,
-): void {
-  activeProgressSessions.delete(progressSessionKey(folder, sourceChannel));
+  const controller = new ProgressCardController({
+    clientResolver,
+    chatId: stored.chatId,
+    replyToMsgId: stored.replyToMsgId,
+    threadId: stored.threadId,
+    replyInThread: stored.replyInThread,
+    existingMessageId: stored.messageId,
+    anchorFolder: stored.folder,
+    anchorSourceChannel: stored.sourceChannel,
+  });
+  activeProgressSessions.set(stored.folder, {
+    session: controller,
+    folder: stored.folder,
+    sourceChannel: stored.sourceChannel,
+  });
 }
 
 /**
- * Feed an event only to the card that owns the active Turn.
- *
- * A folder can be shared by several Web/Feishu chats. Folder-wide fan-out
- * makes an event from chat A create or update a stale card in chat B.
+ * Atomically claim the one progress-card slot for a Session. Claim before any
+ * asynchronous Feishu call so simultaneous messages cannot create two cards.
+ */
+export function claimProgressSession(
+  sourceChannel: string,
+  session: ProgressCardController,
+  folder: string,
+): boolean {
+  if (activeProgressSessions.has(folder)) {
+    return false;
+  }
+  activeProgressSessions.set(folder, { session, folder, sourceChannel });
+  return true;
+}
+
+function unregisterProgressSession(folder: string): void {
+  activeProgressSessions.delete(folder);
+}
+
+/**
+ * Feed the Session's single card, wherever its first Feishu message anchored
+ * it. Source channels affect replies, not execution progress ownership.
  */
 export function feedProgressSessionsForFolder(
   folder: string,
-  sourceChannel: string,
   event: StreamEvent,
 ): void {
-  for (const entry of activeProgressSessions.values()) {
-    // Use canReceiveEvents() instead of isActive() — feedEvent() is what
-    // transitions from 'idle' to 'creating' (lazy init), so we must allow
-    // events to reach idle cards, not just active ones.
-    if (
-      entry.folder === folder &&
-      entry.sourceChannel === sourceChannel &&
-      entry.session.canReceiveEvents()
-    ) {
-      entry.session.feedEvent(event);
-    }
-  }
+  activeProgressSessions.get(folder)?.session.feedEvent(event);
 }
 
 /**
@@ -855,67 +924,77 @@ export function feedProgressSessionsForFolder(
 export async function completeAndResetProgressSessionsForFolder(
   folder: string,
 ): Promise<void> {
-  for (const entry of activeProgressSessions.values()) {
-    if (entry.folder === folder && entry.session.isActive()) {
-      await entry.session.completeAndReset().catch(() => {});
-    }
+  const entry = activeProgressSessions.get(folder);
+  if (entry?.session.isActive()) {
+    await entry.session.completeAndReset().catch(() => {});
   }
 }
 
 /**
- * Complete or abort all progress sessions for a folder, then unregister them.
- * Called when the agent process exits.
+ * Finalize the Session card without releasing its anchor. A later runtime for
+ * the same Session reuses the same message.
  */
 export async function finalizeProgressSessionsForFolder(
   folder: string,
   mode: 'complete' | 'abort' | 'fail',
   detail?: string,
 ): Promise<void> {
-  const toRemove: string[] = [];
-  for (const [chatJid, entry] of activeProgressSessions.entries()) {
-    if (entry.folder !== folder) continue;
-    if (mode === 'abort') {
-      await entry.session.abort(detail).catch(() => {});
-    } else if (mode === 'fail') {
-      await entry.session.fail(detail).catch(() => {});
-    } else {
-      await entry.session.complete().catch(() => {});
-    }
-    entry.session.dispose();
-    toRemove.push(chatJid);
+  const entry = activeProgressSessions.get(folder);
+  if (!entry) return;
+  if (mode === 'abort') {
+    await entry.session.abort(detail).catch(() => {});
+  } else if (mode === 'fail') {
+    await entry.session.fail(detail).catch(() => {});
+  } else {
+    await entry.session.complete().catch(() => {});
   }
-  for (const jid of toRemove) {
-    activeProgressSessions.delete(jid);
-  }
+  entry.session.dispose();
 }
 
 /**
  * Check if an active progress session exists for a chatJid.
  */
-export function hasActiveProgressSession(
-  sourceChannel: string,
+export function hasProgressSession(folder: string): boolean {
+  return activeProgressSessions.has(folder);
+}
+
+/** Delete the persistent Session card only when the Session itself is deleted. */
+export async function deleteProgressSession(
   folder: string,
-): boolean {
-  const entry = activeProgressSessions.get(
-    progressSessionKey(folder, sourceChannel),
-  );
-  return !!entry?.session.isActive();
+  clientResolver?: () => lark.Client | undefined,
+): Promise<void> {
+  const entry = activeProgressSessions.get(folder);
+  if (entry) {
+    await entry.session.forceCleanup('Session 已删除');
+  } else {
+    const stored = loadCardStore().find(
+      (candidate) => candidate.folder === folder,
+    );
+    if (stored) {
+      try {
+        await clientResolver?.()?.im.v1.message.delete({
+          path: { message_id: stored.messageId },
+        });
+      } catch {
+        // The Session is being deleted, so a missing/unreachable card is fine.
+      }
+      removeFromCardStore(stored.messageId);
+    }
+  }
+  unregisterProgressSession(folder);
 }
 
 export async function abortAllProgressSessions(
   reason = '服务维护中',
 ): Promise<void> {
-  const promises: Promise<void>[] = [];
-  for (const [chatJid, entry] of activeProgressSessions.entries()) {
-    // Force cleanup ALL sessions during shutdown, regardless of current state.
-    // Sessions may be in 'aborted' state (from registry replacement) but their
-    // Feishu card is still showing "执行中" and needs to be cleaned up.
-    promises.push(
-      entry.session.forceCleanup(reason).catch((err) => {
-        logger.debug({ err, chatJid }, 'Failed to cleanup progress session');
-      }),
-    );
-  }
-  await Promise.allSettled(promises);
+  const aborts = [...activeProgressSessions.entries()].map(([folder, entry]) =>
+    entry.session.abort(reason).catch((err) => {
+      logger.debug({ err, folder }, 'Failed to suspend progress session');
+    }),
+  );
+  await Promise.allSettled(aborts);
+  // Shutdown releases in-memory controllers but preserves every persisted
+  // anchor so restart can resume patching the same Feishu message.
+  for (const entry of activeProgressSessions.values()) entry.session.dispose();
   activeProgressSessions.clear();
 }

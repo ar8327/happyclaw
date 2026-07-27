@@ -6,8 +6,29 @@
 
 import fs from 'fs';
 import path from 'path';
-import type { ContextPlugin, PluginContext, ToolDefinition, ToolResult } from '../plugin.js';
+import type {
+  ContextPlugin,
+  PluginContext,
+  ToolDefinition,
+  ToolResult,
+} from '../plugin.js';
 import { writeIpcFile } from '../ipc.js';
+
+function readCurrentSourceChannel(workspaceIpc: string): string | undefined {
+  try {
+    const parsed = JSON.parse(
+      fs.readFileSync(
+        path.join(workspaceIpc, '.current-delivery.json'),
+        'utf-8',
+      ),
+    ) as { sourceChannel?: unknown };
+    return typeof parsed.sourceChannel === 'string'
+      ? parsed.sourceChannel.trim() || undefined
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export class TasksPlugin implements ContextPlugin {
   readonly name = 'tasks';
@@ -24,8 +45,7 @@ export class TasksPlugin implements ContextPlugin {
       // --- schedule_task ---
       {
         name: 'schedule_task',
-        description:
-          `Schedule a recurring or one-time task.
+        description: `Schedule a recurring or one-time task.
 
 EXECUTION TYPE:
 • "agent" (default): When triggered, a [定时任务] message is sent in the current conversation.
@@ -40,25 +60,30 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
           properties: {
             prompt: {
               type: 'string',
-              description: 'What the agent should do (agent mode) or task description (script mode, optional).',
+              description:
+                'What the agent should do (agent mode) or task description (script mode, optional).',
             },
             schedule_type: {
               type: 'string',
               enum: ['cron', 'interval', 'once'],
-              description: 'cron=recurring at specific times, interval=recurring every N ms, once=run once at specific time',
+              description:
+                'cron=recurring at specific times, interval=recurring every N ms, once=run once at specific time',
             },
             schedule_value: {
               type: 'string',
-              description: 'cron: "*/5 * * * *" | interval: milliseconds like "300000" | once: local timestamp like "2026-02-01T15:30:00"',
+              description:
+                'cron: "*/5 * * * *" | interval: milliseconds like "300000" | once: local timestamp like "2026-02-01T15:30:00"',
             },
             execution_type: {
               type: 'string',
               enum: ['agent', 'script'],
-              description: 'agent=full Claude Agent (default), script=shell command (admin only)',
+              description:
+                'agent=full Claude Agent (default), script=shell command (admin only)',
             },
             script_command: {
               type: 'string',
-              description: 'Shell command to execute (required for script mode).',
+              description:
+                'Shell command to execute (required for script mode).',
             },
             context_mode: {
               type: 'string',
@@ -67,11 +92,13 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
             },
             target_group_jid: {
               type: 'string',
-              description: '(Admin home only) JID of the group to schedule the task for.',
+              description:
+                '(Admin home only) JID of the group to schedule the task for.',
             },
             model: {
               type: 'string',
-              description: 'Model override for this task (e.g., "opus", "sonnet", "haiku"). If omitted, uses the workspace default.',
+              description:
+                'Model override for this task (e.g., "opus", "sonnet", "haiku"). If omitted, uses the workspace default.',
             },
           },
           required: ['schedule_type', 'schedule_value'],
@@ -83,13 +110,24 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
 
           // Validation
           if (execType === 'agent' && !prompt.trim()) {
-            return { content: 'Agent mode requires a prompt. Provide instructions for what the agent should do.', isError: true };
+            return {
+              content:
+                'Agent mode requires a prompt. Provide instructions for what the agent should do.',
+              isError: true,
+            };
           }
           if (execType === 'script' && !scriptCommand?.trim()) {
-            return { content: 'Script mode requires script_command. Provide the shell command to execute.', isError: true };
+            return {
+              content:
+                'Script mode requires script_command. Provide the shell command to execute.',
+              isError: true,
+            };
           }
           if (execType === 'script' && !ctx.isAdminHome) {
-            return { content: 'Only admin home container can create script tasks.', isError: true };
+            return {
+              content: 'Only admin home container can create script tasks.',
+              isError: true,
+            };
           }
 
           // Validate schedule_value
@@ -102,23 +140,41 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
               const { CronExpressionParser } = await import('cron-parser');
               CronExpressionParser.parse(scheduleValue);
             } catch {
-              return { content: `Invalid cron: "${scheduleValue}". Use format like "0 9 * * *" (daily 9am).`, isError: true };
+              return {
+                content: `Invalid cron: "${scheduleValue}". Use format like "0 9 * * *" (daily 9am).`,
+                isError: true,
+              };
             }
           } else if (scheduleType === 'interval') {
             const ms = parseInt(scheduleValue, 10);
             if (isNaN(ms) || ms <= 0) {
-              return { content: `Invalid interval: "${scheduleValue}". Must be positive milliseconds.`, isError: true };
+              return {
+                content: `Invalid interval: "${scheduleValue}". Must be positive milliseconds.`,
+                isError: true,
+              };
             }
           } else if (scheduleType === 'once') {
             const date = new Date(scheduleValue);
             if (isNaN(date.getTime())) {
-              return { content: `Invalid timestamp: "${scheduleValue}". Use ISO 8601 format.`, isError: true };
+              return {
+                content: `Invalid timestamp: "${scheduleValue}". Use ISO 8601 format.`,
+                isError: true,
+              };
             }
           }
 
-          const targetJid = hasCrossGroupAccess && args.target_group_jid
-            ? args.target_group_jid as string
-            : ctx.chatJid;
+          const explicitTarget =
+            hasCrossGroupAccess && typeof args.target_group_jid === 'string'
+              ? args.target_group_jid.trim()
+              : '';
+          // Execution ownership is Session-scoped, but a scheduled task's
+          // delivery anchor should follow the message that requested it.
+          // Fall back to the runtime launch JID only when there is no current
+          // delivery metadata (for example a direct standalone MCP call).
+          const currentSource =
+            readCurrentSourceChannel(ctx.workspaceIpc) ||
+            ctx.currentSourceChannel;
+          const targetJid = explicitTarget || currentSource || ctx.chatJid;
 
           const data: Record<string, unknown> = {
             type: 'schedule_task',
@@ -139,14 +195,17 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
           }
           const filename = writeIpcFile(TASKS_DIR, data);
           const modeLabel = execType === 'script' ? 'script' : 'agent';
-          return { content: `Task scheduled [${modeLabel}] (${filename}): ${scheduleType} - ${scheduleValue}` };
+          return {
+            content: `Task scheduled [${modeLabel}] (${filename}): ${scheduleType} - ${scheduleValue}`,
+          };
         },
       },
 
       // --- list_tasks ---
       {
         name: 'list_tasks',
-        description: "List all scheduled tasks. From admin home: shows all tasks. From other groups: shows only that group's tasks.",
+        description:
+          "List all scheduled tasks. From admin home: shows all tasks. From other groups: shows only that group's tasks.",
         parameters: {
           type: 'object' as const,
           properties: {},
@@ -161,20 +220,31 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
             const tasks = hasCrossGroupAccess
               ? allTasks
               : allTasks.filter(
-                (t: { workspaceFolder?: string; groupFolder?: string }) =>
-                  (t.workspaceFolder || t.groupFolder) === ctx.groupFolder,
-              );
+                  (t: { workspaceFolder?: string; groupFolder?: string }) =>
+                    (t.workspaceFolder || t.groupFolder) === ctx.groupFolder,
+                );
             if (tasks.length === 0) {
               return { content: 'No scheduled tasks found.' };
             }
             const formatted = tasks
-              .map((t: { id: string; prompt: string; schedule_type: string; schedule_value: string; status: string; next_run: string }) =>
-                `- [${t.id}] ${t.prompt.slice(0, 50)}... (${t.schedule_type}: ${t.schedule_value}) - ${t.status}, next: ${t.next_run || 'N/A'}`,
+              .map(
+                (t: {
+                  id: string;
+                  prompt: string;
+                  schedule_type: string;
+                  schedule_value: string;
+                  status: string;
+                  next_run: string;
+                }) =>
+                  `- [${t.id}] ${t.prompt.slice(0, 50)}... (${t.schedule_type}: ${t.schedule_value}) - ${t.status}, next: ${t.next_run || 'N/A'}`,
               )
               .join('\n');
             return { content: `Scheduled tasks:\n${formatted}` };
           } catch (err) {
-            return { content: `Error reading tasks: ${err instanceof Error ? err.message : String(err)}`, isError: true };
+            return {
+              content: `Error reading tasks: ${err instanceof Error ? err.message : String(err)}`,
+              isError: true,
+            };
           }
         },
       },

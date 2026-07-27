@@ -16,6 +16,8 @@ try {
   );
 
   const created: string[] = [];
+  const patched: string[] = [];
+  const deleted: string[] = [];
   function fakeClient(label: string): lark.Client {
     return {
       im: {
@@ -31,8 +33,14 @@ try {
               created.push(label);
               return { data: { message_id: `message-${label}` } };
             },
-            patch: async () => ({}),
-            delete: async () => ({}),
+            patch: async (request: { path: { message_id: string } }) => {
+              patched.push(request.path.message_id);
+              return {};
+            },
+            delete: async (request: { path: { message_id: string } }) => {
+              deleted.push(request.path.message_id);
+              return {};
+            },
           },
         },
       },
@@ -42,70 +50,125 @@ try {
   const cardA = new progress.ProgressCardController({
     client: fakeClient('A'),
     chatId: 'chat-a',
+    anchorFolder: 'shared-folder',
+    anchorSourceChannel: 'feishu:chat-a',
   });
   const cardB = new progress.ProgressCardController({
     client: fakeClient('B'),
     chatId: 'chat-b',
+    anchorFolder: 'shared-folder',
+    anchorSourceChannel: 'feishu:chat-b',
   });
-  progress.registerProgressSession('feishu:chat-a', cardA, 'shared-folder');
-  progress.registerProgressSession('feishu:chat-b', cardB, 'shared-folder');
-
-  progress.feedProgressSessionsForFolder(
-    'shared-folder',
-    'feishu:chat-a',
-    { eventType: 'thinking_delta', text: 'A is working' },
+  assert.equal(
+    progress.claimProgressSession('feishu:chat-a', cardA, 'shared-folder'),
+    true,
   );
+  assert.equal(
+    progress.claimProgressSession('feishu:chat-b', cardB, 'shared-folder'),
+    false,
+    'the first Feishu source must keep the Session card anchor',
+  );
+
+  progress.feedProgressSessionsForFolder('shared-folder', {
+    eventType: 'thinking_delta',
+    text: 'working after a cross-channel steer',
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(created, ['A']);
+
+  await progress.completeAndResetProgressSessionsForFolder('shared-folder');
+  progress.feedProgressSessionsForFolder('shared-folder', {
+    eventType: 'thinking_delta',
+    text: 'next turn from another source',
+  });
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.deepEqual(
     created,
     ['A'],
-    'a stream event must not create a card in a sibling chat',
+    'later turns must patch the same card instead of creating another one',
   );
+  assert.ok(patched.includes('message-A'));
 
-  // The same source chat can back two independent topic folders. Registering
-  // the second route must not replace/abort the first route.
+  // Different Sessions remain isolated even when they share one source chat.
   const topic1 = new progress.ProgressCardController({
     client: fakeClient('topic-1'),
     chatId: 'same-chat',
+    anchorFolder: 'topic-folder-1',
+    anchorSourceChannel: 'feishu:same-chat',
   });
   const topic2 = new progress.ProgressCardController({
     client: fakeClient('topic-2'),
     chatId: 'same-chat',
+    anchorFolder: 'topic-folder-2',
+    anchorSourceChannel: 'feishu:same-chat',
   });
-  progress.registerProgressSession(
-    'feishu:same-chat',
-    topic1,
-    'topic-folder-1',
+  assert.equal(
+    progress.claimProgressSession('feishu:same-chat', topic1, 'topic-folder-1'),
+    true,
   );
-  progress.registerProgressSession(
-    'feishu:same-chat',
-    topic2,
-    'topic-folder-2',
+  assert.equal(
+    progress.claimProgressSession('feishu:same-chat', topic2, 'topic-folder-2'),
+    true,
   );
-  progress.feedProgressSessionsForFolder(
-    'topic-folder-1',
-    'feishu:same-chat',
-    { eventType: 'thinking_delta', text: 'topic 1' },
-  );
-  progress.feedProgressSessionsForFolder(
-    'topic-folder-2',
-    'feishu:same-chat',
-    { eventType: 'thinking_delta', text: 'topic 2' },
-  );
+  progress.feedProgressSessionsForFolder('topic-folder-1', {
+    eventType: 'thinking_delta',
+    text: 'topic 1',
+  });
+  progress.feedProgressSessionsForFolder('topic-folder-2', {
+    eventType: 'thinking_delta',
+    text: 'topic 2',
+  });
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.ok(created.includes('topic-1'));
   assert.ok(created.includes('topic-2'));
 
-  const persisted = JSON.parse(
-    fs.readFileSync(
-      path.join(fixtureRoot, 'data', 'state', 'progress-cards.json'),
-      'utf-8',
-    ),
-  ) as Array<{ chatId: string; messageId: string }>;
+  const storePath = path.join(
+    fixtureRoot,
+    'data',
+    'state',
+    'progress-cards.json',
+  );
+  const persisted = JSON.parse(fs.readFileSync(storePath, 'utf-8')) as Array<{
+    folder: string;
+    sourceChannel: string;
+    messageId: string;
+  }>;
   assert.equal(
-    persisted.filter((entry) => entry.chatId === 'same-chat').length,
-    2,
-    'restart cleanup must retain every active topic card in the same chat',
+    persisted.filter((entry) => entry.folder === 'shared-folder').length,
+    1,
+  );
+  assert.equal(
+    persisted.find((entry) => entry.folder === 'shared-folder')?.sourceChannel,
+    'feishu:chat-a',
+  );
+
+  await progress.abortAllProgressSessions('test restart');
+  assert.deepEqual(
+    deleted,
+    [],
+    'shutdown must preserve the anchored card for restart restoration',
+  );
+
+  await progress.restoreProgressCardSessions(() => fakeClient('restored'));
+  assert.equal(progress.hasProgressSession('shared-folder'), true);
+  progress.feedProgressSessionsForFolder('shared-folder', {
+    eventType: 'thinking_delta',
+    text: 'resumed after restart',
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(patched.includes('message-A'));
+  assert.equal(created.includes('restored'), false);
+
+  await progress.deleteProgressSession('shared-folder', () =>
+    fakeClient('delete-fallback'),
+  );
+  assert.ok((deleted as string[]).includes('message-A'));
+  const afterDelete = JSON.parse(fs.readFileSync(storePath, 'utf-8')) as Array<{
+    folder: string;
+  }>;
+  assert.equal(
+    afterDelete.some((entry) => entry.folder === 'shared-folder'),
+    false,
   );
 
   await progress.abortAllProgressSessions('test cleanup');

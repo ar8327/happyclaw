@@ -61,6 +61,7 @@ export function createContextBuilder(params: {
       workspaceMemory: memoryDir,
       userId: containerInput.userId,
       skillsDirs: [projectSkillsDir, skillsDir].filter(Boolean),
+      currentSourceChannel: state.getCurrentSourceChannel(),
     },
     { nativeCapabilities: nativeCapabilitiesForRunner(descriptor) },
   );
@@ -69,6 +70,7 @@ export function createContextBuilder(params: {
     state.extractSourceChannels(prompt, imChannelsFile);
     ctxMgr.updateDynamicContext({
       recentImChannels: state.recentImChannels,
+      currentSourceChannel: state.getCurrentSourceChannel(),
       contextSummary: state.getContextSummary(),
     });
     const nativeProvides = new Set<SectionId>(

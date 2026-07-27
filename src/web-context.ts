@@ -70,6 +70,7 @@ export interface WebDeps {
   } | null>;
   clearImFailCounts?: (jid: string) => void;
   triggerSessionWrapup?: (folder: string) => Promise<void>;
+  deleteProgressSession?: (folder: string) => Promise<void>;
   getActiveTurnRuntime?: (folder: string) => ActiveTurn | null;
   getPendingTurnCounts?: (folder: string) => Map<string, number>;
   getTurnObservability?: (folder: string) => TurnObservabilitySnapshot | null;

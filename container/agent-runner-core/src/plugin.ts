@@ -22,6 +22,8 @@ export interface PluginContext {
 
   // 动态上下文（每轮 query 前可更新）
   recentImChannels?: Set<string>;
+  /** Source channel that delivered the latest current user input. */
+  currentSourceChannel?: string;
   contextSummary?: string;
   providerInfo?: string; // 如 "Claude Opus 4.6" / "Codex o3-pro"
 }

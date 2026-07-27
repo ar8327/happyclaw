@@ -1,8 +1,8 @@
 /**
- * Turn Manager: routes incoming messages into turns by channel ownership.
+ * Turn Manager: routes incoming messages into turns by Session ownership.
  *
- * A Turn is a batch of messages from the same channel + the Agent's processing/reply.
- * Messages from different channels queue up and wait for the current Turn to complete.
+ * A Turn is a batch of messages handled by the same Session runtime. Source
+ * channels remain delivery metadata, but never split execution inside a Session.
  */
 
 import crypto from 'crypto';
@@ -35,7 +35,6 @@ export class TurnManager {
   private activeTurns = new Map<string, ActiveTurn>(); // folder → active turn
   private pendingQueue = new Map<string, QueuedTurnEntry[]>(); // folder → FIFO
   private handoffInFlight = new Set<string>();
-  private readonly queueWarnLimit = 100;
   private readonly queueTtlMs = 10 * 60_000;
 
   /**
@@ -88,50 +87,22 @@ export class TurnManager {
       return { action: 'start_new', turnId };
     }
 
-    // Active turn exists — same-channel messages stay with its runtime.
+    // Active turn exists — every message bound to this Session stays with its
+    // runtime, regardless of whether it came from Web, IM, or a scheduled task.
+    // Reply routing is carried independently by each delivery.
     const now = Date.now();
-    const sameChannel = active.channel === channel;
+    active.lastInjectedAt = now;
+    active.messageIds.push(...messageIds);
 
-    if (sameChannel) {
-      // An active same-channel runtime always owns follow-up delivery.  Its
-      // runner decides whether to steer immediately or buffer for the next
-      // provider turn; routing must not force a process restart.
-      active.lastInjectedAt = now;
-      active.messageIds.push(...messageIds);
-
-      // Update DB
-      try {
-        updateTurn(active.id, {
-          message_ids: JSON.stringify(active.messageIds),
-        });
-      } catch (err) {
-        logger.warn({ err, turnId: active.id }, 'Failed to update turn in DB');
-      }
-
-      return { action: 'inject', turnId: active.id };
+    try {
+      updateTurn(active.id, {
+        message_ids: JSON.stringify(active.messageIds),
+      });
+    } catch (err) {
+      logger.warn({ err, turnId: active.id }, 'Failed to update turn in DB');
     }
 
-    // Different channel → queue.  Cross-channel drain preserves the explicit
-    // Session routing boundary.
-    const queue = this.getQueue(folder);
-    const alreadyQueued = queue.some((q) => q.chatJid === chatJid);
-    if (alreadyQueued) {
-      return { action: 'already_queued' };
-    }
-
-    queue.push({
-      chatJid,
-      channel,
-      queuedAt: now,
-    });
-    if (queue.length > this.queueWarnLimit) {
-      logger.warn(
-        { folder, queueLength: queue.length, limit: this.queueWarnLimit },
-        'Turn pending queue exceeded warning limit',
-      );
-    }
-
-    return { action: 'queue', needsDrain: true };
+    return { action: 'inject', turnId: active.id };
   }
 
   /**
@@ -355,14 +326,5 @@ export class TurnManager {
     this.activeTurns.clear();
     this.pendingQueue.clear();
     this.handoffInFlight.clear();
-  }
-
-  private getQueue(folder: string): QueuedTurnEntry[] {
-    let queue = this.pendingQueue.get(folder);
-    if (!queue) {
-      queue = [];
-      this.pendingQueue.set(folder, queue);
-    }
-    return queue;
   }
 }

@@ -122,14 +122,14 @@ import { buildFeishuTopicNameSuffix } from './feishu-topic-title.js';
 import { abortAllStreamingSessions } from './feishu-streaming-card.js';
 import {
   type ProgressCardController,
-  registerProgressSession,
-  unregisterProgressSession,
+  claimProgressSession,
   abortAllProgressSessions,
-  cleanupStaleProgressCards,
+  restoreProgressCardSessions,
   feedProgressSessionsForFolder,
   completeAndResetProgressSessionsForFolder,
   finalizeProgressSessionsForFolder,
-  hasActiveProgressSession,
+  hasProgressSession,
+  deleteProgressSession,
 } from './feishu-progress-card.js';
 import {
   formatContextMessages,
@@ -2729,7 +2729,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (pendingDbMessages.length === 0) return true;
 
-  const folder = group.folder;
+  const folder = effectiveGroup.folder;
   const runtimeBootstrapForPrompt = getRuntimeBootstrapState(
     effectiveGroup.folder,
   );
@@ -2867,13 +2867,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             (delivery) => delivery.delivery_id,
           ),
           ackTargets: [...new Set(incompleteDeliveries.map((d) => d.chat_jid))],
-          ackSourceChannels: [
-            ...new Set(
-              pendingDbMessages.map(
-                (message) => message.source_jid || message.chat_jid,
-              ),
-            ),
-          ],
+          ackSourceChannels:
+            pendingDbMessages.length > 0
+              ? [resolveChannel(pendingDbMessages)]
+              : [],
         }
       : undefined;
   for (const delivery of incompleteDeliveries) {
@@ -2956,13 +2953,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // must not roll the cursor back and duplicate that reply.
   let deliveredUserVisibleReply = false;
   let sawSendMessageTool = false;
-  const outboundAcceptanceBaseline = durableOutboundTracker.snapshot(
-    group.folder,
-  );
+  const outboundAcceptanceBaseline = durableOutboundTracker.snapshot(folder);
   let canonicalResultCursor = outboundAcceptanceBaseline;
   const hasDurableUserVisibleReply = () =>
     deliveredUserVisibleReply ||
-    durableOutboundTracker.snapshot(group.folder) > outboundAcceptanceBaseline;
+    durableOutboundTracker.snapshot(folder) > outboundAcceptanceBaseline;
   let lastError = '';
   let cursorCommitted = false;
   let lastReplyMsgId: string | undefined;
@@ -2992,7 +2987,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const commitCursor = (): void => {
     if (cursorCommitted) return;
-    const currentTurn = turnManager.getActiveTurn(group.folder);
+    const currentTurn = turnManager.getActiveTurn(folder);
     if (currentTurn && hasIncompleteTurnDeliveries(currentTurn.id)) {
       logger.debug(
         { chatJid, turnId: currentTurn.id },
@@ -3020,18 +3015,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     status: 'completed' | 'error' | 'interrupted' | 'drained',
     options?: { errorDetail?: string },
   ): void => {
-    const activeTurn = turnManager.getActiveTurn(group.folder);
+    const activeTurn = turnManager.getActiveTurn(folder);
     if (!activeTurn) return;
 
     let traceFile: string | undefined;
     try {
-      const finalBlocks = streamingBlocksManager.finalize(group.folder);
+      const finalBlocks = streamingBlocksManager.finalize(folder);
       if (finalBlocks.length > 0) {
         traceFile = saveTurnTrace({
           turnId: activeTurn.id,
           chatJid,
           channel: activeTurn.channel,
-          folder: group.folder,
+          folder,
           messageIds: activeTurn.messageIds,
           startedAt: new Date(activeTurn.startedAt).toISOString(),
           completedAt: new Date().toISOString(),
@@ -3044,11 +3039,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
 
     if (status === 'interrupted') {
-      turnManager.interruptTurn(group.folder);
+      turnManager.interruptTurn(folder);
     } else if (status === 'error') {
-      turnManager.failTurn(group.folder, options?.errorDetail);
+      turnManager.failTurn(folder, options?.errorDetail);
     } else {
-      turnManager.completeTurn(group.folder, {
+      turnManager.completeTurn(folder, {
         resultMessageId: lastReplyMsgId,
         summary: undefined,
         traceFile,
@@ -3062,18 +3057,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       turnChannel: activeTurn.channel,
       turnMessageCount: activeTurn.messageIds.length,
     });
-    turnObservabilityManager.clear(group.folder);
-    syncPendingTurnObservability(group.folder);
+    turnObservabilityManager.clear(folder);
+    syncPendingTurnObservability(folder);
     // Reset im-commentary turn timer so next turn gets a fresh 30s warmup
-    resetTurnCommentaryTimer(group.folder);
+    resetTurnCommentaryTimer(folder);
   };
 
   const drainQueuedTurn = (): boolean => {
-    return handoffQueuedTurn(group.folder, chatJid);
+    return handoffQueuedTurn(folder, chatJid);
   };
 
   const completeSuccessfulTurn = (): boolean => {
-    const activeTurn = turnManager.getActiveTurn(group.folder);
+    const activeTurn = turnManager.getActiveTurn(folder);
     if (!activeTurn) {
       broadcastRunnerState(chatJid, 'idle');
       resetIdleTimer();
@@ -3096,11 +3091,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   };
 
   // 新一轮从干净状态开始
-  streamingBlocksManager.reset(group.folder);
-  turnObservabilityManager.syncTurn(
-    group.folder,
-    turnManager.getActiveTurn(group.folder),
-  );
+  streamingBlocksManager.reset(folder);
+  turnObservabilityManager.syncTurn(folder, turnManager.getActiveTurn(folder));
   broadcastRunnerState(chatJid, 'starting');
 
   // Build per-sourceJid trigger message map so IPC handler can thread
@@ -3158,6 +3150,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     const titleSource = progressTrigger?.content.replace(/\s+/g, ' ').trim();
     progressCard = imManager.createProgressCard(sourceChannel, {
       ...sourceFeishuOptions,
+      anchorFolder: folder,
+      anchorSourceChannel: sourceChannel,
       title: titleSource
         ? titleSource.length > 48
           ? `${titleSource.slice(0, 47)}…`
@@ -3165,12 +3159,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         : undefined,
       modelLabel: effectiveGroup.model,
       onStop: () => {
-        const active = turnManager.getActiveTurn(group.folder);
+        const active = turnManager.getActiveTurn(folder);
         if (!active) return false;
         const interrupted = queue.interruptQuery(chatJid);
         if (interrupted) {
           broadcastInterruptedTurn(
-            group.folder,
+            folder,
             sourceChannel,
             '用户通过飞书卡片停止',
           );
@@ -3179,7 +3173,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       },
     });
     if (progressCard) {
-      registerProgressSession(sourceChannel, progressCard, group.folder);
+      if (!claimProgressSession(sourceChannel, progressCard, folder)) {
+        progressCard = undefined;
+      }
     }
   }
 
@@ -3193,25 +3189,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         // Any output, including a quiet-tool heartbeat, proves the runtime is
         // alive. Keep accepted delivery leases from mistaking a legitimate
         // long turn for a lost process.
-        renewIpcDeliveryLeasesForFolder(group.folder);
+        renewIpcDeliveryLeasesForFolder(folder);
         if (result.status === 'heartbeat') return;
 
         // 流式事件处理 - 广播 WebSocket + 持久化 SDK Task 生命周期到 DB
         if (result.status === 'stream' && result.streamEvent) {
           broadcastStreamEvent(chatJid, result.streamEvent);
           // 累积 streaming blocks（后端持久化，前端可随时查询）
-          streamingBlocksManager
-            .getOrCreate(group.folder)
-            .feed(result.streamEvent);
-          // Feed only the card owned by the active Turn's source channel.
-          // Several Feishu chats can share one folder/runtime.
-          const progressSourceChannel =
-            turnManager.getActiveTurn(group.folder)?.channel ?? sourceChannel;
-          feedProgressSessionsForFolder(
-            group.folder,
-            progressSourceChannel,
-            result.streamEvent,
-          );
+          streamingBlocksManager.getOrCreate(folder).feed(result.streamEvent);
+          // The Session owns one optional card; source channels only route replies.
+          feedProgressSessionsForFolder(folder, result.streamEvent);
 
           // IM Commentary: update the progress card with human-readable explanation (fire-and-forget)
           const _se = result.streamEvent;
@@ -3228,7 +3215,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             progressCard
           ) {
             sendToolCommentary({
-              folder: group.folder,
+              folder,
               toolName: _se.toolName ?? '',
               toolInputSummary: _se.toolInputSummary,
               isNested: _se.isNested ?? false,
@@ -3237,9 +3224,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           }
 
           turnObservabilityManager.feedEvent(
-            group.folder,
+            folder,
             result.streamEvent,
-            turnManager.getActiveTurn(group.folder),
+            turnManager.getActiveTurn(folder),
           );
 
           // IPC delivery acknowledgement from agent-runner
@@ -3267,7 +3254,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           ) {
             commitIpcCursorOnAck(se.ipcDeliveryIds || []);
             if (lastTurnCompletedSuccessfully && completeSuccessfulTurn()) {
-              await completeAndResetProgressSessionsForFolder(group.folder);
+              await completeAndResetProgressSessionsForFolder(folder);
             }
           }
           if (
@@ -3296,7 +3283,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               if (!existing) {
                 createAgent({
                   id: taskId,
-                  group_folder: group.folder,
+                  group_folder: folder,
                   chat_jid: chatJid,
                   name: taskName,
                   prompt: desc,
@@ -3383,7 +3370,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               if (!existing) {
                 createAgent({
                   id: targetTaskId,
-                  group_folder: group.folder,
+                  group_folder: folder,
                   chat_jid: chatJid,
                   name: 'Task',
                   prompt: '',
@@ -3484,7 +3471,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             // so it doesn't keep firing while the agent stays alive in idle state.
             await setTyping(chatJid, false);
             const canonicalOutbound = durableOutboundTracker.latestTextSince(
-              group.folder,
+              folder,
               canonicalResultCursor,
             );
             if (canonicalOutbound?.chatJid === chatJid) {
@@ -3510,9 +3497,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 threadId: sourceFeishuOptions?.threadId,
                 rootId: sourceFeishuOptions?.threadRootMsgId,
               });
-              canonicalResultCursor = durableOutboundTracker.snapshot(
-                group.folder,
-              );
+              canonicalResultCursor = durableOutboundTracker.snapshot(folder);
             }
             deliveredUserVisibleReply = true;
             // Persist cursor as soon as a visible reply is emitted.
@@ -3524,12 +3509,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           resetIdleTimer();
 
           // Finalize streaming blocks for this round (kept for turn trace persistence)
-          streamingBlocksManager.finalize(group.folder);
+          streamingBlocksManager.finalize(folder);
         }
 
-        // Complete all progress cards for this folder after each turn so they
-        // don't stay at "执行中" while the agent idles between IPC messages.
-        // Cards reset to idle and will lazily create new ones on the next turn.
+        // Complete the Session card after each turn so it does not stay at
+        // "执行中" while the runtime idles. The next turn reuses this card.
         if (result.status === 'success') {
           lastTurnCompletedSuccessfully = true;
           // Long-lived IPC runners stay alive after each result and wait for
@@ -3537,7 +3521,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           // than waiting for process exit. This covers both visible replies and
           // tool-only turns (for example send_message over IM with result:null).
           if (completeSuccessfulTurn()) {
-            await completeAndResetProgressSessionsForFolder(group.folder);
+            await completeAndResetProgressSessionsForFolder(folder);
           }
         }
 
@@ -3558,7 +3542,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (idleTimer) clearTimeout(idleTimer);
   // A shared folder runtime can receive IPC for several JIDs. Roll back every
   // unfinished delivery owned by this runtime, not only its launch JID.
-  const droppedIpcJids = discardPendingIpcCursorCommitsForFolder(group.folder);
+  const droppedIpcJids = discardPendingIpcCursorCommitsForFolder(folder);
   if (droppedIpcJids.length > 0) {
     logger.warn(
       { chatJid, droppedIpcJids },
@@ -3585,15 +3569,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Finalize ALL Feishu progress cards for this folder (including cards
   // created via IPC injection for sibling Feishu chats).
   if (wasInterrupted) {
-    await finalizeProgressSessionsForFolder(group.folder, 'abort', '已中断');
+    await finalizeProgressSessionsForFolder(folder, 'abort', '已中断');
   } else if (isErrorExit) {
-    await finalizeProgressSessionsForFolder(
-      group.folder,
-      'fail',
-      runnerErrorDetail,
-    );
+    await finalizeProgressSessionsForFolder(folder, 'fail', runnerErrorDetail);
   } else {
-    await finalizeProgressSessionsForFolder(group.folder, 'complete');
+    await finalizeProgressSessionsForFolder(folder, 'complete');
   }
 
   // Agent 进程已退出：通知前端清除流式状态（"正在思考..."）。
@@ -3602,13 +3582,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   broadcastRunnerState(chatJid, 'idle');
 
   // --- Turn lifecycle: complete/fail turn and save trace ---
-  const activeTurnAtExit = turnManager.getActiveTurn(group.folder);
+  const activeTurnAtExit = turnManager.getActiveTurn(folder);
   const hasUnfinishedAcceptedWork =
     !!activeTurnAtExit &&
     hasIncompleteTurnDeliveries(activeTurnAtExit.id) &&
     !wasInterrupted;
   if (activeTurnAtExit && hasUnfinishedAcceptedWork) {
-    turnManager.markRecoverable(group.folder, runnerErrorDetail);
+    turnManager.markRecoverable(folder, runnerErrorDetail);
     logger.warn(
       {
         chatJid,
@@ -3637,7 +3617,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     drainQueuedTurn();
   }
 
-  streamingBlocksManager.remove(group.folder);
+  streamingBlocksManager.remove(folder);
 
   // 不可恢复的转录错误（如超大图片/MIME 错配被固化在会话历史中）：无论是否已有回复，都必须重置会话
   const errorForReset = [lastError, output.error].filter(Boolean).join(' ');
@@ -5832,7 +5812,7 @@ async function startMessageLoop(): Promise<void> {
           };
 
           if (route.action === 'inject') {
-            // Same channel — inject into the runtime that owns the active turn.
+            // Same Session — inject into its active runtime regardless of source.
             turnObservabilityManager.syncTurn(
               folder,
               turnManager.getActiveTurn(folder),
@@ -5933,7 +5913,7 @@ async function startMessageLoop(): Promise<void> {
               // collide with the Web progress session and skip creation.
               if (
                 getChannelType(channel) === 'feishu' &&
-                !hasActiveProgressSession(channel, folder)
+                !hasProgressSession(folder)
               ) {
                 const resolved = resolveEffectiveGroup(chatJid, group);
                 const ownerId = resolveSessionOwnerKey(
@@ -5953,6 +5933,8 @@ async function startMessageLoop(): Promise<void> {
                   });
                   const card = imManager.createProgressCard(channel, {
                     ...feishuCardOptions,
+                    anchorFolder: folder,
+                    anchorSourceChannel: channel,
                     title: titleSource
                       ? titleSource.length > 48
                         ? `${titleSource.slice(0, 47)}…`
@@ -5974,7 +5956,7 @@ async function startMessageLoop(): Promise<void> {
                     },
                   });
                   if (card) {
-                    registerProgressSession(channel, card, folder);
+                    claimProgressSession(channel, card, folder);
                   }
                 }
               }
@@ -7194,6 +7176,8 @@ async function main(): Promise<void> {
       const allJids = getJidsByFolder(folder);
       await memoryOrchestrator.exportTranscripts(ownerKey, folder, allJids);
     },
+    deleteProgressSession: (folder: string) =>
+      deleteProgressSession(folder, () => imManager.getAnyLarkClient()),
     getActiveTurnRuntime: (folder: string) => turnManager.getActiveTurn(folder),
     getPendingTurnCounts: (folder: string) =>
       turnManager.getPendingCounts(folder),
@@ -7428,8 +7412,8 @@ async function main(): Promise<void> {
 
   // Clean up progress cards left over from previous process
   if (anyFeishuConnected) {
-    cleanupStaleProgressCards(() => imManager.getAnyLarkClient()).catch((err) =>
-      logger.warn({ err }, 'Failed to clean up stale progress cards'),
+    restoreProgressCardSessions(() => imManager.getAnyLarkClient()).catch(
+      (err) => logger.warn({ err }, 'Failed to restore progress cards'),
     );
   }
 
