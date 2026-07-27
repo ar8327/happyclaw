@@ -674,6 +674,16 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
 
     // Control signals
     if (result.closedDuringQuery) {
+      // A close received while a provider turn is active is different from an
+      // idle close: the provider app-server and MCP subprocesses are still
+      // alive. Without cleanup they keep Node's event loop open forever, so
+      // the host never observes process exit and every later IPC message is
+      // queued behind a zombie runtime.
+      await runner.cleanup?.();
+      emitRuntimeState(writeOutput, runner, state, {
+        providerSessionId: sessionId,
+        resumeAnchor,
+      });
       writeOutput({ status: 'closed', result: null });
       break;
     }

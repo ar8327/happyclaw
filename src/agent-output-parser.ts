@@ -128,11 +128,10 @@ export function attachStdoutHandler(
           }
           // Activity detected — reset the hard timeout
           opts.resetTimeout();
-          if (parsed.status === 'heartbeat') {
-            continue;
-          }
-          // Call onOutput for all non-heartbeat markers (including null results)
-          // so idle timers start even for "silent" query completions.
+          // Forward heartbeats as well as terminal/stream markers. The runtime
+          // host uses them not only for its hard process timeout, but also to
+          // renew accepted IPC delivery leases while a legitimate long-running
+          // tool call is still making progress.
           const onOutputFn = opts.onOutput;
           state.outputChain = state.outputChain
             .then(() => onOutputFn(parsed))

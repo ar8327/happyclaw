@@ -366,6 +366,7 @@ interface PendingIpcCursorCommit {
   rowid: number;
   ipcFilePath: string | null;
   timer: ReturnType<typeof setTimeout>;
+  leaseExpiresAt: number;
   received: boolean;
   accepted: boolean;
 }
@@ -387,6 +388,28 @@ function clearWorkerRedeliveryState(chatJid: string): void {
   if (timer) clearTimeout(timer);
   workerRedeliveryTimers.delete(chatJid);
   workerRedeliveryAttempts.delete(chatJid);
+}
+
+function restartRuntimeForIpcRecovery(
+  chatJid: string,
+  deliveryId: string,
+  phase: 'unreceived' | 'received' | 'accepted',
+): void {
+  const { agentId } = splitWorkerConversationJid(chatJid);
+  const recovery = agentId
+    ? queue
+        .stopGroup(buildWorkerSessionRecordId(agentId), { force: true })
+        .then(() => enqueueIpcRedelivery(chatJid))
+    : queue.restartGroup(chatJid);
+  void recovery.catch((err) => {
+    logger.error(
+      { chatJid, deliveryId, phase, err },
+      'Failed to restart runtime during IPC delivery recovery',
+    );
+    // Preserve the old queue-only fallback even if process termination itself
+    // fails. A later container exit or operator restart can still pick it up.
+    enqueueIpcRedelivery(chatJid);
+  });
 }
 
 function enqueueIpcRedelivery(chatJid: string): void {
@@ -500,7 +523,11 @@ function trackIpcCursorCommit(input: {
       },
       'IPC delivery lease expired — scheduling ACK-aware recovery',
     );
-    enqueueIpcRedelivery(expired.chatJid);
+    restartRuntimeForIpcRecovery(
+      expired.chatJid,
+      expired.deliveryId,
+      'unreceived',
+    );
   };
   const timer = setTimeout(expire, IPC_DELIVERY_TIMEOUT_MS);
   timer.unref?.();
@@ -508,10 +535,77 @@ function trackIpcCursorCommit(input: {
   pendingIpcCursorCommits.set(input.deliveryId, {
     ...input,
     timer,
+    leaseExpiresAt: Date.now() + IPC_DELIVERY_TIMEOUT_MS,
     received:
       persisted?.status === 'received' || persisted?.status === 'accepted',
     accepted: persisted?.status === 'accepted',
   });
+}
+
+function armReceivedIpcLease(
+  deliveryId: string,
+  entry: PendingIpcCursorCommit,
+): void {
+  clearTimeout(entry.timer);
+  entry.leaseExpiresAt = Date.now() + IPC_DELIVERY_LEASE_MS;
+  entry.timer = setTimeout(() => {
+    const current = pendingIpcCursorCommits.get(deliveryId);
+    if (!current) return;
+    pendingIpcCursorCommits.delete(deliveryId);
+    const persisted = getTurnDelivery(deliveryId);
+    if (persisted?.status === 'received') {
+      updateTurnDeliveryStatus([deliveryId], 'queued');
+    }
+    logger.warn(
+      {
+        chatJid: current.chatJid,
+        deliveryId,
+        leaseMs: IPC_DELIVERY_LEASE_MS,
+      },
+      'Runtime received IPC but never completed delivery — restarting for recovery',
+    );
+    restartRuntimeForIpcRecovery(current.chatJid, deliveryId, 'received');
+  }, IPC_DELIVERY_LEASE_MS);
+  entry.timer.unref?.();
+}
+
+function armAcceptedIpcLease(
+  deliveryId: string,
+  entry: PendingIpcCursorCommit,
+): void {
+  clearTimeout(entry.timer);
+  entry.leaseExpiresAt = Date.now() + IPC_DELIVERY_LEASE_MS;
+  entry.timer = setTimeout(() => {
+    const current = pendingIpcCursorCommits.get(deliveryId);
+    if (!current) return;
+    pendingIpcCursorCommits.delete(deliveryId);
+    logger.warn(
+      {
+        chatJid: current.chatJid,
+        deliveryId,
+        leaseMs: IPC_DELIVERY_LEASE_MS,
+      },
+      'Runtime accepted a message but completion ACK is missing — restarting the turn',
+    );
+    restartRuntimeForIpcRecovery(current.chatJid, deliveryId, 'accepted');
+  }, IPC_DELIVERY_LEASE_MS);
+  entry.timer.unref?.();
+}
+
+function renewIpcDeliveryLeasesForFolder(groupFolder: string): void {
+  const now = Date.now();
+  for (const [deliveryId, entry] of pendingIpcCursorCommits) {
+    if (entry.groupFolder !== groupFolder || !entry.received) continue;
+    // Avoid resetting timers on every token delta. Renew once the lease has
+    // crossed its half-life; runner heartbeats guarantee this is reached even
+    // during a long tool call with otherwise quiet provider output.
+    if (entry.leaseExpiresAt - now > IPC_DELIVERY_LEASE_MS / 2) continue;
+    if (entry.accepted) {
+      armAcceptedIpcLease(deliveryId, entry);
+    } else {
+      armReceivedIpcLease(deliveryId, entry);
+    }
+  }
 }
 
 function markIpcCursorReceived(deliveryIds: Iterable<string>): void {
@@ -525,25 +619,7 @@ function markIpcCursorReceived(deliveryIds: Iterable<string>): void {
     // The runner already removed the IPC file.  Do not let an old path delete
     // a later file during recovery.
     entry.ipcFilePath = null;
-    entry.timer = setTimeout(() => {
-      const current = pendingIpcCursorCommits.get(deliveryId);
-      if (!current) return;
-      pendingIpcCursorCommits.delete(deliveryId);
-      const persisted = getTurnDelivery(deliveryId);
-      if (persisted?.status === 'received') {
-        updateTurnDeliveryStatus([deliveryId], 'queued');
-      }
-      logger.warn(
-        {
-          chatJid: current.chatJid,
-          deliveryId,
-          leaseMs: IPC_DELIVERY_LEASE_MS,
-        },
-        'Runtime received IPC but never completed delivery — scheduling recovery',
-      );
-      enqueueIpcRedelivery(current.chatJid);
-    }, IPC_DELIVERY_LEASE_MS);
-    entry.timer.unref?.();
+    armReceivedIpcLease(deliveryId, entry);
   }
 }
 
@@ -557,22 +633,7 @@ function markIpcCursorAccepted(deliveryIds: Iterable<string>): void {
     entry.received = true;
     entry.accepted = true;
     entry.ipcFilePath = null;
-    entry.timer = setTimeout(() => {
-      const current = pendingIpcCursorCommits.get(deliveryId);
-      if (!current) return;
-      pendingIpcCursorCommits.delete(deliveryId);
-      logger.warn(
-        {
-          chatJid: current.chatJid,
-          deliveryId,
-          leaseMs: IPC_DELIVERY_LEASE_MS,
-        },
-        'Runtime accepted a message but completion ACK is missing — resuming the turn',
-      );
-      queue.closeStdin(current.chatJid);
-      enqueueIpcRedelivery(current.chatJid);
-    }, IPC_DELIVERY_LEASE_MS);
-    entry.timer.unref?.();
+    armAcceptedIpcLease(deliveryId, entry);
   }
 }
 
@@ -3129,6 +3190,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     chatJid,
     async (result) => {
       try {
+        // Any output, including a quiet-tool heartbeat, proves the runtime is
+        // alive. Keep accepted delivery leases from mistaking a legitimate
+        // long turn for a lost process.
+        renewIpcDeliveryLeasesForFolder(group.folder);
+        if (result.status === 'heartbeat') return;
+
         // 流式事件处理 - 广播 WebSocket + 持久化 SDK Task 生命周期到 DB
         if (result.status === 'stream' && result.streamEvent) {
           broadcastStreamEvent(chatJid, result.streamEvent);
@@ -5371,6 +5438,9 @@ async function processAgentConversation(
   }
 
   const wrappedOnOutput = async (output: RuntimeOutput) => {
+    renewIpcDeliveryLeasesForFolder(effectiveGroup.folder);
+    if (output.status === 'heartbeat') return;
+
     if (output.runtimeState) {
       persistRuntimeStateForSession(
         effectiveGroup.folder,
