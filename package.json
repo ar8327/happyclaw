@@ -31,6 +31,7 @@
     "test:query-loop": "tsx container/agent-runner/tests/query-loop.test.ts",
     "test:steering-feishu": "tsx src/steering-feishu-improvements.test.ts",
     "test:feishu-conversation-mode": "tsx src/feishu-conversation-mode.test.ts",
+    "test:feishu-backfill": "tsx src/feishu-backfill.test.ts",
     "test:im-outbox": "tsx src/im-outbox.test.ts",
     "test:turn-delivery": "tsx src/turn-delivery.test.ts",
     "test:durable-outbound": "tsx src/durable-outbound-tracker.test.ts",

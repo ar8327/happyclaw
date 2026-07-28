@@ -1317,8 +1317,6 @@ export function createFeishuConnection(
     sinceMs: number,
   ): Promise<void> {
     if (!client) return;
-    // 每个 chat 每次 backfill 至多发一条恢复提示，多页补收不重复提示
-    let recoveryNoticeSent = false;
     const nowSec = Math.floor(Date.now() / 1000);
     const startSec = Math.max(0, Math.floor(sinceMs / 1000));
     const params: {
@@ -1391,27 +1389,6 @@ export function createFeishuConnection(
           };
         })
         .sort((a, b) => a.createTimeMs - b.createTimeMs);
-
-      // 补收提示：让用户能区分「正常处理」和「断线补处理」。
-      // 仅统计真正会进入处理流程的新消息（已入库或断线前的旧消息会被
-      // handleIncomingMessage 跳过），并在处理前发送，确保提示先于回复。
-      const ignoreBefore = connectOptions?.ignoreMessagesBefore;
-      const newMessages = messages.filter(
-        (message) =>
-          !messageExists(message.messageId) &&
-          !(
-            ignoreBefore &&
-            message.createTimeMs > 0 &&
-            message.createTimeMs < ignoreBefore
-          ),
-      );
-      if (newMessages.length > 0 && !recoveryNoticeSent) {
-        recoveryNoticeSent = true;
-        await sendTextToChat(
-          chatId,
-          `📡 飞书连接已恢复，正在补处理断线期间的 ${newMessages.length} 条消息`,
-        );
-      }
 
       for (const message of messages) {
         await handleIncomingMessage(message, 'backfill');
