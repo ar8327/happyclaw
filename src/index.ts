@@ -108,6 +108,7 @@ import {
   type IMRouteContext,
   type IMSendOptions,
 } from './im-channel.js';
+import { buildCanonicalFallbackRoute } from './canonical-fallback-routing.js';
 import {
   applyFeishuConversationMode,
   hasFeishuThreadContext,
@@ -2159,6 +2160,8 @@ async function setTyping(jid: string, isTyping: boolean): Promise<void> {
 interface SendMessageOptions {
   /** Whether to forward the reply to the IM channel (Feishu/Telegram). Defaults to true for IM JIDs. */
   sendToIM?: boolean;
+  /** IM delivery target when the canonical message is stored under a Web/session JID. */
+  imTargetJid?: string;
   /** Pre-computed local image paths to attach to IM messages. Avoids redundant filesystem scans. */
   localImagePaths?: string[];
   /** External message ID from IM platform (e.g. Feishu om_xxx). Used as DB message ID for reply matching. */
@@ -3488,14 +3491,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 'Reused explicit outbound message as canonical turn result',
               );
             } else {
-              // No explicit outbound exists, so stdout is the canonical Web
-              // fallback for this provider result.
+              // No explicit outbound exists, so stdout becomes the canonical
+              // result. Keep the Web copy and, when the triggering source is
+              // an IM channel, durably deliver the same result back to that
+              // source/thread.
               lastReplyMsgId = await sendMessage(chatJid, text, {
-                sendToIM: false,
-                sourceJid: sourceChannelType ? sourceChannel : undefined,
-                replyToId: sourceFeishuOptions?.replyToMsgId,
-                threadId: sourceFeishuOptions?.threadId,
-                rootId: sourceFeishuOptions?.threadRootMsgId,
+                ...buildCanonicalFallbackRoute({
+                  sourceChannel,
+                  sourceChannelType,
+                  imOptions: sourceFeishuOptions,
+                }),
               });
               canonicalResultCursor = durableOutboundTracker.snapshot(folder);
             }
@@ -4148,7 +4153,8 @@ async function sendMessage(
   text: string,
   options: SendMessageOptions = {},
 ): Promise<string | undefined> {
-  const isIMChannel = getChannelType(jid) !== null;
+  const imTargetJid = options.imTargetJid ?? jid;
+  const isIMChannel = getChannelType(imTargetJid) !== null;
   const sendToIM = options.sendToIM ?? isIMChannel;
   try {
     const msgId = options.externalMsgId || crypto.randomUUID();
@@ -4164,7 +4170,7 @@ async function sendMessage(
       enqueueImDelivery({
         id: `reply:${msgId}`,
         sourceChatJid: jid,
-        targetJid: jid,
+        targetJid: imTargetJid,
         kind: 'text',
         payload: { text, localImagePaths, options: options.imOptions },
       });
