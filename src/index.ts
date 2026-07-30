@@ -108,7 +108,11 @@ import {
   type IMRouteContext,
   type IMSendOptions,
 } from './im-channel.js';
-import { buildCanonicalFallbackRoute } from './canonical-fallback-routing.js';
+import {
+  buildCanonicalFallbackRoute,
+  canReuseCanonicalOutbound,
+  selectLatestConsumedSourceChannel,
+} from './canonical-fallback-routing.js';
 import {
   applyFeishuConversationMode,
   hasFeishuThreadContext,
@@ -351,6 +355,8 @@ function markDurableOutboundAcceptance(
     chatJid: string;
     text: string;
     turnId?: string;
+    targetChannel?: string;
+    threadId?: string;
   },
 ): void {
   durableOutboundTracker.mark(runtimeKey, textRecord);
@@ -2583,6 +2589,51 @@ function resolveChannel(messages: NewMessage[]): string {
   return last.source_jid || last.chat_jid;
 }
 
+/**
+ * Resolve the source conversation of the newest inbound message that the
+ * long-lived runner has actually acknowledged receiving. ActiveTurn.channel
+ * is intentionally stable for the whole turn and therefore cannot identify
+ * the source of a later cross-channel IPC injection.
+ */
+function resolveLatestIpcSourceChannel(
+  deliveryIds: string[],
+  fallback: string | null,
+): string | null {
+  const consumedMessages: Array<{
+    rowid: number;
+    chatJid: string;
+    sourceJid?: string | null;
+  }> = [];
+
+  for (const deliveryId of deliveryIds) {
+    const delivery = getTurnDelivery(deliveryId);
+    if (!delivery) continue;
+    let messageIds: string[] = [];
+    try {
+      const parsed = JSON.parse(delivery.message_ids);
+      if (Array.isArray(parsed)) {
+        messageIds = parsed.filter(
+          (messageId): messageId is string => typeof messageId === 'string',
+        );
+      }
+    } catch {
+      continue;
+    }
+
+    for (const messageId of messageIds) {
+      const message = getMessageById(messageId, delivery.chat_jid);
+      if (!message) continue;
+      consumedMessages.push({
+        rowid: message.rowid,
+        chatJid: message.chat_jid,
+        sourceJid: message.source_jid,
+      });
+    }
+  }
+
+  return selectLatestConsumedSourceChannel(consumedMessages, fallback);
+}
+
 function splitRuntimeJid(chatJid: string): {
   baseJid: string;
   agentId: string | null;
@@ -3162,6 +3213,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let progressCard: ProgressCardController | undefined;
   const sourceChannel = resolveChannel(missedMessages);
   const sourceChannelType = getChannelType(sourceChannel);
+  let canonicalResultSourceChannel: string | null = sourceChannel;
   const feishuConfig = ownerUserId ? getImFeishuConfig() : null;
   const sourceFeishuOptions = buildFeishuCardOptionsForSource({
     chatJid,
@@ -3273,6 +3325,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             // and never let the previous Turn's result ID leak forward.
             canonicalResultCursor = durableOutboundTracker.snapshot(folder);
             lastReplyMsgId = undefined;
+            canonicalResultSourceChannel = resolveLatestIpcSourceChannel(
+              se.ipcDeliveryIds || [],
+              turnManager.getActiveTurn(folder)?.channel ||
+                canonicalResultSourceChannel,
+            );
             // The agent just consumed a new user message — it owes a fresh
             // send_message. Reset the flag so the silent-success fallback
             // also covers messages injected mid-turn.
@@ -3507,12 +3564,31 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             // so it doesn't keep firing while the agent stays alive in idle state.
             await setTyping(chatJid, false);
             const activeTurn = turnManager.getActiveTurn(folder);
+            const resultSourceChannel =
+              canonicalResultSourceChannel ||
+              activeTurn?.channel ||
+              sourceChannel;
+            const resultSourceChannelType = getChannelType(resultSourceChannel);
+            const resultFeishuOptions = buildFeishuCardOptionsForSource({
+              chatJid,
+              sourceChannel: resultSourceChannel,
+              folder,
+            });
             const canonicalOutbound = durableOutboundTracker.latestTextSince(
               folder,
               canonicalResultCursor,
               activeTurn?.id,
             );
-            if (canonicalOutbound?.chatJid === chatJid) {
+            if (
+              canonicalOutbound &&
+              canReuseCanonicalOutbound({
+                chatJid,
+                sourceChannel: resultSourceChannel,
+                sourceChannelType: resultSourceChannelType,
+                imOptions: resultFeishuOptions,
+                outbound: canonicalOutbound,
+              })
+            ) {
               // send_message already persisted the exact user-visible reply.
               // Provider stdout remains in the trace/Web stream, but must not
               // become a second assistant message in recent_context.
@@ -3526,18 +3602,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 'Reused explicit outbound message as canonical turn result',
               );
             } else {
-              const resultSourceChannel = activeTurn?.channel || sourceChannel;
-              const resultSourceChannelType =
-                getChannelType(resultSourceChannel);
-              const resultFeishuOptions = buildFeishuCardOptionsForSource({
-                chatJid,
-                sourceChannel: resultSourceChannel,
-                folder,
-              });
-              // No explicit outbound exists, so stdout becomes the canonical
-              // result. Keep the Web copy and, when the triggering source is
-              // an IM channel, durably deliver the same result back to that
-              // source/thread.
+              // No explicit outbound reached this triggering conversation, so
+              // stdout becomes its canonical result. Keep the Web copy and,
+              // when the source is IM, durably deliver the same result back to
+              // that source/thread.
               lastReplyMsgId = await sendMessage(chatJid, text, {
                 ...buildCanonicalFallbackRoute({
                   sourceChannel: resultSourceChannel,
@@ -4380,6 +4448,8 @@ function startIpcWatcher(): void {
                     )
                   ) {
                     let canonicalMessageId: string | undefined;
+                    let canonicalTargetChannel: string | undefined;
+                    let canonicalThreadId: string | undefined;
                     // 模型指定了 IM 渠道 — 发送到 IM
                     if (data.targetChannel) {
                       const localImagePaths = extractLocalImImagePaths(
@@ -4440,6 +4510,8 @@ function startIpcWatcher(): void {
                         base: sendOptions,
                         trigger: lastInbound,
                       });
+                      canonicalTargetChannel = data.targetChannel;
+                      canonicalThreadId = finalSendOptions.threadId;
                       enqueueImDelivery({
                         id:
                           typeof data.requestId === 'string'
@@ -4518,6 +4590,8 @@ function startIpcWatcher(): void {
                       chatJid: data.chatJid,
                       text: data.text,
                       turnId: turnManager.getActiveTurn(sourceGroup)?.id,
+                      targetChannel: canonicalTargetChannel,
+                      threadId: canonicalThreadId,
                     });
                     if (deliveryRequestId) {
                       writeIpcResponseFile(ipcRoot, {

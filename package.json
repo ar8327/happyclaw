@@ -35,6 +35,7 @@
     "test:im-outbox": "tsx src/im-outbox.test.ts",
     "test:turn-delivery": "tsx src/turn-delivery.test.ts",
     "test:durable-outbound": "tsx src/durable-outbound-tracker.test.ts",
+    "test:canonical-fallback": "tsx src/canonical-fallback-routing.test.ts",
     "dev:all": "npx concurrently --timestamp-format \"yyyy-MM-dd HH:mm:ss.SSS\" -n backend,frontend -c blue,green \"npm run dev\" \"npm run dev:web\"",
     "dev:web": "cd web && npm run dev",
     "build:web": "cd web && npm run build",

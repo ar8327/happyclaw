@@ -44,6 +44,8 @@ tracker.mark('long-lived', {
   chatJid: 'web:main',
   text: '当前轮回复',
   turnId: 'turn-2',
+  targetChannel: 'feishu:oc_current',
+  threadId: 'omt_current',
 });
 
 assert.deepEqual(
@@ -54,6 +56,8 @@ assert.deepEqual(
     chatJid: 'web:main',
     text: '当前轮回复',
     turnId: 'turn-2',
+    targetChannel: 'feishu:oc_current',
+    threadId: 'omt_current',
   },
 );
 

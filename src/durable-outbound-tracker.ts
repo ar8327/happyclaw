@@ -4,6 +4,8 @@ export interface DurableTextOutbound {
   chatJid: string;
   text: string;
   turnId?: string;
+  targetChannel?: string;
+  threadId?: string;
 }
 
 /**
