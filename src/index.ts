@@ -96,6 +96,7 @@ import {
   getTurnDeliveries,
   getRecoverableTurns,
   getCompletedTurnDeliveryCursors,
+  completeCoveredTurnDeliveries,
   hasIncompleteTurnDeliveries,
   updateTurnDeliveryStatus,
   updateTurn,
@@ -708,6 +709,7 @@ function commitIpcCursorOnAck(deliveryIds: Iterable<string>): void {
   const uniqueIds = [...new Set(deliveryIds)];
   updateTurnDeliveryStatus(uniqueIds, 'completed');
   let changed = false;
+  const completedCursors = new Map<string, number>();
   for (const deliveryId of uniqueIds) {
     const persisted = getTurnDelivery(deliveryId);
     const entry = pendingIpcCursorCommits.get(deliveryId);
@@ -718,12 +720,19 @@ function commitIpcCursorOnAck(deliveryIds: Iterable<string>): void {
     const chatJid = entry?.chatJid || persisted?.chat_jid;
     const rowid = entry?.rowid ?? persisted?.max_rowid;
     if (!chatJid || rowid === undefined) continue;
+    completedCursors.set(
+      chatJid,
+      Math.max(completedCursors.get(chatJid) ?? 0, rowid),
+    );
     const current = lastAgentTimestamp[chatJid];
     if (!current || rowid > current.rowid) {
       lastAgentTimestamp[chatJid] = { rowid };
       changed = true;
     }
     clearWorkerRedeliveryState(chatJid);
+  }
+  for (const [chatJid, rowid] of completedCursors) {
+    completeCoveredTurnDeliveries(chatJid, rowid);
   }
   if (changed) saveState();
 }
@@ -6163,6 +6172,20 @@ function recoverPendingMessages(): void {
   }
   let cursorChanged = false;
   for (const cursor of getCompletedTurnDeliveryCursors()) {
+    const reconciled = completeCoveredTurnDeliveries(
+      cursor.chat_jid,
+      cursor.max_rowid,
+    );
+    if (reconciled > 0) {
+      logger.info(
+        {
+          chatJid: cursor.chat_jid,
+          maxRowid: cursor.max_rowid,
+          reconciled,
+        },
+        'Recovery: completed stale delivery rows covered by durable cursor',
+      );
+    }
     const current = lastAgentTimestamp[cursor.chat_jid];
     if (!current || cursor.max_rowid > current.rowid) {
       lastAgentTimestamp[cursor.chat_jid] = { rowid: cursor.max_rowid };

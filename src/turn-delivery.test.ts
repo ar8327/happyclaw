@@ -63,8 +63,16 @@ try {
     'queued',
     'retry exhaustion must release accepted work for a later fresh Turn',
   );
+  assert.equal(db.completeCoveredTurnDeliveries('web:test', 7), 0);
+  assert.equal(db.getTurnDelivery('delivery-exhausted')?.status, 'queued');
+  assert.equal(db.completeCoveredTurnDeliveries('web:test', 8), 1);
+  assert.equal(
+    db.getTurnDelivery('delivery-exhausted')?.status,
+    'completed',
+    'a newer completed cursor must reconcile stale delivery ownership',
+  );
   assert.deepEqual(db.getCompletedTurnDeliveryCursors(), [
-    { chat_jid: 'web:test', max_rowid: 7 },
+    { chat_jid: 'web:test', max_rowid: 8 },
   ]);
   assert.equal(db.getRecoverableTurns()[0]?.id, 'turn-1');
 
