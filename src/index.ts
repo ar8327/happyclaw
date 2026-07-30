@@ -132,6 +132,7 @@ import {
   feedProgressSessionsForFolder,
   completeAndResetProgressSessionsForFolder,
   finalizeProgressSessionsForFolder,
+  markProgressSessionRecoveringForFolder,
   hasProgressSession,
   deleteProgressSession,
 } from './feishu-progress-card.js';
@@ -2746,6 +2747,14 @@ function broadcastInterruptedTurn(
 ): void {
   const activeTurn = turnManager.getActiveTurn(folder);
   if (!activeTurn) return;
+  // A user cancellation is terminal for the messages already accepted by
+  // this Turn. Advance their cursors so a restart cannot replay cancelled
+  // work into a new Turn.
+  commitIpcCursorOnAck(
+    getTurnDeliveries(activeTurn.id).map(
+      (delivery) => delivery.delivery_id,
+    ),
+  );
   turnObservabilityManager.markInterrupted(folder, activeTurn, detail);
   broadcastTurnEvent(chatJid, {
     eventType: 'status',
@@ -3681,12 +3690,26 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     lastTurnCompletedSuccessfully &&
     /timed out after \d+ms/i.test(
       [output.error, lastError].filter(Boolean).join(' '),
-    );
+  );
   const isErrorExit = processReportedError && !idleTimeoutAfterSuccessfulTurn;
 
-  // Finalize ALL Feishu progress cards for this folder (including cards
-  // created via IPC injection for sibling Feishu chats).
-  if (wasInterrupted) {
+  const activeTurnAtExit = turnManager.getActiveTurn(folder);
+  // During service shutdown an interrupted provider query is resumable, not a
+  // user cancellation. The shutdown path has already persisted the Turn as
+  // recoverable, so retain its ACK state and card for startup recovery.
+  const wasUserInterrupted = wasInterrupted && !shuttingDown;
+  const hasUnfinishedAcceptedWork =
+    !!activeTurnAtExit &&
+    hasIncompleteTurnDeliveries(activeTurnAtExit.id) &&
+    !wasUserInterrupted;
+
+  // A runtime can exit while the Turn is still recoverable. Keep that Turn's
+  // existing Feishu card registered so the replacement runtime continues to
+  // update the same message instead of completing it and creating a second
+  // card. Only terminal Turn outcomes release the card slot.
+  if (hasUnfinishedAcceptedWork) {
+    markProgressSessionRecoveringForFolder(folder);
+  } else if (wasUserInterrupted) {
     await finalizeProgressSessionsForFolder(folder, 'abort', '已中断');
   } else if (isErrorExit) {
     await finalizeProgressSessionsForFolder(folder, 'fail', runnerErrorDetail);
@@ -3700,11 +3723,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   broadcastRunnerState(chatJid, 'idle');
 
   // --- Turn lifecycle: complete/fail turn and save trace ---
-  const activeTurnAtExit = turnManager.getActiveTurn(folder);
-  const hasUnfinishedAcceptedWork =
-    !!activeTurnAtExit &&
-    hasIncompleteTurnDeliveries(activeTurnAtExit.id) &&
-    !wasInterrupted;
   if (activeTurnAtExit && hasUnfinishedAcceptedWork) {
     turnManager.markRecoverable(folder, runnerErrorDetail);
     logger.warn(
@@ -3717,7 +3735,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     );
   } else if (activeTurnAtExit) {
     const isDrained = output.status === 'drained';
-    const isInterrupted = wasInterrupted;
+    const isInterrupted = wasUserInterrupted;
     finalizeCurrentTurn(
       isInterrupted
         ? 'interrupted'
@@ -7391,6 +7409,41 @@ async function main(): Promise<void> {
   queue.setOnMaxRetriesExceeded((groupJid: string) => {
     const group = registeredGroups[groupJid];
     const name = group?.name || groupJid;
+    const folder = resolveGroupFolder(groupJid);
+    const activeTurn = turnManager.getActiveTurn(folder);
+    if (activeTurn) {
+      // Stop treating exhausted accepted deliveries as live ownership. Leave
+      // their message cursor uncommitted so a later incoming message can retry
+      // them in a fresh Turn, but close this Turn and its progress card now.
+      discardPendingIpcCursorCommitsForFolder(folder);
+      const incompleteDeliveryIds = getTurnDeliveries(activeTurn.id)
+        .filter((delivery) => delivery.status !== 'completed')
+        .map((delivery) => delivery.delivery_id);
+      updateTurnDeliveryStatus(incompleteDeliveryIds, 'queued', {
+        allowAcceptedReplay: true,
+      });
+      const detail = `${name} 处理失败，已达最大重试次数`;
+      turnObservabilityManager.setRunnerState(
+        folder,
+        'error',
+        detail,
+        activeTurn,
+      );
+      broadcastTurnEvent(groupJid, {
+        eventType: 'turn_completed',
+        turnId: activeTurn.id,
+        turnStatus: 'error',
+        turnChannel: activeTurn.channel,
+        turnMessageCount: activeTurn.messageIds.length,
+      });
+      turnManager.failTurn(folder, detail);
+      turnObservabilityManager.clear(folder);
+      void finalizeProgressSessionsForFolder(
+        folder,
+        'fail',
+        detail,
+      );
+    }
     sendSystemMessage(
       groupJid,
       'agent_max_retries',

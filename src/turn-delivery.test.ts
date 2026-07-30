@@ -45,6 +45,24 @@ try {
   db.updateTurnDeliveryStatus(['delivery-1'], 'completed');
   db.updateTurnDeliveryStatus(['delivery-1'], 'queued');
   assert.equal(db.getTurnDelivery('delivery-1')?.status, 'completed');
+
+  db.ensureTurnDelivery({
+    deliveryId: 'delivery-exhausted',
+    turnId: 'turn-1',
+    chatJid: 'web:test',
+    groupFolder: 'test',
+    maxRowid: 8,
+    messageIds: ['message-2'],
+    status: 'accepted',
+  });
+  db.updateTurnDeliveryStatus(['delivery-exhausted'], 'queued', {
+    allowAcceptedReplay: true,
+  });
+  assert.equal(
+    db.getTurnDelivery('delivery-exhausted')?.status,
+    'queued',
+    'retry exhaustion must release accepted work for a later fresh Turn',
+  );
   assert.deepEqual(db.getCompletedTurnDeliveryCursors(), [
     { chat_jid: 'web:test', max_rowid: 7 },
   ]);
