@@ -26,4 +26,35 @@ assert.deepEqual(tracker.latestTextSince('main', baseline), {
 assert.equal(tracker.latestTextSince('main', 3), undefined);
 assert.equal(tracker.snapshot('worker'), 0);
 
+const turnBaseline = tracker.snapshot('long-lived');
+tracker.mark('long-lived', {
+  messageId: 'outbound:old-turn',
+  chatJid: 'web:main',
+  text: '上一轮回复',
+  turnId: 'turn-1',
+});
+
+assert.equal(
+  tracker.latestTextSince('long-lived', turnBaseline, 'turn-2'),
+  undefined,
+);
+
+tracker.mark('long-lived', {
+  messageId: 'outbound:current-turn',
+  chatJid: 'web:main',
+  text: '当前轮回复',
+  turnId: 'turn-2',
+});
+
+assert.deepEqual(
+  tracker.latestTextSince('long-lived', turnBaseline, 'turn-2'),
+  {
+    sequence: 2,
+    messageId: 'outbound:current-turn',
+    chatJid: 'web:main',
+    text: '当前轮回复',
+    turnId: 'turn-2',
+  },
+);
+
 console.log('durable outbound tracker tests passed');

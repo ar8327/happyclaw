@@ -346,7 +346,12 @@ const durableOutboundTracker = new DurableOutboundTracker();
 
 function markDurableOutboundAcceptance(
   runtimeKey: string,
-  textRecord?: { messageId: string; chatJid: string; text: string },
+  textRecord?: {
+    messageId: string;
+    chatJid: string;
+    text: string;
+    turnId?: string;
+  },
 ): void {
   durableOutboundTracker.mark(runtimeKey, textRecord);
 }
@@ -3046,8 +3051,31 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     } else if (status === 'error') {
       turnManager.failTurn(folder, options?.errorDetail);
     } else {
+      let resultMessageId = lastReplyMsgId;
+      if (resultMessageId) {
+        const resultMessage = getMessageById(resultMessageId, chatJid);
+        const resultTimestamp = resultMessage
+          ? Date.parse(resultMessage.timestamp)
+          : Number.NaN;
+        if (
+          !resultMessage ||
+          !Number.isFinite(resultTimestamp) ||
+          resultTimestamp < activeTurn.startedAt
+        ) {
+          logger.warn(
+            {
+              turnId: activeTurn.id,
+              resultMessageId,
+              turnStartedAt: new Date(activeTurn.startedAt).toISOString(),
+              resultTimestamp: resultMessage?.timestamp,
+            },
+            'Ignoring stale result message from an earlier turn',
+          );
+          resultMessageId = undefined;
+        }
+      }
       turnManager.completeTurn(folder, {
-        resultMessageId: lastReplyMsgId,
+        resultMessageId,
         summary: undefined,
         traceFile,
       });
@@ -3240,6 +3268,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           ) {
             lastTurnCompletedSuccessfully = false;
             markIpcCursorReceived(se.ipcDeliveryIds || []);
+            // A long-lived runtime can serve many Turns. Establish a fresh
+            // outbound boundary before the new Turn can call send_message,
+            // and never let the previous Turn's result ID leak forward.
+            canonicalResultCursor = durableOutboundTracker.snapshot(folder);
+            lastReplyMsgId = undefined;
             // The agent just consumed a new user message — it owes a fresh
             // send_message. Reset the flag so the silent-success fallback
             // also covers messages injected mid-turn.
@@ -3473,9 +3506,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             // Stop typing indicator before sending — clears the 4s refresh timer
             // so it doesn't keep firing while the agent stays alive in idle state.
             await setTyping(chatJid, false);
+            const activeTurn = turnManager.getActiveTurn(folder);
             const canonicalOutbound = durableOutboundTracker.latestTextSince(
               folder,
               canonicalResultCursor,
+              activeTurn?.id,
             );
             if (canonicalOutbound?.chatJid === chatJid) {
               // send_message already persisted the exact user-visible reply.
@@ -3491,15 +3526,23 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 'Reused explicit outbound message as canonical turn result',
               );
             } else {
+              const resultSourceChannel = activeTurn?.channel || sourceChannel;
+              const resultSourceChannelType =
+                getChannelType(resultSourceChannel);
+              const resultFeishuOptions = buildFeishuCardOptionsForSource({
+                chatJid,
+                sourceChannel: resultSourceChannel,
+                folder,
+              });
               // No explicit outbound exists, so stdout becomes the canonical
               // result. Keep the Web copy and, when the triggering source is
               // an IM channel, durably deliver the same result back to that
               // source/thread.
               lastReplyMsgId = await sendMessage(chatJid, text, {
                 ...buildCanonicalFallbackRoute({
-                  sourceChannel,
-                  sourceChannelType,
-                  imOptions: sourceFeishuOptions,
+                  sourceChannel: resultSourceChannel,
+                  sourceChannelType: resultSourceChannelType,
+                  imOptions: resultFeishuOptions,
                 }),
               });
               canonicalResultCursor = durableOutboundTracker.snapshot(folder);
@@ -4474,6 +4517,7 @@ function startIpcWatcher(): void {
                       messageId: canonicalMessageId,
                       chatJid: data.chatJid,
                       text: data.text,
+                      turnId: turnManager.getActiveTurn(sourceGroup)?.id,
                     });
                     if (deliveryRequestId) {
                       writeIpcResponseFile(ipcRoot, {
