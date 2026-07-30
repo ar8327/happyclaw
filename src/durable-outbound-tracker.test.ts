@@ -44,16 +44,41 @@ tracker.mark('long-lived', {
   chatJid: 'web:main',
   text: '当前轮回复',
   turnId: 'turn-2',
+  targetChannel: 'feishu:oc_other',
+});
+
+assert.equal(
+  tracker.latestTextSince(
+    'long-lived',
+    turnBaseline,
+    'turn-2',
+    'feishu:oc_current',
+  ),
+  undefined,
+);
+
+tracker.mark('long-lived', {
+  messageId: 'outbound:current-source',
+  chatJid: 'web:main',
+  text: '当前来源回复',
+  turnId: 'turn-2',
+  targetChannel: 'feishu:oc_current',
 });
 
 assert.deepEqual(
-  tracker.latestTextSince('long-lived', turnBaseline, 'turn-2'),
+  tracker.latestTextSince(
+    'long-lived',
+    turnBaseline,
+    'turn-2',
+    'feishu:oc_current',
+  ),
   {
-    sequence: 2,
-    messageId: 'outbound:current-turn',
+    sequence: 3,
+    messageId: 'outbound:current-source',
     chatJid: 'web:main',
-    text: '当前轮回复',
+    text: '当前来源回复',
     turnId: 'turn-2',
+    targetChannel: 'feishu:oc_current',
   },
 );
 

@@ -108,7 +108,10 @@ import {
   type IMRouteContext,
   type IMSendOptions,
 } from './im-channel.js';
-import { buildCanonicalFallbackRoute } from './canonical-fallback-routing.js';
+import {
+  buildCanonicalFallbackRoute,
+  selectLatestCanonicalFallbackSource,
+} from './canonical-fallback-routing.js';
 import {
   applyFeishuConversationMode,
   hasFeishuThreadContext,
@@ -351,6 +354,7 @@ function markDurableOutboundAcceptance(
     chatJid: string;
     text: string;
     turnId?: string;
+    targetChannel?: string;
   },
 ): void {
   durableOutboundTracker.mark(runtimeKey, textRecord);
@@ -627,6 +631,62 @@ function markIpcCursorReceived(deliveryIds: Iterable<string>): void {
     entry.ipcFilePath = null;
     armReceivedIpcLease(deliveryId, entry);
   }
+}
+
+interface AckedFallbackRoute {
+  sourceChannel: string;
+  sourceChannelType: ReturnType<typeof getChannelType>;
+  imOptions?: IMSendOptions;
+}
+
+function resolveAckedFallbackRoute(
+  deliveryIds: Iterable<string>,
+  groupFolder: string,
+): AckedFallbackRoute | undefined {
+  const messagesById = new Map<string, DbMessage>();
+  for (const deliveryId of new Set(deliveryIds)) {
+    const delivery = getTurnDelivery(deliveryId);
+    if (!delivery || delivery.group_folder !== groupFolder) continue;
+    let messageIds: string[] = [];
+    try {
+      const parsed = JSON.parse(delivery.message_ids);
+      if (Array.isArray(parsed)) {
+        messageIds = parsed.filter(
+          (messageId): messageId is string => typeof messageId === 'string',
+        );
+      }
+    } catch (err) {
+      logger.warn(
+        { err, deliveryId },
+        'Failed to parse message IDs for acknowledged IPC delivery',
+      );
+    }
+    for (const messageId of messageIds) {
+      const message = getMessageById(messageId, delivery.chat_jid);
+      if (message) messagesById.set(message.id, message);
+    }
+  }
+
+  const source = selectLatestCanonicalFallbackSource([
+    ...messagesById.values(),
+  ]);
+  if (!source) return undefined;
+  const sourceChannelType = getChannelType(source.sourceChannel);
+  const imOptions = applyFeishuThreadModeForTarget({
+    targetChannel: source.sourceChannel,
+    sourceGroup: groupFolder,
+    trigger: {
+      id: source.messageId,
+      replyToId: source.replyToId,
+      threadId: source.threadId,
+      rootId: source.rootId,
+    },
+  });
+  return {
+    sourceChannel: source.sourceChannel,
+    sourceChannelType,
+    imOptions: Object.keys(imOptions).length > 0 ? imOptions : undefined,
+  };
 }
 
 function markIpcCursorAccepted(deliveryIds: Iterable<string>): void {
@@ -3168,6 +3228,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     sourceChannel,
     folder: effectiveGroup.folder,
   });
+  let fallbackRoute: {
+    sourceChannel: string | null;
+    sourceChannelType: ReturnType<typeof getChannelType>;
+    imOptions?: IMSendOptions;
+  } = {
+    sourceChannel,
+    sourceChannelType,
+    imOptions: sourceFeishuOptions,
+  };
   if (
     ownerUserId &&
     sourceChannelType === 'feishu' &&
@@ -3268,6 +3337,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           ) {
             lastTurnCompletedSuccessfully = false;
             markIpcCursorReceived(se.ipcDeliveryIds || []);
+            const ackedFallbackRoute = resolveAckedFallbackRoute(
+              se.ipcDeliveryIds || [],
+              folder,
+            );
+            if (ackedFallbackRoute) {
+              fallbackRoute = ackedFallbackRoute;
+            }
             // A long-lived runtime can serve many Turns. Establish a fresh
             // outbound boundary before the new Turn can call send_message,
             // and never let the previous Turn's result ID leak forward.
@@ -3511,6 +3587,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               folder,
               canonicalResultCursor,
               activeTurn?.id,
+              fallbackRoute.sourceChannel || undefined,
             );
             if (canonicalOutbound?.chatJid === chatJid) {
               // send_message already persisted the exact user-visible reply.
@@ -3526,23 +3603,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 'Reused explicit outbound message as canonical turn result',
               );
             } else {
-              const resultSourceChannel = activeTurn?.channel || sourceChannel;
-              const resultSourceChannelType =
-                getChannelType(resultSourceChannel);
-              const resultFeishuOptions = buildFeishuCardOptionsForSource({
-                chatJid,
-                sourceChannel: resultSourceChannel,
-                folder,
-              });
               // No explicit outbound exists, so stdout becomes the canonical
               // result. Keep the Web copy and, when the triggering source is
               // an IM channel, durably deliver the same result back to that
               // source/thread.
               lastReplyMsgId = await sendMessage(chatJid, text, {
                 ...buildCanonicalFallbackRoute({
-                  sourceChannel: resultSourceChannel,
-                  sourceChannelType: resultSourceChannelType,
-                  imOptions: resultFeishuOptions,
+                  sourceChannel: fallbackRoute.sourceChannel,
+                  sourceChannelType: fallbackRoute.sourceChannelType,
+                  imOptions: fallbackRoute.imOptions,
                 }),
               });
               canonicalResultCursor = durableOutboundTracker.snapshot(folder);
@@ -4518,6 +4587,7 @@ function startIpcWatcher(): void {
                       chatJid: data.chatJid,
                       text: data.text,
                       turnId: turnManager.getActiveTurn(sourceGroup)?.id,
+                      targetChannel: data.targetChannel,
                     });
                     if (deliveryRequestId) {
                       writeIpcResponseFile(ipcRoot, {
