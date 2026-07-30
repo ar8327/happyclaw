@@ -77,6 +77,24 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.deepEqual(created, ['A']);
 
+  progress.markProgressSessionRecoveringForFolder('shared-folder');
+  assert.equal(
+    progress.hasProgressSession('shared-folder'),
+    true,
+    'a recoverable runtime exit must keep the current Turn card registered',
+  );
+  assert.equal(
+    progress.claimProgressSession('feishu:chat-b', cardB, 'shared-folder'),
+    false,
+    'the replacement runtime must reuse the current Turn card',
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(
+    created,
+    ['A'],
+    'runtime recovery must not create a second Feishu card',
+  );
+
   await progress.completeAndResetProgressSessionsForFolder('shared-folder');
   assert.equal(
     progress.hasProgressSession('shared-folder'),
