@@ -36,6 +36,7 @@ interface OAuthStatus {
   scopes?: string;
   tokenExpired?: boolean;
   hasRefreshToken?: boolean;
+  scopeUpgradeRequired?: boolean;
 }
 
 function RedirectUrlHint() {
@@ -366,7 +367,8 @@ export function FeishuChannelCard({
                 </h4>
               </div>
               <p className="text-xs text-muted-foreground mb-3">
-                授权后，Agent 可以直接读取你有权限访问的飞书文档和 Wiki 页面。
+                授权后，Agent 可以直接读取你有权限访问的飞书文档、Wiki
+                页面和电子表格。
               </p>
 
               {oauthStatus?.authorized ? (
@@ -384,17 +386,38 @@ export function FeishuChannelCard({
                       </span>
                     )}
                   </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleOAuthRevoke}
-                    disabled={oauthLoading}
-                  >
-                    {oauthLoading && (
-                      <Loader2 className="size-3 animate-spin" />
+                  {oauthStatus.scopeUpgradeRequired && (
+                    <div className="rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-warning">
+                      当前授权缺少电子表格只读权限，请更新授权后再读取 Sheet。
+                    </div>
+                  )}
+                  <div className="flex flex-wrap gap-2">
+                    {oauthStatus.scopeUpgradeRequired && (
+                      <Button
+                        size="sm"
+                        onClick={handleOAuthAuthorize}
+                        disabled={oauthLoading}
+                      >
+                        {oauthLoading ? (
+                          <Loader2 className="size-3 animate-spin" />
+                        ) : (
+                          <ExternalLink className="size-3" />
+                        )}
+                        更新授权
+                      </Button>
                     )}
-                    撤销授权
-                  </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleOAuthRevoke}
+                      disabled={oauthLoading}
+                    >
+                      {oauthLoading && (
+                        <Loader2 className="size-3 animate-spin" />
+                      )}
+                      撤销授权
+                    </Button>
+                  </div>
                 </div>
               ) : (
                 <div className="space-y-2">

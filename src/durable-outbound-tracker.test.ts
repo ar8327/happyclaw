@@ -26,4 +26,60 @@ assert.deepEqual(tracker.latestTextSince('main', baseline), {
 assert.equal(tracker.latestTextSince('main', 3), undefined);
 assert.equal(tracker.snapshot('worker'), 0);
 
+const turnBaseline = tracker.snapshot('long-lived');
+tracker.mark('long-lived', {
+  messageId: 'outbound:old-turn',
+  chatJid: 'web:main',
+  text: '上一轮回复',
+  turnId: 'turn-1',
+});
+
+assert.equal(
+  tracker.latestTextSince('long-lived', turnBaseline, 'turn-2'),
+  undefined,
+);
+
+tracker.mark('long-lived', {
+  messageId: 'outbound:current-turn',
+  chatJid: 'web:main',
+  text: '当前轮回复',
+  turnId: 'turn-2',
+  targetChannel: 'feishu:oc_other',
+});
+
+assert.equal(
+  tracker.latestTextSince(
+    'long-lived',
+    turnBaseline,
+    'turn-2',
+    'feishu:oc_current',
+  ),
+  undefined,
+);
+
+tracker.mark('long-lived', {
+  messageId: 'outbound:current-source',
+  chatJid: 'web:main',
+  text: '当前来源回复',
+  turnId: 'turn-2',
+  targetChannel: 'feishu:oc_current',
+});
+
+assert.deepEqual(
+  tracker.latestTextSince(
+    'long-lived',
+    turnBaseline,
+    'turn-2',
+    'feishu:oc_current',
+  ),
+  {
+    sequence: 3,
+    messageId: 'outbound:current-source',
+    chatJid: 'web:main',
+    text: '当前来源回复',
+    turnId: 'turn-2',
+    targetChannel: 'feishu:oc_current',
+  },
+);
+
 console.log('durable outbound tracker tests passed');
