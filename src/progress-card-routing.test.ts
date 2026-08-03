@@ -226,6 +226,73 @@ try {
   );
   await progress.completeAndResetProgressSessionsForFolder('retry-folder');
 
+  // Once created, transient patch failures must keep retrying at a bounded
+  // cadence. The old implementation stopped forever after three failures,
+  // leaving a healthy Turn behind a frozen card.
+  let transientPatchAttempts = 0;
+  let recoveredPatchContent = '';
+  const patchRecoveryCard = new progress.ProgressCardController({
+    client: {
+      im: {
+        message: {
+          reply: async () => ({
+            data: { message_id: 'message-patch-recovery' },
+          }),
+        },
+        v1: {
+          message: {
+            patch: async (request: { data: { content: string } }) => {
+              transientPatchAttempts++;
+              if (transientPatchAttempts <= 3) {
+                throw Object.assign(
+                  new Error('Request failed with status 504'),
+                  {
+                    code: 'ERR_BAD_RESPONSE',
+                    response: { status: 504 },
+                  },
+                );
+              }
+              recoveredPatchContent = request.data.content;
+              return {};
+            },
+            delete: async () => ({}),
+          },
+        },
+      },
+    } as unknown as lark.Client,
+    chatId: 'patch-recovery-chat',
+    replyToMsgId: 'patch-recovery-trigger',
+    anchorFolder: 'patch-recovery-folder',
+    anchorSourceChannel: 'feishu:patch-recovery-chat',
+    flushIntervalMs: 0,
+    patchRetryBaseDelayMs: 1,
+    maxPatchRetryDelayMs: 2,
+  });
+  assert.equal(
+    progress.claimProgressSession(
+      'feishu:patch-recovery-chat',
+      patchRecoveryCard,
+      'patch-recovery-folder',
+    ),
+    true,
+  );
+  progress.feedProgressSessionsForFolder('patch-recovery-folder', {
+    eventType: 'tool_use_start',
+    toolUseId: 'patch-recovery-tool',
+    toolName: 'Bash',
+    toolInputSummary: 'gh run watch 30816272510',
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(
+    transientPatchAttempts,
+    4,
+    'the card must recover after more than three transient patch failures',
+  );
+  assert.match(recoveredPatchContent, /gh run watch 30816272510/);
+  await progress.completeAndResetProgressSessionsForFolder(
+    'patch-recovery-folder',
+  );
+
   let cancelledRetryAttempts = 0;
   const cancelledRetryCard = new progress.ProgressCardController({
     client: {

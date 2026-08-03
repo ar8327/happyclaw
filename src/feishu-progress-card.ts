@@ -12,6 +12,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'node:crypto';
 import { DATA_DIR } from './config.js';
+import {
+  isTransientFeishuApiError,
+  summarizeFeishuApiError,
+} from './feishu-api-error.js';
 import { logger } from './logger.js';
 import { shouldReplyInFeishuThread } from './feishu-conversation-mode.js';
 import type { StreamEvent } from './stream-event.types.js';
@@ -92,62 +96,6 @@ function isMissingProgressCardError(err: unknown): boolean {
   );
 }
 
-interface ProgressCardErrorSummary {
-  message: string;
-  code?: string;
-  status?: number;
-  larkCode?: number;
-  larkMessage?: string;
-}
-
-/** Keep SDK request headers and bearer tokens out of application logs. */
-function summarizeProgressCardError(err: unknown): ProgressCardErrorSummary {
-  const candidate =
-    err && typeof err === 'object'
-      ? (err as {
-          message?: unknown;
-          code?: unknown;
-          response?: {
-            status?: unknown;
-            data?: { code?: unknown; msg?: unknown };
-          };
-        })
-      : null;
-  const status = candidate?.response?.status;
-  const larkCode = candidate?.response?.data?.code;
-  const larkMessage = candidate?.response?.data?.msg;
-  return {
-    message:
-      typeof candidate?.message === 'string'
-        ? candidate.message
-        : err instanceof Error
-          ? err.message
-          : String(err),
-    ...(typeof candidate?.code === 'string' ? { code: candidate.code } : {}),
-    ...(typeof status === 'number' ? { status } : {}),
-    ...(typeof larkCode === 'number' ? { larkCode } : {}),
-    ...(typeof larkMessage === 'string' ? { larkMessage } : {}),
-  };
-}
-
-function isTransientProgressCardError(err: unknown): boolean {
-  const summary = summarizeProgressCardError(err);
-  if (summary.status !== undefined) {
-    return (
-      summary.status === 408 || summary.status === 429 || summary.status >= 500
-    );
-  }
-  return (
-    summary.message === 'No Lark client available' ||
-    summary.code === 'ECONNRESET' ||
-    summary.code === 'ECONNREFUSED' ||
-    summary.code === 'ETIMEDOUT' ||
-    summary.code === 'EAI_AGAIN' ||
-    summary.code === 'ERR_NETWORK' ||
-    summary.code === 'ERR_BAD_RESPONSE'
-  );
-}
-
 /** Delete progress cards left behind by an interrupted process. */
 export async function cleanupStaleProgressCards(
   clientResolver: () => lark.Client | undefined,
@@ -216,6 +164,12 @@ export interface ProgressCardOptions {
   createRetryBaseDelayMs?: number;
   /** Total create attempts, including the initial request. Defaults to 4. */
   maxCreateAttempts?: number;
+  /** Normal update throttle. Defaults to 2 seconds. */
+  flushIntervalMs?: number;
+  /** Initial delay after a transient patch failure. Defaults to 1 second. */
+  patchRetryBaseDelayMs?: number;
+  /** Maximum delay between transient patch retries. Defaults to 30 seconds. */
+  maxPatchRetryDelayMs?: number;
 }
 
 interface ActiveTool {
@@ -309,7 +263,6 @@ export class ProgressCardController {
     willRetry: boolean;
   };
   private patchFailCount = 0;
-  private readonly maxPatchFailures = 3;
   private createAttemptCount = 0;
   private createUuid = randomUUID();
 
@@ -317,7 +270,7 @@ export class ProgressCardController {
   private deleteTimer: ReturnType<typeof setTimeout> | null = null;
   private createRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private lastFlushTime = 0;
-  private readonly flushInterval = 2000; // 2s throttle
+  private readonly flushInterval: number;
 
   private client: lark.Client | undefined;
   private readonly clientResolver?: () => lark.Client | undefined;
@@ -333,6 +286,8 @@ export class ProgressCardController {
   private readonly completionDeleteDelayMs: number;
   private readonly createRetryBaseDelayMs: number;
   private readonly maxCreateAttempts: number;
+  private readonly patchRetryBaseDelayMs: number;
+  private readonly maxPatchRetryDelayMs: number;
   private stopActionId?: string;
 
   constructor(opts: ProgressCardOptions) {
@@ -353,6 +308,15 @@ export class ProgressCardController {
       opts.createRetryBaseDelayMs ?? 1_000,
     );
     this.maxCreateAttempts = Math.max(1, opts.maxCreateAttempts ?? 4);
+    this.flushInterval = Math.max(0, opts.flushIntervalMs ?? 2_000);
+    this.patchRetryBaseDelayMs = Math.max(
+      0,
+      opts.patchRetryBaseDelayMs ?? 1_000,
+    );
+    this.maxPatchRetryDelayMs = Math.max(
+      this.patchRetryBaseDelayMs,
+      opts.maxPatchRetryDelayMs ?? 30_000,
+    );
     this.registerStopAction();
   }
 
@@ -550,7 +514,7 @@ export class ProgressCardController {
         this.scheduleDelete(this.messageId);
       } catch (err) {
         logger.warn(
-          { error: summarizeProgressCardError(err) },
+          { error: summarizeFeishuApiError(err) },
           `Progress card: failed to patch completed | chatId=${this.chatId} messageId=${this.messageId}`,
         );
       }
@@ -591,7 +555,7 @@ export class ProgressCardController {
         );
       } catch (err) {
         logger.warn(
-          { error: summarizeProgressCardError(err) },
+          { error: summarizeFeishuApiError(err) },
           `Progress card: failed to patch aborted | chatId=${this.chatId}`,
         );
       }
@@ -632,7 +596,7 @@ export class ProgressCardController {
       } catch (err) {
         logger.warn(
           {
-            error: summarizeProgressCardError(err),
+            error: summarizeFeishuApiError(err),
             chatId: this.chatId,
             messageId: this.messageId,
           },
@@ -667,7 +631,7 @@ export class ProgressCardController {
       );
     } catch (err) {
       logger.warn(
-        { error: summarizeProgressCardError(err) },
+        { error: summarizeFeishuApiError(err) },
         `Progress card: force cleanup failed | chatId=${this.chatId}`,
       );
     }
@@ -788,7 +752,7 @@ export class ProgressCardController {
         } catch (err) {
           logger.warn(
             {
-              error: summarizeProgressCardError(err),
+              error: summarizeFeishuApiError(err),
               chatId: this.chatId,
               finalState,
             },
@@ -840,14 +804,14 @@ export class ProgressCardController {
       this.state === 'aborted' ||
       this.state === 'failed'
     ) {
-      if (isTransientProgressCardError(err)) {
+      if (isTransientFeishuApiError(err)) {
         void this.recoverTerminalCard(this.state);
       }
       return;
     }
     this.state = 'error';
     const willRetry =
-      isTransientProgressCardError(err) &&
+      isTransientFeishuApiError(err) &&
       this.createAttemptCount < this.maxCreateAttempts;
     const delayMs = willRetry
       ? this.createRetryBaseDelayMs *
@@ -855,7 +819,7 @@ export class ProgressCardController {
       : undefined;
     logger.warn(
       {
-        error: summarizeProgressCardError(err),
+        error: summarizeFeishuApiError(err),
         chatId: this.chatId,
         attempt: this.createAttemptCount,
         maxAttempts: this.maxCreateAttempts,
@@ -898,7 +862,7 @@ export class ProgressCardController {
     } catch (err) {
       logger.warn(
         {
-          error: summarizeProgressCardError(err),
+          error: summarizeFeishuApiError(err),
           chatId: this.chatId,
           displayState,
         },
@@ -907,29 +871,43 @@ export class ProgressCardController {
     }
   }
 
-  private scheduleFlush(): void {
+  private scheduleFlush(minDelayMs = 0): void {
     if (this.flushTimer) return; // already scheduled
-    if (this.patchFailCount >= this.maxPatchFailures) return;
 
     const elapsed = Date.now() - this.lastFlushTime;
-    const delay = Math.max(0, this.flushInterval - elapsed);
+    const delay = Math.max(minDelayMs, 0, this.flushInterval - elapsed);
 
     this.flushTimer = setTimeout(async () => {
       this.flushTimer = null;
       if (this.state !== 'active' || !this.messageId) return;
 
       this.dirty = false;
+      let retryDelayMs = 0;
       try {
         await this.patchCard('active');
         this.lastFlushTime = Date.now();
         this.patchFailCount = 0;
       } catch (err) {
         this.patchFailCount++;
-        logger.debug(
+        const willRetry = isTransientFeishuApiError(err);
+        if (willRetry) {
+          retryDelayMs = Math.min(
+            this.maxPatchRetryDelayMs,
+            this.patchRetryBaseDelayMs *
+              Math.pow(2, Math.min(10, this.patchFailCount - 1)),
+          );
+          // Preserve the latest accumulated state even when no new runner
+          // event arrives while Lark is unavailable. The capped retry delay
+          // acts as a circuit breaker without permanently freezing the card.
+          this.dirty = true;
+        }
+        logger.warn(
           {
-            error: summarizeProgressCardError(err),
+            error: summarizeFeishuApiError(err),
             chatId: this.chatId,
             failCount: this.patchFailCount,
+            willRetry,
+            retryDelayMs: willRetry ? retryDelayMs : undefined,
           },
           'Progress card: patch failed',
         );
@@ -937,9 +915,10 @@ export class ProgressCardController {
 
       // If more events arrived during flush, schedule again
       if (this.dirty && this.state === 'active') {
-        this.scheduleFlush();
+        this.scheduleFlush(retryDelayMs);
       }
     }, delay);
+    this.flushTimer.unref?.();
   }
 
   private async patchCard(displayState: ProgressDisplayState): Promise<void> {
