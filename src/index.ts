@@ -116,12 +116,14 @@ import {
 import {
   applyFeishuConversationMode,
   hasFeishuThreadContext,
+  shouldProcessUnmentionedFeishuGroupMessage,
   type FeishuConversationMode,
   type FeishuThreadSource,
 } from './feishu-conversation-mode.js';
 import {
   buildFeishuTopicIdentity,
   resolveFeishuTopicAnchor,
+  resolveFeishuTopicAnchorCandidates,
 } from './feishu-topic-session.js';
 import { buildFeishuTopicNameSuffix } from './feishu-topic-title.js';
 import { abortAllStreamingSessions } from './feishu-streaming-card.js';
@@ -6651,23 +6653,37 @@ function buildOnAgentMessage(): (baseChatJid: string, agentId: string) => void {
  * Mention gating callback: when bot is NOT @mentioned in a group chat,
  * return true to process the message anyway, false to drop it.
  */
-function shouldProcessGroupMessage(chatJid: string): boolean {
-  const policy = getChatBindingPolicy(chatJid);
-
-  // activation_mode 优先于 require_mention
-  const mode = policy.activationMode;
-  switch (mode) {
-    case 'always':
-      return true; // 群聊不需要 @bot
-    case 'when_mentioned':
-      return false; // 必须 @bot
-    case 'disabled':
-      return false; // 忽略所有消息（在调用方处理 disabled 的 DM 忽略）
-    case 'auto':
-    default:
-      // 兼容旧行为：require_mention defaults to false; if true → only process @mentions
-      return policy.requireMention !== true;
+function hasExistingFeishuTopicSession(
+  chatJid: string,
+  context?: IMRouteContext,
+): boolean {
+  if (!chatJid.startsWith('feishu:') || context?.chatType === 'p2p') {
+    return false;
   }
+  for (const anchor of resolveFeishuTopicAnchorCandidates(context)) {
+    const identity = buildFeishuTopicIdentity(chatJid, anchor);
+    const topic =
+      registeredGroups[identity.jid] ?? getRegisteredGroup(identity.jid);
+    if (
+      topic?.folder === identity.folder &&
+      getSessionRecord(`main:${identity.folder}`)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function shouldProcessGroupMessage(
+  chatJid: string,
+  context?: IMRouteContext,
+): boolean {
+  const policy = getChatBindingPolicy(chatJid);
+  return shouldProcessUnmentionedFeishuGroupMessage({
+    activationMode: policy.activationMode,
+    requireMention: policy.requireMention,
+    hasExistingTopic: hasExistingFeishuTopicSession(chatJid, context),
+  });
 }
 
 /**

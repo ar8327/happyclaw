@@ -81,7 +81,10 @@ export interface IMChannelConnectOpts {
   /** Bot 被移出群聊或群被解散时调用 */
   onBotRemovedFromGroup?: (chatJid: string) => void;
   /** 群聊消息过滤：bot 未被 @mention 时调用，返回 true 则处理，false 则丢弃 */
-  shouldProcessGroupMessage?: (chatJid: string) => boolean;
+  shouldProcessGroupMessage?: (
+    chatJid: string,
+    context?: IMRouteContext,
+  ) => boolean;
   /** 中断 fast-path：消息到达时立即检测中断意图，绕过轮询延迟直接触发中断 */
   onInterruptRequest?: (chatJid: string, intent: 'stop' | 'correction') => void;
 }
