@@ -73,7 +73,10 @@ export interface ConnectOptions {
   /** Bot 被移出群聊或群被解散时调用（自动解绑 IM 绑定） */
   onBotRemovedFromGroup?: (chatJid: string) => void;
   /** 群聊消息过滤：bot 未被 @mention 时调用，返回 true 则处理，false 则丢弃 */
-  shouldProcessGroupMessage?: (chatJid: string) => boolean;
+  shouldProcessGroupMessage?: (
+    chatJid: string,
+    context?: IMRouteContext,
+  ) => boolean;
   /** 中断 fast-path：消息到达时立即检测中断意图，绕过轮询延迟直接触发中断 */
   onInterruptRequest?: (chatJid: string, intent: 'stop' | 'correction') => void;
 }
@@ -1042,6 +1045,29 @@ export function createFeishuConnection(
       chatName: resolvedChatName,
       messageText: text,
     };
+
+    // Apply mention gating before topic projection and attachment download.
+    // An established AgentDock topic may opt in through routeContext, while
+    // unrelated group threads remain invisible to the bot.
+    if (chatType === 'group' && shouldProcessGroupMessage) {
+      const isBotMentioned = isFeishuBotMentioned(mentions, botOpenId);
+      if (
+        !isBotMentioned &&
+        !shouldProcessGroupMessage(chatJid, routeContext)
+      ) {
+        logger.debug(
+          {
+            chatJid,
+            messageId,
+            threadId: routeContext.threadId,
+            rootId: routeContext.rootId,
+          },
+          'Dropped group message: mention required but bot not mentioned',
+        );
+        return;
+      }
+    }
+
     const agentRouting = resolveEffectiveChatJid?.(chatJid, routeContext);
     const targetJid = agentRouting?.effectiveJid ?? chatJid;
     const targetAgentId = agentRouting?.agentId;
@@ -1205,19 +1231,6 @@ export function createFeishuConnection(
             'Failed to send slash command error feedback',
           );
         }
-        return;
-      }
-    }
-
-    // ── 群聊 Mention 过滤：require_mention 模式下，bot 未被 @ 则丢弃 ──
-    if (chatType === 'group' && shouldProcessGroupMessage) {
-      // 无 bot open_id 时至少要求存在 @mention，不能退化为全量响应。
-      const isBotMentioned = isFeishuBotMentioned(mentions, botOpenId);
-      if (!isBotMentioned && !shouldProcessGroupMessage(chatJid)) {
-        logger.debug(
-          { chatJid, messageId },
-          'Dropped group message: mention required but bot not mentioned',
-        );
         return;
       }
     }

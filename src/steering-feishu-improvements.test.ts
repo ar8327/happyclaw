@@ -421,6 +421,7 @@ async function testPersistentConnectionCardAction(): Promise<void> {
 
 async function testFailureCardCreatedBeforeProgressEvents(): Promise<void> {
   let sentCard: Record<string, unknown> | undefined;
+  let patchedCard: Record<string, unknown> | undefined;
   const client = {
     im: {
       message: {
@@ -434,8 +435,9 @@ async function testFailureCardCreatedBeforeProgressEvents(): Promise<void> {
             sentCard = JSON.parse(payload.data.content);
             return { data: { message_id: 'failed-card-1' } };
           },
-          patch: async () => {
-            throw new Error('unexpected patch');
+          patch: async (payload: { data: { content: string } }) => {
+            patchedCard = JSON.parse(payload.data.content);
+            return {};
           },
           delete: async () => ({ code: 0 }),
         },
@@ -457,6 +459,11 @@ async function testFailureCardCreatedBeforeProgressEvents(): Promise<void> {
     'red',
   );
   assert.match(JSON.stringify(sentCard), /token expired/);
+  assert.equal(
+    (patchedCard?.header as { template?: string } | undefined)?.template,
+    'red',
+    'terminal reconciliation must explicitly patch the recovered card',
+  );
   controller.dispose();
 }
 

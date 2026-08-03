@@ -6085,6 +6085,29 @@ export function getCompletedTurnDeliveryCursors(): Array<{
     .all() as Array<{ chat_jid: string; max_rowid: number }>;
 }
 
+/**
+ * Reconcile stale delivery rows after the same messages have been completed by
+ * a newer Turn. The per-chat cursor is monotonic, so every delivery ending at
+ * or before a completed cursor is already durably consumed.
+ */
+export function completeCoveredTurnDeliveries(
+  chatJid: string,
+  maxRowid: number,
+): number {
+  const now = new Date().toISOString();
+  return db
+    .prepare(
+      `UPDATE turn_deliveries
+          SET status = 'completed',
+              completed_at = COALESCE(completed_at, ?),
+              updated_at = ?
+        WHERE chat_jid = ?
+          AND max_rowid <= ?
+          AND status != 'completed'`,
+    )
+    .run(now, now, chatJid, maxRowid).changes;
+}
+
 export function getTurnsByJid(
   chatJid: string,
   limit: number = 50,

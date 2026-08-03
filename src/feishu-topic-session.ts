@@ -16,11 +16,21 @@ export function resolveFeishuTopicAnchor(
 ): string | null {
   // thread_id is the stable identifier shared by the initial topic event and
   // its replies. Older events may only expose root/parent/message IDs.
-  return (
-    cleanId(context?.threadId) ||
-    cleanId(context?.rootId) ||
-    cleanId(context?.parentId) ||
-    cleanId(context?.messageId)
+  return resolveFeishuTopicAnchorCandidates(context)[0] ?? null;
+}
+
+export function resolveFeishuTopicAnchorCandidates(
+  context?: FeishuTopicRouteContext,
+): string[] {
+  return Array.from(
+    new Set(
+      [
+        cleanId(context?.threadId),
+        cleanId(context?.rootId),
+        cleanId(context?.parentId),
+        cleanId(context?.messageId),
+      ].filter((value): value is string => Boolean(value)),
+    ),
   );
 }
 

@@ -12,6 +12,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'node:crypto';
 import { DATA_DIR } from './config.js';
+import {
+  isTransientFeishuApiError,
+  summarizeFeishuApiError,
+} from './feishu-api-error.js';
 import { logger } from './logger.js';
 import { shouldReplyInFeishuThread } from './feishu-conversation-mode.js';
 import type { StreamEvent } from './stream-event.types.js';
@@ -156,6 +160,16 @@ export interface ProgressCardOptions {
   anchorSourceChannel?: string;
   /** Delay before a successful Turn card is withdrawn. Defaults to 15 seconds. */
   completionDeleteDelayMs?: number;
+  /** Initial delay for transient create retries. Defaults to 1 second. */
+  createRetryBaseDelayMs?: number;
+  /** Total create attempts, including the initial request. Defaults to 4. */
+  maxCreateAttempts?: number;
+  /** Normal update throttle. Defaults to 2 seconds. */
+  flushIntervalMs?: number;
+  /** Initial delay after a transient patch failure. Defaults to 1 second. */
+  patchRetryBaseDelayMs?: number;
+  /** Maximum delay between transient patch retries. Defaults to 30 seconds. */
+  maxPatchRetryDelayMs?: number;
 }
 
 interface ActiveTool {
@@ -249,12 +263,14 @@ export class ProgressCardController {
     willRetry: boolean;
   };
   private patchFailCount = 0;
-  private readonly maxPatchFailures = 3;
+  private createAttemptCount = 0;
+  private createUuid = randomUUID();
 
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private deleteTimer: ReturnType<typeof setTimeout> | null = null;
+  private createRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private lastFlushTime = 0;
-  private readonly flushInterval = 2000; // 2s throttle
+  private readonly flushInterval: number;
 
   private client: lark.Client | undefined;
   private readonly clientResolver?: () => lark.Client | undefined;
@@ -268,6 +284,10 @@ export class ProgressCardController {
   private readonly anchorFolder?: string;
   private readonly anchorSourceChannel?: string;
   private readonly completionDeleteDelayMs: number;
+  private readonly createRetryBaseDelayMs: number;
+  private readonly maxCreateAttempts: number;
+  private readonly patchRetryBaseDelayMs: number;
+  private readonly maxPatchRetryDelayMs: number;
   private stopActionId?: string;
 
   constructor(opts: ProgressCardOptions) {
@@ -283,6 +303,20 @@ export class ProgressCardController {
     this.anchorFolder = opts.anchorFolder;
     this.anchorSourceChannel = opts.anchorSourceChannel;
     this.completionDeleteDelayMs = opts.completionDeleteDelayMs ?? 15_000;
+    this.createRetryBaseDelayMs = Math.max(
+      0,
+      opts.createRetryBaseDelayMs ?? 1_000,
+    );
+    this.maxCreateAttempts = Math.max(1, opts.maxCreateAttempts ?? 4);
+    this.flushInterval = Math.max(0, opts.flushIntervalMs ?? 2_000);
+    this.patchRetryBaseDelayMs = Math.max(
+      0,
+      opts.patchRetryBaseDelayMs ?? 1_000,
+    );
+    this.maxPatchRetryDelayMs = Math.max(
+      this.patchRetryBaseDelayMs,
+      opts.maxPatchRetryDelayMs ?? 30_000,
+    );
     this.registerStopAction();
   }
 
@@ -325,8 +359,7 @@ export class ProgressCardController {
     if (
       this.state === 'completed' ||
       this.state === 'aborted' ||
-      this.state === 'failed' ||
-      this.state === 'error'
+      this.state === 'failed'
     ) {
       return;
     }
@@ -434,20 +467,13 @@ export class ProgressCardController {
     }
 
     // Lazy creation: create the Session card on its first meaningful event.
-    if (this.dirty && this.state === 'idle') {
+    if (this.dirty && (this.state === 'idle' || this.state === 'error')) {
       this.registerStopAction();
       if (this.messageId) {
         this.state = 'active';
         this.scheduleFlush();
       } else {
-        this.state = 'creating';
-        this.createCard().catch((err) => {
-          logger.warn(
-            { err, chatId: this.chatId },
-            'Progress card: create failed',
-          );
-          this.state = 'error';
-        });
+        this.startCardCreation();
       }
     }
 
@@ -462,7 +488,8 @@ export class ProgressCardController {
     if (
       prevState !== 'active' &&
       prevState !== 'creating' &&
-      prevState !== 'aborted'
+      prevState !== 'aborted' &&
+      prevState !== 'error'
     ) {
       logger.info(
         `Progress card: complete() skipped | chatId=${this.chatId} state=${prevState}`,
@@ -475,6 +502,7 @@ export class ProgressCardController {
       this.runnerError = undefined;
     }
     this.clearFlushTimer();
+    this.clearCreateRetryTimer();
     this.clearStopAction();
 
     if (this.messageId) {
@@ -486,10 +514,12 @@ export class ProgressCardController {
         this.scheduleDelete(this.messageId);
       } catch (err) {
         logger.warn(
-          { err },
+          { error: summarizeFeishuApiError(err) },
           `Progress card: failed to patch completed | chatId=${this.chatId} messageId=${this.messageId}`,
         );
       }
+    } else if (prevState === 'error') {
+      await this.recoverTerminalCard('completed');
     } else {
       logger.info(
         `Progress card: complete() called but no messageId | chatId=${this.chatId} prevState=${prevState}`,
@@ -507,9 +537,11 @@ export class ProgressCardController {
       this.state === 'failed'
     )
       return;
+    const previousState = this.state;
     this.state = 'aborted';
     this.abortReason = reason;
     this.clearFlushTimer();
+    this.clearCreateRetryTimer();
     this.clearStopAction();
 
     if (this.messageId) {
@@ -523,10 +555,12 @@ export class ProgressCardController {
         );
       } catch (err) {
         logger.warn(
-          { err },
+          { error: summarizeFeishuApiError(err) },
           `Progress card: failed to patch aborted | chatId=${this.chatId}`,
         );
       }
+    } else if (previousState === 'error') {
+      await this.recoverTerminalCard('aborted');
     }
   }
 
@@ -541,6 +575,7 @@ export class ProgressCardController {
       this.runnerError?.message ||
       'Runner 未返回具体错误信息';
     this.clearFlushTimer();
+    this.clearCreateRetryTimer();
     this.clearStopAction();
 
     if (this.messageId) {
@@ -560,7 +595,11 @@ export class ProgressCardController {
         );
       } catch (err) {
         logger.warn(
-          { err, chatId: this.chatId, messageId: this.messageId },
+          {
+            error: summarizeFeishuApiError(err),
+            chatId: this.chatId,
+            messageId: this.messageId,
+          },
           'Progress card: failed to patch runner error',
         );
       }
@@ -570,19 +609,7 @@ export class ProgressCardController {
     // Errors can happen before the first thinking/tool event. Create a terminal
     // card directly so startup and protocol failures are still visible.
     if (previousState === 'idle' || previousState === 'error') {
-      try {
-        await this.sendCard('failed');
-        if (this.messageId) removeFromCardStore(this.messageId);
-        logger.info(
-          { chatId: this.chatId, messageId: this.messageId },
-          'Progress card: created failed card',
-        );
-      } catch (err) {
-        logger.warn(
-          { err, chatId: this.chatId },
-          'Progress card: failed to create runner error card',
-        );
-      }
+      await this.recoverTerminalCard('failed');
     }
     // If creation is already in flight, createCard() observes state='failed'
     // and patches the newly created card in its race-resolution path.
@@ -591,6 +618,7 @@ export class ProgressCardController {
   /** Force cleanup during shutdown or Session deletion. */
   async forceCleanup(_reason: string): Promise<void> {
     this.clearFlushTimer();
+    this.clearCreateRetryTimer();
     this.clearStopAction();
     this.clearDeleteTimer();
     if (!this.messageId) return;
@@ -603,7 +631,7 @@ export class ProgressCardController {
       );
     } catch (err) {
       logger.warn(
-        { err },
+        { error: summarizeFeishuApiError(err) },
         `Progress card: force cleanup failed | chatId=${this.chatId}`,
       );
     }
@@ -617,6 +645,7 @@ export class ProgressCardController {
   /** Dispose active-update timers while preserving delayed success cleanup. */
   dispose(): void {
     this.clearFlushTimer();
+    this.clearCreateRetryTimer();
     this.clearStopAction();
   }
 
@@ -629,6 +658,8 @@ export class ProgressCardController {
     this.dirty = true;
     if (this.state === 'active') {
       this.scheduleFlush();
+    } else if (this.state === 'idle' || this.state === 'error') {
+      this.startCardCreation();
     }
   }
 
@@ -670,6 +701,7 @@ export class ProgressCardController {
         data: {
           content,
           msg_type: 'interactive',
+          uuid: this.createUuid,
           reply_in_thread: shouldReplyInFeishuThread({
             threadId: this.threadId,
             replyInThread: this.replyInThread,
@@ -679,7 +711,12 @@ export class ProgressCardController {
     } else {
       resp = await client.im.v1.message.create({
         params: { receive_id_type: 'chat_id' },
-        data: { receive_id: this.chatId, msg_type: 'interactive', content },
+        data: {
+          receive_id: this.chatId,
+          msg_type: 'interactive',
+          content,
+          uuid: this.createUuid,
+        },
       });
     }
 
@@ -714,7 +751,11 @@ export class ProgressCardController {
           }
         } catch (err) {
           logger.warn(
-            { err, chatId: this.chatId, finalState },
+            {
+              error: summarizeFeishuApiError(err),
+              chatId: this.chatId,
+              finalState,
+            },
             'Progress card: failed to patch final state after creation race',
           );
         }
@@ -722,6 +763,8 @@ export class ProgressCardController {
       }
 
       this.state = 'active';
+      this.createAttemptCount = 0;
+      this.clearCreateRetryTimer();
       logger.info(
         { chatId: this.chatId, messageId: this.messageId },
         'Progress card created',
@@ -729,40 +772,153 @@ export class ProgressCardController {
 
       if (this.dirty) this.scheduleFlush();
     } catch (err) {
-      if (this.state !== 'failed') this.state = 'error';
+      // Do not overwrite a terminal state chosen while the request was in
+      // flight. handleCreateFailure() will reconcile a transient timeout with
+      // that terminal state using the same idempotency UUID.
+      if (this.state === 'creating') this.state = 'error';
       throw err;
     }
   }
 
-  private scheduleFlush(): void {
+  private startCardCreation(): void {
+    if (
+      this.messageId ||
+      this.createRetryTimer ||
+      this.state === 'creating' ||
+      this.state === 'active' ||
+      this.state === 'completed' ||
+      this.state === 'aborted' ||
+      this.state === 'failed' ||
+      this.createAttemptCount >= this.maxCreateAttempts
+    ) {
+      return;
+    }
+    this.state = 'creating';
+    this.createAttemptCount++;
+    void this.createCard().catch((err) => this.handleCreateFailure(err));
+  }
+
+  private handleCreateFailure(err: unknown): void {
+    if (
+      this.state === 'completed' ||
+      this.state === 'aborted' ||
+      this.state === 'failed'
+    ) {
+      if (isTransientFeishuApiError(err)) {
+        void this.recoverTerminalCard(this.state);
+      }
+      return;
+    }
+    this.state = 'error';
+    const willRetry =
+      isTransientFeishuApiError(err) &&
+      this.createAttemptCount < this.maxCreateAttempts;
+    const delayMs = willRetry
+      ? this.createRetryBaseDelayMs *
+        Math.pow(2, Math.max(0, this.createAttemptCount - 1))
+      : undefined;
+    logger.warn(
+      {
+        error: summarizeFeishuApiError(err),
+        chatId: this.chatId,
+        attempt: this.createAttemptCount,
+        maxAttempts: this.maxCreateAttempts,
+        willRetry,
+        delayMs,
+      },
+      'Progress card: create failed',
+    );
+    if (!willRetry || delayMs === undefined) return;
+    this.createRetryTimer = setTimeout(() => {
+      this.createRetryTimer = null;
+      this.startCardCreation();
+    }, delayMs);
+    this.createRetryTimer.unref?.();
+  }
+
+  /**
+   * Reuse the create UUID once more after a timed-out create so a terminal
+   * Turn can recover the message ID and close a card that Lark may already
+   * have accepted behind a gateway timeout.
+   */
+  private async recoverTerminalCard(
+    displayState: Exclude<ProgressDisplayState, 'active'>,
+  ): Promise<void> {
+    try {
+      await this.sendCard(displayState);
+      if (!this.messageId) return;
+      // An idempotent retry may return the card created by the original active
+      // request, so patch explicitly to guarantee the terminal presentation.
+      await this.patchCard(displayState);
+      if (displayState === 'completed') {
+        this.scheduleDelete(this.messageId);
+      } else {
+        removeFromCardStore(this.messageId);
+      }
+      logger.info(
+        { chatId: this.chatId, messageId: this.messageId, displayState },
+        'Progress card: recovered terminal card after create failure',
+      );
+    } catch (err) {
+      logger.warn(
+        {
+          error: summarizeFeishuApiError(err),
+          chatId: this.chatId,
+          displayState,
+        },
+        'Progress card: failed to recover terminal card',
+      );
+    }
+  }
+
+  private scheduleFlush(minDelayMs = 0): void {
     if (this.flushTimer) return; // already scheduled
-    if (this.patchFailCount >= this.maxPatchFailures) return;
 
     const elapsed = Date.now() - this.lastFlushTime;
-    const delay = Math.max(0, this.flushInterval - elapsed);
+    const delay = Math.max(minDelayMs, 0, this.flushInterval - elapsed);
 
     this.flushTimer = setTimeout(async () => {
       this.flushTimer = null;
       if (this.state !== 'active' || !this.messageId) return;
 
       this.dirty = false;
+      let retryDelayMs = 0;
       try {
         await this.patchCard('active');
         this.lastFlushTime = Date.now();
         this.patchFailCount = 0;
       } catch (err) {
         this.patchFailCount++;
-        logger.debug(
-          { err, chatId: this.chatId, failCount: this.patchFailCount },
+        const willRetry = isTransientFeishuApiError(err);
+        if (willRetry) {
+          retryDelayMs = Math.min(
+            this.maxPatchRetryDelayMs,
+            this.patchRetryBaseDelayMs *
+              Math.pow(2, Math.min(10, this.patchFailCount - 1)),
+          );
+          // Preserve the latest accumulated state even when no new runner
+          // event arrives while Lark is unavailable. The capped retry delay
+          // acts as a circuit breaker without permanently freezing the card.
+          this.dirty = true;
+        }
+        logger.warn(
+          {
+            error: summarizeFeishuApiError(err),
+            chatId: this.chatId,
+            failCount: this.patchFailCount,
+            willRetry,
+            retryDelayMs: willRetry ? retryDelayMs : undefined,
+          },
           'Progress card: patch failed',
         );
       }
 
       // If more events arrived during flush, schedule again
       if (this.dirty && this.state === 'active') {
-        this.scheduleFlush();
+        this.scheduleFlush(retryDelayMs);
       }
     }, delay);
+    this.flushTimer.unref?.();
   }
 
   private async patchCard(displayState: ProgressDisplayState): Promise<void> {
@@ -783,6 +939,9 @@ export class ProgressCardController {
         const missingMessageId = this.messageId;
         this.messageId = null;
         removeFromCardStore(missingMessageId);
+        // A genuinely missing/deleted message needs a new idempotency scope;
+        // transient retries of one create attempt keep the previous UUID.
+        this.createUuid = randomUUID();
         await this.sendCard(displayState);
         return;
       }
@@ -851,6 +1010,13 @@ export class ProgressCardController {
       this.deleteTimer = null;
     }
   }
+
+  private clearCreateRetryTimer(): void {
+    if (this.createRetryTimer) {
+      clearTimeout(this.createRetryTimer);
+      this.createRetryTimer = null;
+    }
+  }
 }
 
 // ─── Progress Card Session Registry ──────────────────────────
@@ -892,6 +1058,17 @@ export function feedProgressSessionsForFolder(
   event: StreamEvent,
 ): void {
   activeProgressSessions.get(folder)?.session.feedEvent(event);
+}
+
+/**
+ * Keep the current Turn card alive while the host replaces a runtime that
+ * exited before acknowledging all accepted IPC deliveries.
+ */
+export function markProgressSessionRecoveringForFolder(
+  folder: string,
+  detail = '运行时中断，正在恢复任务…',
+): void {
+  activeProgressSessions.get(folder)?.session.addCommentary(detail);
 }
 
 /**

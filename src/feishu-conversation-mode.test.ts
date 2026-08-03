@@ -9,11 +9,13 @@ import {
   isFeishuBotMentioned,
   normalizeFeishuConversationMode,
   resolveFeishuThreadRootMsgId,
+  shouldProcessUnmentionedFeishuGroupMessage,
   shouldReplyInFeishuThread,
 } from './feishu-conversation-mode.js';
 import {
   buildFeishuTopicIdentity,
   resolveFeishuTopicAnchor,
+  resolveFeishuTopicAnchorCandidates,
 } from './feishu-topic-session.js';
 import { buildFeishuTopicNameSuffix } from './feishu-topic-title.js';
 
@@ -30,6 +32,47 @@ assert.equal(
 );
 assert.equal(
   isFeishuBotMentioned([{ id: { open_id: 'ou_bot' } }], 'ou_bot'),
+  true,
+);
+assert.equal(
+  shouldProcessUnmentionedFeishuGroupMessage({
+    activationMode: 'when_mentioned',
+    requireMention: true,
+    hasExistingTopic: false,
+  }),
+  false,
+);
+assert.equal(
+  shouldProcessUnmentionedFeishuGroupMessage({
+    activationMode: 'when_mentioned',
+    requireMention: true,
+    hasExistingTopic: true,
+  }),
+  true,
+  'an established topic must accept attachment-only follow-ups',
+);
+assert.equal(
+  shouldProcessUnmentionedFeishuGroupMessage({
+    activationMode: 'disabled',
+    requireMention: false,
+    hasExistingTopic: true,
+  }),
+  false,
+);
+assert.equal(
+  shouldProcessUnmentionedFeishuGroupMessage({
+    activationMode: 'auto',
+    requireMention: true,
+    hasExistingTopic: true,
+  }),
+  true,
+);
+assert.equal(
+  shouldProcessUnmentionedFeishuGroupMessage({
+    activationMode: 'auto',
+    requireMention: false,
+    hasExistingTopic: false,
+  }),
   true,
 );
 assert.equal(hasFeishuThreadContext({ thread_id: ' omt_thread ' }), true);
@@ -89,6 +132,15 @@ assert.equal(
 assert.equal(
   resolveFeishuTopicAnchor({ messageId: 'om_message', rootId: 'om_root' }),
   'om_root',
+);
+assert.deepEqual(
+  resolveFeishuTopicAnchorCandidates({
+    messageId: 'om_message',
+    parentId: 'om_parent',
+    rootId: 'om_root',
+    threadId: 'omt_thread',
+  }),
+  ['omt_thread', 'om_root', 'om_parent', 'om_message'],
 );
 
 const identityA = buildFeishuTopicIdentity('feishu:oc_chat', 'omt_thread');
@@ -150,10 +202,7 @@ try {
       'om_root',
     );
     assert.deepEqual(
-      database.getLastInboundMessage(
-        'web:fixture',
-        'feishu:oc_fixture',
-      ),
+      database.getLastInboundMessage('web:fixture', 'feishu:oc_fixture'),
       {
         id: 'om_reply',
         sender: 'ou_user',
