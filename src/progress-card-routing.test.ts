@@ -155,6 +155,195 @@ try {
   assert.ok(created.includes('topic-1'));
   assert.ok(created.includes('topic-2'));
 
+  // A transient Lark gateway failure must not permanently suppress the tool
+  // card. Reuse one UUID so a timed-out but accepted request stays idempotent.
+  let retryAttempts = 0;
+  const retryUuids: string[] = [];
+  const retryCard = new progress.ProgressCardController({
+    client: {
+      im: {
+        message: {
+          reply: async (request: { data: { uuid?: string } }) => {
+            retryAttempts++;
+            retryUuids.push(request.data.uuid || '');
+            if (retryAttempts === 1) {
+              throw Object.assign(new Error('Request failed with status 504'), {
+                code: 'ERR_BAD_RESPONSE',
+                response: { status: 504 },
+              });
+            }
+            created.push('retry');
+            return { data: { message_id: 'message-retry' } };
+          },
+        },
+        v1: {
+          message: {
+            patch: async (request: { path: { message_id: string } }) => {
+              patched.push(request.path.message_id);
+              return {};
+            },
+            delete: async (request: { path: { message_id: string } }) => {
+              deleted.push(request.path.message_id);
+              return {};
+            },
+          },
+        },
+      },
+    } as unknown as lark.Client,
+    chatId: 'retry-chat',
+    replyToMsgId: 'retry-trigger',
+    anchorFolder: 'retry-folder',
+    anchorSourceChannel: 'feishu:retry-chat',
+    createRetryBaseDelayMs: 5,
+    maxCreateAttempts: 3,
+  });
+  assert.equal(
+    progress.claimProgressSession(
+      'feishu:retry-chat',
+      retryCard,
+      'retry-folder',
+    ),
+    true,
+  );
+  progress.feedProgressSessionsForFolder('retry-folder', {
+    eventType: 'tool_use_start',
+    toolUseId: 'retry-tool',
+    toolName: 'Read',
+    toolInputSummary: 'Caelum source',
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(retryAttempts, 2);
+  assert.ok(retryUuids[0]);
+  assert.deepEqual(
+    new Set(retryUuids).size,
+    1,
+    'transient retries must reuse one Lark idempotency UUID',
+  );
+  assert.ok(created.includes('retry'));
+  assert.ok(
+    patched.includes('message-retry'),
+    'the recovered card must render the accumulated tool event',
+  );
+  await progress.completeAndResetProgressSessionsForFolder('retry-folder');
+
+  let cancelledRetryAttempts = 0;
+  const cancelledRetryCard = new progress.ProgressCardController({
+    client: {
+      im: {
+        message: {
+          reply: async () => {
+            cancelledRetryAttempts++;
+            throw Object.assign(new Error('Request failed with status 504'), {
+              code: 'ERR_BAD_RESPONSE',
+              response: { status: 504 },
+            });
+          },
+        },
+      },
+    } as unknown as lark.Client,
+    chatId: 'cancelled-retry-chat',
+    replyToMsgId: 'cancelled-retry-trigger',
+    anchorFolder: 'cancelled-retry-folder',
+    anchorSourceChannel: 'feishu:cancelled-retry-chat',
+    createRetryBaseDelayMs: 50,
+    maxCreateAttempts: 3,
+  });
+  assert.equal(
+    progress.claimProgressSession(
+      'feishu:cancelled-retry-chat',
+      cancelledRetryCard,
+      'cancelled-retry-folder',
+    ),
+    true,
+  );
+  progress.feedProgressSessionsForFolder('cancelled-retry-folder', {
+    eventType: 'thinking_delta',
+    text: 'short turn',
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await progress.completeAndResetProgressSessionsForFolder(
+    'cancelled-retry-folder',
+  );
+  await new Promise((resolve) => setTimeout(resolve, 70));
+  assert.equal(
+    cancelledRetryAttempts,
+    2,
+    'a terminal Turn gets one idempotent reconciliation attempt but no delayed retry',
+  );
+
+  // The Turn may finish while the initial create request is still waiting on
+  // a gateway timeout. Preserve that terminal state and reconcile it after the
+  // in-flight request rejects instead of reviving an active card.
+  let rejectRacingCreate: ((reason?: unknown) => void) | undefined;
+  let racingCreateAttempts = 0;
+  const racingCreateUuids: string[] = [];
+  const racingPatchedCards: Array<Record<string, unknown>> = [];
+  const racingCard = new progress.ProgressCardController({
+    client: {
+      im: {
+        message: {
+          reply: async (request: { data: { uuid?: string } }) => {
+            racingCreateAttempts++;
+            racingCreateUuids.push(request.data.uuid || '');
+            if (racingCreateAttempts === 1) {
+              return await new Promise((_resolve, reject) => {
+                rejectRacingCreate = reject;
+              });
+            }
+            return { data: { message_id: 'message-racing-terminal' } };
+          },
+        },
+        v1: {
+          message: {
+            patch: async (request: { data: { content: string } }) => {
+              racingPatchedCards.push(JSON.parse(request.data.content));
+              return {};
+            },
+            delete: async () => ({}),
+          },
+        },
+      },
+    } as unknown as lark.Client,
+    chatId: 'racing-terminal-chat',
+    replyToMsgId: 'racing-terminal-trigger',
+    anchorFolder: 'racing-terminal-folder',
+    anchorSourceChannel: 'feishu:racing-terminal-chat',
+    completionDeleteDelayMs: 10,
+  });
+  assert.equal(
+    progress.claimProgressSession(
+      'feishu:racing-terminal-chat',
+      racingCard,
+      'racing-terminal-folder',
+    ),
+    true,
+  );
+  progress.feedProgressSessionsForFolder('racing-terminal-folder', {
+    eventType: 'tool_use_start',
+    toolUseId: 'racing-tool',
+    toolName: 'Read',
+    toolInputSummary: 'while create is pending',
+  });
+  await progress.completeAndResetProgressSessionsForFolder(
+    'racing-terminal-folder',
+  );
+  assert.ok(rejectRacingCreate, 'the initial create request must be in flight');
+  rejectRacingCreate(
+    Object.assign(new Error('Request failed with status 504'), {
+      code: 'ERR_BAD_RESPONSE',
+      response: { status: 504 },
+    }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(racingCreateAttempts, 2);
+  assert.equal(new Set(racingCreateUuids).size, 1);
+  assert.equal(
+    (racingPatchedCards.at(-1)?.header as { template?: string } | undefined)
+      ?.template,
+    'green',
+    'the timeout reconciliation must preserve the completed state',
+  );
+
   const failedCard = new progress.ProgressCardController({
     client: fakeClient('failed'),
     chatId: 'failed-chat',
