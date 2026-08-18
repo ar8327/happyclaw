@@ -20,6 +20,10 @@ import { logger } from './logger.js';
 import { saveDownloadedFile, MAX_FILE_SIZE } from './im-downloader.js';
 import { detectImageMimeType } from './image-detector.js';
 import { analyzeIntent } from './intent-analyzer.js';
+import {
+  parseSlashCommand,
+  type ImCommandHandler,
+} from './im-command-utils.js';
 
 // ─── Constants ──────────────────────────────────────────────────
 
@@ -62,7 +66,7 @@ export interface QQConnectOpts {
     chatName: string,
     code: string,
   ) => Promise<boolean>;
-  onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+  onCommand?: ImCommandHandler;
   resolveGroupFolder?: (jid: string) => string | undefined;
   resolveEffectiveChatJid?: (
     chatJid: string,
@@ -756,13 +760,13 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
       );
 
       // Handle slash commands
-      const slashMatch = content.match(/^\/(\S+)(?:\s+(.*))?$/i);
-      if (slashMatch && opts.onCommand) {
-        const cmdBody = (
-          slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
-        ).trim();
+      const slashCommand = parseSlashCommand(content);
+      if (slashCommand && opts.onCommand) {
         try {
-          const reply = await opts.onCommand(jid, cmdBody);
+          const reply = await opts.onCommand(jid, slashCommand.body, {
+            targetJid: opts.resolveEffectiveChatJid?.(jid)?.effectiveJid ?? jid,
+            chatType: jid.startsWith('qq:c2c:') ? 'p2p' : 'group',
+          });
           if (reply) {
             await sendQQMessage('c2c', userOpenId, markdownToPlainText(reply));
             return;
@@ -959,13 +963,13 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
       );
 
       // Handle slash commands
-      const slashMatch = content.match(/^\/(\S+)(?:\s+(.*))?$/i);
-      if (slashMatch && opts.onCommand) {
-        const cmdBody = (
-          slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
-        ).trim();
+      const slashCommand = parseSlashCommand(content);
+      if (slashCommand && opts.onCommand) {
         try {
-          const reply = await opts.onCommand(jid, cmdBody);
+          const reply = await opts.onCommand(jid, slashCommand.body, {
+            targetJid: opts.resolveEffectiveChatJid?.(jid)?.effectiveJid ?? jid,
+            chatType: jid.startsWith('qq:c2c:') ? 'p2p' : 'group',
+          });
           if (reply) {
             await sendQQMessage(
               'group',

@@ -20,6 +20,11 @@ import {
 import { broadcastNewMessage } from './web.js';
 import { detectImageMimeType } from './image-detector.js';
 import { analyzeIntent } from './intent-analyzer.js';
+import {
+  parseSlashCommand,
+  stripLeadingMentions,
+  type ImCommandHandler,
+} from './im-command-utils.js';
 import { getSystemSettings } from './runtime-config.js';
 import { buildStaticReplyCard } from './feishu-card-builder.js';
 import { handleProgressCardAction } from './feishu-progress-card.js';
@@ -55,7 +60,7 @@ export interface ConnectOptions {
   /** 热重连时设置：丢弃 create_time 早于此时间戳（epoch ms）的消息，避免处理渠道关闭期间的堆积消息 */
   ignoreMessagesBefore?: number;
   /** 斜杠指令回调（如 /clear），返回回复文本或 null */
-  onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+  onCommand?: ImCommandHandler;
   /** 根据 chatJid 解析群组 folder，用于下载文件/图片到工作区 */
   resolveGroupFolder?: (
     chatJid: string,
@@ -806,15 +811,24 @@ export function createFeishuConnection(
     if (!client) return;
     try {
       if (replyToMsgId) {
-        await client.im.message.reply({
-          path: { message_id: replyToMsgId },
-          data: {
-            msg_type: 'text',
-            content: JSON.stringify({ text }),
-            reply_in_thread: replyInThread === true,
-          },
-        });
-        return;
+        try {
+          await client.im.message.reply({
+            path: { message_id: replyToMsgId },
+            data: {
+              msg_type: 'text',
+              content: JSON.stringify({ text }),
+              reply_in_thread: replyInThread === true,
+            },
+          });
+          return;
+        } catch (replyErr) {
+          // A rejected reply (stale anchor, thread mode mismatch) must not
+          // swallow the text — command feedback would silently disappear.
+          logger.warn(
+            { chatId, replyToMsgId, replyInThread, err: replyErr },
+            'Feishu reply failed, falling back to a plain message',
+          );
+        }
       }
       await client.im.message.create({
         data: {
@@ -1156,22 +1170,32 @@ export function createFeishuConnection(
     rememberChatProgress(chatId, resolvedCreateTimeMs, chatType);
 
     // ── 斜杠指令：拦截已知 /xxx 命令，不进入消息流 ──
-    // 群聊中 @机器人 后跟斜杠命令，mention 替换后文本为 "@botname /cmd"，
-    // 需要先 strip 掉开头的 @mention 前缀再匹配
-    const textForSlash = text?.trim().replace(/^@\S+\s+/, '') ?? '';
-    const slashMatch = textForSlash.match(/^\/(\S+)(.*)$/);
-    if (slashMatch && onCommand) {
-      const cmdBody = (slashMatch[1] + slashMatch[2]).trim();
+    // 群聊中 @机器人 后文本为 "@botname /cmd"。机器人展示名可能带空格、也可能
+    // 为空，靠正则猜一个 token 会把命令漏给 agent，所以按 mention 的真实展示名
+    // 精确剥离。剥离结果同时用于下面的中断意图识别。
+    const mentionNames = (mentions ?? []).map((mention) => mention.name || '');
+    const textForSlash = stripLeadingMentions(text ?? '', mentionNames);
+    const commandContext = {
+      targetJid,
+      threadId,
+      chatType: chatType === 'p2p' ? ('p2p' as const) : ('group' as const),
+    };
+    const slashCommand = parseSlashCommand(textForSlash);
+    if (slashCommand && onCommand) {
       logger.info(
-        { chatJid, cmd: slashMatch[1], cmdBody },
+        { chatJid, cmd: slashCommand.cmd, cmdBody: slashCommand.body },
         'Feishu slash command detected',
       );
       try {
-        const reply = await onCommand(chatJid, cmdBody);
+        const reply = await onCommand(
+          chatJid,
+          slashCommand.body,
+          commandContext,
+        );
         logger.info(
           {
             chatJid,
-            cmd: slashMatch[1],
+            cmd: slashCommand.cmd,
             hasReply: !!reply,
             replyLen: reply?.length,
           },
@@ -1189,7 +1213,7 @@ export function createFeishuConnection(
         // reply 为 null 表示未知命令，继续作为普通消息处理
       } catch (err) {
         logger.error(
-          { chatJid, cmd: slashMatch[1], err },
+          { chatJid, cmd: slashCommand.cmd, err },
           'Feishu slash command failed',
         );
         try {
@@ -1234,8 +1258,11 @@ export function createFeishuConnection(
 
     // ── 中断 fast-path：消息到达时立即检测中断意图，绕过轮询延迟 ──
     // 使用路由后的 targetJid 确保中断命中正确的 queue key
-    if (onInterruptRequest && text.length <= 50) {
-      const intent = analyzeIntent(text);
+    // 意图识别同样用剥离 @mention 后的文本：群聊里 "@bot 停" 带上前缀后会被
+    // 判成 correction，而 correction 不再触发硬中断（改走 turn 内 steering），
+    // 于是群聊中的显式停止会整个失效。
+    if (onInterruptRequest && textForSlash.length <= 50) {
+      const intent = analyzeIntent(textForSlash);
       if (intent !== 'continue') {
         onInterruptRequest(targetJid, intent);
         logger.info(

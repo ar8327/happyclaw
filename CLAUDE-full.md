@@ -631,11 +631,19 @@ Session runtime 收尾 → export transcripts
 
 | 命令 | 缩写 | 用途 |
 |------|------|------|
+| `/help` | `/h` | 显示命令表；未知但形似命令的输入也会回这张表 |
+| `/stop` | - | 中断当前会话正在执行的 turn（写 `_interrupt` sentinel + 标记 turn interrupted） |
 | `/list` | `/ls` | 查看所有工作区和对话列表，标记当前位置，显示 Agent 短 ID |
 | `/status` | - | 查看当前所在的工作区/对话状态 |
 | `/recall` | `/rc` | 调用 Claude CLI（`--print` 模式）总结最近 10 条消息，API 不可用时 fallback 到原始消息列表 |
 | `/clear` | - | 清除当前对话的会话上下文 |
 | `/require_mention` | - | 切换群聊响应模式：`/require_mention true`（需要 @机器人）或 `/require_mention false`（全量响应） |
+
+命令分发时会带上渠道解析出的路由上下文（`ImCommandContext.targetJid`）。运行时队列按 effective session JID 索引，`/stop` 这类操作运行时的命令必须用 `targetJid`，否则在绑定会话或飞书话题下会打空。
+
+`/require_mention` 会同时把 `activation_mode` 重置为 `auto`：`shouldProcessGroupMessage()` 中 `activation_mode` 优先于 `require_mention`，只写后者会被 Web 设置页选的非 auto 模式静默覆盖。
+
+群聊里的 @mention 前缀按 mention 的真实展示名剥离（`stripLeadingMentions()`），机器人名带空格或展示名为空时命令依然可识别；剥离后的文本同时用于中断意图识别。
 
 `/recall` 通过 `execFile('claude', ['--print'])` + stdin 管道调用 Claude CLI，复用与 Agent Runner 相同的 OAuth 认证机制。
 

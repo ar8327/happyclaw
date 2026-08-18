@@ -17,6 +17,7 @@ import {
   createQQChannel,
   createWeChatChannel,
 } from './im-channel.js';
+import type { ImCommandHandler } from './im-command-utils.js';
 import type { FeishuConnectionConfig } from './feishu.js';
 import type { TelegramConnectionConfig } from './telegram.js';
 import type { QQConnectionConfig } from './qq.js';
@@ -65,7 +66,7 @@ export interface WeChatConnectConfig {
 
 export interface ConnectFeishuOptions {
   ignoreMessagesBefore?: number;
-  onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+  onCommand?: ImCommandHandler;
   resolveGroupFolder?: (
     chatJid: string,
     context?: IMRouteContext,
@@ -388,7 +389,7 @@ class IMConnectionManager {
       code: string,
     ) => Promise<boolean>,
     options?: {
-      onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+      onCommand?: ImCommandHandler;
       resolveGroupFolder?: (jid: string) => string | undefined;
       resolveEffectiveChatJid?: (
         chatJid: string,
@@ -447,7 +448,7 @@ class IMConnectionManager {
       code: string,
     ) => Promise<boolean>,
     options?: {
-      onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+      onCommand?: ImCommandHandler;
       resolveGroupFolder?: (jid: string) => string | undefined;
       resolveEffectiveChatJid?: (
         chatJid: string,
@@ -504,7 +505,7 @@ class IMConnectionManager {
     config: WeChatConnectConfig,
     onNewChat: (chatJid: string, chatName: string) => void,
     options?: {
-      onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+      onCommand?: ImCommandHandler;
       resolveGroupFolder?: (jid: string) => string | undefined;
       resolveEffectiveChatJid?: (
         chatJid: string,

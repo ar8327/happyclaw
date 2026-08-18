@@ -5,6 +5,7 @@
  * and provides adapter factories that wrap existing connection implementations.
  */
 import * as lark from '@larksuiteoapi/node-sdk';
+import type { ImCommandHandler } from './im-command-utils.js';
 import {
   createFeishuConnection,
   type FeishuConnection,
@@ -63,7 +64,7 @@ export interface IMChannelConnectOpts {
     code: string,
   ) => Promise<boolean>;
   /** Slash command callback (e.g. /clear). Returns reply text or null. */
-  onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+  onCommand?: ImCommandHandler;
   /** 根据 jid 解析群组 folder，用于下载文件/图片到工作区 */
   resolveGroupFolder?: (
     jid: string,

@@ -134,3 +134,117 @@ export function formatSystemStatus(
 
   return lines.join('\n');
 }
+
+// ─── Slash command parsing ──────────────────────────────────────
+
+/**
+ * Routing context a channel hands to the command dispatcher.
+ *
+ * `targetJid` matters because the runtime queue is keyed by the *effective*
+ * session JID (bound workspace / Feishu topic), not by the source chat JID.
+ * Commands that touch a runtime must act on the routed JID or they silently
+ * hit nothing.
+ */
+export interface ImCommandContext {
+  targetJid?: string;
+  threadId?: string;
+  chatType?: 'p2p' | 'group';
+}
+
+export type ImCommandHandler = (
+  chatJid: string,
+  command: string,
+  context?: ImCommandContext,
+) => Promise<string | null>;
+
+export interface ParsedSlashCommand {
+  /** Bare command token, e.g. `stop`. */
+  cmd: string;
+  /** `cmd` plus its arguments — the form the dispatcher parses. */
+  body: string;
+}
+
+/**
+ * Parse a leading `/command` out of a message.
+ *
+ * Also tolerates Telegram's `/cmd@BotName` suffix. Returns null when the text
+ * does not start with a slash token at all.
+ */
+export function parseSlashCommand(text: string): ParsedSlashCommand | null {
+  const match = text.trim().match(/^\/([^\s@]+)(?:@\S+)?([\s\S]*)$/);
+  if (!match) return null;
+  const cmd = match[1];
+  const rest = (match[2] ?? '').trim();
+  return { cmd, body: rest ? `${cmd} ${rest}` : cmd };
+}
+
+/**
+ * Strip leading @mentions so a command survives being addressed to the bot.
+ *
+ * Feishu rewrites mention keys into `@{displayName}` before we see the text,
+ * and display names may contain spaces or be empty — a naive `^@\S+\s+` regex
+ * loses the command in both cases. Matching the known mention names first, and
+ * only then falling back to a generic strip, keeps `@Happy Claw /status`
+ * working.
+ */
+export function stripLeadingMentions(
+  text: string,
+  mentionNames: string[] = [],
+): string {
+  let out = (text ?? '').trim();
+  const tokens = mentionNames
+    .map((name) => `@${(name ?? '').trim()}`)
+    .filter((token) => token.length > 1)
+    .sort((a, b) => b.length - a.length);
+
+  for (let guard = 0; guard < 8; guard += 1) {
+    const before = out;
+    for (const token of tokens) {
+      if (out.startsWith(token)) {
+        out = out.slice(token.length).trimStart();
+        break;
+      }
+    }
+    if (out !== before) continue;
+    // Mentions with an unknown/empty display name collapse to a bare "@"
+    // prefix; strip generically so the command still resolves.
+    const generic = out.match(/^@\S*\s+/);
+    if (!generic) break;
+    out = out.slice(generic[0].length).trimStart();
+  }
+  return out.trim();
+}
+
+/**
+ * Whether an unrecognized slash token looks like a mistyped command rather
+ * than ordinary text that happens to start with a slash (`/tmp/a.log ...`).
+ */
+export function isLikelyCommandToken(cmd: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_-]{0,19}$/.test(cmd);
+}
+
+export const IM_SLASH_COMMANDS: Array<{ usage: string; desc: string }> = [
+  { usage: '/help', desc: '显示这份命令表' },
+  { usage: '/stop', desc: '中断当前会话正在执行的任务' },
+  { usage: '/status', desc: '查看当前工作区运行状态' },
+  { usage: '/where', desc: '查看当前绑定位置与回复策略' },
+  { usage: '/list', desc: '列出全部工作区与对话（别名 /ls）' },
+  { usage: '/bind <目标>', desc: '绑定到工作区或 Agent，如 /bind myws/a3b' },
+  { usage: '/unbind', desc: '解绑回默认工作区' },
+  { usage: '/new <名称>', desc: '新建工作区并绑定当前聊天' },
+  { usage: '/recall', desc: 'AI 总结最近对话（别名 /rc）' },
+  { usage: '/require_mention true|false', desc: '群聊是否需要 @机器人' },
+  { usage: '/clear', desc: '清除会话上下文（仅 Web 端）' },
+];
+
+export function formatCommandHelp(): string {
+  const width = Math.max(
+    ...IM_SLASH_COMMANDS.map((entry) => entry.usage.length),
+  );
+  return [
+    '可用命令：',
+    ...IM_SLASH_COMMANDS.map(
+      (entry) => `  ${entry.usage.padEnd(width)}  ${entry.desc}`,
+    ),
+  ].join('\n');
+}
