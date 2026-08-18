@@ -14,10 +14,8 @@ import { extractMessageContent, handleFeishuCardAction } from './feishu.js';
 function testCardBuilders(): void {
   const reply = buildStaticReplyCard('# 这不是标题\n正文');
   assert.equal(reply.schema, '2.0');
-  assert.equal(
-    (reply.header as { title: { content: string } }).title.content,
-    '回复',
-  );
+  // Minimal style: the reply card carries no header banner at all.
+  assert.equal(reply.header, undefined);
   assert.match(JSON.stringify(reply), /# 这不是标题/);
   const replyConfig = reply.config as {
     enable_forward?: boolean;
@@ -68,11 +66,24 @@ function testCardBuilders(): void {
   const serialized = JSON.stringify(progress);
   assert.equal(progress.schema, '2.0');
   assert.match(serialized, /collapsible_panel/);
-  assert.match(serialized, /column_set/);
   assert.match(serialized, /tool-0/);
   assert.match(serialized, /tool-29/);
   assert.match(serialized, /stop-action/);
   assert.doesNotMatch(serialized, /wide_screen_mode/);
+  // Minimal style contract: neutral header, no subtitle, no tag row, and the
+  // active tool rendered as a plain line instead of a two-column block.
+  const progressHeader = progress.header as {
+    template: string;
+    subtitle?: unknown;
+    text_tag_list?: unknown;
+  };
+  assert.equal(progressHeader.template, 'grey');
+  assert.equal(progressHeader.subtitle, undefined);
+  assert.equal(progressHeader.text_tag_list, undefined);
+  assert.doesNotMatch(serialized, /column_set/);
+  assert.doesNotMatch(serialized, /text_tag/);
+  assert.match(serialized, /active-tool/);
+  assert.match(serialized, /执行中 · /);
 
   const retrying = buildProgressCard({
     title: '同步 upstream',
