@@ -38,6 +38,7 @@ import {
   UserRole,
 } from './types.js';
 import { getDefaultPermissions, normalizePermissions } from './permissions.js';
+import { SYNTHETIC_SENDERS } from './synthetic-messages.js';
 
 let db: Database.Database;
 
@@ -2348,11 +2349,20 @@ export function getUsageUsers(): Array<{ id: string; username: string }> {
   return rows;
 }
 
+// Host-injected messages share the messages table with real inbound IM
+// messages, but their ids are not valid IM message ids. They must never be
+// returned as a reply anchor.
+const SYNTHETIC_SENDER_PLACEHOLDERS = SYNTHETIC_SENDERS.map(() => '?').join(
+  ', ',
+);
+const NOT_SYNTHETIC_SQL = `sender NOT IN (${SYNTHETIC_SENDER_PLACEHOLDERS})`;
+
 /**
  * Get the sender ID and message ID of the most recent non-bot message in a chat.
  * Optionally filter by source_jid (e.g., "feishu:oc_xxx") for accurate
  * attribution in multi-channel home containers.
  * The returned `id` is the original IM message ID (e.g., feishu om_xxx).
+ * Host-injected messages (scheduled task triggers, system notices) are skipped.
  */
 export function getLastInboundMessage(
   chatJid: string,
@@ -2365,10 +2375,10 @@ export function getLastInboundMessage(
   root_id?: string;
 } | null {
   const sql = sourceJid
-    ? `SELECT id, sender, reply_to_id, thread_id, root_id FROM messages WHERE chat_jid = ? AND source_jid = ? AND is_from_me = 0 ORDER BY rowid DESC LIMIT 1`
-    : `SELECT id, sender, reply_to_id, thread_id, root_id FROM messages WHERE chat_jid = ? AND is_from_me = 0 ORDER BY rowid DESC LIMIT 1`;
+    ? `SELECT id, sender, reply_to_id, thread_id, root_id FROM messages WHERE chat_jid = ? AND source_jid = ? AND is_from_me = 0 AND ${NOT_SYNTHETIC_SQL} ORDER BY rowid DESC LIMIT 1`
+    : `SELECT id, sender, reply_to_id, thread_id, root_id FROM messages WHERE chat_jid = ? AND is_from_me = 0 AND ${NOT_SYNTHETIC_SQL} ORDER BY rowid DESC LIMIT 1`;
   const row = sourceJid
-    ? (db.prepare(sql).get(chatJid, sourceJid) as
+    ? (db.prepare(sql).get(chatJid, sourceJid, ...SYNTHETIC_SENDERS) as
         | {
             id: string;
             sender: string;
@@ -2377,7 +2387,7 @@ export function getLastInboundMessage(
             root_id?: string;
           }
         | undefined)
-    : (db.prepare(sql).get(chatJid) as
+    : (db.prepare(sql).get(chatJid, ...SYNTHETIC_SENDERS) as
         | {
             id: string;
             sender: string;
@@ -2409,10 +2419,11 @@ export function getLastInboundMessageInThread(
             AND source_jid = ?
             AND thread_id = ?
             AND is_from_me = 0
+            AND ${NOT_SYNTHETIC_SQL}
           ORDER BY rowid DESC
           LIMIT 1`,
       )
-      .get(chatJid, sourceJid, threadId) as
+      .get(chatJid, sourceJid, threadId, ...SYNTHETIC_SENDERS) as
       | {
           id: string;
           sender: string;

@@ -174,6 +174,7 @@ import { TurnManager } from './turn-manager.js';
 import { DurableOutboundTracker } from './durable-outbound-tracker.js';
 import { saveTurnTrace, cleanupOldTraces } from './turn-trace.js';
 import { startSchedulerLoop } from './task-scheduler.js';
+import { isSyntheticMessage } from './synthetic-messages.js';
 import {
   AgentStatus,
   DbMessage,
@@ -3100,7 +3101,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const triggerMap = new Map<string, RuntimeTriggerMessage>();
   for (const m of missedMessages) {
     const srcJid = m.source_jid || m.chat_jid;
-    if (m.id.startsWith('recovery:')) {
+    // Host-injected messages (scheduled task triggers, restart recovery control)
+    // carry host-generated ids that no IM backend knows about. Anchoring a reply
+    // to one makes the whole delivery fail, so resolve the real inbound message
+    // instead and fall back to the chat root when there is none.
+    if (isSyntheticMessage(m)) {
       const lastInbound = getLastInboundMessage(chatJid, srcJid);
       if (lastInbound) {
         triggerMap.set(srcJid, {
