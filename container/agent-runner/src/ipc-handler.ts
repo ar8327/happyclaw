@@ -48,7 +48,7 @@ export function writeCurrentDeliveryRoute(
   paths: IpcPaths,
   sourceChannels: string[] | undefined,
 ): void {
-  const sourceChannel = normalizeStringArray(sourceChannels)?.at(-1);
+  const sourceChannel = normalizeChannelList(sourceChannels)?.at(-1);
   const workspaceIpc = path.dirname(paths.inputDir);
   const target = path.join(workspaceIpc, CURRENT_DELIVERY_ROUTE_FILE);
   const temp = `${target}.tmp`;
@@ -73,13 +73,39 @@ export function writeCurrentDeliveryRoute(
 
 export const IPC_POLL_MS = 500;
 
-export function normalizeStringArray(value: unknown): string[] | undefined {
+/**
+ * 渠道列表去重，重复项按**最近一次出现**排到末尾。
+ *
+ * 这个顺序是有语义的：`writeCurrentDeliveryRoute()` 与
+ * `SessionState.getCurrentSourceChannel()` 都用 `.at(-1)` 取「当前渠道」，
+ * 同一渠道重复出现时必须以最新那次为准，否则回复会路由到旧渠道。
+ */
+export function normalizeChannelList(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const normalized: string[] = [];
   for (const item of value) {
     if (typeof item !== 'string' || item.length === 0) continue;
     const previous = normalized.indexOf(item);
     if (previous >= 0) normalized.splice(previous, 1);
+    normalized.push(item);
+  }
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+/**
+ * 投递 ID 去重，保留**首次出现**的顺序。
+ *
+ * 宿主侧一律 `[...new Set(ids)]` 后逐个处理，顺序不影响回执语义，
+ * 因此按消息到达顺序排列，让日志与回执读起来和消息批次一致。
+ */
+export function normalizeDeliveryIds(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== 'string' || item.length === 0) continue;
+    if (seen.has(item)) continue;
+    seen.add(item);
     normalized.push(item);
   }
   return normalized.length > 0 ? normalized : undefined;
@@ -99,13 +125,13 @@ export function mergeIpcMessages(messages: IpcMessage[]): IpcMessage {
       const images = messages.flatMap((message) => message.images || []);
       return images.length > 0 ? images : undefined;
     })(),
-    deliveryIds: normalizeStringArray(
+    deliveryIds: normalizeDeliveryIds(
       messages.flatMap((message) => message.deliveryIds || []),
     ),
-    ackTargets: normalizeStringArray(
+    ackTargets: normalizeChannelList(
       messages.flatMap((message) => message.ackTargets || []),
     ),
-    ackSourceChannels: normalizeStringArray(
+    ackSourceChannels: normalizeChannelList(
       messages.flatMap((message) => message.ackSourceChannels || []),
     ),
     intent: messages.some((message) => message.intent === 'correction')
@@ -126,13 +152,13 @@ export function buildIpcAckStreamEvent(
   const messages = Array.isArray(messageOrMessages)
     ? messageOrMessages
     : [messageOrMessages];
-  const ipcAckTargets = normalizeStringArray(
+  const ipcAckTargets = normalizeChannelList(
     messages.flatMap((message) => message.ackTargets || []),
   );
-  const ipcAckSources = normalizeStringArray(
+  const ipcAckSources = normalizeChannelList(
     messages.flatMap((message) => message.ackSourceChannels || []),
   );
-  const ipcDeliveryIds = normalizeStringArray(
+  const ipcDeliveryIds = normalizeDeliveryIds(
     messages.flatMap((message) => message.deliveryIds || []),
   );
   return {
@@ -252,13 +278,13 @@ export function drainIpcInput(paths: IpcPaths, log: LogFn): IpcDrainResult {
           result.messages.push({
             text: data.text,
             images: data.images,
-            deliveryIds: normalizeStringArray(
+            deliveryIds: normalizeDeliveryIds(
               data.deliveryIds || (data.deliveryId ? [data.deliveryId] : []),
             ),
-            ackTargets: normalizeStringArray(data.ackTargets),
+            ackTargets: normalizeChannelList(data.ackTargets),
             ackSourceChannels:
-              normalizeStringArray(data.ackSourceChannels) ||
-              normalizeStringArray(data.sourceChannels) ||
+              normalizeChannelList(data.ackSourceChannels) ||
+              normalizeChannelList(data.sourceChannels) ||
               extractAckSourceChannels(data.text),
             intent: data.intent === 'correction' ? 'correction' : 'continue',
           });

@@ -143,21 +143,31 @@ function fitPanelLines(lines: string[]): string {
 function collapsiblePanel(
   title: string,
   content: string,
-  iconToken: string,
+  iconToken?: string,
 ): Record<string, unknown> {
   return {
     tag: 'collapsible_panel',
     expanded: false,
-    border: { color: 'grey', corner_radius: '6px' },
     header: {
       title: plain(title),
-      icon: { tag: 'standard_icon', token: iconToken },
-      icon_position: 'left',
-      padding: '8px 10px 8px 10px',
+      ...(iconToken
+        ? {
+            icon: { tag: 'standard_icon', token: iconToken },
+            icon_position: 'left',
+          }
+        : {}),
+      padding: '4px 0px 4px 0px',
     },
-    padding: '8px 10px 10px 10px',
+    padding: '4px 0px 6px 0px',
     elements: [markdown(content || '暂无记录', { text_size: 'notation' })],
   };
+}
+
+/** Muted single line used for status/meta rows. */
+function metaLine(content: string): Record<string, unknown> {
+  return markdown(`<font color='grey'>${content}</font>`, {
+    text_size: 'notation',
+  });
 }
 
 export function buildStaticReplyCard(
@@ -193,20 +203,10 @@ export function buildStaticReplyCard(
       streaming_mode: false,
       summary: { content: compactLine(body, 80) || '回复' },
     },
-    header: {
-      title: plain('回复'),
-      template:
-        state === 'aborted'
-          ? 'orange'
-          : state === 'streaming'
-            ? 'wathet'
-            : 'indigo',
-      icon: { tag: 'standard_icon', token: 'chat_outlined' },
-    },
     body: {
       direction: 'vertical',
-      padding: '12px 16px 14px 16px',
-      vertical_spacing: '10px',
+      padding: '12px 16px 12px 16px',
+      vertical_spacing: '8px',
       elements,
     },
   };
@@ -275,28 +275,16 @@ export function buildProgressCard(
         : data.state === 'failed'
           ? '执行失败'
           : data.abortReason || '已中断';
+  // Minimal presentation: the header stays neutral grey for every healthy
+  // state so the card blends into the chat stream. Colour is reserved for
+  // failures, where drawing attention is the point.
   const template = visibleRunnerError
     ? visibleRunnerError.willRetry
       ? 'orange'
       : 'red'
-    : data.state === 'active'
-      ? 'wathet'
-      : data.state === 'completed'
-        ? 'green'
-        : data.state === 'failed'
-          ? 'red'
-          : 'orange';
-  const currentAction = visibleRunnerError
-    ? errorSummary(
-        visibleRunnerError.detail || visibleRunnerError.message || statusLabel,
-      )
-    : data.activeTools[0]
-      ? `${toolName(data.activeTools[0])}${data.activeTools[0].inputSummary ? ` · ${compactLine(data.activeTools[0].inputSummary, 48)}` : ''}`
-      : data.isThinking
-        ? '正在思考'
-        : data.latestCommentary
-          ? compactLine(data.latestCommentary, 60)
-          : statusLabel;
+    : data.state === 'failed'
+      ? 'red'
+      : 'grey';
   const title =
     compactLine(data.title || data.latestCommentary || 'Agent 执行', 48) ||
     'Agent 执行';
@@ -304,39 +292,12 @@ export function buildProgressCard(
   const totalAgents =
     data.activeSubAgents.length + data.completedSubAgents.length;
 
-  const textTags: Array<Record<string, unknown>> = [
-    {
-      tag: 'text_tag',
-      text: plain(formatElapsed(data.elapsedMs)),
-      color:
-        data.state === 'active' && !visibleRunnerError ? 'blue' : 'neutral',
-    },
-  ];
-  if (data.modelLabel) {
-    textTags.push({
-      tag: 'text_tag',
-      text: plain(compactLine(data.modelLabel, 18)),
-      color: 'indigo',
-    });
-  }
-  if (visibleRunnerError) {
-    textTags.push({
-      tag: 'text_tag',
-      text: plain(
-        visibleRunnerError.willRetry ? '自动重试中' : '当前 turn 已停止',
-      ),
-      color: visibleRunnerError.willRetry ? 'orange' : 'red',
-    });
-  }
-  if (totalTools > 0) {
-    textTags.push({
-      tag: 'text_tag',
-      text: plain(`${totalTools} tools`),
-      color: 'neutral',
-    });
-  }
+  const statusParts = [statusLabel, formatElapsed(data.elapsedMs)];
+  if (data.modelLabel) statusParts.push(compactLine(data.modelLabel, 18));
 
-  const elements: Array<Record<string, unknown>> = [];
+  const elements: Array<Record<string, unknown>> = [
+    metaLine(statusParts.join(' · ')),
+  ];
 
   if (visibleRunnerError) {
     const retrying = visibleRunnerError.willRetry;
@@ -368,29 +329,16 @@ export function buildProgressCard(
     const elapsed =
       tool.startTime === undefined
         ? ''
-        : formatElapsed(Date.now() - tool.startTime);
-    elements.push({
-      tag: 'column_set',
-      flex_mode: 'stretch',
-      vertical_align: 'center',
-      columns: [
-        {
-          tag: 'column',
-          width: 'weighted',
-          weight: 4,
-          elements: [
-            markdown(
-              `**${toolName(tool)}**${tool.inputSummary ? `  \`${compactLine(tool.inputSummary, 70)}\`` : ''}`,
-            ),
-          ],
-        },
-        {
-          tag: 'column',
-          width: 'auto',
-          elements: [markdown(elapsed, { text_align: 'right' })],
-        },
-      ],
-    });
+        : ` <font color='grey'>· ${formatElapsed(Date.now() - tool.startTime)}</font>`;
+    elements.push(
+      markdown(
+        `**${toolName(tool)}**${tool.inputSummary ? ` \`${compactLine(tool.inputSummary, 70)}\`` : ''}${elapsed}`,
+      ),
+    );
+  }
+
+  if (data.activeTools.length === 0 && data.isThinking && !visibleRunnerError) {
+    elements.push(metaLine('正在思考…'));
   }
 
   if (data.latestCommentary) {
@@ -405,7 +353,6 @@ export function buildProgressCard(
         thinking.length <= MAX_PANEL_CHARS
           ? thinking
           : `${thinking.slice(0, MAX_PANEL_CHARS)}\n\n*后续内容过长，已截断。*`,
-        'thinking_outlined',
       ),
     );
   }
@@ -430,11 +377,7 @@ export function buildProgressCard(
       }),
     ];
     elements.push(
-      collapsiblePanel(
-        `工具调用 (${totalTools})`,
-        fitPanelLines(toolLines),
-        'tool_outlined',
-      ),
+      collapsiblePanel(`工具调用 (${totalTools})`, fitPanelLines(toolLines)),
     );
   }
 
@@ -453,11 +396,7 @@ export function buildProgressCard(
       }),
     ];
     elements.push(
-      collapsiblePanel(
-        `子 Agent (${totalAgents})`,
-        fitPanelLines(agentLines),
-        'robot_outlined',
-      ),
+      collapsiblePanel(`子 Agent (${totalAgents})`, fitPanelLines(agentLines)),
     );
   }
 
@@ -469,7 +408,7 @@ export function buildProgressCard(
     elements.push({
       tag: 'button',
       text: plain('停止'),
-      type: 'danger',
+      type: 'default',
       size: 'small',
       width: 'default',
       behaviors: [
@@ -502,7 +441,6 @@ export function buildProgressCard(
     },
     header: {
       title: plain(title),
-      subtitle: plain(currentAction),
       template,
       icon: {
         tag: 'standard_icon',
@@ -514,13 +452,12 @@ export function buildProgressCard(
               ? 'yes_outlined'
               : 'warning_outlined',
       },
-      text_tag_list: textTags.slice(0, 3),
-      padding: '12px 16px 12px 16px',
+      padding: '10px 16px 10px 16px',
     },
     body: {
       direction: 'vertical',
-      padding: '12px 16px 14px 16px',
-      vertical_spacing: '10px',
+      padding: '10px 16px 12px 16px',
+      vertical_spacing: '8px',
       elements,
     },
   };

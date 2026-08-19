@@ -55,7 +55,6 @@ export interface QueryConfig {
    * silently rebuild or cache provider-specific prompt content internally.
    */
   systemPrompt: string;
-  promptContract?: RunnerPromptContract;
   sessionId?: string;
   resumeAt?: string;
   images?: Array<{ data: string; mimeType?: string }>;
@@ -151,6 +150,13 @@ export type PushMessageResult =
 export interface AgentRunner {
   /** 返回此 provider 的 IPC 能力声明 */
   readonly ipcCapabilities: IpcCapabilities;
+
+  /**
+   * runner 实现自己的 prompt 契约：system prompt 载体、动态段刷新周期、
+   * turn section 的投递通道。启动时与 descriptor 声明对拍，不一致直接 fail-fast，
+   * 避免 descriptor 写着一套、实现跑着另一套。
+   */
+  readonly promptContract: RunnerPromptContract;
 
   /**
    * 初始化 runner。

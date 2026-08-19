@@ -16,6 +16,20 @@ import {
   resolveFeishuTopicAnchor,
 } from './feishu-topic-session.js';
 import { buildFeishuTopicNameSuffix } from './feishu-topic-title.js';
+import { isSyntheticMessage } from './synthetic-messages.js';
+
+assert.equal(
+  isSyntheticMessage({ id: 'task-task-1755-abc-1755', sender: '__task__' }),
+  true,
+);
+assert.equal(
+  isSyntheticMessage({ id: 'recovery:turn-1', sender: '__system__' }),
+  true,
+);
+assert.equal(
+  isSyntheticMessage({ id: 'om_message', sender: 'ou_user' }),
+  false,
+);
 
 assert.equal(normalizeFeishuConversationMode('thread'), 'thread');
 assert.equal(normalizeFeishuConversationMode('invalid'), 'chat');
@@ -150,10 +164,7 @@ try {
       'om_root',
     );
     assert.deepEqual(
-      database.getLastInboundMessage(
-        'web:fixture',
-        'feishu:oc_fixture',
-      ),
+      database.getLastInboundMessage('web:fixture', 'feishu:oc_fixture'),
       {
         id: 'om_reply',
         sender: 'ou_user',
@@ -161,6 +172,64 @@ try {
         thread_id: null,
         root_id: 'om_root',
       },
+    );
+
+    // A scheduled task trigger is injected as a synthetic inbound message with a
+    // host-generated id. It must never become the reply anchor — replying to it
+    // makes the Feishu delivery fail with an invalid message_id.
+    database.storeMessageDirect(
+      'task-task-1755000000000-abc123-1755000001000',
+      'web:fixture',
+      '__task__',
+      '[定时任务]',
+      '[task:task-1755000000000-abc123] 汇报进度',
+      new Date().toISOString(),
+      false,
+    );
+    assert.equal(
+      database.getLastInboundMessage('web:fixture', 'feishu:oc_fixture')?.id,
+      'om_reply',
+    );
+    assert.equal(database.getLastInboundMessage('web:fixture')?.id, 'om_reply');
+
+    // Same guarantee inside a thread.
+    database.storeMessageDirect(
+      'om_in_thread',
+      'web:fixture',
+      'ou_user',
+      'Fixture User',
+      'threaded follow-up',
+      new Date().toISOString(),
+      false,
+      undefined,
+      undefined,
+      'feishu:oc_fixture',
+      undefined,
+      'omt_thread',
+      'om_root',
+    );
+    database.storeMessageDirect(
+      'task-task-1755000000000-abc123-1755000002000',
+      'web:fixture',
+      '__task__',
+      '[定时任务]',
+      '[task:task-1755000000000-abc123] 汇报进度',
+      new Date().toISOString(),
+      false,
+      undefined,
+      undefined,
+      'feishu:oc_fixture',
+      undefined,
+      'omt_thread',
+      'om_root',
+    );
+    assert.equal(
+      database.getLastInboundMessageInThread(
+        'web:fixture',
+        'feishu:oc_fixture',
+        'omt_thread',
+      )?.id,
+      'om_in_thread',
     );
 
     database.closeDatabase();

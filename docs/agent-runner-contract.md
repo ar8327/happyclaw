@@ -27,10 +27,14 @@
 - `ContextBundle` 是模型上下文的结构化单一入口。每个 section 都有稳定的 `id`、`content` 与 `stability`。
 - `stability` 分为 `static`、`session`、`turn`。query-loop 每轮都重新构造 bundle，并在 `runQuery()` 前调用 `runner.applyContext()`。
 - descriptor 的 `nativeProvides` 声明 runner 原生提供的 section。共享 builder 必须过滤这些 section，避免原生上下文与显式注入重复。
-- runner 必须保证每个 canonical section 恰好出现一次。不得缓存上一轮的动态 section，也不得在内部另建一套 HappyClaw prompt。
-- Claude 通过原生 identity、环境、工作区规则与 Skill 发现提供部分 section，其余 section 作为 append prompt。
-- Codex 在新 thread 的 instructions file 中放 static 与 session section；turn section 通过 `thread/inject_items` 注入。resume 后 section 内容变化时按 hash 增量注入，删除 section 时注入失效标记。
-- Antigravity 每轮把完整渲染结果写入隔离 HOME 的 `GEMINI.md`。
+- runner 必须保证每个 canonical section 恰好出现一次。不得在内部另建一套 HappyClaw prompt。
+- turn section 的投递通道由 `promptContract.turnContextDelivery` 声明，三种取值：
+  - `system`：每轮把完整渲染结果重写进 system / rules 载体（Antigravity 写隔离 HOME 的 `GEMINI.md`）。载体不进对话历史，全量重传没有累积代价。
+  - `user_prefix`：system 只放 static 与 session section，turn section 按内容 hash 增量前置到用户消息（Claude）。system 前缀逐轮字节稳定，动态段不会打断 prompt cache。
+  - `incremental_items`：static 与 session section 随 thread 启动写入 instructions file，turn section 通过 `thread/inject_items` 增量投递（Codex / TraeX）。
+- 增量投递统一走 `context-injection.ts` 的 `planContextInjection()`：内容变化的 section 带 `supersedes-previous` 标记作废旧副本，消失的 section 投递失效说明。runner 不得自己另写一套 hash 逻辑。
+- 采用增量投递的 runner 必须在压缩边界丢弃投递记录（`BaseCliRunner` 监听 `lifecycle/compact_completed` 统一处理），否则被摘要吞掉的段不会重新注入。
+- Claude 通过原生 identity、环境、工作区规则与 Skill 发现提供部分 section，其余 section 走 append prompt。
 - `QueryConfig.systemPrompt` 只保留为 runner 调用层的渲染结果，不再驱动环境变量或临时 instructions file 通用分支。
 
 ## Descriptor 握手契约
@@ -41,7 +45,8 @@
   - `midQueryPush`
   - `runtimeModeSwitch`
 - 任一字段不一致都必须直接 fail-fast，不能带着错误声明继续运行。
-- `lifecycle`、`promptContract` 和 `nativeProvides` 是静态契约，`context-conformance.test.ts` 负责验证 section 覆盖、动态刷新与 Codex 增量投递。
+- `promptContract` 同样 fail-fast：runner 实例用 `readonly promptContract` 声明自己的实现事实，容器启动时与 descriptor 深比较，不一致直接抛错。其中 `mode` 与 `dynamicContextReload` 是描述性字段（供 Runners 页与降级决策阅读），`turnContextDelivery` 直接驱动 `BaseCliRunner` 的投递行为。
+- `lifecycle` 与 `nativeProvides` 是静态契约，`context-conformance.test.ts` 负责验证 section 覆盖、descriptor 与实现的 promptContract 一致性，以及 `resolveTurnContextDelivery()` 的增量语义。
 
 ## Resume Anchor 契约
 
@@ -92,6 +97,7 @@
 
 - 确认 `applyContext()` 在每个 turn 都消费新构造的 `ContextBundle`。
 - 声明并验证 `nativeProvides`，确保 canonical section 不重不漏。
+- 声明 `promptContract`（含 `turnContextDelivery`），并让 runner 实例导出同一份常量供握手与 conformance 测试对拍。
 - 确认 `ipcCapabilities` 与主进程 descriptor 一致，否则进程启动应直接失败。
 - 确认 `resume_anchor` 何时发出，并写进实现说明。
 - 确认 `getActivityReport()` 的统计粒度不会误导看门狗。

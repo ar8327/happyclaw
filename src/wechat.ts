@@ -12,6 +12,10 @@
  * CDN URL:  https://novac2c.cdn.weixin.qq.com/c2c
  */
 import crypto from 'crypto';
+import {
+  parseSlashCommand,
+  type ImCommandHandler,
+} from './im-command-utils.js';
 import { storeChatMetadata, storeMessageDirect, updateChatName } from './db.js';
 import { notifyNewImMessage } from './message-notifier.js';
 import { broadcastNewMessage } from './web.js';
@@ -72,7 +76,7 @@ export interface WeChatConnectOpts {
   onReady?: () => void;
   onNewChat: (jid: string, name: string) => void;
   ignoreMessagesBefore?: number;
-  onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+  onCommand?: ImCommandHandler;
   resolveGroupFolder?: (jid: string) => string | undefined;
   resolveEffectiveChatJid?: (
     chatJid: string,
@@ -577,13 +581,13 @@ export function createWeChatConnection(
       }
 
       // Handle slash commands
-      const slashMatch = content.match(/^\/(\S+)(?:\s+(.*))?$/i);
-      if (slashMatch && opts.onCommand) {
-        const cmdBody = (
-          slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
-        ).trim();
+      const slashCommand = parseSlashCommand(content);
+      if (slashCommand && opts.onCommand) {
         try {
-          const reply = await opts.onCommand(jid, cmdBody);
+          const reply = await opts.onCommand(jid, slashCommand.body, {
+            targetJid: opts.resolveEffectiveChatJid?.(jid)?.effectiveJid ?? jid,
+            chatType: 'p2p',
+          });
           if (reply) {
             const ct = contextTokenCache.get(fromUserId);
             if (ct) {

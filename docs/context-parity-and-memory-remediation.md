@@ -10,6 +10,8 @@
 
 > **实施状态，2026-07-24**：本文列出的 P0、P1、P2 与文档整改均已落地。上下文主链路已切换为 `ContextBundle + applyContext()`；Memory 已切换为并行只读车道、串行写车道与 SQLite 持久队列；快速检索、批量 wrapup、防饿死、保留策略和监控指标均已接入。对应回归测试由 `make typecheck` 统一执行。下文保留基线证据与设计推导，便于后续审计。
 
+> **后续整改，2026-08-19**：本文第一部分留下的三个尾巴已闭环。① claude 此前把 `sessionStatic + turnDynamic` 合并成一整块塞进 `--append-system-prompt`，随身索引每轮重读磁盘导致 system 前缀逐轮变化、prompt cache 全量失效；现按 `promptContract.turnContextDelivery` 分流，claude 走 `user_prefix`，turn 段按 hash 增量前置到用户消息（实测每轮常驻 system 从约 7.2k tok 降到 2.9k）。② codex 的增量注入此前只在 section 消失时作废，内容变更会让新旧副本在 thread 历史里并存；现统一由 `context-injection.ts` 的 `planContextInjection()` 打 `supersedes-previous` 标记。③ `promptContract` 从装饰性声明变成 fail-fast 契约：runner 实例自带 `readonly promptContract`，启动握手与 descriptor 深比较，`context-conformance.test.ts` 追加实现级断言。另外修掉了 claude 侧 `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` 与 `global-instructions` section 对 user-global `CLAUDE.md` 的双份注入，并把 `channel-routing` 拆成静态规则（留在 system）与活跃渠道（turn）两段。
+
 四个整改目标：
 
 1. **上下文注入一致性**：抽象所有注入给 runner 的内容，切换 runner 后模型看到的 HappyClaw 侧上下文应当无差别；等价性由测试强制。

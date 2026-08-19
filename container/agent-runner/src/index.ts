@@ -294,6 +294,24 @@ function validateDeclaredIpcCapabilities(
   }
 }
 
+/**
+ * descriptor 的 promptContract 与 runner 实现自己的声明对拍。
+ * 上下文投递通道写错会直接影响模型看到的东西，必须在第一次 runQuery 前就炸掉。
+ */
+function validateDeclaredPromptContract(
+  runnerId: string,
+  descriptor: RunnerDescriptor,
+  runner: AgentRunner,
+): void {
+  const declared = JSON.stringify(descriptor.promptContract);
+  const actual = JSON.stringify(runner.promptContract);
+  if (declared !== actual) {
+    throw new Error(
+      `Runner "${runnerId}" promptContract mismatch: descriptor=${declared} instance=${actual}`,
+    );
+  }
+}
+
 function validateDeclaredRunnerDescriptor(
   manifest: RunnerManifest,
   input: ContainerInput,
@@ -443,6 +461,7 @@ async function main(): Promise<void> {
     toolScope: TOOL_SCOPE,
   });
   validateDeclaredIpcCapabilities(runnerId, containerInput, runner);
+  validateDeclaredPromptContract(runnerId, runnerManifest.descriptor, runner);
   await runner.initialize();
 
   await runQueryLoop({
@@ -458,7 +477,6 @@ async function main(): Promise<void> {
       memoryDir: WORKSPACE_MEMORY,
       skillsDir: WORKSPACE_SKILLS,
     }),
-    promptContract: runnerManifest.descriptor.promptContract,
     initialPrompt: prompt,
     initialImages: promptImages,
     initialMessages: [

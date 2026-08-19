@@ -10,13 +10,9 @@
  */
 
 import fs from 'fs';
-import crypto from 'crypto';
 import path from 'path';
 import os from 'os';
-import {
-  normalizeHomeFlags,
-  type ContextSection,
-} from 'agentdock-agent-runner-core';
+import { normalizeHomeFlags } from 'agentdock-agent-runner-core';
 
 import type {
   AgentRunner,
@@ -31,6 +27,8 @@ import type {
   PushMessageResult,
 } from '../../runner-interface.js';
 import { combineRenderedContext } from '../../runner-interface.js';
+import { planContextInjection } from '../../context-injection.js';
+import type { RunnerPromptContract } from '../../runner-descriptor.types.js';
 import type { ContainerInput, ContainerOutput } from '../../types.js';
 import type { SessionState } from '../../session-state.js';
 import type { IpcPaths } from '../../ipc-handler.js';
@@ -188,59 +186,23 @@ export function isCodexSessionResumeFailedError(message: string): boolean {
   ].some((pattern) => pattern.test(message));
 }
 
-export function planCodexContextInjection(
-  previousHashes: ReadonlyMap<string, string>,
-  sections: ContextSection[],
-  options: {
-    threadChanged: boolean;
-    freshThread: boolean;
-  },
-): {
-  changed: Array<{ id: string; content: string }>;
-  nextHashes: Map<string, string>;
-} {
-  const nextHashes = new Map<string, string>(
-    sections.map((section) => [
-      section.id,
-      crypto.createHash('sha256').update(section.content).digest('hex'),
-    ]),
-  );
-  const changed: Array<{ id: string; content: string }> = sections
-    .filter((section) => {
-      if (
-        options.freshThread &&
-        options.threadChanged &&
-        section.stability !== 'turn'
-      ) {
-        return false;
-      }
-      return (
-        options.threadChanged ||
-        previousHashes.get(section.id) !== nextHashes.get(section.id)
-      );
-    })
-    .map((section) => ({
-      id: section.id,
-      content: section.content,
-    }));
-  if (!options.freshThread) {
-    for (const previousId of previousHashes.keys()) {
-      if (nextHashes.has(previousId)) continue;
-      changed.push({
-        id: previousId,
-        content: `The previous HappyClaw context section "${previousId}" no longer applies. Ignore its earlier content.`,
-      });
-    }
-  }
-  return { changed, nextHashes };
-}
-
 // ---------------------------------------------------------------------------
 // CodexRunner
 // ---------------------------------------------------------------------------
 
+/**
+ * codex / traex 的 prompt 契约：static 与 session 段随 thread 启动写入
+ * instructions 文件，turn section 通过 thread/inject_items 增量投递。
+ */
+export const CODEX_PROMPT_CONTRACT: RunnerPromptContract = {
+  mode: 'instructions_file',
+  dynamicContextReload: 'turn',
+  turnContextDelivery: 'incremental_items',
+};
+
 export class CodexRunner implements AgentRunner {
   readonly ipcCapabilities: IpcCapabilities;
+  readonly promptContract: RunnerPromptContract = CODEX_PROMPT_CONTRACT;
 
   private session!: CodexSession;
   private instructionsFile!: string;
@@ -419,7 +381,7 @@ export class CodexRunner implements AgentRunner {
     const threadId = this.session.getThreadId();
     if (!threadId) return;
     const threadChanged = this.contextThreadId !== threadId;
-    const plan = planCodexContextInjection(
+    const plan = planContextInjection(
       this.contextHashes,
       this.renderedContext.sections,
       {
@@ -530,10 +492,18 @@ export class CodexRunner implements AgentRunner {
       ? this.renderedContext.sessionStatic
       : config.systemPrompt;
 
-    fs.writeFileSync(this.instructionsFile, systemPrompt, 'utf-8');
-    log(
-      `Codex instructions prepared: mode=session-static, chars=${systemPrompt.length}, promptChars=${composedPrompt.length}`,
+    // instructions 文件只在 thread/start 与 thread/resume 时被 app-server 读取。
+    // thread 已经在跑的时候重写它不会生效，静态段的后续变更由
+    // injectChangedContext() 通过 thread/inject_items 补投。
+    const willStartThread = !(
+      resumeTarget && resumeTarget === this.session.getThreadId()
     );
+    if (willStartThread) {
+      fs.writeFileSync(this.instructionsFile, systemPrompt, 'utf-8');
+      log(
+        `Codex instructions written: mode=session-static, chars=${systemPrompt.length}, promptChars=${composedPrompt.length}`,
+      );
+    }
 
     // Prepare images (base64 → temp files)
     let imagePaths: string[] | undefined;

@@ -24,6 +24,16 @@ export type HookStreamingMode = 'none' | 'begin_end' | 'progress';
 export type PostCompactRepairMode = 'native' | 'synthetic' | 'none';
 export type PromptMode = 'append' | 'instructions_file';
 export type DynamicContextReloadMode = 'none' | 'turn' | 'mid_turn';
+/**
+ * 每轮动态 section（stability='turn'）的投递通道。
+ * - `system`：每轮把完整渲染结果重新写进 system/rules 载体（全量重传）。
+ * - `user_prefix`：system 只保留 static+session；turn section 按内容 hash 增量前置到用户消息。
+ * - `incremental_items`：通过 provider 的会话注入接口按 hash 增量投递（Codex thread/inject_items）。
+ */
+export type TurnContextDelivery =
+  | 'system'
+  | 'user_prefix'
+  | 'incremental_items';
 export type NativeContextSectionId =
   | 'identity'
   | 'environment'
@@ -32,6 +42,7 @@ export type NativeContextSectionId =
   | 'platform-guidelines'
   | 'context-summary'
   | 'channel-routing'
+  | 'channel-routing-active'
   | 'memory-index'
   | 'skills-catalog';
 export type ToolInjectionMode =
@@ -99,6 +110,8 @@ export interface RunnerLifecycleCapabilities {
 export interface RunnerPromptContract {
   mode: PromptMode;
   dynamicContextReload: DynamicContextReloadMode;
+  /** turn section 的投递通道。runner 实现必须与此声明一致，由 context-conformance 测试对拍。 */
+  turnContextDelivery: TurnContextDelivery;
 }
 
 export interface RunnerRuntimeContract {
@@ -240,6 +253,7 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
     promptContract: {
       mode: 'append',
       dynamicContextReload: 'turn',
+      turnContextDelivery: 'user_prefix',
     },
     nativeProvides: [
       'identity',
@@ -342,6 +356,7 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
     promptContract: {
       mode: 'instructions_file',
       dynamicContextReload: 'turn',
+      turnContextDelivery: 'incremental_items',
     },
     nativeProvides: [],
     runtimeContract: {
@@ -448,6 +463,7 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
     promptContract: {
       mode: 'instructions_file',
       dynamicContextReload: 'turn',
+      turnContextDelivery: 'incremental_items',
     },
     nativeProvides: [],
     runtimeContract: {
@@ -564,6 +580,7 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
     promptContract: {
       mode: 'instructions_file',
       dynamicContextReload: 'turn',
+      turnContextDelivery: 'system',
     },
     nativeProvides: [],
     runtimeContract: {

@@ -30,6 +30,7 @@ import {
 import { PREDEFINED_AGENTS } from './agent-defs.js';
 import { prepareClaudePromptWithImages } from './image-utils.js';
 import { StreamEventProcessor } from './event-adapter.js';
+import type { RunnerPromptContract } from '../../runner-descriptor.types.js';
 
 export interface ClaudeRunnerOptions {
   containerInput: ContainerInput;
@@ -488,6 +489,9 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
     if (this.opts.model) args.push('--model', this.opts.model);
     if (this.opts.thinkingEffort)
       args.push('--effort', this.opts.thinkingEffort);
+    // --add-dir 只用来放开文件访问。CLI 会在 CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD
+    // 打开时额外加载这些目录下的 CLAUDE.md，而 user-global 的 CLAUDE.md 已经由
+    // ContextBundle 的 global-instructions 段注入，打开就会重复注入一份。
     for (const dir of resolveAdditionalDirectories([
       this.opts.globalDir,
       this.opts.memoryDir,
@@ -508,7 +512,6 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
         ...this.mcpServerEnv,
         ENABLE_CLAUDEAI_MCP_SERVERS: 'false',
         CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-        CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
         CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
       },
     };
@@ -845,11 +848,22 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
   }
 }
 
+/**
+ * claude 的 prompt 契约：append 到 CLI 原生 preset 之后，
+ * turn section 走用户消息前缀（保持 system 前缀逐轮稳定）。
+ */
+export const CLAUDE_PROMPT_CONTRACT: RunnerPromptContract = {
+  mode: 'append',
+  dynamicContextReload: 'turn',
+  turnContextDelivery: 'user_prefix',
+};
+
 export class ClaudeRunner extends BaseCliRunner {
   readonly ipcCapabilities: IpcCapabilities = {
     supportsMidQueryPush: true,
     supportsRuntimeModeSwitch: false,
   };
+  readonly promptContract: RunnerPromptContract = CLAUDE_PROMPT_CONTRACT;
 
   protected readonly adapter: ClaudeCliAdapter;
   private readonly tmpDir: string;

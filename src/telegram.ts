@@ -15,6 +15,10 @@ import {
 } from './im-downloader.js';
 import { detectImageMimeType } from './image-detector.js';
 import { analyzeIntent } from './intent-analyzer.js';
+import {
+  parseSlashCommand,
+  type ImCommandHandler,
+} from './im-command-utils.js';
 
 // ─── TelegramConnection Interface ──────────────────────────────
 
@@ -36,7 +40,7 @@ export interface TelegramConnectOpts {
     code: string,
   ) => Promise<boolean>;
   /** 斜杠指令回调（如 /clear），返回回复文本或 null */
-  onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+  onCommand?: ImCommandHandler;
   /** 根据 jid 解析群组 folder，用于下载文件/图片到工作区 */
   resolveGroupFolder?: (jid: string) => string | undefined;
   /** 将 IM chatJid 解析为绑定目标 JID（conversation agent 或工作区主会话） */
@@ -475,21 +479,23 @@ export function createTelegramConnection(
             ctx.chat.type === 'private' ? 'p2p' : 'group',
           );
 
+          // 解析绑定路由（命令也需要它：运行时按 effective JID 索引）
+          const agentRouting = opts.resolveEffectiveChatJid?.(jid);
+          const targetJid = agentRouting?.effectiveJid ?? jid;
+
           // ── 斜杠指令：拦截已知 /xxx 命令，不进入消息流 ──
-          // Telegram 群聊中会追加 @BotUsername，需要去掉
-          const tgSlashMatch = text
-            .trim()
-            .match(/^\/(\S+?)(?:@\S+)?(?:\s+(.*))?$/i);
-          if (tgSlashMatch && opts.onCommand) {
-            const cmdBody = (
-              tgSlashMatch[1] + (tgSlashMatch[2] ? ' ' + tgSlashMatch[2] : '')
-            ).trim();
+          // parseSlashCommand 会顺带去掉 Telegram 群聊追加的 @BotUsername
+          const slashCommand = parseSlashCommand(text);
+          if (slashCommand && opts.onCommand) {
             logger.info(
-              { jid, cmd: tgSlashMatch[1], cmdBody },
+              { jid, cmd: slashCommand.cmd, cmdBody: slashCommand.body },
               'Telegram slash command detected',
             );
             try {
-              const reply = await opts.onCommand(jid, cmdBody);
+              const reply = await opts.onCommand(jid, slashCommand.body, {
+                targetJid,
+                chatType: ctx.chat.type === 'private' ? 'p2p' : 'group',
+              });
               if (reply) {
                 await ctx.reply(reply);
                 return; // 已知命令，拦截
@@ -497,7 +503,7 @@ export function createTelegramConnection(
               // reply 为 null 表示未知命令，继续作为普通消息处理
             } catch (err) {
               logger.error(
-                { jid, cmd: tgSlashMatch[1], err },
+                { jid, cmd: slashCommand.cmd, err },
                 'Telegram slash command failed',
               );
               try {
@@ -518,10 +524,6 @@ export function createTelegramConnection(
           } catch (err) {
             logger.debug({ err, msgId }, 'Failed to add Telegram reaction');
           }
-
-          // 解析绑定路由
-          const agentRouting = opts.resolveEffectiveChatJid?.(jid);
-          const targetJid = agentRouting?.effectiveJid ?? jid;
 
           // ── 中断 fast-path（使用路由后的 targetJid） ──
           if (opts.onInterruptRequest && text.length <= 50) {

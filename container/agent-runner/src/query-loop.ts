@@ -19,7 +19,6 @@ import type {
   RenderedRunnerContext,
 } from './runner-interface.js';
 import { combineRenderedContext } from './runner-interface.js';
-import type { RunnerPromptContract } from './runner-descriptor.types.js';
 import type { ContainerOutput } from './types.js';
 import type { SessionState } from './session-state.js';
 import {
@@ -44,7 +43,6 @@ import {
 export interface QueryLoopConfig {
   runner: AgentRunner;
   buildContext: (prompt: string) => RenderedRunnerContext;
-  promptContract?: RunnerPromptContract;
   initialPrompt: string;
   initialImages?: Array<{ data: string; mimeType?: string }>;
   initialMessages?: IpcMessage[];
@@ -570,7 +568,6 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
     const queryConfig: QueryConfig = {
       prompt: effectivePrompt,
       systemPrompt: combineRenderedContext(renderedContext),
-      promptContract: config.promptContract,
       sessionId: config.ephemeralSession ? undefined : sessionId,
       resumeAt: config.ephemeralSession ? undefined : resumeAnchor,
       images,

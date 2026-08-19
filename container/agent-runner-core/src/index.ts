@@ -54,15 +54,12 @@ export type {
   SectionId,
   RenderContextBundleOptions,
 } from './context-bundle.js';
-export { renderContextBundle, splitRenderedContext } from './context-bundle.js';
+export { renderContextBundle } from './context-bundle.js';
 export { ContextManager } from './context.js';
 
-// Prompt builder
+// Context bundle builder
 export {
-  buildBasePrompt,
   buildContextBundle,
-  buildAppendPrompt,
-  buildFullPrompt,
   buildChannelRoutingReminder,
   normalizeHomeFlags,
   INTERACTION_GUIDELINES,
@@ -70,8 +67,6 @@ export {
   WEB_FETCH_GUIDELINES,
   BACKGROUND_TASK_GUIDELINES,
 } from './prompt-builder.js';
-// Legacy alias
-export { buildBasePrompt as buildBaseSystemPrompt } from './prompt-builder.js';
 
 // Built-in plugins
 export { MessagingPlugin } from './plugins/messaging.js';

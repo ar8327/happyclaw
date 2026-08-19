@@ -127,8 +127,8 @@
 - **消息路由**：stdout 仅输出到 Web 端；IM 消息必须通过 `send_message(channel=...)` 显式发送
 - **敏感数据过滤**：StreamEvent 中的 `toolInputSummary` 会过滤 `ANTHROPIC_API_KEY` 等环境变量名
 - **能力声明校验**：container 启动时会用 `declaredIpcCapabilities` 对拍 runner 实例的 `ipcCapabilities`，声明和实现不一致直接 fail-fast
-- **上下文投递**：`ContextBundle` 按 `static / session / turn` 组织 canonical section；query-loop 每轮调用 `applyContext()`。descriptor 的 `nativeProvides` 用于过滤 runner 原生内容，conformance 测试保证 section 不重不漏
-- **Codex 升级约束**：`container/agent-runner/package.json` 里的 `@openai/codex-sdk` 已锁定精确版本。升级前必须复验 `model_instructions_file` 逐 turn 重读仍然成立
+- **上下文投递**：`ContextBundle` 按 `static / session / turn` 组织 canonical section；query-loop 每轮调用 `applyContext()`。descriptor 的 `nativeProvides` 过滤 runner 原生内容，`promptContract.turnContextDelivery` 决定 turn 段的投递通道（claude=`user_prefix` 增量前置到用户消息、codex/traex=`incremental_items` 走 `thread/inject_items`、agy=`system` 全量重写 rules 文件）。增量投递统一走 `context-injection.ts`，内容变更会作废旧副本；conformance 测试保证 section 不重不漏且 descriptor 与实现声明一致
+- **Codex 升级约束**：`container/agent-runner/package.json` 里的 `@openai/codex-sdk` 已锁定精确版本。`model_instructions_file` 只在 `thread/start` / `thread/resume` 时被读取，thread 运行期间的上下文更新依赖 `thread/inject_items`；升级前必须复验这两条仍然成立
 - **Antigravity (agy) runner**：`runners/agy/`，print 模式逐轮 spawn `agy --print=...`，`--conversation <uuid>` 续接。关键机制：
   - **会话隔离 HOME**：agy 无 config-dir 环境变量，runner 用 `HAPPYCLAW_AGY_HOME`（descriptor `configDirEnv`，宿主机自动指向 session 的 `.agy/`）作为子进程 `$HOME`；macOS 认证 token 在 login keychain（service=`gemini`），keychain 路径按 `$HOME` 推导，因此 `prepareAgyHome` 会把 `Library/Keychains` 软链回真实 HOME
   - **系统提示词**：写入会话 HOME 的 `~/.gemini/GEMINI.md` 全局规则（每次运行重读、不膨胀会话历史）；workspace 级 `AGENTS.md`/`GEMINI.md` 在 print 模式**不生效**，勿依赖
@@ -631,11 +631,19 @@ Session runtime 收尾 → export transcripts
 
 | 命令 | 缩写 | 用途 |
 |------|------|------|
+| `/help` | `/h` | 显示命令表；未知但形似命令的输入也会回这张表 |
+| `/stop` | - | 中断当前会话正在执行的 turn（写 `_interrupt` sentinel + 标记 turn interrupted） |
 | `/list` | `/ls` | 查看所有工作区和对话列表，标记当前位置，显示 Agent 短 ID |
 | `/status` | - | 查看当前所在的工作区/对话状态 |
 | `/recall` | `/rc` | 调用 Claude CLI（`--print` 模式）总结最近 10 条消息，API 不可用时 fallback 到原始消息列表 |
 | `/clear` | - | 清除当前对话的会话上下文 |
 | `/require_mention` | - | 切换群聊响应模式：`/require_mention true`（需要 @机器人）或 `/require_mention false`（全量响应） |
+
+命令分发时会带上渠道解析出的路由上下文（`ImCommandContext.targetJid`）。运行时队列按 effective session JID 索引，`/stop` 这类操作运行时的命令必须用 `targetJid`，否则在绑定会话或飞书话题下会打空。
+
+`/require_mention` 会同时把 `activation_mode` 重置为 `auto`：`shouldProcessGroupMessage()` 中 `activation_mode` 优先于 `require_mention`，只写后者会被 Web 设置页选的非 auto 模式静默覆盖。
+
+群聊里的 @mention 前缀按 mention 的真实展示名剥离（`stripLeadingMentions()`），机器人名带空格或展示名为空时命令依然可识别；剥离后的文本同时用于中断意图识别。
 
 `/recall` 通过 `execFile('claude', ['--print'])` + stdin 管道调用 Claude CLI，复用与 Agent Runner 相同的 OAuth 认证机制。
 

@@ -132,9 +132,12 @@ import {
   deleteProgressSession,
 } from './feishu-progress-card.js';
 import {
+  formatCommandHelp,
   formatContextMessages,
   formatWorkspaceList,
   formatSystemStatus,
+  isLikelyCommandToken,
+  type ImCommandContext,
   type WorkspaceInfo,
 } from './im-command-utils.js';
 import {
@@ -174,6 +177,7 @@ import { TurnManager } from './turn-manager.js';
 import { DurableOutboundTracker } from './durable-outbound-tracker.js';
 import { saveTurnTrace, cleanupOldTraces } from './turn-trace.js';
 import { startSchedulerLoop } from './task-scheduler.js';
+import { isSyntheticMessage } from './synthetic-messages.js';
 import {
   AgentStatus,
   DbMessage,
@@ -1599,18 +1603,28 @@ function sendSystemMessage(jid: string, type: string, detail: string): void {
 }
 
 /**
- * Slash command handler for IM channels (Feishu/Telegram).
- * Returns a reply string on success, or null if command not recognized.
+ * Slash command handler for IM channels (Feishu/Telegram/QQ/WeChat).
+ *
+ * Returns a reply string on success, or null to let the message fall through
+ * to the agent as ordinary text. `context` carries the channel's routed target
+ * JID — commands that act on a runtime must use it, because the runtime queue
+ * is keyed by the effective session JID rather than the source chat JID.
  */
 async function handleCommand(
   chatJid: string,
   command: string,
+  context?: ImCommandContext,
 ): Promise<string | null> {
   const parts = command.split(/\s+/);
   const cmd = parts[0];
   const rawArgs = command.slice(cmd.length).trim();
 
   switch (cmd) {
+    case 'help':
+    case 'h':
+      return formatCommandHelp();
+    case 'stop':
+      return handleStopCommand(chatJid, context);
     case 'clear':
       return '此命令仅支持在 Web 端使用';
     case 'list':
@@ -1632,8 +1646,51 @@ async function handleCommand(
     case 'require_mention':
       return handleRequireMentionCommand(chatJid, rawArgs);
     default:
-      return null;
+      // A mistyped command deserves feedback, but plain text that merely
+      // starts with a path ("/tmp/a.log 看下") must still reach the agent.
+      return isLikelyCommandToken(cmd)
+        ? `⚠️ 未知命令 /${cmd}\n\n${formatCommandHelp()}`
+        : null;
   }
+}
+
+/**
+ * Interrupt whatever the current session is running.
+ *
+ * Previously this only worked through natural-language intent detection, which
+ * stayed silent and — since corrections stopped hard-interrupting — no longer
+ * fired at all once a group message carried an @mention prefix.
+ */
+function handleStopCommand(
+  chatJid: string,
+  context?: ImCommandContext,
+): string {
+  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  if (!group) return '当前 IM 未绑定工作区';
+
+  const targetJid =
+    context?.targetJid ||
+    getLocationForGroup(chatJid, group).effectiveJid ||
+    chatJid;
+  const folder = resolveEffectiveFolder(targetJid) || group.folder;
+  const activeTurn = turnManager.getActiveTurn(folder);
+  const interrupted = queue.interruptQuery(targetJid);
+
+  if (!interrupted) {
+    logger.info(
+      { chatJid, targetJid, folder, hasActiveTurn: !!activeTurn },
+      '/stop found no active runtime',
+    );
+    return activeTurn
+      ? '⚠️ 当前 turn 没有可中断的运行时，已跳过'
+      : '当前没有正在执行的任务';
+  }
+
+  if (activeTurn) {
+    broadcastInterruptedTurn(folder, targetJid, '用户通过 /stop 停止');
+  }
+  logger.info({ chatJid, targetJid, folder }, '/stop interrupted current turn');
+  return '⏹ 已停止当前执行';
 }
 
 /**
@@ -1980,13 +2037,42 @@ function handleNewCommand(chatJid: string, rawName: string): string {
   return `工作区「${name}」已创建并绑定\n📁 ${folder}\n🔁 回复策略: source_only\n\n发送 /unbind 可解绑回默认工作区`;
 }
 
+/** Human-readable description of what actually gates a group chat. */
+function describeGroupActivation(
+  policy: ReturnType<typeof getChatBindingPolicy>,
+): string {
+  switch (policy.activationMode) {
+    case 'always':
+      return '全量响应（activation_mode=always）';
+    case 'when_mentioned':
+      return '需要 @机器人（activation_mode=when_mentioned）';
+    case 'disabled':
+      return '已停用，所有消息都被忽略（activation_mode=disabled）';
+    default:
+      return policy.requireMention
+        ? '需要 @机器人（require_mention=true）'
+        : '全量响应（默认）';
+  }
+}
+
 function handleRequireMentionCommand(chatJid: string, rawArgs: string): string {
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   if (!group) return '未找到当前会话';
 
   const action = rawArgs.trim().toLowerCase();
-  if (action === 'true') {
-    const updated: RegisteredGroup = { ...group, require_mention: true };
+
+  // shouldProcessGroupMessage() checks activation_mode first and only falls
+  // back to require_mention under 'auto'. Writing require_mention alone let a
+  // non-auto activation_mode (set from the Web settings page) silently win, so
+  // the command reported success while nothing changed. Reset the mode to
+  // 'auto' as part of the write and say so.
+  const applyRequireMention = (requireMention: boolean): string => {
+    const previousMode = getChatBindingPolicy(chatJid).activationMode;
+    const updated: RegisteredGroup = {
+      ...group,
+      require_mention: requireMention,
+      activation_mode: 'auto',
+    };
     setRegisteredGroup(chatJid, updated);
     const policy = getChatBindingPolicy(chatJid);
     applyExplicitChatBinding(
@@ -1996,22 +2082,20 @@ function handleRequireMentionCommand(chatJid: string, rawArgs: string): string {
       policy.replyPolicy,
     );
     registeredGroups[chatJid] = updated;
-    return '已开启：群聊中需要 @机器人 才会响应';
-  } else if (action === 'false') {
-    const updated: RegisteredGroup = { ...group, require_mention: false };
-    setRegisteredGroup(chatJid, updated);
+    const note =
+      previousMode === 'auto'
+        ? ''
+        : `\n（activation_mode 已从 ${previousMode} 重置为 auto，否则该设置不会生效）`;
+    return requireMention
+      ? `已开启：群聊中需要 @机器人 才会响应${note}`
+      : `已关闭：群聊中所有消息都会响应，无需 @机器人${note}`;
+  };
+
+  if (action === 'true') return applyRequireMention(true);
+  if (action === 'false') return applyRequireMention(false);
+  if (!action) {
     const policy = getChatBindingPolicy(chatJid);
-    applyExplicitChatBinding(
-      chatJid,
-      updated,
-      policy.sessionId,
-      policy.replyPolicy,
-    );
-    registeredGroups[chatJid] = updated;
-    return '已关闭：群聊中所有消息都会响应，无需 @机器人';
-  } else if (!action) {
-    const current = group.require_mention === true;
-    return `当前 require_mention: ${current}\n\n用法:\n/require_mention true — 需要 @机器人\n/require_mention false — 全量响应`;
+    return `当前生效门控: ${describeGroupActivation(policy)}\n\n用法:\n/require_mention true — 需要 @机器人\n/require_mention false — 全量响应`;
   }
   return '用法: /require_mention true|false';
 }
@@ -3100,7 +3184,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const triggerMap = new Map<string, RuntimeTriggerMessage>();
   for (const m of missedMessages) {
     const srcJid = m.source_jid || m.chat_jid;
-    if (m.id.startsWith('recovery:')) {
+    // Host-injected messages (scheduled task triggers, restart recovery control)
+    // carry host-generated ids that no IM backend knows about. Anchoring a reply
+    // to one makes the whole delivery fail, so resolve the real inbound message
+    // instead and fall back to the chat root when there is none.
+    if (isSyntheticMessage(m)) {
       const lastInbound = getLastInboundMessage(chatJid, srcJid);
       if (lastInbound) {
         triggerMap.set(srcJid, {
