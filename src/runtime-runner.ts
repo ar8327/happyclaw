@@ -46,10 +46,17 @@ import {
   getRunnerProfile,
   getSessionRecord,
   listRunnerProfiles,
+  replaceSessionRuntimeSelectionIfCurrent,
 } from './db.js';
 import { modelsForDescriptor, runnerAuthAvailable } from './runner-health.js';
 import { validateRunnerProfileConfig } from './runner-profile-schema.js';
 import { nativePluginCapabilitiesForRunner } from './runner-descriptor.types.js';
+import {
+  readTraexAuthContext,
+  resetTraexResumeStateForCorrectedSelection,
+  resolveLegacyTraexRunnerMigration,
+  resolveTraexModelSelection,
+} from './traex-model-selection.js';
 
 /** Read existing settings.json, merge MCP servers, and write only if changed. */
 function ensureSettingsJson(
@@ -442,14 +449,50 @@ function resolveRunnerProfileBundle(
   };
 }
 
-function resolveRunnerModelProvider(
+function resolveRunnerModelSelection(
   descriptor: RunnerDescriptor | undefined,
   model: string | undefined,
   env: Record<string, string>,
-): string | undefined {
-  if (!descriptor || !model) return undefined;
-  return modelsForDescriptor(descriptor, env).find((item) => item.id === model)
-    ?.modelProvider;
+  runnerId: string,
+  runnerConfigDir: string,
+): {
+  model: string | undefined;
+  modelProvider?: string;
+  correctedLegacySelection: boolean;
+} {
+  if (!descriptor || !model) {
+    return {
+      model,
+      modelProvider: undefined,
+      correctedLegacySelection: false,
+    };
+  }
+
+  const models = modelsForDescriptor(descriptor, env);
+  if (runnerId !== 'traex') {
+    return {
+      model,
+      modelProvider: models.find((item) => item.id === model)?.modelProvider,
+      correctedLegacySelection: false,
+    };
+  }
+
+  const selection = resolveTraexModelSelection(
+    model,
+    models,
+    readTraexAuthContext(path.join(runnerConfigDir, 'cli', 'auth.json'), env),
+  );
+  if (selection.correctedLegacySelection) {
+    logger.warn(
+      {
+        storedModel: model,
+        effectiveModel: selection.model,
+        effectiveModelProvider: selection.modelProvider,
+      },
+      'Corrected legacy TraeX model selection using active auth provider',
+    );
+  }
+  return selection;
 }
 
 function commandExists(command: string, versionArgs: string[]): boolean {
@@ -705,12 +748,54 @@ export async function runHostAgent(
     effectiveModel,
     storedRunnerId,
   );
-  const effectiveRunnerId =
+  let effectiveRunnerId =
     effectiveModel &&
     inferredModelRunner &&
     inferredModelRunner !== storedRunnerId
       ? inferredModelRunner
       : storedRunnerId;
+  let correctedLegacyRunner = false;
+  if (
+    sessionRecord?.runner_id === 'codex' &&
+    sessionRecord.model === effectiveModel &&
+    effectiveRunnerId === 'codex' &&
+    effectiveModel
+  ) {
+    const traexDescriptor = getRunnerDescriptor('traex');
+    const traexConfigDir = path.join(sessionBaseDir, '.traex');
+    fs.mkdirSync(traexConfigDir, { recursive: true });
+    prepareTraexRuntimeHome(traexConfigDir, hostEnv);
+    const traexEnv = {
+      ...hostEnv,
+      TRAE_HOME: traexConfigDir,
+    };
+    const migration = traexDescriptor
+      ? resolveLegacyTraexRunnerMigration(
+          storedRunnerId,
+          effectiveModel,
+          modelsForDescriptor(traexDescriptor, traexEnv),
+          readTraexAuthContext(
+            path.join(traexConfigDir, 'cli', 'auth.json'),
+            traexEnv,
+          ),
+        )
+      : null;
+    if (migration) {
+      effectiveRunnerId = migration.runnerId;
+      correctedLegacyRunner = true;
+      logger.warn(
+        {
+          group: group.name,
+          storedRunnerId,
+          effectiveRunnerId,
+          storedModel: effectiveModel,
+          effectiveModel: migration.model,
+          effectiveModelProvider: migration.modelProvider,
+        },
+        'Corrected legacy Codex runner selection using TraeX auth provider',
+      );
+    }
+  }
   if (effectiveRunnerId !== storedRunnerId) {
     logger.warn(
       {
@@ -737,14 +822,31 @@ export async function runHostAgent(
   if (effectiveRunnerId === 'traex') {
     prepareTraexRuntimeHome(runnerConfigDir, hostEnv);
   }
+  const runnerConfigDirEnv =
+    effectiveRunnerDescriptor?.runtimeContract.configDirEnv;
+  if (runnerConfigDirEnv) {
+    hostEnv[runnerConfigDirEnv] = runnerConfigDir;
+  }
+  const resolvedModelSelection = resolveRunnerModelSelection(
+    effectiveRunnerDescriptor,
+    effectiveModel,
+    hostEnv,
+    effectiveRunnerId,
+    runnerConfigDir,
+  );
+  const resolvedEffectiveModel = resolvedModelSelection.model;
+  const correctedLegacySelection =
+    correctedLegacyRunner || resolvedModelSelection.correctedLegacySelection;
   // Per-workspace model override takes priority over global and runtime-env config.
   if (
-    effectiveModel &&
-    (!inferredModelRunner || inferredModelRunner === effectiveRunnerId)
+    resolvedEffectiveModel &&
+    (!inferredModelRunner ||
+      inferredModelRunner === effectiveRunnerId ||
+      correctedLegacyRunner)
   ) {
     for (const envName of effectiveRunnerDescriptor?.runtimeContract.modelEnv ||
       []) {
-      hostEnv[envName] = effectiveModel;
+      hostEnv[envName] = resolvedEffectiveModel;
     }
   } else if (effectiveModel && inferredModelRunner) {
     logger.warn(
@@ -765,15 +867,10 @@ export async function runHostAgent(
   if (effectiveThinkingEffort) {
     hostEnv['HAPPYCLAW_THINKING_EFFORT'] = effectiveThinkingEffort;
   }
-  const effectiveModelProvider = resolveRunnerModelProvider(
-    effectiveRunnerDescriptor,
-    effectiveModel,
-    hostEnv,
-  );
   const runnerConfig: RunnerResolvedConfig = {
     profileId: activeProfile?.id,
-    model: effectiveModel,
-    modelProvider: effectiveModelProvider,
+    model: resolvedEffectiveModel,
+    modelProvider: resolvedModelSelection.modelProvider,
     thinkingEffort: effectiveThinkingEffort,
     modelBackendVariant: effectiveModelBackendVariant,
     command: runnerCommand,
@@ -867,11 +964,6 @@ export async function runHostAgent(
   );
   hostEnv['HAPPYCLAW_RUNNER_CONFIG_DIR'] = runnerConfigDir;
   hostEnv['HAPPYCLAW_WORKSPACE_SESSION'] = sessionBaseDir;
-  const runnerConfigDirEnv =
-    effectiveRunnerDescriptor?.runtimeContract.configDirEnv;
-  if (runnerConfigDirEnv) {
-    hostEnv[runnerConfigDirEnv] = runnerConfigDir;
-  }
   // Cross-provider invoke_agent: share home session dir for fresh OAuth tokens
   // (same pattern as memory-agent.ts — avoids stale refresh tokens)
   const homeClaudeDir = path.join(
@@ -1014,6 +1106,66 @@ export async function runHostAgent(
 
   const logsDir = path.join(groupDir, 'logs');
   applyAgentDockEnvAliases(hostEnv);
+  let normalizedSelectionPersisted = false;
+  const legacyStoredModel =
+    correctedLegacySelection && effectiveModel ? effectiveModel : undefined;
+  const effectiveOnOutput = correctedLegacySelection
+    ? async (output: RuntimeOutput): Promise<void> => {
+        const freshProviderSessionId =
+          output.runtimeState?.providerSessionId || output.newSessionId;
+        if (
+          !normalizedSelectionPersisted &&
+          freshProviderSessionId &&
+          freshProviderSessionId !== input.sessionId &&
+          legacyStoredModel &&
+          resolvedEffectiveModel &&
+          sessionRecord?.runner_id === storedRunnerId &&
+          sessionRecord?.model === legacyStoredModel
+        ) {
+          try {
+            const updated = replaceSessionRuntimeSelectionIfCurrent(
+              stableSessionId,
+              storedRunnerId,
+              legacyStoredModel,
+              effectiveRunnerId,
+              resolvedEffectiveModel,
+            );
+            normalizedSelectionPersisted = true;
+            if (updated) {
+              if (group.model === legacyStoredModel) {
+                group.model = resolvedEffectiveModel;
+              }
+              logger.info(
+                {
+                  sessionId: stableSessionId,
+                  providerSessionId: freshProviderSessionId,
+                  storedRunnerId,
+                  normalizedRunnerId: effectiveRunnerId,
+                  storedModel: legacyStoredModel,
+                  normalizedModel: resolvedEffectiveModel,
+                },
+                'Persisted normalized TraeX runtime selection after fresh thread started',
+              );
+            } else {
+              logger.warn(
+                {
+                  sessionId: stableSessionId,
+                  expectedRunnerId: storedRunnerId,
+                  expectedModel: legacyStoredModel,
+                },
+                'Skipped TraeX runtime selection normalization because session changed',
+              );
+            }
+          } catch (err) {
+            logger.warn(
+              { sessionId: stableSessionId, err },
+              'Failed to persist normalized TraeX runtime selection for legacy session',
+            );
+          }
+        }
+        await onOutput?.(output);
+      }
+    : onOutput;
 
   return new Promise((resolve) => {
     let settled = false;
@@ -1046,8 +1198,22 @@ export async function runHostAgent(
       killProcessTree(proc);
     });
     const declaredRunnerDescriptor = effectiveRunnerDescriptor;
+    const effectiveInput = resetTraexResumeStateForCorrectedSelection(
+      input,
+      correctedLegacySelection,
+    );
+    if (correctedLegacySelection) {
+      logger.warn(
+        {
+          sessionId: stableSessionId,
+          discardedProviderSessionId: input.sessionId,
+          discardedResumeAnchor: input.resumeAnchor,
+        },
+        'Starting fresh TraeX thread after legacy provider correction',
+      );
+    }
     const containerInput: ContainerInput = {
-      ...input,
+      ...effectiveInput,
       runnerId: effectiveRunnerId,
       runnerConfig,
       declaredRunnerDescriptor,
@@ -1095,7 +1261,7 @@ export async function runHostAgent(
     attachStdoutHandler(proc.stdout, stdoutState, {
       groupName: group.name,
       label: 'Local runtime',
-      onOutput,
+      onOutput: effectiveOnOutput,
       resetTimeout,
     });
     attachStderrHandler(proc.stderr, stderrState, group.name, {
@@ -1117,7 +1283,7 @@ export async function runHostAgent(
         input,
         stdoutState,
         stderrState,
-        onOutput,
+        onOutput: effectiveOnOutput,
         resolvePromise: resolveOnce,
         startTime,
         timeoutMs,

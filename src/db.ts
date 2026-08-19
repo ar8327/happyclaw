@@ -4021,6 +4021,45 @@ export function saveSessionRecord(session: SessionRecord): void {
   );
 }
 
+export function replaceSessionRuntimeSelectionIfCurrent(
+  sessionId: string,
+  expectedRunnerId: SessionRecord['runner_id'],
+  expectedModel: string,
+  replacementRunnerId: SessionRecord['runner_id'],
+  replacementModel: string,
+): boolean {
+  const tx = db.transaction(() => {
+    const result = db
+      .prepare(
+        `UPDATE sessions
+         SET runner_profile_id = CASE
+               WHEN runner_id = ? THEN runner_profile_id
+               ELSE NULL
+             END,
+             runner_id = ?, model = ?, updated_at = ?
+         WHERE id = ? AND runner_id = ? AND model = ?`,
+      )
+      .run(
+        replacementRunnerId,
+        replacementRunnerId,
+        replacementModel,
+        new Date().toISOString(),
+        sessionId,
+        expectedRunnerId,
+        expectedModel,
+      );
+    if (result.changes === 0) return false;
+
+    db.prepare(
+      `UPDATE session_channels
+       SET model = ?
+       WHERE session_id = ? AND model = ?`,
+    ).run(replacementModel, sessionId, expectedModel);
+    return true;
+  });
+  return tx();
+}
+
 export function listSessionRecords(): SessionRecord[] {
   const rows = db
     .prepare(
