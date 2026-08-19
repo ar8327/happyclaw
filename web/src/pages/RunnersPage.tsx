@@ -32,6 +32,7 @@ interface RunnerInfo {
   prompt_contract: {
     mode: string;
     dynamicContextReload: string;
+    turnContextDelivery: string;
   };
   tool_contract?: {
     mode: string;
@@ -457,6 +458,10 @@ export function RunnersPage() {
                           <div>
                             上下文刷新:{' '}
                             {runner.prompt_contract.dynamicContextReload}
+                          </div>
+                          <div>
+                            动态段投递:{' '}
+                            {runner.prompt_contract.turnContextDelivery}
                           </div>
                           <div>
                             中途注入:{' '}

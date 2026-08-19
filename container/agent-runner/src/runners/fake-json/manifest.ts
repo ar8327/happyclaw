@@ -38,6 +38,7 @@ const fakeDescriptor: RunnerDescriptor = {
   promptContract: {
     mode: 'append',
     dynamicContextReload: 'turn',
+    turnContextDelivery: 'system',
   },
   nativeProvides: [],
   runtimeContract: {

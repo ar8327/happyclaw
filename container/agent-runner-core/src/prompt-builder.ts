@@ -91,7 +91,7 @@ export const BACKGROUND_TASK_GUIDELINES = [
 // Channel routing section (static + dynamic IM channels)
 // ---------------------------------------------------------------------------
 
-function buildChannelRoutingSection(recentImChannels?: Set<string>): string {
+function buildChannelRoutingRulesSection(): string {
   return [
     '',
     '## 消息渠道',
@@ -104,14 +104,19 @@ function buildChannelRoutingSection(recentImChannels?: Set<string>): string {
     '- 如果所有消息都来自 Web（没有 source 属性），正常回复即可，无需调用 send_message。',
     '- 同一批消息可能来自不同渠道，根据需要分别回复。',
     '- **上下文压缩后**：之前的渠道上下文可能丢失，但 `source` 属性仍然存在于每条消息中。压缩后请务必检查最新消息的 `source` 属性，确保通过 `send_message` 回复 IM 用户。',
-    // Inject persisted IM channels reminder so continued sessions don't forget
-    ...(recentImChannels && recentImChannels.size > 0
-      ? [
-          '',
-          `**活跃 IM 渠道**：你近期与以下渠道有活跃对话：${[...recentImChannels].join('、')}。`,
-          '完成任务后，务必通过 `send_message(channel="渠道值")` 主动向这些渠道的用户汇报结果。',
-        ]
-      : []),
+  ].join('\n');
+}
+
+/**
+ * 活跃 IM 渠道清单。会话期间可能变化，因此与静态渠道规则分开成段，
+ * 让规则本身留在可缓存的 static 段里。
+ */
+function buildActiveChannelsSection(recentImChannels?: Set<string>): string {
+  if (!recentImChannels || recentImChannels.size === 0) return '';
+  return [
+    '',
+    `**活跃 IM 渠道**：你近期与以下渠道有活跃对话：${[...recentImChannels].join('、')}。`,
+    '完成任务后，务必通过 `send_message(channel="渠道值")` 主动向这些渠道的用户汇报结果。',
   ].join('\n');
 }
 
@@ -148,6 +153,7 @@ export function buildBasePrompt(ctx: PluginContext): string {
       'platform-guidelines',
       'context-summary',
       'channel-routing',
+      'channel-routing-active',
       'memory-index',
       'skills-catalog',
     ],
@@ -290,9 +296,18 @@ export function buildContextBundle(
 
   sections.push({
     id: 'channel-routing',
-    stability: 'turn',
-    content: buildChannelRoutingSection(ctx.recentImChannels),
+    stability: 'static',
+    content: buildChannelRoutingRulesSection(),
   });
+
+  const activeChannels = buildActiveChannelsSection(ctx.recentImChannels);
+  if (activeChannels) {
+    sections.push({
+      id: 'channel-routing-active',
+      stability: 'turn',
+      content: activeChannels,
+    });
+  }
 
   for (const plugin of plugins) {
     if (!plugin.isEnabled(ctx)) continue;

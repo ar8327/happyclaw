@@ -16,6 +16,10 @@ import type {
   PushMessageResult,
 } from '../runner-interface.js';
 import { combineRenderedContext } from '../runner-interface.js';
+import {
+  planContextInjection,
+  renderContextInjectionText,
+} from '../context-injection.js';
 
 export interface CliCommand {
   command: string;
@@ -110,6 +114,8 @@ export abstract class BaseCliRunner implements AgentRunner {
   private activeStartedAt = 0;
   private interrupted = false;
   private renderedContext: RenderedRunnerContext | null = null;
+  private turnContextHashes = new Map<string, string>();
+  private turnContextSessionKey: string | null = null;
   private stdinOperation: Promise<void> = Promise.resolve();
   private stdinEnding = false;
 
@@ -220,15 +226,52 @@ export abstract class BaseCliRunner implements AgentRunner {
     };
   }
 
+  /**
+   * 丢弃已投递的 turn section 记录，下一轮重新全量注入。
+   * 上下文被压缩后模型可能已经看不到早先注入的段，子类需在压缩边界调用。
+   */
+  protected resetTurnContextInjection(): void {
+    this.turnContextHashes = new Map();
+    this.turnContextSessionKey = null;
+  }
+
+  /**
+   * 按 descriptor 的 turnContextDelivery 决定本轮上下文怎么进模型。
+   * - `user_prefix`：system 只放 static+session（保持 prompt cache 前缀稳定），
+   *   turn section 按内容 hash 增量前置到用户消息，没变化就不重复注入。
+   * - 其他：维持全量重传语义。
+   */
+  private resolveTurnContext(config: QueryConfig): QueryConfig {
+    const context = this.renderedContext;
+    if (!context) return config;
+    if (config.promptContract?.turnContextDelivery !== 'user_prefix') {
+      return { ...config, systemPrompt: combineRenderedContext(context) };
+    }
+
+    const sessionKey = config.sessionId || config.resumeAt || null;
+    const threadChanged =
+      sessionKey === null || sessionKey !== this.turnContextSessionKey;
+    const plan = planContextInjection(
+      threadChanged ? new Map() : this.turnContextHashes,
+      context.sections.filter((section) => section.stability === 'turn'),
+      { threadChanged, freshThread: sessionKey === null },
+    );
+    this.turnContextHashes = plan.nextHashes;
+    this.turnContextSessionKey = sessionKey;
+
+    const prefix =
+      plan.changed.length > 0 ? renderContextInjectionText(plan.changed) : '';
+    return {
+      ...config,
+      systemPrompt: context.sessionStatic,
+      prompt: prefix ? `${prefix}\n\n${config.prompt}` : config.prompt,
+    };
+  }
+
   async *runQuery(
     config: QueryConfig,
   ): AsyncGenerator<NormalizedMessage, QueryResult> {
-    const effectiveConfig = this.renderedContext
-      ? {
-          ...config,
-          systemPrompt: combineRenderedContext(this.renderedContext),
-        }
-      : config;
+    const effectiveConfig = this.resolveTurnContext(config);
     const command = this.adapter.buildCommand(effectiveConfig);
     const input = this.adapter.buildInput(effectiveConfig);
     const proc = spawn(command.command, command.args || [], {
@@ -255,6 +298,14 @@ export abstract class BaseCliRunner implements AgentRunner {
 
     const enqueue = (messages: NormalizedMessage[]) => {
       for (const message of messages) {
+        if (
+          message.kind === 'stream_event' &&
+          message.event.eventType === 'lifecycle' &&
+          message.event.phase === 'compact_completed'
+        ) {
+          // 压缩后早先注入的 turn section 可能已被摘要吞掉，丢弃投递记录以便下轮重注
+          this.resetTurnContextInjection();
+        }
         if (message.kind === 'resume_anchor') {
           resumeAnchor = message.anchor;
         } else if (message.kind === 'error') {

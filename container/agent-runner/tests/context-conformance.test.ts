@@ -9,7 +9,7 @@ import {
   type PluginContext,
 } from '../../agent-runner-core/src/index.js';
 import { RUNNER_DESCRIPTORS } from '../src/runner-descriptor.types.js';
-import { planCodexContextInjection } from '../src/runners/codex/runner.js';
+import { planContextInjection } from '../src/context-injection.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'context-conformance-'));
 
@@ -126,7 +126,7 @@ try {
     );
   }
 
-  const freshPlan = planCodexContextInjection(new Map(), firstBundle.sections, {
+  const freshPlan = planContextInjection(new Map(), firstBundle.sections, {
     threadChanged: true,
     freshThread: true,
   });
@@ -146,7 +146,7 @@ try {
   memoryVersion = 'memory version two';
   context.contextSummary = undefined;
   const secondBundle = buildContextBundle(context, plugins);
-  const updatePlan = planCodexContextInjection(
+  const updatePlan = planContextInjection(
     freshPlan.nextHashes,
     secondBundle.sections,
     { threadChanged: false, freshThread: false },
@@ -173,7 +173,7 @@ try {
     ),
   );
 
-  const noChangePlan = planCodexContextInjection(
+  const noChangePlan = planContextInjection(
     updatePlan.nextHashes,
     secondBundle.sections,
     { threadChanged: false, freshThread: false },

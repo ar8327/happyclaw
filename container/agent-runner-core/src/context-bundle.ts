@@ -8,6 +8,7 @@ export type SectionId =
   | 'platform-guidelines'
   | 'context-summary'
   | 'channel-routing'
+  | 'channel-routing-active'
   | 'memory-index'
   | 'skills-catalog'
   | `plugin:${string}`;

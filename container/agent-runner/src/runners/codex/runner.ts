@@ -10,13 +10,9 @@
  */
 
 import fs from 'fs';
-import crypto from 'crypto';
 import path from 'path';
 import os from 'os';
-import {
-  normalizeHomeFlags,
-  type ContextSection,
-} from 'agentdock-agent-runner-core';
+import { normalizeHomeFlags } from 'agentdock-agent-runner-core';
 
 import type {
   AgentRunner,
@@ -31,6 +27,7 @@ import type {
   PushMessageResult,
 } from '../../runner-interface.js';
 import { combineRenderedContext } from '../../runner-interface.js';
+import { planContextInjection } from '../../context-injection.js';
 import type { ContainerInput, ContainerOutput } from '../../types.js';
 import type { SessionState } from '../../session-state.js';
 import type { IpcPaths } from '../../ipc-handler.js';
@@ -186,53 +183,6 @@ export function isCodexSessionResumeFailedError(message: string): boolean {
     /conversation.*not found/i,
     /no rollout found for thread id/i,
   ].some((pattern) => pattern.test(message));
-}
-
-export function planCodexContextInjection(
-  previousHashes: ReadonlyMap<string, string>,
-  sections: ContextSection[],
-  options: {
-    threadChanged: boolean;
-    freshThread: boolean;
-  },
-): {
-  changed: Array<{ id: string; content: string }>;
-  nextHashes: Map<string, string>;
-} {
-  const nextHashes = new Map<string, string>(
-    sections.map((section) => [
-      section.id,
-      crypto.createHash('sha256').update(section.content).digest('hex'),
-    ]),
-  );
-  const changed: Array<{ id: string; content: string }> = sections
-    .filter((section) => {
-      if (
-        options.freshThread &&
-        options.threadChanged &&
-        section.stability !== 'turn'
-      ) {
-        return false;
-      }
-      return (
-        options.threadChanged ||
-        previousHashes.get(section.id) !== nextHashes.get(section.id)
-      );
-    })
-    .map((section) => ({
-      id: section.id,
-      content: section.content,
-    }));
-  if (!options.freshThread) {
-    for (const previousId of previousHashes.keys()) {
-      if (nextHashes.has(previousId)) continue;
-      changed.push({
-        id: previousId,
-        content: `The previous HappyClaw context section "${previousId}" no longer applies. Ignore its earlier content.`,
-      });
-    }
-  }
-  return { changed, nextHashes };
 }
 
 // ---------------------------------------------------------------------------
@@ -419,7 +369,7 @@ export class CodexRunner implements AgentRunner {
     const threadId = this.session.getThreadId();
     if (!threadId) return;
     const threadChanged = this.contextThreadId !== threadId;
-    const plan = planCodexContextInjection(
+    const plan = planContextInjection(
       this.contextHashes,
       this.renderedContext.sections,
       {

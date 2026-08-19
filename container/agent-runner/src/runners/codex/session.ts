@@ -11,6 +11,11 @@ import fs from 'fs';
 import path from 'path';
 import { createInterface, type Interface as ReadlineInterface } from 'readline';
 
+import {
+  renderContextInjectionText,
+  type ContextInjectionSection,
+} from '../../context-injection.js';
+
 export interface CodexSessionConfig {
   model?: string;
   modelProvider?: string;
@@ -235,10 +240,7 @@ interface AppNotification {
   params: unknown;
 }
 
-export interface CodexContextInjectionSection {
-  id: string;
-  content: string;
-}
+export type CodexContextInjectionSection = ContextInjectionSection;
 
 interface Waiter<T> {
   resolve: (value: T) => void;
@@ -507,12 +509,7 @@ function buildContextInjectionItem(
     content: [
       {
         type: 'input_text',
-        text: sections
-          .map(
-            (section) =>
-              `<happyclaw-context section="${section.id}">\n${section.content}\n</happyclaw-context>`,
-          )
-          .join('\n\n'),
+        text: renderContextInjectionText(sections),
       },
     ],
   };
