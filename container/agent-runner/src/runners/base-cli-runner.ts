@@ -16,10 +16,8 @@ import type {
   PushMessageResult,
 } from '../runner-interface.js';
 import { combineRenderedContext } from '../runner-interface.js';
-import {
-  planContextInjection,
-  renderContextInjectionText,
-} from '../context-injection.js';
+import { resolveTurnContextDelivery } from '../context-injection.js';
+import type { RunnerPromptContract } from '../runner-descriptor.types.js';
 
 export interface CliCommand {
   command: string;
@@ -109,6 +107,7 @@ class AsyncMessageQueue<T> {
 
 export abstract class BaseCliRunner implements AgentRunner {
   abstract readonly ipcCapabilities: IpcCapabilities;
+  abstract readonly promptContract: RunnerPromptContract;
   protected abstract readonly adapter: CliRunnerAdapter;
   private activeProcess: ChildProcessWithoutNullStreams | null = null;
   private activeStartedAt = 0;
@@ -244,27 +243,26 @@ export abstract class BaseCliRunner implements AgentRunner {
   private resolveTurnContext(config: QueryConfig): QueryConfig {
     const context = this.renderedContext;
     if (!context) return config;
-    if (config.promptContract?.turnContextDelivery !== 'user_prefix') {
-      return { ...config, systemPrompt: combineRenderedContext(context) };
-    }
 
     const sessionKey = config.sessionId || config.resumeAt || null;
-    const threadChanged =
-      sessionKey === null || sessionKey !== this.turnContextSessionKey;
-    const plan = planContextInjection(
-      threadChanged ? new Map() : this.turnContextHashes,
-      context.sections.filter((section) => section.stability === 'turn'),
-      { threadChanged, freshThread: sessionKey === null },
-    );
-    this.turnContextHashes = plan.nextHashes;
+    const resolved = resolveTurnContextDelivery({
+      delivery: this.promptContract.turnContextDelivery,
+      sessionStatic: context.sessionStatic,
+      combined: combineRenderedContext(context),
+      sections: context.sections,
+      previousHashes: this.turnContextHashes,
+      previousSessionKey: this.turnContextSessionKey,
+      sessionKey,
+    });
+    this.turnContextHashes = resolved.nextHashes;
     this.turnContextSessionKey = sessionKey;
 
-    const prefix =
-      plan.changed.length > 0 ? renderContextInjectionText(plan.changed) : '';
     return {
       ...config,
-      systemPrompt: context.sessionStatic,
-      prompt: prefix ? `${prefix}\n\n${config.prompt}` : config.prompt,
+      systemPrompt: resolved.systemPrompt,
+      prompt: resolved.promptPrefix
+        ? `${resolved.promptPrefix}\n\n${config.prompt}`
+        : config.prompt,
     };
   }
 

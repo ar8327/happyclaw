@@ -28,6 +28,7 @@ import type {
 } from '../../runner-interface.js';
 import { combineRenderedContext } from '../../runner-interface.js';
 import { planContextInjection } from '../../context-injection.js';
+import type { RunnerPromptContract } from '../../runner-descriptor.types.js';
 import type { ContainerInput, ContainerOutput } from '../../types.js';
 import type { SessionState } from '../../session-state.js';
 import type { IpcPaths } from '../../ipc-handler.js';
@@ -189,8 +190,19 @@ export function isCodexSessionResumeFailedError(message: string): boolean {
 // CodexRunner
 // ---------------------------------------------------------------------------
 
+/**
+ * codex / traex 的 prompt 契约：static 与 session 段随 thread 启动写入
+ * instructions 文件，turn section 通过 thread/inject_items 增量投递。
+ */
+export const CODEX_PROMPT_CONTRACT: RunnerPromptContract = {
+  mode: 'instructions_file',
+  dynamicContextReload: 'turn',
+  turnContextDelivery: 'incremental_items',
+};
+
 export class CodexRunner implements AgentRunner {
   readonly ipcCapabilities: IpcCapabilities;
+  readonly promptContract: RunnerPromptContract = CODEX_PROMPT_CONTRACT;
 
   private session!: CodexSession;
   private instructionsFile!: string;

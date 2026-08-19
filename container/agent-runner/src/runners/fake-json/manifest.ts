@@ -1,5 +1,8 @@
 import type { NormalizedMessage } from '../../runner-interface.js';
-import type { RunnerDescriptor } from '../../runner-descriptor.types.js';
+import type {
+  RunnerDescriptor,
+  RunnerPromptContract,
+} from '../../runner-descriptor.types.js';
 import { BaseCliRunner, type CliRunnerAdapter } from '../base-cli-runner.js';
 import type { RunnerManifest } from '../types.js';
 
@@ -121,6 +124,11 @@ class FakeJsonRunner extends BaseCliRunner {
   readonly ipcCapabilities = {
     supportsMidQueryPush: false,
     supportsRuntimeModeSwitch: false,
+  };
+  readonly promptContract: RunnerPromptContract = {
+    mode: 'append',
+    dynamicContextReload: 'turn',
+    turnContextDelivery: 'system',
   };
 
   protected readonly adapter: CliRunnerAdapter = {

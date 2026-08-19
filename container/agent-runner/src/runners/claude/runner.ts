@@ -30,6 +30,7 @@ import {
 import { PREDEFINED_AGENTS } from './agent-defs.js';
 import { prepareClaudePromptWithImages } from './image-utils.js';
 import { StreamEventProcessor } from './event-adapter.js';
+import type { RunnerPromptContract } from '../../runner-descriptor.types.js';
 
 export interface ClaudeRunnerOptions {
   containerInput: ContainerInput;
@@ -845,11 +846,22 @@ class ClaudeCliAdapter implements CliRunnerAdapter {
   }
 }
 
+/**
+ * claude 的 prompt 契约：append 到 CLI 原生 preset 之后，
+ * turn section 走用户消息前缀（保持 system 前缀逐轮稳定）。
+ */
+export const CLAUDE_PROMPT_CONTRACT: RunnerPromptContract = {
+  mode: 'append',
+  dynamicContextReload: 'turn',
+  turnContextDelivery: 'user_prefix',
+};
+
 export class ClaudeRunner extends BaseCliRunner {
   readonly ipcCapabilities: IpcCapabilities = {
     supportsMidQueryPush: true,
     supportsRuntimeModeSwitch: false,
   };
+  readonly promptContract: RunnerPromptContract = CLAUDE_PROMPT_CONTRACT;
 
   protected readonly adapter: ClaudeCliAdapter;
   private readonly tmpDir: string;

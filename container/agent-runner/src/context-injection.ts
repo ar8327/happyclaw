@@ -15,6 +15,8 @@ import crypto from 'crypto';
 
 import type { ContextSection } from 'agentdock-agent-runner-core';
 
+import type { TurnContextDelivery } from './runner-descriptor.types.js';
+
 export interface ContextInjectionSection {
   id: string;
   content: string;
@@ -96,4 +98,64 @@ export function renderContextInjectionText(
       return `<happyclaw-context${attrs}>\n${notice}${section.content}\n</happyclaw-context>`;
     })
     .join('\n\n');
+}
+
+// ---------------------------------------------------------------------------
+// Turn context delivery
+// ---------------------------------------------------------------------------
+
+export interface TurnContextDeliveryInput {
+  /** runner 自己声明的投递通道（与 descriptor 由启动握手对拍）。 */
+  delivery: TurnContextDelivery;
+  /** static + session 段的渲染结果。 */
+  sessionStatic: string;
+  /** 整份 bundle 的渲染结果，供全量重传的 runner 使用。 */
+  combined: string;
+  sections: ContextSection[];
+  previousHashes: ReadonlyMap<string, string>;
+  /** 上一轮投递时的会话锚点，null 表示尚未投递过。 */
+  previousSessionKey: string | null;
+  /** 本轮的会话锚点，null 表示全新会话。 */
+  sessionKey: string | null;
+}
+
+export interface TurnContextDeliveryResult {
+  /** 本轮 system/rules 载体的内容。 */
+  systemPrompt: string;
+  /** 需要前置到用户消息的增量上下文，空串表示本轮无需注入。 */
+  promptPrefix: string;
+  nextHashes: Map<string, string>;
+}
+
+/**
+ * 按 runner 声明的投递通道决定本轮上下文怎么进模型。
+ *
+ * - `user_prefix`：system 只放 static+session（保持 prompt cache 前缀逐轮稳定），
+ *   turn section 按内容 hash 增量前置到用户消息。
+ * - 其他通道：维持全量重传语义，由 runner 自己的载体承载。
+ */
+export function resolveTurnContextDelivery(
+  input: TurnContextDeliveryInput,
+): TurnContextDeliveryResult {
+  if (input.delivery !== 'user_prefix') {
+    return {
+      systemPrompt: input.combined,
+      promptPrefix: '',
+      nextHashes: new Map(input.previousHashes),
+    };
+  }
+
+  const threadChanged =
+    input.sessionKey === null || input.sessionKey !== input.previousSessionKey;
+  const plan = planContextInjection(
+    threadChanged ? new Map() : input.previousHashes,
+    input.sections.filter((section) => section.stability === 'turn'),
+    { threadChanged, freshThread: input.sessionKey === null },
+  );
+  return {
+    systemPrompt: input.sessionStatic,
+    promptPrefix:
+      plan.changed.length > 0 ? renderContextInjectionText(plan.changed) : '',
+    nextHashes: plan.nextHashes,
+  };
 }

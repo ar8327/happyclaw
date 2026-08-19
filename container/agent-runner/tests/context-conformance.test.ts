@@ -9,7 +9,13 @@ import {
   type PluginContext,
 } from '../../agent-runner-core/src/index.js';
 import { RUNNER_DESCRIPTORS } from '../src/runner-descriptor.types.js';
-import { planContextInjection } from '../src/context-injection.js';
+import {
+  planContextInjection,
+  resolveTurnContextDelivery,
+} from '../src/context-injection.js';
+import { CLAUDE_PROMPT_CONTRACT } from '../src/runners/claude/runner.js';
+import { CODEX_PROMPT_CONTRACT } from '../src/runners/codex/runner.js';
+import { AGY_PROMPT_CONTRACT } from '../src/runners/agy/runner.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'context-conformance-'));
 
@@ -179,6 +185,97 @@ try {
     { threadChanged: false, freshThread: false },
   );
   assert.deepEqual(noChangePlan.changed, []);
+
+  // --- descriptor 声明必须与 runner 实现自己的声明一致 ---
+  const implementationContracts: Record<string, unknown> = {
+    claude: CLAUDE_PROMPT_CONTRACT,
+    codex: CODEX_PROMPT_CONTRACT,
+    traex: CODEX_PROMPT_CONTRACT,
+    agy: AGY_PROMPT_CONTRACT,
+  };
+  for (const descriptor of Object.values(RUNNER_DESCRIPTORS)) {
+    const implementation = implementationContracts[descriptor.id];
+    assert.ok(
+      implementation,
+      `${descriptor.id} has no implementation-side prompt contract`,
+    );
+    assert.deepEqual(
+      descriptor.promptContract,
+      implementation,
+      `${descriptor.id} promptContract drifted from its runner implementation`,
+    );
+  }
+
+  // --- 实际投递函数：user_prefix 的增量语义 ---
+  const turnSections = firstBundle.sections.filter(
+    (section) => section.stability === 'turn',
+  );
+  assert.ok(turnSections.length > 0);
+  const sessionStatic = 'SESSION-STATIC';
+  const combined = 'COMBINED';
+
+  const firstTurn = resolveTurnContextDelivery({
+    delivery: 'user_prefix',
+    sessionStatic,
+    combined,
+    sections: firstBundle.sections,
+    previousHashes: new Map(),
+    previousSessionKey: null,
+    sessionKey: null,
+  });
+  assert.equal(firstTurn.systemPrompt, sessionStatic);
+  for (const section of turnSections) {
+    assert.ok(
+      firstTurn.promptPrefix.includes(`section="${section.id}"`),
+      `first turn must deliver ${section.id}`,
+    );
+  }
+  for (const section of firstBundle.sections) {
+    if (section.stability === 'turn') continue;
+    assert.ok(
+      !firstTurn.promptPrefix.includes(`section="${section.id}"`),
+      `${section.id} belongs to the system carrier, not the user prefix`,
+    );
+  }
+
+  const steadyTurn = resolveTurnContextDelivery({
+    delivery: 'user_prefix',
+    sessionStatic,
+    combined,
+    sections: firstBundle.sections,
+    previousHashes: firstTurn.nextHashes,
+    previousSessionKey: 'session-1',
+    sessionKey: 'session-1',
+  });
+  assert.equal(steadyTurn.promptPrefix, '');
+  assert.equal(steadyTurn.systemPrompt, sessionStatic);
+
+  memoryVersion = 'memory version three';
+  const changedTurn = resolveTurnContextDelivery({
+    delivery: 'user_prefix',
+    sessionStatic,
+    combined,
+    sections: buildContextBundle(context, plugins).sections,
+    previousHashes: steadyTurn.nextHashes,
+    previousSessionKey: 'session-1',
+    sessionKey: 'session-1',
+  });
+  assert.ok(changedTurn.promptPrefix.includes('memory version three'));
+  assert.ok(changedTurn.promptPrefix.includes('supersedes-previous="true"'));
+  assert.ok(!changedTurn.promptPrefix.includes('channel-routing-active'));
+
+  // --- 其他通道维持全量重传 ---
+  const fullResend = resolveTurnContextDelivery({
+    delivery: 'system',
+    sessionStatic,
+    combined,
+    sections: firstBundle.sections,
+    previousHashes: new Map(),
+    previousSessionKey: null,
+    sessionKey: null,
+  });
+  assert.equal(fullResend.systemPrompt, combined);
+  assert.equal(fullResend.promptPrefix, '');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

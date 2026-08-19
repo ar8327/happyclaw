@@ -31,6 +31,7 @@ import type {
   PushMessageResult,
 } from '../../runner-interface.js';
 import { combineRenderedContext } from '../../runner-interface.js';
+import type { RunnerPromptContract } from '../../runner-descriptor.types.js';
 import type { ContainerInput, ContainerOutput } from '../../types.js';
 import type { SessionState } from '../../session-state.js';
 import type { IpcPaths } from '../../ipc-handler.js';
@@ -151,11 +152,22 @@ function appendImageAttachmentNote(prompt: string, paths: string[]): string {
   ].join('\n');
 }
 
+/**
+ * agy 的 prompt 契约：每轮把完整渲染结果重写进隔离 HOME 的 GEMINI.md，
+ * 规则文件不进对话历史，因此维持全量重传。
+ */
+export const AGY_PROMPT_CONTRACT: RunnerPromptContract = {
+  mode: 'instructions_file',
+  dynamicContextReload: 'turn',
+  turnContextDelivery: 'system',
+};
+
 export class AgyRunner implements AgentRunner {
   readonly ipcCapabilities: IpcCapabilities = {
     supportsMidQueryPush: false,
     supportsRuntimeModeSwitch: false,
   };
+  readonly promptContract: RunnerPromptContract = AGY_PROMPT_CONTRACT;
 
   private readonly opts: AgyRunnerOptions;
   private homeDir!: string;
