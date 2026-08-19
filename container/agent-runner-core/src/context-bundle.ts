@@ -26,10 +26,7 @@ export interface ContextBundle {
 export interface RenderContextBundleOptions {
   exclude?: Iterable<SectionId>;
   includeStabilities?: Iterable<ContextStability>;
-  globalInstructionsStyle?: 'section' | 'raw';
 }
-
-const GLOBAL_SECTION_PREFIX = '## Global Instructions\n\n';
 
 export function renderContextBundle(
   bundle: ContextBundle,
@@ -46,29 +43,6 @@ export function renderContextBundle(
         (!includedStabilities || includedStabilities.has(section.stability)) &&
         section.content.length > 0,
     )
-    .map((section) => {
-      if (
-        section.id === 'global-instructions' &&
-        options?.globalInstructionsStyle === 'raw' &&
-        section.content.startsWith(GLOBAL_SECTION_PREFIX)
-      ) {
-        return section.content.slice(GLOBAL_SECTION_PREFIX.length, -1);
-      }
-      return section.content;
-    })
+    .map((section) => section.content)
     .join('\n');
-}
-
-export function splitRenderedContext(bundle: ContextBundle): {
-  sessionStatic: string;
-  turnDynamic: string;
-} {
-  return {
-    sessionStatic: renderContextBundle(bundle, {
-      includeStabilities: ['static', 'session'],
-    }),
-    turnDynamic: renderContextBundle(bundle, {
-      includeStabilities: ['turn'],
-    }),
-  };
 }

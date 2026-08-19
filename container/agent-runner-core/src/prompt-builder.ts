@@ -1,13 +1,8 @@
 /**
- * System prompt builder — assembles prompt sections shared by all runners.
- *
- * Two-level API:
- * - buildBasePrompt(): environment + workspace/global CLAUDE.md (for Codex etc.)
- * - buildAppendPrompt(): all guideline segments + plugins (for all providers)
- * - buildFullPrompt(): base + append (for Codex)
- *
- * Claude uses only buildAppendPrompt() because the claude_code preset
- * already includes base environment info.
+ * Context bundle builder — assembles the canonical context sections shared by
+ * all runners. `buildContextBundle()` is the single authority; runners filter
+ * by `descriptor.nativeProvides` and deliver the rest through their own
+ * carrier (see docs/agent-runner-contract.md).
  */
 
 import fs from 'fs';
@@ -141,69 +136,6 @@ function buildContextSummarySection(contextSummary?: string): string {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
-
-/**
- * Base prompt — environment info + workspace CLAUDE.md + global CLAUDE.md.
- * Used by Codex and other providers that don't have a preset.
- * Claude doesn't need this (claude_code preset already includes base info).
- */
-export function buildBasePrompt(ctx: PluginContext): string {
-  return renderContextBundle(buildContextBundle(ctx, []), {
-    exclude: [
-      'platform-guidelines',
-      'context-summary',
-      'channel-routing',
-      'channel-routing-active',
-      'memory-index',
-      'skills-catalog',
-    ],
-  });
-}
-
-/**
- * Append prompt — all guideline segments + plugin prompt sections.
- * Used by ALL providers (Claude appends to preset, Codex appends to base).
- *
- * Segments (in order, static sections first to maximize prompt cache prefix matching):
- * 1. Global CLAUDE.md (only for isHome — Claude preset doesn't load this)
- * 2. Interaction guidelines (static)
- * 3. Skill storage guidelines (static)
- * 4. Output guidelines (static)
- * 5. WebFetch guidelines (static)
- * 6. Background task guidelines (static)
- * 7. contextSummary (if any, dynamic)
- * 8. Channel routing (static + dynamic recentImChannels)
- * 9. Plugin prompt sections (includes MemoryPlugin, dynamic)
- */
-export function buildAppendPrompt(
-  ctx: PluginContext,
-  plugins: ContextPlugin[],
-  options?: { includeGlobalInstructions?: boolean },
-): string {
-  const excluded: SectionId[] = [
-    'identity',
-    'environment',
-    'workspace-instructions',
-  ];
-  if (options?.includeGlobalInstructions === false) {
-    excluded.push('global-instructions');
-  }
-  return renderContextBundle(buildContextBundle(ctx, plugins), {
-    exclude: excluded,
-    globalInstructionsStyle: 'raw',
-  });
-}
-
-/**
- * Full prompt = base + append.
- * Used by Codex and other providers that need the complete prompt.
- */
-export function buildFullPrompt(
-  ctx: PluginContext,
-  plugins: ContextPlugin[],
-): string {
-  return renderContextBundle(buildContextBundle(ctx, plugins));
-}
 
 function pluginSectionId(plugin: ContextPlugin): SectionId {
   if (plugin.name === 'memory') return 'memory-index';

@@ -1,31 +1,19 @@
 /**
- * ContextManager — central orchestrator for plugins, tools, and system prompt assembly.
+ * ContextManager — central orchestrator for plugins, tools, and context assembly.
  *
- * Provides two-level prompt API:
- * - buildAppendPrompt(): for Claude (appends to preset)
- * - buildFullPrompt() / writeFullPromptToFile(): for Codex etc.
- * - buildSystemPrompt(): legacy API (calls buildFullPrompt internally)
+ * `buildContextBundle()` is the only prompt entry point: it returns the
+ * canonical sections, and each runner decides how to deliver them according to
+ * its `promptContract` (see docs/agent-runner-contract.md).
  */
 
-import fs from 'fs';
-import type { ContainerInput } from './types.js';
 import type {
   ContextPlugin,
   PluginContext,
   ToolDefinition,
   ToolResult,
 } from './plugin.js';
-import {
-  buildBasePrompt,
-  buildAppendPrompt as buildAppendPromptImpl,
-  buildContextBundle as buildContextBundleImpl,
-  buildFullPrompt as buildFullPromptImpl,
-} from './prompt-builder.js';
-import {
-  renderContextBundle,
-  type ContextBundle,
-  type RenderContextBundleOptions,
-} from './context-bundle.js';
+import { buildContextBundle as buildContextBundleImpl } from './prompt-builder.js';
+import type { ContextBundle } from './context-bundle.js';
 
 export class ContextManager {
   private plugins: ContextPlugin[] = [];
@@ -95,46 +83,8 @@ export class ContextManager {
     }
   }
 
-  /**
-   * Build the append prompt — all guideline segments + plugin contributions.
-   * Used by Claude (appends to the claude_code preset).
-   */
-  buildAppendPrompt(): string {
-    return buildAppendPromptImpl(this.ctx, this.plugins);
-  }
-
-  /**
-   * Build the full prompt = base + append.
-   * Used by Codex and other providers without a preset.
-   */
-  buildFullPrompt(): string {
-    return buildFullPromptImpl(this.ctx, this.plugins);
-  }
-
   buildContextBundle(): ContextBundle {
     return buildContextBundleImpl(this.ctx, this.plugins);
-  }
-
-  renderContext(options?: RenderContextBundleOptions): string {
-    return renderContextBundle(this.buildContextBundle(), options);
-  }
-
-  /**
-   * Write the full prompt to a file (convenience for Codex's model_instructions_file).
-   */
-  writeFullPromptToFile(filePath: string): void {
-    fs.writeFileSync(filePath, this.buildFullPrompt(), 'utf-8');
-  }
-
-  /**
-   * Build the full system prompt from base sections + plugin contributions.
-   * @deprecated Use buildAppendPrompt() or buildFullPrompt() instead.
-   */
-  buildSystemPrompt(_input: ContainerInput, providerInfo?: string): string {
-    if (providerInfo) {
-      this.ctx.providerInfo = providerInfo;
-    }
-    return this.buildFullPrompt();
   }
 
   /** Get the plugin context (read-only). */

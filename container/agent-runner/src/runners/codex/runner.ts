@@ -492,10 +492,18 @@ export class CodexRunner implements AgentRunner {
       ? this.renderedContext.sessionStatic
       : config.systemPrompt;
 
-    fs.writeFileSync(this.instructionsFile, systemPrompt, 'utf-8');
-    log(
-      `Codex instructions prepared: mode=session-static, chars=${systemPrompt.length}, promptChars=${composedPrompt.length}`,
+    // instructions 文件只在 thread/start 与 thread/resume 时被 app-server 读取。
+    // thread 已经在跑的时候重写它不会生效，静态段的后续变更由
+    // injectChangedContext() 通过 thread/inject_items 补投。
+    const willStartThread = !(
+      resumeTarget && resumeTarget === this.session.getThreadId()
     );
+    if (willStartThread) {
+      fs.writeFileSync(this.instructionsFile, systemPrompt, 'utf-8');
+      log(
+        `Codex instructions written: mode=session-static, chars=${systemPrompt.length}, promptChars=${composedPrompt.length}`,
+      );
+    }
 
     // Prepare images (base64 → temp files)
     let imagePaths: string[] | undefined;

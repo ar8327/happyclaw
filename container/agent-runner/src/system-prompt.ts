@@ -95,15 +95,3 @@ export function createContextBuilder(params: {
     };
   };
 }
-
-export function createSystemPromptBuilder(
-  params: Parameters<typeof createContextBuilder>[0],
-): (prompt: string) => string {
-  const buildContext = createContextBuilder(params);
-  return (prompt: string) => {
-    const context = buildContext(prompt);
-    return [context.sessionStatic, context.turnDynamic]
-      .filter(Boolean)
-      .join('\n');
-  };
-}
