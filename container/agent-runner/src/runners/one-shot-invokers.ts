@@ -286,3 +286,119 @@ export async function invokeClaudeOneShot(input: {
       process.env.ANTHROPIC_AUTH_TOKEN = prevAuthToken;
   }
 }
+
+export function hasGrokOneShotAuth(env: NodeJS.ProcessEnv): boolean {
+  if (env.XAI_API_KEY || env.HAPPYCLAW_GROK_AVAILABLE === '1') return true;
+  const grokHome = env.GROK_HOME || path.join(os.homedir(), '.grok');
+  try {
+    return fs.existsSync(path.join(grokHome, 'auth.json'));
+  } catch {
+    return false;
+  }
+}
+
+/** grok 的 --effort 取值域比其他 runner 宽，多出 none/minimal/xhigh。 */
+function toGrokEffort(effort: string): string {
+  const allowed = new Set([
+    'none',
+    'minimal',
+    'low',
+    'medium',
+    'high',
+    'xhigh',
+    'max',
+  ]);
+  return allowed.has(effort) ? effort : 'medium';
+}
+
+export async function invokeGrokOneShot(input: {
+  prompt: string;
+  model: string;
+  cwd: string;
+  thinkingEffort?: string;
+  timeoutMs: number;
+  maxTurns?: number;
+}): Promise<string> {
+  const { prepareGrokHome } = await import('./grok/grok-env.js');
+  const grokProbe = spawnSync('grok', ['--version'], { encoding: 'utf8' });
+  if (grokProbe.error || grokProbe.status !== 0) {
+    throw new Error(
+      `Grok CLI not available: ${grokProbe.error?.message || grokProbe.stderr || grokProbe.stdout}`,
+    );
+  }
+
+  // 一次性调用也用隔离 HOME，避免污染用户真实会话存储；认证软链回真实 home
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'happyclaw-grok-os-'));
+  prepareGrokHome(homeDir);
+  try {
+    const args = [
+      '-p',
+      input.prompt,
+      '--output-format',
+      'json',
+      '--model',
+      input.model,
+      '--permission-mode',
+      'bypassPermissions',
+      '--no-ask-user',
+    ];
+    if (input.thinkingEffort) {
+      args.push('--effort', toGrokEffort(input.thinkingEffort));
+    }
+    if (input.maxTurns) args.push('--max-turns', String(input.maxTurns));
+
+    const child = spawn('grok', args, {
+      cwd: input.cwd,
+      env: {
+        ...(process.env as Record<string, string>),
+        GROK_HOME: homeDir,
+        HAPPYCLAW_INVOKE_DEPTH: '1',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+
+    const timer = setTimeout(() => {
+      child.kill('SIGINT');
+      setTimeout(() => {
+        if (!child.killed) child.kill('SIGKILL');
+      }, 1000);
+    }, input.timeoutMs);
+    try {
+      const exitCode = await new Promise<number>((resolve, reject) => {
+        child.once('error', reject);
+        child.once('close', (code) => resolve(code ?? 0));
+      });
+      if (exitCode !== 0) {
+        throw new Error(
+          stderr.trim() ||
+            stdout.trim() ||
+            `Grok CLI exited with code ${exitCode}`,
+        );
+      }
+      // 未登录等 CLI 级错误也走 stdout，形如 {"type":"error","message":"..."}
+      const parsed = JSON.parse(stdout) as {
+        text?: string;
+        type?: string;
+        message?: string;
+      };
+      if (parsed.type === 'error') {
+        throw new Error(parsed.message || 'Grok CLI returned an error');
+      }
+      return (parsed.text || '').trim();
+    } finally {
+      clearTimeout(timer);
+    }
+  } finally {
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+}
