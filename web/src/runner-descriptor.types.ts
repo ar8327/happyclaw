@@ -650,4 +650,103 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       observability: 'degraded',
     },
   },
+  grok: {
+    id: 'grok',
+    label: 'Grok',
+    description:
+      'xAI Grok CLI runner，headless 逐轮调用，输出与 Claude Code stream-json 同构，会话级隔离 GROK_HOME。',
+    defaultModel: 'grok-4.6',
+    modelPatterns: ['^grok-'],
+    capabilities: {
+      sessionResume: 'strong',
+      interrupt: 'weak',
+      imageInput: true,
+      usage: 'exact',
+      midQueryPush: false,
+      runtimeModeSwitch: false,
+      toolStreaming: 'fine',
+      backgroundTasks: true,
+      subAgent: 'tool-only',
+      customTools: 'mcp',
+      mcpTransport: ['stdio', 'http'],
+      skills: ['native', 'tool-loader'],
+      ephemeralSession: true,
+      filesystemAccess: true,
+      predefinedSubagents: false,
+    },
+    lifecycle: {
+      turnBoundary: 'native',
+      archivalTrigger: ['turn_threshold', 'cleanup_only'],
+      contextShrinkTrigger: 'synthetic',
+      beforeToolExecutionGuard: 'native_hook',
+      hookStreaming: 'none',
+      postCompactRepair: 'synthetic',
+    },
+    promptContract: {
+      mode: 'append',
+      dynamicContextReload: 'turn',
+      turnContextDelivery: 'user_prefix',
+    },
+    nativeProvides: [
+      'identity',
+      'environment',
+      'workspace-instructions',
+      'skills-catalog',
+    ],
+    runtimeContract: {
+      requiredCommands: ['grok'],
+      configDirEnv: 'GROK_HOME',
+      modelEnv: ['HAPPYCLAW_GROK_MODEL'],
+      availabilityEnv: 'HAPPYCLAW_GROK_AVAILABLE',
+      auth: 'external_cli',
+      authProbe: {
+        type: 'json_file',
+        anyEnv: ['XAI_API_KEY'],
+        files: [
+          {
+            envPath: 'GROK_HOME',
+            relativeToEnv: 'auth.json',
+            relativeToHome: '.grok/auth.json',
+          },
+        ],
+      },
+      versionArgs: ['--version'],
+    },
+    toolContract: {
+      mode: 'mcp_stdio',
+      supportsUserMcp: true,
+      userMcpSources: ['agentdock', 'profile'],
+      builtinServerName: 'agentdock',
+    },
+    profileSchema: {
+      type: 'object',
+      properties: {
+        model: {
+          type: 'string',
+          title: '模型',
+          description: '覆盖 Grok CLI 使用的模型（见 grok models）',
+        },
+        thinkingEffort: {
+          type: 'string',
+          enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+          title: '推理强度',
+        },
+        command: {
+          type: 'string',
+          title: '命令路径',
+          description: '默认使用 PATH 中的 grok',
+        },
+      },
+      additionalProperties: true,
+    },
+    models: [
+      { id: 'grok-4.6', label: 'Grok 4.6' },
+      { id: 'grok-4.5', label: 'Grok 4.5' },
+    ],
+    compatibility: {
+      chat: 'full',
+      im: 'degraded',
+      observability: 'full',
+    },
+  },
 };
