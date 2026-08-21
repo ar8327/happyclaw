@@ -16,6 +16,7 @@ import {
 import { detectImageMimeType } from './image-detector.js';
 import { analyzeIntent } from './intent-analyzer.js';
 import {
+  commandReplyText,
   parseSlashCommand,
   type ImCommandHandler,
 } from './im-command-utils.js';
@@ -492,12 +493,14 @@ export function createTelegramConnection(
               'Telegram slash command detected',
             );
             try {
-              const reply = await opts.onCommand(jid, slashCommand.body, {
-                targetJid,
-                chatType: ctx.chat.type === 'private' ? 'p2p' : 'group',
-              });
-              if (reply) {
-                await ctx.reply(reply);
+              const replyText = commandReplyText(
+                await opts.onCommand(jid, slashCommand.body, {
+                  targetJid,
+                  chatType: ctx.chat.type === 'private' ? 'p2p' : 'group',
+                }),
+              );
+              if (replyText) {
+                await ctx.reply(replyText);
                 return; // 已知命令，拦截
               }
               // reply 为 null 表示未知命令，继续作为普通消息处理

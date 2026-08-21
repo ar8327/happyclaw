@@ -13,6 +13,7 @@
  */
 import crypto from 'crypto';
 import {
+  commandReplyText,
   parseSlashCommand,
   type ImCommandHandler,
 } from './im-command-utils.js';
@@ -584,10 +585,13 @@ export function createWeChatConnection(
       const slashCommand = parseSlashCommand(content);
       if (slashCommand && opts.onCommand) {
         try {
-          const reply = await opts.onCommand(jid, slashCommand.body, {
-            targetJid: opts.resolveEffectiveChatJid?.(jid)?.effectiveJid ?? jid,
-            chatType: 'p2p',
-          });
+          const reply = commandReplyText(
+            await opts.onCommand(jid, slashCommand.body, {
+              targetJid:
+                opts.resolveEffectiveChatJid?.(jid)?.effectiveJid ?? jid,
+              chatType: 'p2p',
+            }),
+          );
           if (reply) {
             const ct = contextTokenCache.get(fromUserId);
             if (ct) {

@@ -21,6 +21,8 @@ import { broadcastNewMessage } from './web.js';
 import { detectImageMimeType } from './image-detector.js';
 import { analyzeIntent } from './intent-analyzer.js';
 import {
+  commandReplyCard,
+  commandReplyText,
   parseSlashCommand,
   stripLeadingMentions,
   type ImCommandHandler,
@@ -28,6 +30,10 @@ import {
 import { getSystemSettings } from './runtime-config.js';
 import { buildStaticReplyCard } from './feishu-card-builder.js';
 import { handleProgressCardAction } from './feishu-progress-card.js';
+import {
+  handleModelCardAction,
+  type ModelCardActionPayload,
+} from './model-card-actions.js';
 import type { IMRouteContext } from './im-channel.js';
 import {
   isFeishuBotMentioned,
@@ -207,22 +213,33 @@ interface WsConnectionState {
   nextConnectTime: number;
 }
 
-interface FeishuCardActionPayload {
-  action?: {
-    value?: unknown;
-  };
-}
+type FeishuCardActionPayload = ModelCardActionPayload;
 
 export interface FeishuCardActionResponse {
   toast: {
     type: 'success' | 'info' | 'warning' | 'error';
     content: string;
   };
+  /** Replacement card. Feishu applies it to the message that was clicked. */
+  card?: {
+    type: 'raw';
+    data: Record<string, unknown>;
+  };
 }
 
 export async function handleFeishuCardAction(
   data: FeishuCardActionPayload,
 ): Promise<FeishuCardActionResponse> {
+  const modelOutcome = await handleModelCardAction(data);
+  if (modelOutcome) {
+    return {
+      toast: modelOutcome.toast,
+      ...(modelOutcome.card
+        ? { card: { type: 'raw' as const, data: modelOutcome.card } }
+        : {}),
+    };
+  }
+
   const result = await handleProgressCardAction(data.action?.value);
   if (result === 'stopped') {
     return {
@@ -844,6 +861,57 @@ export function createFeishuConnection(
   }
 
   /**
+   * Send an interactive card as a command reply, falling back to plain text.
+   *
+   * Slash-command feedback must never disappear just because the card payload
+   * was rejected, so every failure path degrades to `sendTextToChat`.
+   */
+  async function sendCardToChat(
+    chatId: string,
+    card: Record<string, unknown>,
+    fallbackText: string,
+    replyToMsgId?: string,
+    replyInThread?: boolean,
+  ): Promise<void> {
+    if (!client) return;
+    const content = JSON.stringify(card);
+    try {
+      if (replyToMsgId) {
+        try {
+          await client.im.message.reply({
+            path: { message_id: replyToMsgId },
+            data: {
+              msg_type: 'interactive',
+              content,
+              reply_in_thread: replyInThread === true,
+            },
+          });
+          return;
+        } catch (replyErr) {
+          logger.warn(
+            { chatId, replyToMsgId, err: replyErr },
+            'Feishu card reply failed, falling back to a plain card message',
+          );
+        }
+      }
+      await client.im.message.create({
+        data: {
+          receive_id: chatId,
+          msg_type: 'interactive',
+          content,
+        },
+        params: { receive_id_type: 'chat_id' },
+      });
+    } catch (err) {
+      logger.warn(
+        { chatId, err },
+        'Feishu card send failed, falling back to text',
+      );
+      await sendTextToChat(chatId, fallbackText, replyToMsgId, replyInThread);
+    }
+  }
+
+  /**
    * 展开合并转发消息：通过 API 获取子消息内容。
    * 飞书 WebSocket 推送的 merge_forward 消息 content 通常不含子消息正文，
    * 需要通过 GET /im/v1/messages/{message_id} 获取完整内容。
@@ -1179,6 +1247,7 @@ export function createFeishuConnection(
       targetJid,
       threadId,
       chatType: chatType === 'p2p' ? ('p2p' as const) : ('group' as const),
+      supportsCards: true,
     };
     const slashCommand = parseSlashCommand(textForSlash);
     if (slashCommand && onCommand) {
@@ -1187,27 +1256,31 @@ export function createFeishuConnection(
         'Feishu slash command detected',
       );
       try {
-        const reply = await onCommand(
+        const result = await onCommand(
           chatJid,
           slashCommand.body,
           commandContext,
         );
+        const reply = commandReplyText(result);
+        const card = commandReplyCard(result);
         logger.info(
           {
             chatJid,
             cmd: slashCommand.cmd,
             hasReply: !!reply,
+            hasCard: !!card,
             replyLen: reply?.length,
           },
           'Feishu slash command processed',
         );
         if (reply) {
-          await sendTextToChat(
-            chatId,
-            reply,
-            messageId,
-            targetJid.startsWith('web:feishu-topic-') || Boolean(threadId),
-          );
+          const replyInThread =
+            targetJid.startsWith('web:feishu-topic-') || Boolean(threadId);
+          if (card) {
+            await sendCardToChat(chatId, card, reply, messageId, replyInThread);
+          } else {
+            await sendTextToChat(chatId, reply, messageId, replyInThread);
+          }
           return; // 已知命令，拦截
         }
         // reply 为 null 表示未知命令，继续作为普通消息处理

@@ -314,10 +314,31 @@ make dist-desktop
 | `/unbind` | - | 解绑回默认工作区 |
 | `/new <名称>` | - | 创建新工作区并绑定当前群组 |
 | `/recall` | `/rc` | AI 总结最近对话记录 |
+| `/model [参数]` | - | 查看或切换当前会话的 runner / 模型 / effort / variant |
 | `/clear` | - | 清除当前对话的会话上下文 |
 | `/require_mention` | - | 切换群聊响应模式：`true`（需要 @）或 `false`（全量响应） |
 
 未知命令若长得像命令（纯字母/下划线的单个 token），会回一句提示并附上命令表；以路径开头的普通消息（如 `/tmp/a.log 看下`）仍原样交给 agent。
+
+#### `/model`
+
+作用对象是当前聊天**实际路由到的会话**（主会话、绑定的 conversation agent，或飞书话题会话），修改后下一轮消息立即使用新配置。
+
+```
+/model                      查看当前 runner / 模型 / effort / variant 与可选项
+/model list [runner]        列出全部 runner，或某个 runner 的模型与参数
+/model <model>              切换模型，runner 由模型自动推断
+/model <runner> <model>     显式指定 runner 与模型
+/model effort <level>       切换推理强度（default 复位）
+/model variant <id>         切换模型后端变体（default 复位）
+/model reset                清除 model / effort / variant 覆盖
+/model claude opus effort:high     组合写法
+```
+
+- 模型名含空格时用引号包起来：`/model agy "Gemini 3.1 Pro (High)"`
+- 切换 runner 会停止当前 runtime 并清空会话恢复状态（与 Web 端改 runner 行为一致），只改模型/effort/variant 则不重启
+- 飞书返回**可交互卡片**：runner / model / effort / variant 四个下拉选择器，选中即生效并原地刷新卡片；Telegram、QQ、微信收到等价的纯文本
+- 模型不在 runner catalog 中时按原样写入（catalog 可能是冷的），但明确属于其它 runner 的模型会被拒绝
 
 
 ### Runner 选择

@@ -31,6 +31,7 @@
     "test:runner-images": "tsx container/agent-runner/tests/image-utils.test.ts",
     "test:query-loop": "tsx container/agent-runner/tests/query-loop.test.ts",
     "test:im-slash-command": "tsx src/im-slash-command.test.ts",
+    "test:model-command": "tsx src/model-command.test.ts",
     "test:steering-feishu": "tsx src/steering-feishu-improvements.test.ts",
     "preview:feishu-card": "tsx scripts/preview-feishu-card.ts",
     "test:feishu-conversation-mode": "tsx src/feishu-conversation-mode.test.ts",
