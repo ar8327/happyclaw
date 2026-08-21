@@ -70,7 +70,9 @@
 | `src/im-channel.ts` | 统一 IM 通道接口（`IMChannel`）、Feishu/Telegram 适配器工厂 |
 | `src/intent-analyzer.ts` | 消息意图分析：stop/correction/continue 识别 |
 | `src/commands.ts` | Web 端斜杠命令处理器（`/clear` 重置会话） |
-| `src/im-command-utils.ts` | IM 斜杠命令纯函数工具：`formatWorkspaceList()`、`formatContextMessages()` |
+| `src/im-command-utils.ts` | IM 斜杠命令纯函数工具：`formatWorkspaceList()`、`formatContextMessages()`、`commandReplyText()` |
+| `src/model-command.ts` | `/model` 命令的解析、变更求解与文本渲染（纯函数） |
+| `src/model-card-actions.ts` | 飞书 `/model` 卡片回调的解析与 handler 注册 |
 | `src/telegram-pairing.ts` | Telegram 配对码：6 位随机码，5 分钟过期 |
 | `src/terminal-manager.ts` | 本地终端管理（node-pty + pipe fallback，WebSocket 双向通信） |
 | `src/message-attachments.ts` | 图片附件规范化（MIME 检测、Data URL 解析） |
@@ -636,6 +638,7 @@ Session runtime 收尾 → export transcripts
 | `/list` | `/ls` | 查看所有工作区和对话列表，标记当前位置，显示 Agent 短 ID |
 | `/status` | - | 查看当前所在的工作区/对话状态 |
 | `/recall` | `/rc` | 调用 Claude CLI（`--print` 模式）总结最近 10 条消息，API 不可用时 fallback 到原始消息列表 |
+| `/model` | - | 查看或切换当前路由会话的 runner / model / thinking effort / backend variant，飞书返回可交互卡片 |
 | `/clear` | - | 清除当前对话的会话上下文 |
 | `/require_mention` | - | 切换群聊响应模式：`/require_mention true`（需要 @机器人）或 `/require_mention false`（全量响应） |
 
@@ -646,6 +649,27 @@ Session runtime 收尾 → export transcripts
 群聊里的 @mention 前缀按 mention 的真实展示名剥离（`stripLeadingMentions()`），机器人名带空格或展示名为空时命令依然可识别；剥离后的文本同时用于中断意图识别。
 
 `/recall` 通过 `execFile('claude', ['--print'])` + stdin 管道调用 Claude CLI，复用与 Agent Runner 相同的 OAuth 认证机制。
+
+命令回调的返回值是 `ImCommandResult = string | { text, card } | null`。`text` 永远存在，是所有渠道的兜底；`card` 只有声明了 `ImCommandContext.supportsCards` 的渠道（当前仅飞书）会渲染。渠道侧统一用 `commandReplyText()` / `commandReplyCard()` 取值，命令不会退化成"只有卡片没有文本"。
+
+### 8.12.1 `/model`
+
+| 模块 | 职责 |
+|------|------|
+| `src/model-command.ts` | 纯逻辑：参数解析（含引号分词）、变更求解与校验、文本渲染。无 DB 依赖，由 `src/model-command.test.ts` 覆盖 |
+| `src/index.ts` | `handleModelCommand()` / `applyModelChange()`：解析目标会话、构建快照、落库、必要时重启 runtime |
+| `src/feishu-card-builder.ts` | `buildModelConfigCard()`：卡片 JSON 2.0 呈现 |
+| `src/model-card-actions.ts` | 卡片回调解析与 handler 注册（`index.ts` 在 `main()` 里注入 applier，避免 transport 直接依赖会话状态） |
+
+**作用对象**：`resolveBoundSessionTarget()` 解析出的**路由会话**，而不是聊天的默认工作区。绑定到 conversation agent 或飞书话题时，改的就是那条会话自己的 `sessions` 记录 —— 它才是下一轮真正执行的会话。
+
+**快照来源**：runner 列表来自 `listRunnerDescriptors()`，模型来自 `getRunnerServerManifest(id).listModels()`，profile 覆盖复用 runtime-runner 导出的 `resolveRunnerProfileBundle()`，因此 `/model` 显示的就是下一轮 runtime 实际会用的值。可用性判定用 `runnerAuthAvailable()`（纯文件/环境变量探测）而不是 `healthCheck()`，后者每个 runner 都要 spawn 一次 CLI，飞书卡片回调等不起。
+
+**生效时机**：本地 runtime 是 per-turn 进程，model / effort / variant 在下次 spawn 时读取，不需要重启。切换 runner 会 `stopSession(force)` + `deleteSessionRuntimeState()`，与 `PATCH /api/sessions/:id` 一致——provider 状态目录和 resume anchor 属于旧 runner，留着会串味。落库时同步更新兼容 group 的 `model` / `thinking_effort` / `model_backend_variant`，否则 Web 会话列表与 `runtime-runner` 的 fallback 会读到旧值。
+
+**effort / variant 约束**：只提供 `SessionRecord` 能存下的取值（effort 为 `low|medium|high|xhigh`，variant 为 `standard|max`），再与 per-model `supportedThinkingEfforts` 和 runner profileSchema 的 enum 取交集——与前端 `thinkingEffortOptionsFromSchema()` 同源。换模型后不被支持的 effort 与所有 variant 都会复位。
+
+**卡片交互**：`select_static` 的 `behaviors` 走 `card.action.trigger` 回调，选中即生效并用回调响应的 `card: {type:'raw', data}` 原地刷新。路由上下文（`jid` + `session`）直接嵌在 callback value 里而不是放内存表——配置卡片会长期留在聊天记录里，必须能跨重启工作；每次点击都重新校验会话是否仍是当前绑定，不一致就拒绝并刷新卡片。切 runner 的下拉带 `confirm`，因为它会中断正在跑的 turn。
 
 ### 8.13 群聊 Mention 控制
 

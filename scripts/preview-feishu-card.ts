@@ -10,8 +10,10 @@
  *   npx tsx scripts/preview-feishu-card.ts active     # print one sample
  */
 import {
+  buildModelConfigCard,
   buildProgressCard,
   buildStaticReplyCard,
+  MODEL_CARD_DEFAULT_VALUE,
   type ProgressCardRenderData,
 } from '../src/feishu-card-builder.js';
 
@@ -89,6 +91,63 @@ const samples: Record<string, () => unknown> = {
       '已经把斜杠命令的分发路径修好了：\n\n- `/stop` 现在会真的中断\n- `/require_mention` 不再被 activation_mode 悄悄覆盖',
     ),
   'reply-aborted': () => buildStaticReplyCard('这段回复被中断了', 'aborted'),
+  model: () =>
+    buildModelConfigCard({
+      locationLine: '主工作区 / 主会话',
+      summaryLines: [
+        '**Runner** Claude (claude)',
+        '**Model** opus _(继承)_',
+        '**Effort** 默认',
+      ],
+      fields: [
+        {
+          field: 'runner',
+          label: 'Runner',
+          placeholder: '选择 Runner',
+          selected: 'claude',
+          options: [
+            { value: 'claude', label: 'Claude' },
+            { value: 'codex', label: 'Codex ⚠️ 未认证' },
+            { value: 'agy', label: 'Antigravity' },
+          ],
+          confirm: {
+            title: '切换 Runner？',
+            text: '会停止当前 runtime 并清空会话恢复状态，正在执行的 turn 会被中断。',
+          },
+        },
+        {
+          field: 'model',
+          label: 'Model',
+          placeholder: '选择模型',
+          selected: MODEL_CARD_DEFAULT_VALUE,
+          options: [
+            { value: MODEL_CARD_DEFAULT_VALUE, label: '默认（opus）' },
+            { value: 'haiku', label: 'Haiku (haiku)' },
+            { value: 'sonnet', label: 'Sonnet (sonnet)' },
+            { value: 'opus', label: 'Opus (opus)' },
+          ],
+        },
+        {
+          field: 'effort',
+          label: 'Thinking Effort',
+          placeholder: '选择推理强度',
+          selected: MODEL_CARD_DEFAULT_VALUE,
+          options: [
+            { value: MODEL_CARD_DEFAULT_VALUE, label: '默认' },
+            { value: 'low', label: 'low' },
+            { value: 'medium', label: 'medium' },
+            { value: 'high', label: 'high' },
+          ],
+        },
+      ],
+      actionValue: {
+        action: 'model_config',
+        jid: 'feishu:oc_demo',
+        target: 'web:main',
+        session: 'main:main',
+      },
+      note: '选择后立即生效，下一条消息使用新配置',
+    }),
 };
 
 const name = process.argv[2];

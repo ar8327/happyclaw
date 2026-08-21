@@ -55,6 +55,7 @@ import {
   getSessionBinding,
   getSessionRecord,
   getSessionRuntimeState,
+  deleteSessionRuntimeState,
   getWorkerSessionRecord,
   listSessionBindings,
   listSessionRecords,
@@ -138,8 +139,41 @@ import {
   formatSystemStatus,
   isLikelyCommandToken,
   type ImCommandContext,
+  type ImCommandResult,
   type WorkspaceInfo,
 } from './im-command-utils.js';
+import {
+  availableEfforts,
+  availableVariants,
+  effectiveModel,
+  findModelChoice,
+  findRunnerOption,
+  formatModelChangeResult,
+  formatModelHelp,
+  formatModelList,
+  formatModelStatus,
+  modelLabel,
+  parseModelCommandArgs,
+  resolveModelChange,
+  type ModelChangePlan,
+  type ModelCommandSet,
+  type ModelConfigSnapshot,
+  type ModelRunnerOption,
+} from './model-command.js';
+import {
+  buildModelConfigCard,
+  MODEL_CARD_DEFAULT_VALUE,
+  MODEL_CARD_MAX_OPTIONS,
+  type ModelCardField,
+} from './feishu-card-builder.js';
+import {
+  MODEL_CARD_ACTION,
+  setModelCardActionHandler,
+} from './model-card-actions.js';
+import { listRunnerDescriptors } from './runner-registry.js';
+import { getRunnerServerManifest } from './runner-catalog.js';
+import { runnerAuthAvailable } from './runner-health.js';
+import { resolveRunnerProfileBundle } from './runtime-runner.js';
 import {
   buildWorkerConversationJid,
   buildWorkerSessionId,
@@ -184,6 +218,7 @@ import {
   MessageCursor,
   NewMessage,
   RegisteredGroup,
+  SessionRecord,
 } from './types.js';
 import { logger } from './logger.js';
 import { normalizeImageAttachments } from './message-attachments.js';
@@ -1614,7 +1649,7 @@ async function handleCommand(
   chatJid: string,
   command: string,
   context?: ImCommandContext,
-): Promise<string | null> {
+): Promise<ImCommandResult> {
   const parts = command.split(/\s+/);
   const cmd = parts[0];
   const rawArgs = command.slice(cmd.length).trim();
@@ -1645,6 +1680,8 @@ async function handleCommand(
       return handleNewCommand(chatJid, rawArgs);
     case 'require_mention':
       return handleRequireMentionCommand(chatJid, rawArgs);
+    case 'model':
+      return handleModelCommand(chatJid, rawArgs, context);
     default:
       // A mistyped command deserves feedback, but plain text that merely
       // starts with a path ("/tmp/a.log 看下") must still reach the agent.
@@ -1895,6 +1932,555 @@ function getLocationForGroup(chatJid: string, group: RegisteredGroup) {
     replyPolicy: resolved.replyPolicy,
     boundAgentId: resolved.boundAgentId,
     effectiveJid: resolved.effectiveJid,
+  };
+}
+
+// ─── /model — runner & model switching ────────────────────────
+
+interface ModelCommandTarget {
+  chatJid: string;
+  session: SessionRecord;
+  folder: string;
+  locationLine: string;
+  /** JID the runtime queue is keyed by — required to stop the old runtime. */
+  runtimeJid: string;
+  /** Web-side compatibility group mirroring the session's model fields. */
+  backingJid: string | null;
+}
+
+type ModelCommandTargetResult =
+  | { ok: true; target: ModelCommandTarget }
+  | { ok: false; message: string };
+
+/**
+ * Resolve which session a `/model` invocation acts on.
+ *
+ * It is deliberately the *routed* session rather than the chat's default
+ * workspace: a chat bound to a conversation agent or a Feishu topic runs its
+ * own session record, and that is the one whose runner will actually execute
+ * the next turn.
+ */
+function resolveModelCommandTarget(
+  chatJid: string,
+  context?: ImCommandContext,
+): ModelCommandTargetResult {
+  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  if (!group) return { ok: false, message: '当前 IM 未绑定工作区' };
+
+  // A Feishu topic is routed per-message from the thread anchor, so the
+  // chat-level binding knows nothing about it. Without this branch /model in a
+  // topic would report and reconfigure the parent chat's session instead.
+  const routedJid = context?.targetJid;
+  if (routedJid && routedJid.startsWith('web:feishu-topic-')) {
+    const topicGroup =
+      registeredGroups[routedJid] ?? getRegisteredGroup(routedJid);
+    const topicSession = topicGroup
+      ? getSessionRecord(`main:${topicGroup.folder}`)
+      : undefined;
+    if (topicGroup && topicSession) {
+      return {
+        ok: true,
+        target: {
+          chatJid,
+          session: topicSession,
+          folder: topicGroup.folder,
+          locationLine: topicGroup.name,
+          runtimeJid: routedJid,
+          backingJid: routedJid,
+        },
+      };
+    }
+  }
+
+  const resolved = resolveBoundSessionTarget(chatJid, group);
+  const folder = resolved.folder || group.folder;
+  const session =
+    (resolved.sessionId ? getSessionRecord(resolved.sessionId) : undefined) ??
+    getSessionRecord(`main:${folder}`);
+  if (!session) {
+    return { ok: false, message: `找不到会话记录（folder: ${folder}）` };
+  }
+
+  return {
+    ok: true,
+    target: {
+      chatJid,
+      session,
+      folder,
+      locationLine: resolved.locationLine,
+      // The runtime queue keys a worker by its session id, not by the
+      // `chat#agent:` conversation JID the channel routes messages to.
+      runtimeJid:
+        session.kind === 'worker'
+          ? session.id
+          : context?.targetJid || resolved.effectiveJid || chatJid,
+      backingJid:
+        session.kind === 'worker' ? null : findWebJidForFolder(folder),
+    },
+  };
+}
+
+function runnerSchemaEnum(
+  schema: Record<string, unknown> | undefined,
+  key: string,
+): string[] {
+  const properties = schema?.properties;
+  if (
+    !properties ||
+    typeof properties !== 'object' ||
+    Array.isArray(properties)
+  ) {
+    return [];
+  }
+  const property = (properties as Record<string, unknown>)[key];
+  if (!property || typeof property !== 'object' || Array.isArray(property)) {
+    return [];
+  }
+  const values = (property as { enum?: unknown[] }).enum;
+  return Array.isArray(values)
+    ? values.filter((value): value is string => typeof value === 'string')
+    : [];
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+async function buildModelRunnerOptions(): Promise<ModelRunnerOption[]> {
+  return Promise.all(
+    listRunnerDescriptors().map(async (descriptor) => {
+      const manifest = getRunnerServerManifest(descriptor.id);
+      const models = manifest ? await manifest.listModels() : [];
+      // Auth probes are file/env lookups; a full healthCheck() would spawn a
+      // CLI per runner, which is too slow for a Feishu card callback.
+      const available = runnerAuthAvailable(descriptor);
+      return {
+        id: descriptor.id,
+        label: descriptor.label,
+        available,
+        unavailableReason: available ? undefined : '未检测到可用凭据',
+        defaultModel: descriptor.defaultModel ?? null,
+        models: models.map((model) => ({
+          id: model.id,
+          label: model.label,
+          modelProvider: model.modelProvider,
+          supportedThinkingEfforts: model.supportedThinkingEfforts,
+          backendVariants: model.backendVariants,
+        })),
+        schemaEfforts: runnerSchemaEnum(
+          descriptor.profileSchema,
+          'thinkingEffort',
+        ),
+        schemaVariants: runnerSchemaEnum(
+          descriptor.profileSchema,
+          'modelBackendVariant',
+        ),
+      };
+    }),
+  );
+}
+
+async function buildModelConfigSnapshot(
+  target: ModelCommandTarget,
+): Promise<ModelConfigSnapshot> {
+  const runners = await buildModelRunnerOptions();
+  // Same resolution the local runtime performs, so what /model reports is what
+  // the next turn will actually launch with.
+  const bundle = resolveRunnerProfileBundle(
+    target.session.runner_id,
+    target.session.runner_profile_id,
+  );
+
+  return {
+    sessionId: target.session.id,
+    sessionKind: target.session.kind,
+    locationLine: target.locationLine,
+    runnerId: target.session.runner_id,
+    model: target.session.model,
+    thinkingEffort: target.session.thinking_effort,
+    modelBackendVariant: target.session.model_backend_variant,
+    profileId: bundle.activeProfile?.id ?? null,
+    profileName: bundle.activeProfile?.name ?? null,
+    profileModel: stringOrNull(bundle.config.model),
+    profileThinkingEffort: stringOrNull(bundle.config.thinkingEffort),
+    profileModelBackendVariant: stringOrNull(bundle.config.modelBackendVariant),
+    turnActive: queue.hasActiveRuntimeForFolder(target.folder),
+    runners,
+  };
+}
+
+interface ModelChangeOutcome {
+  runtimeStopped: boolean;
+  turnWasActive: boolean;
+  error?: string;
+}
+
+/**
+ * Persist a resolved plan and make the running session pick it up.
+ *
+ * Model/effort/variant are read when the per-turn runtime spawns, so they need
+ * no restart. A runner swap does: the provider state directory and resume
+ * anchor belong to the old runner, so the old runtime is force-stopped and its
+ * runtime state dropped, exactly like `PATCH /api/sessions/:id`.
+ */
+async function applyModelChange(
+  target: ModelCommandTarget,
+  plan: ModelChangePlan,
+): Promise<ModelChangeOutcome> {
+  const turnWasActive = queue.hasActiveRuntimeForFolder(target.folder);
+  let runtimeStopped = false;
+
+  if (plan.requiresRuntimeReset) {
+    try {
+      await queue.stopSession(target.runtimeJid, { force: true });
+      runtimeStopped = true;
+    } catch (err) {
+      return {
+        runtimeStopped: false,
+        turnWasActive,
+        error: `切换 runner 前停止旧 runtime 失败: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      };
+    }
+  }
+
+  const updated: SessionRecord = {
+    ...target.session,
+    runner_id: plan.runnerId,
+    // A profile belongs to one runner; keeping it across a swap would fail the
+    // same validation the web PATCH route enforces.
+    runner_profile_id: plan.runnerChanged
+      ? null
+      : target.session.runner_profile_id,
+    model: plan.model,
+    thinking_effort: plan.thinkingEffort as SessionRecord['thinking_effort'],
+    model_backend_variant:
+      plan.modelBackendVariant as SessionRecord['model_backend_variant'],
+    updated_at: new Date().toISOString(),
+  };
+  saveSessionRecord(updated);
+  if (plan.requiresRuntimeReset) {
+    deleteSessionRuntimeState(target.session.id);
+  }
+
+  // Keep the compatibility group in sync: runtime-runner falls back to it and
+  // the web session list renders from it.
+  if (target.backingJid) {
+    const backing =
+      registeredGroups[target.backingJid] ??
+      getRegisteredGroup(target.backingJid);
+    if (backing) {
+      const nextGroup: RegisteredGroup = {
+        ...backing,
+        model: updated.model ?? undefined,
+        thinking_effort: updated.thinking_effort ?? undefined,
+        model_backend_variant: updated.model_backend_variant ?? undefined,
+      };
+      setRegisteredGroup(target.backingJid, nextGroup);
+      registeredGroups[target.backingJid] = nextGroup;
+    }
+  }
+
+  target.session = updated;
+  logger.info(
+    {
+      chatJid: target.chatJid,
+      sessionId: updated.id,
+      runnerId: updated.runner_id,
+      model: updated.model,
+      thinkingEffort: updated.thinking_effort,
+      modelBackendVariant: updated.model_backend_variant,
+      runtimeStopped,
+    },
+    '/model applied new runtime config',
+  );
+  return { runtimeStopped, turnWasActive };
+}
+
+// ─── /model card rendering ────────────────────────────────────
+
+function modelCardField(
+  field: string,
+  label: string,
+  placeholder: string,
+  selected: string | null,
+  options: Array<{ value: string; label: string }>,
+  confirm?: { title: string; text: string },
+): ModelCardField {
+  return {
+    field,
+    label,
+    placeholder,
+    selected,
+    options,
+    truncated: Math.max(0, options.length - MODEL_CARD_MAX_OPTIONS),
+    confirm,
+  };
+}
+
+function buildModelCard(
+  target: ModelCommandTarget,
+  snapshot: ModelConfigSnapshot,
+  note?: string,
+): Record<string, unknown> {
+  const runner = findRunnerOption(snapshot, snapshot.runnerId);
+  const resolvedModel = effectiveModel(snapshot);
+  const modelChoice = findModelChoice(runner, resolvedModel);
+  const efforts = availableEfforts(runner, modelChoice);
+  const variants = availableVariants(runner, modelChoice);
+
+  const summaryLines = [
+    `**Runner** ${runner ? `${runner.label} (${runner.id})` : snapshot.runnerId}`,
+    `**Model** ${resolvedModel || '默认'}${snapshot.model ? '' : ' _(继承)_'}`,
+    `**Effort** ${snapshot.thinkingEffort || '默认'}`,
+  ];
+  if (variants.length > 0) {
+    summaryLines.push(`**Variant** ${snapshot.modelBackendVariant || '默认'}`);
+  }
+  if (snapshot.profileName) {
+    summaryLines.push(`**Profile** ${snapshot.profileName}`);
+  }
+
+  const fields: ModelCardField[] = [
+    modelCardField(
+      'runner',
+      'Runner',
+      '选择 Runner',
+      snapshot.runnerId,
+      snapshot.runners.map((item) => ({
+        value: item.id,
+        label: `${item.label}${item.available ? '' : ' ⚠️ 未认证'}`,
+      })),
+      {
+        title: '切换 Runner？',
+        text: '会停止当前 runtime 并清空会话恢复状态，正在执行的 turn 会被中断。',
+      },
+    ),
+    modelCardField(
+      'model',
+      'Model',
+      '选择模型',
+      snapshot.model ?? MODEL_CARD_DEFAULT_VALUE,
+      [
+        {
+          value: MODEL_CARD_DEFAULT_VALUE,
+          label: `默认${runner?.defaultModel ? `（${runner.defaultModel}）` : ''}`,
+        },
+        ...(runner?.models ?? []).map((model) => ({
+          value: model.id,
+          label: modelLabel(model),
+        })),
+        // A model written through without a catalog entry still has to appear,
+        // otherwise the select would render as if nothing were configured.
+        ...(snapshot.model && !findModelChoice(runner, snapshot.model)
+          ? [{ value: snapshot.model, label: `${snapshot.model}（自定义）` }]
+          : []),
+      ],
+    ),
+    modelCardField(
+      'effort',
+      'Thinking Effort',
+      '选择推理强度',
+      snapshot.thinkingEffort ?? MODEL_CARD_DEFAULT_VALUE,
+      [
+        { value: MODEL_CARD_DEFAULT_VALUE, label: '默认' },
+        ...efforts.map((effort) => ({ value: effort, label: effort })),
+      ],
+    ),
+  ];
+
+  if (variants.length > 0) {
+    fields.push(
+      modelCardField(
+        'variant',
+        'Backend Variant',
+        '选择后端变体',
+        snapshot.modelBackendVariant ?? MODEL_CARD_DEFAULT_VALUE,
+        [
+          { value: MODEL_CARD_DEFAULT_VALUE, label: '默认' },
+          ...variants.map((variant) => ({
+            value: variant.id,
+            label: variant.label || variant.id,
+          })),
+        ],
+      ),
+    );
+  }
+
+  return buildModelConfigCard({
+    locationLine: snapshot.locationLine,
+    summaryLines,
+    fields,
+    actionValue: {
+      action: MODEL_CARD_ACTION,
+      jid: target.chatJid,
+      // The routed JID has to round-trip: a card posted inside a Feishu topic
+      // would otherwise resolve back to the parent chat when clicked.
+      target: target.runtimeJid,
+      session: snapshot.sessionId,
+    },
+    note:
+      note ??
+      (snapshot.turnActive
+        ? '当前 turn 正在执行，改动会在下一轮生效'
+        : '选择后立即生效，下一条消息使用新配置'),
+    warning:
+      runner && !runner.available
+        ? `Runner ${runner.id} 未检测到可用凭据，可能无法启动`
+        : undefined,
+  });
+}
+
+function renderModelReply(
+  target: ModelCommandTarget,
+  snapshot: ModelConfigSnapshot,
+  context: ImCommandContext | undefined,
+  text: string,
+  note?: string,
+): ImCommandResult {
+  if (!context?.supportsCards) return text;
+  return { text, card: buildModelCard(target, snapshot, note) };
+}
+
+async function handleModelCommand(
+  chatJid: string,
+  rawArgs: string,
+  context?: ImCommandContext,
+): Promise<ImCommandResult> {
+  const resolved = resolveModelCommandTarget(chatJid, context);
+  if (!resolved.ok) return resolved.message;
+  const target = resolved.target;
+
+  const intent = parseModelCommandArgs(rawArgs);
+  if (intent.kind === 'error') {
+    return `⚠️ ${intent.message}\n\n${formatModelHelp()}`;
+  }
+  if (intent.kind === 'help') return formatModelHelp();
+
+  const snapshot = await buildModelConfigSnapshot(target);
+  if (intent.kind === 'list') return formatModelList(snapshot, intent.runner);
+  if (intent.kind === 'status') {
+    return renderModelReply(
+      target,
+      snapshot,
+      context,
+      formatModelStatus(snapshot),
+    );
+  }
+
+  const resolution = resolveModelChange(snapshot, intent);
+  if (!resolution.ok) {
+    return `⚠️ ${resolution.message}\n\n${formatModelHelp()}`;
+  }
+
+  const outcome = await applyModelChange(target, resolution.plan);
+  if (outcome.error) return `⚠️ ${outcome.error}`;
+
+  const nextSnapshot = await buildModelConfigSnapshot(target);
+  return renderModelReply(
+    target,
+    nextSnapshot,
+    context,
+    formatModelChangeResult(snapshot, resolution.plan, outcome),
+  );
+}
+
+/**
+ * Apply one Feishu card selection.
+ *
+ * The card embeds its session id so it survives a restart, but the chat may
+ * have been re-bound since it was posted — acting on a stale target would
+ * silently reconfigure the wrong session, so the click is refused and the card
+ * is refreshed instead.
+ */
+async function applyModelCardSelection(request: {
+  field: string;
+  value: string | null;
+  sessionId: string;
+  chatJid: string;
+  targetJid?: string | null;
+}): Promise<{
+  toast: { type: 'success' | 'info' | 'warning' | 'error'; content: string };
+  card?: Record<string, unknown>;
+}> {
+  const resolved = resolveModelCommandTarget(request.chatJid, {
+    targetJid: request.targetJid ?? undefined,
+    supportsCards: true,
+  });
+  if (!resolved.ok) {
+    return { toast: { type: 'error', content: resolved.message } };
+  }
+  const target = resolved.target;
+  const snapshot = await buildModelConfigSnapshot(target);
+
+  if (target.session.id !== request.sessionId) {
+    return {
+      toast: {
+        type: 'warning',
+        content: '这张卡片对应的会话已切换，已刷新为当前会话',
+      },
+      card: buildModelCard(target, snapshot, '卡片已刷新为当前绑定的会话'),
+    };
+  }
+
+  const isDefault =
+    !request.value || request.value === MODEL_CARD_DEFAULT_VALUE;
+  let resolution;
+  if (request.field === 'reset') {
+    resolution = resolveModelChange(snapshot, { kind: 'reset' });
+  } else {
+    const set: ModelCommandSet = {};
+    switch (request.field) {
+      case 'runner':
+        if (isDefault) {
+          return { toast: { type: 'warning', content: '请选择一个 Runner' } };
+        }
+        set.runner = request.value as string;
+        break;
+      case 'model':
+        set.model = isDefault ? 'default' : (request.value as string);
+        break;
+      case 'effort':
+        set.effort = isDefault ? null : (request.value as string);
+        break;
+      case 'variant':
+        set.variant = isDefault ? null : (request.value as string);
+        break;
+      default:
+        return { toast: { type: 'warning', content: '无法识别此操作' } };
+    }
+    resolution = resolveModelChange(snapshot, {
+      kind: 'set',
+      set,
+      positional: [],
+    });
+  }
+
+  if (!resolution.ok) {
+    return {
+      toast: { type: 'info', content: resolution.message },
+      card: buildModelCard(target, snapshot),
+    };
+  }
+
+  const outcome = await applyModelChange(target, resolution.plan);
+  if (outcome.error) {
+    return {
+      toast: { type: 'error', content: outcome.error },
+      card: buildModelCard(target, snapshot),
+    };
+  }
+
+  const nextSnapshot = await buildModelConfigSnapshot(target);
+  const note = outcome.runtimeStopped
+    ? '已停止旧 runtime，下一条消息用新 runner 重开会话'
+    : outcome.turnWasActive
+      ? '当前 turn 仍在用旧配置执行，下一轮生效'
+      : undefined;
+  return {
+    toast: { type: 'success', content: '已更新模型配置' },
+    card: buildModelCard(target, nextSnapshot, note),
   };
 }
 
@@ -6851,6 +7437,10 @@ async function main(): Promise<void> {
   migrateSystemIMToGlobal();
 
   loadState();
+
+  // Feishu /model cards call back into session config; the transport layer must
+  // not reach into session state itself, so register the applier here.
+  setModelCardActionHandler(applyModelCardSelection);
 
   // --- Memory Orchestrator ---
   const memoryOrchestrator = new MemoryOrchestrator();

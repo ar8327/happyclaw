@@ -462,3 +462,168 @@ export function buildProgressCard(
     },
   };
 }
+
+// ─── Model config card ────────────────────────────────────────
+
+/** Sentinel option value meaning "clear the override". */
+export const MODEL_CARD_DEFAULT_VALUE = '__default__';
+/** Feishu rejects oversized option lists; keep well below the platform cap. */
+export const MODEL_CARD_MAX_OPTIONS = 40;
+
+export interface ModelCardOption {
+  value: string;
+  label: string;
+}
+
+export interface ModelCardField {
+  /** Callback field name, e.g. `runner` / `model` / `effort` / `variant`. */
+  field: string;
+  label: string;
+  placeholder: string;
+  selected: string | null;
+  options: ModelCardOption[];
+  /** Number of options dropped by MODEL_CARD_MAX_OPTIONS, if any. */
+  truncated?: number;
+  /** Shown before the callback fires — used where a choice is destructive. */
+  confirm?: { title: string; text: string };
+}
+
+export interface ModelCardData {
+  locationLine: string;
+  summaryLines: string[];
+  fields: ModelCardField[];
+  /** Merged into every callback value so the handler can find the session. */
+  actionValue: Record<string, unknown>;
+  note?: string;
+  warning?: string;
+}
+
+function modelCardSelect(
+  field: ModelCardField,
+  actionValue: Record<string, unknown>,
+) {
+  let visible = field.options.slice(0, MODEL_CARD_MAX_OPTIONS);
+  // Truncation must never drop the current selection — a select whose
+  // initial_option is missing renders as "unset" and misreports the session.
+  if (
+    field.selected &&
+    !visible.some((option) => option.value === field.selected) &&
+    field.options.some((option) => option.value === field.selected)
+  ) {
+    const current = field.options.find(
+      (option) => option.value === field.selected,
+    )!;
+    visible = [current, ...visible.slice(0, MODEL_CARD_MAX_OPTIONS - 1)];
+  }
+
+  const options = visible.map((option) => ({
+    text: plain(compactLine(option.label, 60)),
+    value: option.value,
+  }));
+  const selected =
+    field.selected && options.some((option) => option.value === field.selected)
+      ? field.selected
+      : undefined;
+  return {
+    tag: 'select_static',
+    name: `hc_model_${field.field}`,
+    placeholder: plain(field.placeholder),
+    width: 'fill',
+    ...(selected ? { initial_option: selected } : {}),
+    options,
+    ...(field.confirm
+      ? {
+          confirm: {
+            title: plain(field.confirm.title),
+            text: plain(field.confirm.text),
+          },
+        }
+      : {}),
+    behaviors: [
+      {
+        type: 'callback',
+        value: { ...actionValue, field: field.field },
+      },
+    ],
+  };
+}
+
+/**
+ * Interactive `/model` card.
+ *
+ * Every select applies immediately through a `card.action.trigger` callback —
+ * there is no submit button, because a half-applied form would leave the
+ * session config and the card visibly out of sync.
+ */
+export function buildModelConfigCard(
+  data: ModelCardData,
+): Record<string, unknown> {
+  const elements: Array<Record<string, unknown>> = [
+    markdown(`**${data.locationLine}**`),
+  ];
+  if (data.summaryLines.length > 0) {
+    elements.push(markdown(data.summaryLines.join('\n')));
+  }
+  elements.push({ tag: 'hr' });
+
+  for (const field of data.fields) {
+    if (field.options.length === 0) continue;
+    elements.push(metaLine(field.label));
+    elements.push(modelCardSelect(field, data.actionValue));
+    if (field.truncated) {
+      elements.push(
+        metaLine(`还有 ${field.truncated} 个未列出，可用 /model 文本命令指定`),
+      );
+    }
+  }
+
+  if (data.warning) {
+    elements.push(
+      markdown(`<font color='orange'>${data.warning}</font>`, {
+        text_size: 'notation',
+      }),
+    );
+  }
+  if (data.note) {
+    elements.push(metaLine(data.note));
+  }
+
+  elements.push({
+    tag: 'button',
+    text: plain('重置为默认'),
+    type: 'text',
+    size: 'small',
+    width: 'default',
+    behaviors: [
+      {
+        type: 'callback',
+        value: { ...data.actionValue, field: 'reset' },
+      },
+    ],
+    confirm: {
+      title: plain('重置模型配置？'),
+      text: plain('会清除 model / effort / variant 覆盖，runner 保持不变。'),
+    },
+  });
+
+  return {
+    schema: '2.0',
+    config: {
+      width_mode: 'fill',
+      update_multi: true,
+      enable_forward_interaction: false,
+      summary: { content: `模型配置 · ${compactLine(data.locationLine, 40)}` },
+    },
+    header: {
+      title: plain('⚙️ 模型配置'),
+      template: 'blue',
+      padding: '10px 16px 10px 16px',
+    },
+    body: {
+      direction: 'vertical',
+      padding: '10px 16px 12px 16px',
+      vertical_spacing: '8px',
+      elements,
+    },
+  };
+}

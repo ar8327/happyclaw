@@ -21,6 +21,7 @@ import { saveDownloadedFile, MAX_FILE_SIZE } from './im-downloader.js';
 import { detectImageMimeType } from './image-detector.js';
 import { analyzeIntent } from './intent-analyzer.js';
 import {
+  commandReplyText,
   parseSlashCommand,
   type ImCommandHandler,
 } from './im-command-utils.js';
@@ -763,10 +764,13 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
       const slashCommand = parseSlashCommand(content);
       if (slashCommand && opts.onCommand) {
         try {
-          const reply = await opts.onCommand(jid, slashCommand.body, {
-            targetJid: opts.resolveEffectiveChatJid?.(jid)?.effectiveJid ?? jid,
-            chatType: jid.startsWith('qq:c2c:') ? 'p2p' : 'group',
-          });
+          const reply = commandReplyText(
+            await opts.onCommand(jid, slashCommand.body, {
+              targetJid:
+                opts.resolveEffectiveChatJid?.(jid)?.effectiveJid ?? jid,
+              chatType: jid.startsWith('qq:c2c:') ? 'p2p' : 'group',
+            }),
+          );
           if (reply) {
             await sendQQMessage('c2c', userOpenId, markdownToPlainText(reply));
             return;
@@ -966,10 +970,13 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
       const slashCommand = parseSlashCommand(content);
       if (slashCommand && opts.onCommand) {
         try {
-          const reply = await opts.onCommand(jid, slashCommand.body, {
-            targetJid: opts.resolveEffectiveChatJid?.(jid)?.effectiveJid ?? jid,
-            chatType: jid.startsWith('qq:c2c:') ? 'p2p' : 'group',
-          });
+          const reply = commandReplyText(
+            await opts.onCommand(jid, slashCommand.body, {
+              targetJid:
+                opts.resolveEffectiveChatJid?.(jid)?.effectiveJid ?? jid,
+              chatType: jid.startsWith('qq:c2c:') ? 'p2p' : 'group',
+            }),
+          );
           if (reply) {
             await sendQQMessage(
               'group',
