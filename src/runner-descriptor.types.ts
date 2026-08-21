@@ -308,6 +308,16 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
           title: '命令路径',
           description: '默认使用 PATH 中的 claude',
         },
+        proxy: {
+          type: 'string',
+          title: '代理地址',
+          description: 'HTTP(S) 代理，仅对 runner 子进程生效，不影响主进程',
+        },
+        no_proxy: {
+          type: 'string',
+          title: '代理排除',
+          description: '不走代理的地址列表（逗号分隔），默认 localhost,127.0.0.1,::1',
+        },
       },
       additionalProperties: true,
     },
@@ -414,6 +424,16 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
           type: 'string',
           title: '命令路径',
           description: '默认使用 PATH 中的 codex',
+        },
+        proxy: {
+          type: 'string',
+          title: '代理地址',
+          description: 'HTTP(S) 代理，仅对 runner 子进程生效，不影响主进程',
+        },
+        no_proxy: {
+          type: 'string',
+          title: '代理排除',
+          description: '不走代理的地址列表（逗号分隔），默认 localhost,127.0.0.1,::1',
         },
       },
       additionalProperties: true,
@@ -536,6 +556,16 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
           title: '命令路径',
           description: '默认使用 PATH 中的 traex',
         },
+        proxy: {
+          type: 'string',
+          title: '代理地址',
+          description: 'HTTP(S) 代理，仅对 runner 子进程生效，不影响主进程',
+        },
+        no_proxy: {
+          type: 'string',
+          title: '代理排除',
+          description: '不走代理的地址列表（逗号分隔），默认 localhost,127.0.0.1,::1',
+        },
       },
       additionalProperties: true,
     },
@@ -624,6 +654,16 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
           title: '压缩阈值 (tokens)',
           description:
             '上下文估算超过该值时自动归档压缩并重开会话，0 关闭（默认 250000）',
+        },
+        proxy: {
+          type: 'string',
+          title: '代理地址',
+          description: 'HTTP(S) 代理，仅对 runner 子进程生效，不影响主进程',
+        },
+        no_proxy: {
+          type: 'string',
+          title: '代理排除',
+          description: '不走代理的地址列表（逗号分隔），默认 localhost,127.0.0.1,::1',
         },
       },
       additionalProperties: true,
