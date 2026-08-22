@@ -92,15 +92,12 @@ function assertProductionManifestDescriptors(): void {
       descriptor,
       `manifest descriptor mismatch for ${manifest.descriptor.id}`,
     );
+    // 健康检查与模型目录归宿主侧（src/runners/*/manifest.ts）：容器进程里
+    // 从来没有调用方，钩子留在这儿只会诱导下次继续往死代码里写实现。
     assert.equal(
-      typeof manifest.healthCheck,
+      typeof manifest.createRunner,
       'function',
-      `missing healthCheck for ${manifest.descriptor.id}`,
-    );
-    assert.equal(
-      typeof manifest.listModels,
-      'function',
-      `missing listModels for ${manifest.descriptor.id}`,
+      `missing createRunner for ${manifest.descriptor.id}`,
     );
   }
 }

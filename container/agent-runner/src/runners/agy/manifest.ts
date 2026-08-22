@@ -1,13 +1,6 @@
-import { execFile } from 'child_process';
-import { promisify } from 'util';
-
 import type { RunnerManifest } from '../types.js';
-import type { RunnerModel } from '../../runner-descriptor.types.js';
 import { RUNNER_DESCRIPTORS } from '../../runner-descriptor.types.js';
-import { descriptorHealthCheck, descriptorModels } from '../health.js';
 import { hasAgyOneShotAuth, invokeAgyOneShot } from '../one-shot-invokers.js';
-
-const execFileAsync = promisify(execFile);
 
 function configuredModel(ctxModel?: string): string {
   return (
@@ -33,25 +26,6 @@ function configuredCompactThreshold(profileValue: unknown): number | undefined {
   return undefined;
 }
 
-/** 优先实时读取 `agy models`，失败回落到描述符静态列表。 */
-async function listAgyModels(): Promise<RunnerModel[]> {
-  try {
-    const result = await execFileAsync('agy', ['models'], {
-      timeout: 10_000,
-      windowsHide: true,
-    });
-    const models = result.stdout
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0 && !line.startsWith('Error'))
-      .map((line) => ({ id: line, label: line }));
-    if (models.length > 0) return models;
-  } catch {
-    /* fall through */
-  }
-  return descriptorModels(RUNNER_DESCRIPTORS.agy);
-}
-
 export const agyManifest: RunnerManifest = {
   descriptor: RUNNER_DESCRIPTORS.agy,
   createRunner: async (ctx) => {
@@ -67,8 +41,6 @@ export const agyManifest: RunnerManifest = {
       ),
     });
   },
-  healthCheck: (ctx) => descriptorHealthCheck(RUNNER_DESCRIPTORS.agy, ctx.env),
-  listModels: () => listAgyModels(),
   createOneShotInvoker: (ctx) => {
     if (!hasAgyOneShotAuth(ctx.env)) return null;
     const defaultModel = configuredModel();

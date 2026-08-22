@@ -29,9 +29,6 @@ export const codexManifest: RunnerManifest = {
         RUNNER_DESCRIPTORS.codex.toolContract.builtinServerName,
     });
   },
-  healthCheck: (ctx) =>
-    descriptorHealthCheck(RUNNER_DESCRIPTORS.codex, ctx.env),
-  listModels: async () => descriptorModels(RUNNER_DESCRIPTORS.codex),
   createOneShotInvoker: (ctx) => {
     const defaultModel =
       ctx.env.HAPPYCLAW_CODEX_MODEL || ctx.env.OPENAI_MODEL || 'gpt-5.4';

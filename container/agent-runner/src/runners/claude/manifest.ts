@@ -29,9 +29,6 @@ export const claudeManifest: RunnerManifest = {
         RUNNER_DESCRIPTORS.claude.toolContract.builtinServerName,
     });
   },
-  healthCheck: (ctx) =>
-    descriptorHealthCheck(RUNNER_DESCRIPTORS.claude, ctx.env),
-  listModels: async () => descriptorModels(RUNNER_DESCRIPTORS.claude),
   createOneShotInvoker: (ctx) =>
     hasClaudeOneShotAuth(ctx.env)
       ? {

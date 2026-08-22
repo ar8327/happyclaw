@@ -71,6 +71,21 @@ export interface RunnerAuthProbeFile {
   requiredJsonPaths?: string[][];
   requiredAnyJsonPaths?: string[][];
   detailJsonFields?: RunnerAuthProbeJsonField[];
+  /**
+   * 凭据不是 JSON（裸 token、pbtxt、sqlite 等）时置 true：只判断文件存在，
+   * 不做解析。默认 false 会把无法 JSON.parse 的文件判为未认证。
+   */
+  existsOnly?: boolean;
+}
+
+/**
+ * macOS Keychain 条目探测。多数 CLI 在 darwin 上把 OAuth 凭据存进 login
+ * keychain 而非落盘，只探文件会漏判（agy、Claude Code 都是如此）。
+ * 非 darwin 平台上这类条目会被跳过，凭据本来就落在 `files` 里。
+ */
+export interface RunnerAuthProbeKeychain {
+  service: string;
+  account?: string;
 }
 
 export interface RunnerAuthProbe {
@@ -78,6 +93,7 @@ export interface RunnerAuthProbe {
   anyEnv?: string[];
   requiredEnv?: string[];
   files?: RunnerAuthProbeFile[];
+  keychain?: RunnerAuthProbeKeychain[];
 }
 
 export interface RunnerCapabilities {
@@ -268,7 +284,12 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       auth: 'external_cli',
       authProbe: {
         type: 'json_file',
-        anyEnv: ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'],
+        anyEnv: [
+          'ANTHROPIC_API_KEY',
+          'CLAUDE_API_KEY',
+          'CLAUDE_CODE',
+          'CLAUDE_CODE_OAUTH_TOKEN',
+        ],
         files: [
           {
             relativeToHome: '.claude/.credentials.json',
@@ -281,6 +302,9 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
             ],
           },
         ],
+        // macOS 上 Claude Code 把 OAuth 凭据存进 login keychain，
+        // `~/.claude/.credentials.json` 根本不落盘。
+        keychain: [{ service: 'Claude Code-credentials' }],
       },
       versionArgs: ['--version'],
     },
@@ -374,7 +398,7 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       auth: 'external_cli',
       authProbe: {
         type: 'json_file',
-        anyEnv: ['OPENAI_API_KEY'],
+        anyEnv: ['OPENAI_API_KEY', 'CODEX_API_KEY'],
         files: [
           {
             envPath: 'CODEX_HOME',
@@ -592,11 +616,17 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       authProbe: {
         type: 'json_file',
         files: [
+          // 裸 token 文件，不是 JSON；新版 agy 登录后写在这里。
           {
-            relativeToHome: '.gemini/google_accounts.json',
-            requiredJsonPaths: [['active']],
+            envPath: 'HAPPYCLAW_AGY_HOME',
+            relativeToEnv: '.gemini/antigravity-cli/antigravity-oauth-token',
+            relativeToHome: '.gemini/antigravity-cli/antigravity-oauth-token',
+            existsOnly: true,
           },
         ],
+        // 主要凭据位置：login keychain。文件探测只是它的补充，
+        // 不是所有版本/平台都会落盘 token 文件。
+        keychain: [{ service: 'gemini', account: 'antigravity' }],
       },
       versionArgs: ['--version'],
     },
@@ -628,12 +658,20 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       },
       additionalProperties: true,
     },
+    // 仅作 `agy models` 不可用时的回落（离线、eligibility check 失败等）。
+    // 实时列表见 src/runners/agy/manifest.ts。
     models: [
-      { id: 'Gemini 3.1 Pro (High)', label: 'Gemini 3.1 Pro (High)' },
-      { id: 'Gemini 3.1 Pro (Low)', label: 'Gemini 3.1 Pro (Low)' },
+      { id: 'Gemini 3.7 Flash (High)', label: 'Gemini 3.7 Flash (High)' },
+      { id: 'Gemini 3.7 Flash (Medium)', label: 'Gemini 3.7 Flash (Medium)' },
+      { id: 'Gemini 3.7 Flash (Low)', label: 'Gemini 3.7 Flash (Low)' },
+      { id: 'Gemini 3.6 Flash (High)', label: 'Gemini 3.6 Flash (High)' },
+      { id: 'Gemini 3.6 Flash (Medium)', label: 'Gemini 3.6 Flash (Medium)' },
+      { id: 'Gemini 3.6 Flash (Low)', label: 'Gemini 3.6 Flash (Low)' },
       { id: 'Gemini 3.5 Flash (High)', label: 'Gemini 3.5 Flash (High)' },
       { id: 'Gemini 3.5 Flash (Medium)', label: 'Gemini 3.5 Flash (Medium)' },
       { id: 'Gemini 3.5 Flash (Low)', label: 'Gemini 3.5 Flash (Low)' },
+      { id: 'Gemini 3.1 Pro (High)', label: 'Gemini 3.1 Pro (High)' },
+      { id: 'Gemini 3.1 Pro (Low)', label: 'Gemini 3.1 Pro (Low)' },
       {
         id: 'Claude Sonnet 4.6 (Thinking)',
         label: 'Claude Sonnet 4.6 (Thinking)',
@@ -707,6 +745,12 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
             envPath: 'GROK_HOME',
             relativeToEnv: 'auth.json',
             relativeToHome: '.grok/auth.json',
+            // 顶层按 `https://auth.x.ai::<uuid>` 分组，账号 key 是动态的。
+            // 只判文件存在会把空壳 auth.json 当成已登录。
+            requiredAnyJsonPaths: [
+              ['*', 'key'],
+              ['*', 'refresh_token'],
+            ],
           },
         ],
       },
