@@ -208,7 +208,10 @@ import type { IpcInjection } from './session-runtime-queue.js';
 import { interruptibleSleep } from './message-notifier.js';
 import { enqueueImDelivery, startImOutboxWorker } from './im-outbox.js';
 import { TurnManager } from './turn-manager.js';
-import { DurableOutboundTracker } from './durable-outbound-tracker.js';
+import {
+  DurableOutboundTracker,
+  TurnOutboundGate,
+} from './durable-outbound-tracker.js';
 import { saveTurnTrace, cleanupOldTraces } from './turn-trace.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { isSyntheticMessage } from './synthetic-messages.js';
@@ -3622,12 +3625,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // once a user-visible reply has been durably accepted, a later idle close
   // must not roll the cursor back and duplicate that reply.
   let deliveredUserVisibleReply = false;
-  let sawSendMessageTool = false;
   const outboundAcceptanceBaseline = durableOutboundTracker.snapshot(folder);
   let canonicalResultCursor = outboundAcceptanceBaseline;
   const hasDurableUserVisibleReply = () =>
     deliveredUserVisibleReply ||
     durableOutboundTracker.snapshot(folder) > outboundAcceptanceBaseline;
+  // Gate for the silent-success IM fallback below. Scoped to the current turn,
+  // not the runtime: a long-lived process that already replied hours ago would
+  // otherwise re-deliver that reply when it finally exits on idle timeout.
+  const turnOutboundGate = new TurnOutboundGate(durableOutboundTracker, folder);
   let lastError = '';
   let cursorCommitted = false;
   let lastReplyMsgId: string | undefined;
@@ -3880,7 +3886,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             typeof _se.toolName === 'string' &&
             /(?:^|__)send_(?:message|image|file)$/.test(_se.toolName);
           if (_se.eventType === 'tool_use_start' && isOutboundTool) {
-            sawSendMessageTool = true;
+            turnOutboundGate.markToolSignal();
           }
 
           if (
@@ -3912,9 +3918,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             lastTurnCompletedSuccessfully = false;
             markIpcCursorReceived(se.ipcDeliveryIds || []);
             // The agent just consumed a new user message — it owes a fresh
-            // send_message. Reset the flag so the silent-success fallback
-            // also covers messages injected mid-turn.
-            sawSendMessageTool = false;
+            // send_message. Re-baseline the gate so the silent-success
+            // fallback also covers messages injected mid-turn.
+            turnOutboundGate.beginTurn();
           }
           if (
             se.eventType === 'status' &&
@@ -4504,7 +4510,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Judge the turn by the latest user message the agent actually consumed —
   // including messages injected mid-turn (their ack advanced the cursor) —
   // not just the initial batch. Unacked messages are excluded: they get
-  // re-delivered in a fresh turn instead of a fallback reply.
+  // re-delivered in a fresh turn instead of a fallback reply. Only a turn that
+  // produced no host-accepted outbound at all may fall back — otherwise an
+  // idle-timeout exit would forward a reply the channel already received.
   const ackedCursorRowid = Math.max(
     lastProcessed.rowid,
     lastAgentTimestamp[chatJid]?.rowid ?? 0,
@@ -4527,7 +4535,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       message.timestamp > latestConsumedMessage.timestamp &&
       !isNoopAgentReply(message.content),
   );
-  if (!isErrorExit && latestSourceChannel && !sawSendMessageTool) {
+  if (!isErrorExit && latestSourceChannel && !turnOutboundGate.sentThisTurn()) {
     const fallbackText = latestSubstantiveAssistantReply?.content || '收到啦。';
     const fallbackOutboxId = crypto.randomUUID();
     const fallbackOptions = applyFeishuThreadModeForTarget({
