@@ -1,4 +1,4 @@
-import { execFile } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -21,6 +21,12 @@ export interface RunnerAuthProbeFile {
   requiredJsonPaths?: string[][];
   requiredAnyJsonPaths?: string[][];
   detailJsonFields?: RunnerAuthProbeJsonField[];
+  existsOnly?: boolean;
+}
+
+export interface RunnerAuthProbeKeychain {
+  service: string;
+  account?: string;
 }
 
 export interface RunnerAuthProbe {
@@ -28,11 +34,14 @@ export interface RunnerAuthProbe {
   anyEnv?: string[];
   requiredEnv?: string[];
   files?: RunnerAuthProbeFile[];
+  keychain?: RunnerAuthProbeKeychain[];
 }
 
 export interface RunnerRuntimeContractForHealth {
   requiredCommands?: string[];
   requiredEnv?: string[];
+  /** 置为 '1' 时无条件视为已认证，供容器/CI 显式覆盖探测结果。 */
+  availabilityEnv?: string;
   modelCatalog?: RunnerModelCatalog;
   auth?: 'none' | 'api_key' | 'oauth' | 'external_cli';
   authProbe?: RunnerAuthProbe;
@@ -218,14 +227,21 @@ function modelProviderFromCachePath(cachePath: string): string | undefined {
 }
 
 function readPath(value: unknown, jsonPath: string[]): unknown {
-  let current = value;
-  for (const segment of jsonPath) {
-    if (!current || typeof current !== 'object' || Array.isArray(current)) {
-      return undefined;
-    }
-    current = (current as Record<string, unknown>)[segment];
+  if (jsonPath.length === 0) return value;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
   }
-  return current;
+  const [segment, ...rest] = jsonPath;
+  // `*` 匹配任意一个键。凭据文件常按动态 key 分组（账号 URL、租户 UUID），
+  // 固定路径表达不了「随便哪个账号下有 token 就算登录过」。
+  if (segment === '*') {
+    for (const child of Object.values(value as Record<string, unknown>)) {
+      const found = readPath(child, rest);
+      if (hasValue(found)) return found;
+    }
+    return undefined;
+  }
+  return readPath((value as Record<string, unknown>)[segment], rest);
 }
 
 function hasValue(value: unknown): boolean {
@@ -269,6 +285,11 @@ function probeJsonFile(
     };
   }
 
+  // 裸 token 等非 JSON 凭据：存在即视为已认证，不做解析。
+  if (file.existsOnly) {
+    return { detected: true, authenticated: true, path: filePath, details: {} };
+  }
+
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as unknown;
     const requiredJsonPaths = file.requiredJsonPaths || [];
@@ -297,6 +318,36 @@ function probeJsonFile(
       details: { parseError: true },
     };
   }
+}
+
+/**
+ * macOS keychain 条目探测。
+ *
+ * 只查 metadata（不带 `-w`），所以既不会解密密码，也不会弹授权对话框，
+ * 在 keychain 锁定时同样能回答「这条凭据存在吗」——判断「登录过没有」足够。
+ * 结果按 (service, account) 进程内缓存，避免 `/model` 每次渲染都 spawn。
+ */
+const keychainCache = new Map<string, { at: number; found: boolean }>();
+const KEYCHAIN_CACHE_TTL_MS = 60_000;
+
+function probeKeychainEntry(entry: RunnerAuthProbeKeychain): boolean {
+  if (process.platform !== 'darwin') return false;
+  const cacheKey = `${entry.service}\u0000${entry.account || ''}`;
+  const cached = keychainCache.get(cacheKey);
+  const now = Date.now();
+  if (cached && now - cached.at < KEYCHAIN_CACHE_TTL_MS) return cached.found;
+
+  const args = ['find-generic-password', '-s', entry.service];
+  if (entry.account) args.push('-a', entry.account);
+  let found = false;
+  try {
+    execFileSync('security', args, { timeout: 3000, stdio: 'ignore' });
+    found = true;
+  } catch {
+    found = false;
+  }
+  keychainCache.set(cacheKey, { at: now, found });
+  return found;
 }
 
 export function evaluateRunnerAuthProbe(
@@ -356,15 +407,36 @@ export function evaluateRunnerAuthProbe(
       details: result.details,
     })),
   };
+
+  // 凭据没落盘不代表没登录：darwin 上多数 CLI 存在 login keychain 里。
+  // 文件已经命中就不必再 spawn `security`。
+  const keychainEntries = probe.keychain || [];
+  let matchedKeychain: RunnerAuthProbeKeychain | undefined;
+  if (!authenticatedFile && keychainEntries.length > 0) {
+    const probed = keychainEntries.map((entry) => ({
+      entry,
+      found: probeKeychainEntry(entry),
+    }));
+    matchedKeychain = probed.find((result) => result.found)?.entry;
+    details.keychain = probed.map(({ entry, found }) => ({
+      service: entry.service,
+      account: entry.account,
+      found,
+    }));
+  }
+
   if (authenticatedFile) {
     Object.assign(details, authenticatedFile.details);
-  } else {
+  } else if (!matchedKeychain) {
     missingReasons.push('runner 尚未认证');
   }
 
   return {
-    authenticated: !!authenticatedFile && missingRequiredEnv.length === 0,
-    detected: fileResults.some((result) => result.detected),
+    authenticated:
+      (!!authenticatedFile || !!matchedKeychain) &&
+      missingRequiredEnv.length === 0,
+    detected:
+      fileResults.some((result) => result.detected) || !!matchedKeychain,
     details,
     missingReasons,
   };
@@ -375,6 +447,8 @@ export function runnerAuthAvailable(
   env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
 ): boolean {
   if (!descriptor) return false;
+  const availabilityEnv = descriptor.runtimeContract.availabilityEnv;
+  if (availabilityEnv && env[availabilityEnv] === '1') return true;
   if (descriptor.runtimeContract.auth === 'none') return true;
   if (descriptor.runtimeContract.authProbe) {
     return evaluateRunnerAuthProbe(descriptor.runtimeContract.authProbe, env)

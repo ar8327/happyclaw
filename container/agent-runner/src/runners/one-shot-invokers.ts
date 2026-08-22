@@ -4,6 +4,9 @@ import path from 'path';
 import { spawn, spawnSync } from 'child_process';
 import type { ModelReasoningEffort } from '@openai/codex-sdk';
 
+import { RUNNER_DESCRIPTORS } from '../runner-descriptor.types.js';
+import { runnerAuthAvailable } from './health.js';
+
 type ClaudeEffort = 'low' | 'medium' | 'high' | 'max';
 
 const CLAUDE_ALLOWED_TOOLS = [
@@ -17,41 +20,23 @@ const CLAUDE_ALLOWED_TOOLS = [
   'WebFetch',
 ];
 
+/**
+ * one-shot 的认证判断一律走 descriptor 的 authProbe。
+ *
+ * 这里曾经每个 runner 手写一份「猜凭据文件路径」的检查，结果各错各的：
+ * agy 探的是老 gemini-cli 的遗留文件，claude 只看环境变量、完全漏掉
+ * keychain 登录。探针是单一真相源，别再在这里复制一份。
+ */
 export function hasClaudeOneShotAuth(env: NodeJS.ProcessEnv): boolean {
-  return !!(
-    env.ANTHROPIC_API_KEY ||
-    env.CLAUDE_API_KEY ||
-    env.CLAUDE_CODE ||
-    env.CLAUDE_CODE_OAUTH_TOKEN ||
-    env.HAPPYCLAW_CLAUDE_AVAILABLE === '1'
-  );
+  return runnerAuthAvailable(RUNNER_DESCRIPTORS.claude, env);
 }
 
 export function hasCodexOneShotAuth(env: NodeJS.ProcessEnv): boolean {
-  if (
-    env.OPENAI_API_KEY ||
-    env.CODEX_API_KEY ||
-    env.HAPPYCLAW_CODEX_AVAILABLE === '1'
-  ) {
-    return true;
-  }
-  const codexHome = env.CODEX_HOME || path.join(os.homedir(), '.codex');
-  try {
-    return fs.existsSync(path.join(codexHome, 'auth.json'));
-  } catch {
-    return false;
-  }
+  return runnerAuthAvailable(RUNNER_DESCRIPTORS.codex, env);
 }
 
 export function hasAgyOneShotAuth(env: NodeJS.ProcessEnv): boolean {
-  if (env.HAPPYCLAW_AGY_AVAILABLE === '1') return true;
-  try {
-    return fs.existsSync(
-      path.join(os.homedir(), '.gemini', 'google_accounts.json'),
-    );
-  } catch {
-    return false;
-  }
+  return runnerAuthAvailable(RUNNER_DESCRIPTORS.agy, env);
 }
 
 export async function invokeAgyOneShot(input: {
@@ -288,13 +273,7 @@ export async function invokeClaudeOneShot(input: {
 }
 
 export function hasGrokOneShotAuth(env: NodeJS.ProcessEnv): boolean {
-  if (env.XAI_API_KEY || env.HAPPYCLAW_GROK_AVAILABLE === '1') return true;
-  const grokHome = env.GROK_HOME || path.join(os.homedir(), '.grok');
-  try {
-    return fs.existsSync(path.join(grokHome, 'auth.json'));
-  } catch {
-    return false;
-  }
+  return runnerAuthAvailable(RUNNER_DESCRIPTORS.grok, env);
 }
 
 /** grok 的 --effort 取值域比其他 runner 宽，多出 none/minimal/xhigh。 */

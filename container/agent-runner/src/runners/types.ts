@@ -52,7 +52,5 @@ export interface RunnerManifest {
   descriptor: RunnerDescriptor;
   production?: boolean;
   createRunner(ctx: RunnerFactoryContext): AgentRunner | Promise<AgentRunner>;
-  healthCheck?(ctx: RunnerHealthContext): Promise<RunnerHealth>;
-  listModels?(ctx: RunnerHealthContext): Promise<RunnerModel[]>;
   createOneShotInvoker?(ctx: RunnerHealthContext): OneShotInvoker | null;
 }

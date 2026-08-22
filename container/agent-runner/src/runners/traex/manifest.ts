@@ -42,9 +42,6 @@ export const traexManifest: RunnerManifest = {
       builtinMcpServerName: undefined,
     });
   },
-  healthCheck: (ctx) =>
-    descriptorHealthCheck(RUNNER_DESCRIPTORS.traex, ctx.env),
-  listModels: async () => descriptorModels(RUNNER_DESCRIPTORS.traex),
 };
 
 export default traexManifest;
