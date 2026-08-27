@@ -149,13 +149,47 @@ export interface ImCommandContext {
   targetJid?: string;
   threadId?: string;
   chatType?: 'p2p' | 'group';
+  /**
+   * The channel can render an interactive card (currently Feishu only).
+   * Handlers may return one in addition to the plain-text fallback; channels
+   * that cannot render it just send `text`.
+   */
+  supportsCards?: boolean;
 }
+
+/**
+ * A command reply that carries an optional rich rendering.
+ *
+ * `text` is mandatory and is what every channel falls back to, so a command
+ * never becomes card-only.
+ */
+export interface ImCommandReply {
+  text: string;
+  card?: Record<string, unknown>;
+}
+
+export type ImCommandResult = string | ImCommandReply | null;
 
 export type ImCommandHandler = (
   chatJid: string,
   command: string,
   context?: ImCommandContext,
-) => Promise<string | null>;
+) => Promise<ImCommandResult>;
+
+/** Plain-text form of a command reply, for channels without rich rendering. */
+export function commandReplyText(reply: ImCommandResult): string | null {
+  if (!reply) return null;
+  if (typeof reply === 'string') return reply || null;
+  return reply.text || null;
+}
+
+/** Interactive card attached to a command reply, if the handler produced one. */
+export function commandReplyCard(
+  reply: ImCommandResult,
+): Record<string, unknown> | null {
+  if (!reply || typeof reply === 'string') return null;
+  return reply.card ?? null;
+}
 
 export interface ParsedSlashCommand {
   /** Bare command token, e.g. `stop`. */
@@ -234,6 +268,10 @@ export const IM_SLASH_COMMANDS: Array<{ usage: string; desc: string }> = [
   { usage: '/new <名称>', desc: '新建工作区并绑定当前聊天' },
   { usage: '/recall', desc: 'AI 总结最近对话（别名 /rc）' },
   { usage: '/require_mention true|false', desc: '群聊是否需要 @机器人' },
+  {
+    usage: '/model [参数]',
+    desc: '查看或切换 runner / 模型 / effort / variant',
+  },
   { usage: '/clear', desc: '清除会话上下文（仅 Web 端）' },
 ];
 

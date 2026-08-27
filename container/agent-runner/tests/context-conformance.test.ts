@@ -16,6 +16,7 @@ import {
 import { CLAUDE_PROMPT_CONTRACT } from '../src/runners/claude/runner.js';
 import { CODEX_PROMPT_CONTRACT } from '../src/runners/codex/runner.js';
 import { AGY_PROMPT_CONTRACT } from '../src/runners/agy/runner.js';
+import { GROK_PROMPT_CONTRACT } from '../src/runners/grok/runner.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'context-conformance-'));
 
@@ -192,6 +193,7 @@ try {
     codex: CODEX_PROMPT_CONTRACT,
     traex: CODEX_PROMPT_CONTRACT,
     agy: AGY_PROMPT_CONTRACT,
+    grok: GROK_PROMPT_CONTRACT,
   };
   for (const descriptor of Object.values(RUNNER_DESCRIPTORS)) {
     const implementation = implementationContracts[descriptor.id];

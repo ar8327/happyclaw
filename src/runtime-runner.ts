@@ -415,7 +415,7 @@ function prepareTraexRuntimeHome(
   }
 }
 
-function resolveRunnerProfileBundle(
+export function resolveRunnerProfileBundle(
   runnerId: string,
   selectedProfileId?: string | null,
 ): {

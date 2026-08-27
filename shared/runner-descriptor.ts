@@ -71,6 +71,21 @@ export interface RunnerAuthProbeFile {
   requiredJsonPaths?: string[][];
   requiredAnyJsonPaths?: string[][];
   detailJsonFields?: RunnerAuthProbeJsonField[];
+  /**
+   * 凭据不是 JSON（裸 token、pbtxt、sqlite 等）时置 true：只判断文件存在，
+   * 不做解析。默认 false 会把无法 JSON.parse 的文件判为未认证。
+   */
+  existsOnly?: boolean;
+}
+
+/**
+ * macOS Keychain 条目探测。多数 CLI 在 darwin 上把 OAuth 凭据存进 login
+ * keychain 而非落盘，只探文件会漏判（agy、Claude Code 都是如此）。
+ * 非 darwin 平台上这类条目会被跳过，凭据本来就落在 `files` 里。
+ */
+export interface RunnerAuthProbeKeychain {
+  service: string;
+  account?: string;
 }
 
 export interface RunnerAuthProbe {
@@ -78,6 +93,7 @@ export interface RunnerAuthProbe {
   anyEnv?: string[];
   requiredEnv?: string[];
   files?: RunnerAuthProbeFile[];
+  keychain?: RunnerAuthProbeKeychain[];
 }
 
 export interface RunnerCapabilities {
@@ -268,7 +284,12 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       auth: 'external_cli',
       authProbe: {
         type: 'json_file',
-        anyEnv: ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'],
+        anyEnv: [
+          'ANTHROPIC_API_KEY',
+          'CLAUDE_API_KEY',
+          'CLAUDE_CODE',
+          'CLAUDE_CODE_OAUTH_TOKEN',
+        ],
         files: [
           {
             relativeToHome: '.claude/.credentials.json',
@@ -281,6 +302,9 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
             ],
           },
         ],
+        // macOS 上 Claude Code 把 OAuth 凭据存进 login keychain，
+        // `~/.claude/.credentials.json` 根本不落盘。
+        keychain: [{ service: 'Claude Code-credentials' }],
       },
       versionArgs: ['--version'],
     },
@@ -384,7 +408,7 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       auth: 'external_cli',
       authProbe: {
         type: 'json_file',
-        anyEnv: ['OPENAI_API_KEY'],
+        anyEnv: ['OPENAI_API_KEY', 'CODEX_API_KEY'],
         files: [
           {
             envPath: 'CODEX_HOME',
@@ -622,11 +646,17 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       authProbe: {
         type: 'json_file',
         files: [
+          // 裸 token 文件，不是 JSON；新版 agy 登录后写在这里。
           {
-            relativeToHome: '.gemini/google_accounts.json',
-            requiredJsonPaths: [['active']],
+            envPath: 'HAPPYCLAW_AGY_HOME',
+            relativeToEnv: '.gemini/antigravity-cli/antigravity-oauth-token',
+            relativeToHome: '.gemini/antigravity-cli/antigravity-oauth-token',
+            existsOnly: true,
           },
         ],
+        // 主要凭据位置：login keychain。文件探测只是它的补充，
+        // 不是所有版本/平台都会落盘 token 文件。
+        keychain: [{ service: 'gemini', account: 'antigravity' }],
       },
       versionArgs: ['--version'],
     },
@@ -668,12 +698,20 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       },
       additionalProperties: true,
     },
+    // 仅作 `agy models` 不可用时的回落（离线、eligibility check 失败等）。
+    // 实时列表见 src/runners/agy/manifest.ts。
     models: [
-      { id: 'Gemini 3.1 Pro (High)', label: 'Gemini 3.1 Pro (High)' },
-      { id: 'Gemini 3.1 Pro (Low)', label: 'Gemini 3.1 Pro (Low)' },
+      { id: 'Gemini 3.7 Flash (High)', label: 'Gemini 3.7 Flash (High)' },
+      { id: 'Gemini 3.7 Flash (Medium)', label: 'Gemini 3.7 Flash (Medium)' },
+      { id: 'Gemini 3.7 Flash (Low)', label: 'Gemini 3.7 Flash (Low)' },
+      { id: 'Gemini 3.6 Flash (High)', label: 'Gemini 3.6 Flash (High)' },
+      { id: 'Gemini 3.6 Flash (Medium)', label: 'Gemini 3.6 Flash (Medium)' },
+      { id: 'Gemini 3.6 Flash (Low)', label: 'Gemini 3.6 Flash (Low)' },
       { id: 'Gemini 3.5 Flash (High)', label: 'Gemini 3.5 Flash (High)' },
       { id: 'Gemini 3.5 Flash (Medium)', label: 'Gemini 3.5 Flash (Medium)' },
       { id: 'Gemini 3.5 Flash (Low)', label: 'Gemini 3.5 Flash (Low)' },
+      { id: 'Gemini 3.1 Pro (High)', label: 'Gemini 3.1 Pro (High)' },
+      { id: 'Gemini 3.1 Pro (Low)', label: 'Gemini 3.1 Pro (Low)' },
       {
         id: 'Claude Sonnet 4.6 (Thinking)',
         label: 'Claude Sonnet 4.6 (Thinking)',
@@ -688,6 +726,111 @@ export const RUNNER_DESCRIPTORS: Record<RunnerId, RunnerDescriptor> = {
       chat: 'full',
       im: 'degraded',
       observability: 'degraded',
+    },
+  },
+  grok: {
+    id: 'grok',
+    label: 'Grok',
+    description:
+      'xAI Grok CLI runner，headless 逐轮调用，输出与 Claude Code stream-json 同构，会话级隔离 GROK_HOME。',
+    defaultModel: 'grok-4.6',
+    modelPatterns: ['^grok-'],
+    capabilities: {
+      sessionResume: 'strong',
+      interrupt: 'weak',
+      imageInput: true,
+      usage: 'exact',
+      midQueryPush: false,
+      runtimeModeSwitch: false,
+      toolStreaming: 'fine',
+      backgroundTasks: true,
+      subAgent: 'tool-only',
+      customTools: 'mcp',
+      mcpTransport: ['stdio', 'http'],
+      skills: ['native', 'tool-loader'],
+      ephemeralSession: true,
+      filesystemAccess: true,
+      predefinedSubagents: false,
+    },
+    lifecycle: {
+      turnBoundary: 'native',
+      archivalTrigger: ['turn_threshold', 'cleanup_only'],
+      contextShrinkTrigger: 'synthetic',
+      beforeToolExecutionGuard: 'native_hook',
+      hookStreaming: 'none',
+      postCompactRepair: 'synthetic',
+    },
+    promptContract: {
+      mode: 'append',
+      dynamicContextReload: 'turn',
+      turnContextDelivery: 'user_prefix',
+    },
+    nativeProvides: [
+      'identity',
+      'environment',
+      'workspace-instructions',
+      'skills-catalog',
+    ],
+    runtimeContract: {
+      requiredCommands: ['grok'],
+      configDirEnv: 'GROK_HOME',
+      modelEnv: ['HAPPYCLAW_GROK_MODEL'],
+      availabilityEnv: 'HAPPYCLAW_GROK_AVAILABLE',
+      auth: 'external_cli',
+      authProbe: {
+        type: 'json_file',
+        anyEnv: ['XAI_API_KEY'],
+        files: [
+          {
+            envPath: 'GROK_HOME',
+            relativeToEnv: 'auth.json',
+            relativeToHome: '.grok/auth.json',
+            // 顶层按 `https://auth.x.ai::<uuid>` 分组，账号 key 是动态的。
+            // 只判文件存在会把空壳 auth.json 当成已登录。
+            requiredAnyJsonPaths: [
+              ['*', 'key'],
+              ['*', 'refresh_token'],
+            ],
+          },
+        ],
+      },
+      versionArgs: ['--version'],
+    },
+    toolContract: {
+      mode: 'mcp_stdio',
+      supportsUserMcp: true,
+      userMcpSources: ['agentdock', 'profile'],
+      builtinServerName: 'agentdock',
+    },
+    profileSchema: {
+      type: 'object',
+      properties: {
+        model: {
+          type: 'string',
+          title: '模型',
+          description: '覆盖 Grok CLI 使用的模型（见 grok models）',
+        },
+        thinkingEffort: {
+          type: 'string',
+          enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+          title: '推理强度',
+        },
+        command: {
+          type: 'string',
+          title: '命令路径',
+          description: '默认使用 PATH 中的 grok',
+        },
+      },
+      additionalProperties: true,
+    },
+    models: [
+      { id: 'grok-4.6', label: 'Grok 4.6' },
+      { id: 'grok-4.5', label: 'Grok 4.5' },
+    ],
+    compatibility: {
+      chat: 'full',
+      im: 'degraded',
+      observability: 'full',
     },
   },
 };

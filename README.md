@@ -67,7 +67,7 @@ AgentDock 源自 [HappyClaw](https://github.com/riba2534/happyclaw) 的实验性
 
 - **单用户多 Session** — 当前主模型是一个本地操作者配合多个 Session，会话可独立选择 runner、工作目录、压缩策略和 IM 绑定
 - **统一本地 Runtime** — Session 统一走本地 runtime，旧的 `host` 和 `container` 双执行模式只保留兼容痕迹，不再是产品能力
-- **多 Runner 主链路** — runner registry 统一暴露 Claude、Codex、TraeX 与 Antigravity，兼容能力差异会在界面中明确展示
+- **多 Runner 主链路** — runner registry 统一暴露 Claude、Codex、TraeX、Antigravity 与 Grok，兼容能力差异会在界面中明确展示
 - **macOS Desktop** — Electron 桌面壳提供菜单栏、全局快捷键、浮动对话窗口、自动更新和本机后端托管
 - **移动端 PWA** — 针对移动端深度优化，支持一键安装到桌面，iOS / Android 均已适配，随时随地通过手机访问 AI Agent
 - **四端消息统一路由** — 飞书 WebSocket 长连接（富文本卡片、Reaction 反馈）、Telegram Bot API、QQ Bot API v2（私聊 + 群聊 @Bot）、Web 界面，四端消息统一路由
@@ -92,13 +92,13 @@ AgentDock 源自 [HappyClaw](https://github.com/riba2534/happyclaw) 的实验性
 
 ### Agent 执行引擎
 
-主运行链路由 `src/runtime-runner.ts` 驱动，本地启动 `container/agent-runner` 中的 Claude、Codex、TraeX 或 Antigravity runner，并统一向外暴露 Session 语义。
+主运行链路由 `src/runtime-runner.ts` 驱动，本地启动 `container/agent-runner` 中的 Claude、Codex、TraeX、Antigravity 或 Grok runner，并统一向外暴露 Session 语义。
 
 更细的 runner 契约说明见 [docs/agent-runner-contract.md](docs/agent-runner-contract.md)。
 
 - **Session 是一等对象** — 主会话、workspace、worker、memory 都经由 `/api/sessions` 投影和管理
 - **统一本地 runtime** — 新 Session 固定走本地 runtime；`runtime_mode`、`execution_mode` 和 `llm_provider` 旧字段都已退出对外 Session 契约
-- **Runner 可切换** — 当前支持 Claude、Codex 与 Antigravity，runner profile、模型、thinking effort、环境变量都能在 Session 级别配置
+- **Runner 可切换** — 当前支持 Claude、Codex、Antigravity 与 Grok，runner profile、模型、thinking effort、环境变量都能在 Session 级别配置
 - **多 Session 并发** — Runtime 队列按 Session 调度，并通过 `/api/status` 统一暴露运行与排队状态
 - **工作目录可初始化** — 新建 Session 可从本地目录复制或从 Git 仓库初始化，再在设置中单独调整 cwd
 - **失败自动恢复** — 保留指数退避重试、上下文压缩和历史归档能力
@@ -314,10 +314,31 @@ make dist-desktop
 | `/unbind` | - | 解绑回默认工作区 |
 | `/new <名称>` | - | 创建新工作区并绑定当前群组 |
 | `/recall` | `/rc` | AI 总结最近对话记录 |
+| `/model [参数]` | - | 查看或切换当前会话的 runner / 模型 / effort / variant |
 | `/clear` | - | 清除当前对话的会话上下文 |
 | `/require_mention` | - | 切换群聊响应模式：`true`（需要 @）或 `false`（全量响应） |
 
 未知命令若长得像命令（纯字母/下划线的单个 token），会回一句提示并附上命令表；以路径开头的普通消息（如 `/tmp/a.log 看下`）仍原样交给 agent。
+
+#### `/model`
+
+作用对象是当前聊天**实际路由到的会话**（主会话、绑定的 conversation agent，或飞书话题会话），修改后下一轮消息立即使用新配置。
+
+```
+/model                      查看当前 runner / 模型 / effort / variant 与可选项
+/model list [runner]        列出全部 runner，或某个 runner 的模型与参数
+/model <model>              切换模型，runner 由模型自动推断
+/model <runner> <model>     显式指定 runner 与模型
+/model effort <level>       切换推理强度（default 复位）
+/model variant <id>         切换模型后端变体（default 复位）
+/model reset                清除 model / effort / variant 覆盖
+/model claude opus effort:high     组合写法
+```
+
+- 模型名含空格时用引号包起来：`/model agy "Gemini 3.1 Pro (High)"`
+- 切换 runner 会停止当前 runtime 并清空会话恢复状态（与 Web 端改 runner 行为一致），只改模型/effort/variant 则不重启
+- 飞书返回**可交互卡片**：runner / model / effort / variant 四个下拉选择器，选中即生效并原地刷新卡片；Telegram、QQ、微信收到等价的纯文本
+- 模型不在 runner catalog 中时按原样写入（catalog 可能是冷的），但明确属于其它 runner 的模型会被拒绝
 
 
 ### Runner 选择
@@ -327,6 +348,7 @@ make dist-desktop
 | **Claude** | 原生支持更完整的 session resume、hook 与 observability | 聊天、记忆、IM、观测均为 full |
 | **Codex** | 聊天、memory 与结构化观测可用，IM 能力仍有降级 | 聊天、记忆与 observability 为 full，IM 为 degraded |
 | **Antigravity** | `agy --print` 逐轮运行，支持 resume、图片与 MCP，缺少工具前置 hook | 聊天与记忆可用，安全防护和精确 usage 为 degraded |
+| **Grok** | `grok -p` 逐轮运行，输出与 Claude Code stream-json 同构；resume 后 session id 不变，工具前置 hook 可用 | 聊天、记忆与 observability 为 full，IM 为 degraded（MCP 工具须经 `search_tool` 发现） |
 
 当前所有 Session 都通过本地 runtime 启动。`runtime_mode`、`execution_mode` 与 `llm_provider` 已不再作为 Session 接口字段返回；如果请求体继续携带这些旧字段，`/api/sessions` 会直接拒绝。它们只在历史数据库迁移和启动期兼容清理中被识别并移除。
 
@@ -357,12 +379,12 @@ flowchart TD
 
     subgraph 执行层
         Runtime["本地 Runtime<br/>(runtime-runner)"]
-        AgentRunner["agent-runner<br/>(Claude / Codex / Antigravity)"]
+        AgentRunner["agent-runner<br/>(Claude / Codex / Antigravity / Grok)"]
         MemAgent["Memory Runtime<br/>(one-shot 请求)"]
     end
 
     subgraph Agent["Agent 运行时"]
-        Runner["Claude / Codex / Antigravity Runner"]
+        Runner["Claude / Codex / Antigravity / Grok Runner"]
         MCP["MCP Server<br/>(按能力过滤工具)"]
         Stream["统一 StreamEvent"]
     end
@@ -409,7 +431,7 @@ flowchart TD
     class Memory cfg
 ```
 
-**数据流**：消息从接入层进入主进程，经去重和 Session 路由后分发到并发队列。队列统一启动本地 runtime，由 `runtime-runner` 调度 `container/agent-runner` 中的 Claude、Codex 或 Antigravity。流式事件通过 stdout 标记协议传回主进程，经 WebSocket 广播到 Web 客户端。IM 消息由 Agent 通过 `send_message` MCP 工具显式发送，经 IPC 文件通道路由到对应 IM 渠道。Memory 的廉价检索直接读取 Markdown；深度查询走并行只读车道；持久写入由 SQLite 队列和串行写车道驱动 one-shot memory runtime。
+**数据流**：消息从接入层进入主进程，经去重和 Session 路由后分发到并发队列。队列统一启动本地 runtime，由 `runtime-runner` 调度 `container/agent-runner` 中的 Claude、Codex、Antigravity 或 Grok。流式事件通过 stdout 标记协议传回主进程，经 WebSocket 广播到 Web 客户端。IM 消息由 Agent 通过 `send_message` MCP 工具显式发送，经 IPC 文件通道路由到对应 IM 渠道。Memory 的廉价检索直接读取 Markdown；深度查询走并行只读车道；持久写入由 SQLite 队列和串行写车道驱动 one-shot memory runtime。
 
 ### 技术栈
 
@@ -460,7 +482,7 @@ agentdock/
 │   │       ├── runner-interface.ts #   AgentRunner 契约与 QueryConfig
 │   │       ├── system-prompt.ts  #     共享 system prompt 构造
 │   │       ├── happyclaw-mcp-server.ts # 共用 MCP server 入口
-│   │       └── runners/          #     Runner manifest 与 Claude / Codex / Antigravity 实现
+│   │       └── runners/          #     Runner manifest 与 Claude / Codex / Antigravity / Grok 实现
 │   ├── agent-runner-core/        #   ContextBundle、PromptBuilder 与 MCP 插件核心
 │   └── skills/                   #   项目级 Skills
 │

@@ -15,7 +15,7 @@
 当前 AgentDock 更接近一个自托管的本地 Agent 工作台：
 
 - **输入**：飞书 / Telegram / QQ / Web 界面消息，统一绑定到同一个本地操作者名下的 Session
-- **执行**：本地 runtime 启动 `container/agent-runner` 中的 Claude、Codex 或 Antigravity runner，不再区分 Docker 与宿主机双执行模式
+- **执行**：本地 runtime 启动 `container/agent-runner` 中的 Claude、Codex、Antigravity 或 Grok runner，不再区分 Docker 与宿主机双执行模式
 - **输出**：Web 实时流式推送（stdout）；IM 渠道通过 Agent 显式调用 `send_message` 发送
 - **记忆**：Memory Orchestrator 管理持久记忆与 wrapup 流程，记忆能力通过 `memory:{ownerKey}` Session 暴露
 
@@ -70,7 +70,9 @@
 | `src/im-channel.ts` | 统一 IM 通道接口（`IMChannel`）、Feishu/Telegram 适配器工厂 |
 | `src/intent-analyzer.ts` | 消息意图分析：stop/correction/continue 识别 |
 | `src/commands.ts` | Web 端斜杠命令处理器（`/clear` 重置会话） |
-| `src/im-command-utils.ts` | IM 斜杠命令纯函数工具：`formatWorkspaceList()`、`formatContextMessages()` |
+| `src/im-command-utils.ts` | IM 斜杠命令纯函数工具：`formatWorkspaceList()`、`formatContextMessages()`、`commandReplyText()` |
+| `src/model-command.ts` | `/model` 命令的解析、变更求解与文本渲染（纯函数） |
+| `src/model-card-actions.ts` | 飞书 `/model` 卡片回调的解析与 handler 注册 |
 | `src/telegram-pairing.ts` | Telegram 配对码：6 位随机码，5 分钟过期 |
 | `src/terminal-manager.ts` | 本地终端管理（node-pty + pipe fallback，WebSocket 双向通信） |
 | `src/message-attachments.ts` | 图片附件规范化（MIME 检测、Data URL 解析） |
@@ -114,7 +116,7 @@
 
 ### 2.3 本地 Runtime 执行
 
-当前主链路只有**本地 unified runtime**。`src/session-launcher.ts` 提供启动门面，`src/runtime-runner.ts` 负责准备环境、目录边界、子进程与日志处理，然后启动 `container/agent-runner/` 中的 Claude、Codex 或 Antigravity runner。
+当前主链路只有**本地 unified runtime**。`src/session-launcher.ts` 提供启动门面，`src/runtime-runner.ts` 负责准备环境、目录边界、子进程与日志处理，然后启动 `container/agent-runner/` 中的 Claude、Codex、Antigravity 或 Grok runner。
 
 更细的 runner 契约说明见 `docs/agent-runner-contract.md`。
 
@@ -127,7 +129,7 @@
 - **消息路由**：stdout 仅输出到 Web 端；IM 消息必须通过 `send_message(channel=...)` 显式发送
 - **敏感数据过滤**：StreamEvent 中的 `toolInputSummary` 会过滤 `ANTHROPIC_API_KEY` 等环境变量名
 - **能力声明校验**：container 启动时会用 `declaredIpcCapabilities` 对拍 runner 实例的 `ipcCapabilities`，声明和实现不一致直接 fail-fast
-- **上下文投递**：`ContextBundle` 按 `static / session / turn` 组织 canonical section；query-loop 每轮调用 `applyContext()`。descriptor 的 `nativeProvides` 过滤 runner 原生内容，`promptContract.turnContextDelivery` 决定 turn 段的投递通道（claude=`user_prefix` 增量前置到用户消息、codex/traex=`incremental_items` 走 `thread/inject_items`、agy=`system` 全量重写 rules 文件）。增量投递统一走 `context-injection.ts`，内容变更会作废旧副本；conformance 测试保证 section 不重不漏且 descriptor 与实现声明一致
+- **上下文投递**：`ContextBundle` 按 `static / session / turn` 组织 canonical section；query-loop 每轮调用 `applyContext()`。descriptor 的 `nativeProvides` 过滤 runner 原生内容，`promptContract.turnContextDelivery` 决定 turn 段的投递通道（claude/grok=`user_prefix` 增量前置到用户消息、codex/traex=`incremental_items` 走 `thread/inject_items`、agy=`system` 全量重写 rules 文件）。增量投递统一走 `context-injection.ts`，内容变更会作废旧副本；conformance 测试保证 section 不重不漏且 descriptor 与实现声明一致
 - **Codex 升级约束**：`container/agent-runner/package.json` 里的 `@openai/codex-sdk` 已锁定精确版本。`model_instructions_file` 只在 `thread/start` / `thread/resume` 时被读取，thread 运行期间的上下文更新依赖 `thread/inject_items`；升级前必须复验这两条仍然成立
 - **Antigravity (agy) runner**：`runners/agy/`，print 模式逐轮 spawn `agy --print=...`，`--conversation <uuid>` 续接。关键机制：
   - **会话隔离 HOME**：agy 无 config-dir 环境变量，runner 用 `HAPPYCLAW_AGY_HOME`（descriptor `configDirEnv`，宿主机自动指向 session 的 `.agy/`）作为子进程 `$HOME`；macOS 认证 token 在 login keychain（service=`gemini`），keychain 路径按 `$HOME` 推导，因此 `prepareAgyHome` 会把 `Library/Keychains` 软链回真实 HOME
@@ -137,6 +139,18 @@
   - **图片输入**：print 模式无直接附图入口（CLI 无 media 参数），runner 把 base64 图片落盘到临时目录，提示词附绝对路径清单，由 agent 用自带文件查看工具读取（实测可正确识别，含工作区外路径）
   - **合成压缩**：agy 无原生 compact。runner 超过 token 阈值后提交 `session_wrapup`，最多等待 5 秒获取确定性交接摘要，无论归档响应是否成功都会清除 resume 锚点并在下一轮开启新会话；未完成归档由宿主持久队列补偿。注意 agy 基线约 1.8 万 tokens
   - **已知抖动**：agy 偶发启动期死挂（零输出、零日志、`--print-timeout` 不触发），runner 内置活性看门狗（stdout/stderr + 日志文件 + conversations SQLite WAL mtime，默认 180s，`HAPPYCLAW_AGY_STALL_TIMEOUT_MS` 可调），未产出任何输出且未建会话时自动重试一次
+
+- **Grok runner**：`runners/grok/`，headless 逐轮 spawn `grok --prompt-file ...`，`--resume <uuid>` 续接。关键机制：
+  - **输出同构**：`--output-format streaming-messages-json --include-partial-messages` 的行结构与 Claude Code stream-json 完全一致（`system`/`assistant`/`user`/`result`/`stream_event`，assistant.message 就是 Anthropic Message），因此直接复用 claude 的 `StreamEventProcessor`，只在 `event-adapter.ts` 里做工具名归一
+  - **会话隔离 HOME**：用 `GROK_HOME`（descriptor `configDirEnv`，宿主机自动指向 session 的 `.grok/`）；`prepareGrokHome` 把 `auth.json` 与 `auth.json.lock` 软链回真实 home，多会话共享同一份凭据并随刷新保持最新。软链每轮启动前校验一次，被原子写替换成实体文件会自动重建
+  - **MCP 工具**：写会话 GROK_HOME 的 `config.toml`（`[mcp_servers.*]`，stdio 用 `command/args/env`，HTTP 用 `url/headers`）。**必须是用户级配置** —— repo-local 的 `.mcp.json` 在未信任目录会被静默跳过（`grok mcp doctor` 报 "folder untrusted"），用户级 MCP 不受 folder trust 限制
+  - **工具暴露是间接的**：grok 不把 MCP 工具展开成顶层工具，模型须先 `search_tool` 发现再 `use_tool` 调用，全名形如 `agentdock__send_message`。这是 `compatibility.im` 标 `degraded` 的原因；turn context 里显式写出工具全名可显著提高命中率
+  - **工具名归一**：`run_terminal_command`→`Bash`、`todo_write`→`TodoWrite` 等见 `tool-names.ts`；`use_tool` 会被摊平成 `mcp__<server>__<tool>`。摊平是**有状态**的：`content_block_start` 到达时 input 还是空的，真名要等 `input_json_delta` 拼出 `tool_name`，所以 start 事件先扣住、解出真名再补发（`GrokEventNormalizer`），否则 UI 会把每次 MCP 调用都显示成 `use_tool`
+  - **resume 锚点**：`-s/--session-id` 只能开新会话（重复使用报 "already in use"），续接一律 `--resume`。好处是 session id 跨轮不变，锚点即 session id —— 这是 grok 能声明 `sessionResume: 'strong'` 的依据
+  - **工具前置 hook**：`config.toml` 的 `[[hooks.PreToolUse]]` 属可信配置层，同样不受 folder trust 限制。载荷是 camelCase + snake_case 事件名（`{hookEventName:'pre_tool_use', toolName, toolInput}`），`hook-handler.ts` 归一后复用 claude 的 safety-lite 规则；阻断语义与 Claude Code 一致（stderr + exit 2，模型侧收到 `Hook denied: <stderr>`）
+  - **图片输入**：`--prompt-json` 收 **ACP** content blocks（`{type,data,mimeType}`），不是 Anthropic 的 `source.data`；载荷超过 256KB 时退回落盘 + 正文附路径，避免撞 ARG_MAX。极小尺寸图片会被 grok 拒收
+  - **无运行中追加**：headless 没有 `--input-format stream-json` 通道，每轮一个进程，`midQueryPush: false`，运行期到达的消息由上游缓冲到下一轮
+  - **规则文件**：grok 会自动读取 cwd 的 `CLAUDE.md`/`AGENTS.md`（**单文件截断到 10000 字符**），因此 `nativeProvides` 含 `workspace-instructions`；`--rules`（别名 `--append-system-prompt`）负责追加 happyclaw 的 system prompt
 
 **Agent Runner 模块结构**（`container/agent-runner/src/`）：
 
@@ -175,7 +189,7 @@
 - `MemoryOrchestrator` 使用两个语义车道：`query` 在可配置并行度的只读车道运行；`remember`、wrapup、索引修复与 `global_sleep` 在严格互斥的写车道运行
 - 写请求先进入 SQLite `memory_write_queue`，支持去重、进程重启恢复、三次退避重试、失败查询和已完成记录清理
 - `RuntimeRequestExecutor` 负责统一执行管线，memory 通过 `MemoryPromptBuilderHook`、`RuntimeStatePersistenceHook`、`OneShotCloseHook` 等 hook 拼装 prompt、收集响应、落盘轻量 runtime state
-- query 只选择可强制只读的 runner。Claude 只开放 Read、Grep、Glob；Codex 使用 read-only sandbox；Antigravity 不参与 query runner 选择
+- query 只选择可强制只读的 runner。Claude 只开放 Read、Grep、Glob；Codex 使用 read-only sandbox；Grok 用 `--tools read_file,grep,list_dir` 白名单并跳过 MCP server 注入；Antigravity 不参与 query runner 选择
 - 每个 memory 请求都会复用共享 `session-launcher` 启动一次性 runtime turn，不复用上一次的 `providerSessionId`、`resumeAnchor`、`providerState`
 - memory 的真实状态只保存在 `data/memory/{ownerKey}/` 的文件系统里，不参与 AgentDock 的 synthetic compact
 - query 完成后会校验 memory 目录快照。发现意外写入时记录告警；索引问题以 dedup repair backlog 延迟处理
@@ -636,6 +650,7 @@ Session runtime 收尾 → export transcripts
 | `/list` | `/ls` | 查看所有工作区和对话列表，标记当前位置，显示 Agent 短 ID |
 | `/status` | - | 查看当前所在的工作区/对话状态 |
 | `/recall` | `/rc` | 调用 Claude CLI（`--print` 模式）总结最近 10 条消息，API 不可用时 fallback 到原始消息列表 |
+| `/model` | - | 查看或切换当前路由会话的 runner / model / thinking effort / backend variant，飞书返回可交互卡片 |
 | `/clear` | - | 清除当前对话的会话上下文 |
 | `/require_mention` | - | 切换群聊响应模式：`/require_mention true`（需要 @机器人）或 `/require_mention false`（全量响应） |
 
@@ -646,6 +661,27 @@ Session runtime 收尾 → export transcripts
 群聊里的 @mention 前缀按 mention 的真实展示名剥离（`stripLeadingMentions()`），机器人名带空格或展示名为空时命令依然可识别；剥离后的文本同时用于中断意图识别。
 
 `/recall` 通过 `execFile('claude', ['--print'])` + stdin 管道调用 Claude CLI，复用与 Agent Runner 相同的 OAuth 认证机制。
+
+命令回调的返回值是 `ImCommandResult = string | { text, card } | null`。`text` 永远存在，是所有渠道的兜底；`card` 只有声明了 `ImCommandContext.supportsCards` 的渠道（当前仅飞书）会渲染。渠道侧统一用 `commandReplyText()` / `commandReplyCard()` 取值，命令不会退化成"只有卡片没有文本"。
+
+### 8.12.1 `/model`
+
+| 模块 | 职责 |
+|------|------|
+| `src/model-command.ts` | 纯逻辑：参数解析（含引号分词）、变更求解与校验、文本渲染。无 DB 依赖，由 `src/model-command.test.ts` 覆盖 |
+| `src/index.ts` | `handleModelCommand()` / `applyModelChange()`：解析目标会话、构建快照、落库、必要时重启 runtime |
+| `src/feishu-card-builder.ts` | `buildModelConfigCard()`：卡片 JSON 2.0 呈现 |
+| `src/model-card-actions.ts` | 卡片回调解析与 handler 注册（`index.ts` 在 `main()` 里注入 applier，避免 transport 直接依赖会话状态） |
+
+**作用对象**：`resolveBoundSessionTarget()` 解析出的**路由会话**，而不是聊天的默认工作区。绑定到 conversation agent 或飞书话题时，改的就是那条会话自己的 `sessions` 记录 —— 它才是下一轮真正执行的会话。
+
+**快照来源**：runner 列表来自 `listRunnerDescriptors()`，模型来自 `getRunnerServerManifest(id).listModels()`，profile 覆盖复用 runtime-runner 导出的 `resolveRunnerProfileBundle()`，因此 `/model` 显示的就是下一轮 runtime 实际会用的值。可用性判定用 `runnerAuthAvailable()`（纯文件/环境变量探测）而不是 `healthCheck()`，后者每个 runner 都要 spawn 一次 CLI，飞书卡片回调等不起。
+
+**生效时机**：本地 runtime 是 per-turn 进程，model / effort / variant 在下次 spawn 时读取，不需要重启。切换 runner 会 `stopSession(force)` + `deleteSessionRuntimeState()`，与 `PATCH /api/sessions/:id` 一致——provider 状态目录和 resume anchor 属于旧 runner，留着会串味。落库时同步更新兼容 group 的 `model` / `thinking_effort` / `model_backend_variant`，否则 Web 会话列表与 `runtime-runner` 的 fallback 会读到旧值。
+
+**effort / variant 约束**：只提供 `SessionRecord` 能存下的取值（effort 为 `low|medium|high|xhigh`，variant 为 `standard|max`），再与 per-model `supportedThinkingEfforts` 和 runner profileSchema 的 enum 取交集——与前端 `thinkingEffortOptionsFromSchema()` 同源。换模型后不被支持的 effort 与所有 variant 都会复位。
+
+**卡片交互**：`select_static` 的 `behaviors` 走 `card.action.trigger` 回调，选中即生效并用回调响应的 `card: {type:'raw', data}` 原地刷新。路由上下文（`jid` + `session`）直接嵌在 callback value 里而不是放内存表——配置卡片会长期留在聊天记录里，必须能跨重启工作；每次点击都重新校验会话是否仍是当前绑定，不一致就拒绝并刷新卡片。切 runner 的下拉带 `confirm`，因为它会中断正在跑的 turn。
 
 ### 8.13 群聊 Mention 控制
 

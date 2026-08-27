@@ -332,6 +332,58 @@ async function invokeAgy(
   };
 }
 
+async function invokeGrok(
+  input: WorkflowInvokeInput,
+): Promise<WorkflowInvokeResult> {
+  const model = input.model || process.env.HAPPYCLAW_GROK_MODEL || 'grok-4.6';
+  const prompt = [
+    `You must complete this task within at most ${input.maxTurns || 10} tool-use turns.`,
+    '',
+    input.prompt,
+  ].join('\n');
+  const args = [
+    '-p',
+    prompt,
+    '--output-format',
+    'json',
+    '--model',
+    model,
+    '--permission-mode',
+    'bypassPermissions',
+    '--no-ask-user',
+  ];
+  if (input.maxTurns) args.push('--max-turns', String(input.maxTurns));
+  const child = spawn('grok', args, {
+    cwd: input.cwd,
+    env: sanitizedEnv(),
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
+  });
+  const result = await collectProcess(child, input.timeoutMs, input.signal);
+  if (result.code !== 0) {
+    throw new Error(
+      result.stderr.trim() ||
+        result.stdout.trim() ||
+        `grok exited with ${result.code}`,
+    );
+  }
+  const parsed = JSON.parse(result.stdout || '{}') as {
+    text?: string;
+    type?: string;
+    message?: string;
+  };
+  if (parsed.type === 'error') {
+    throw new Error(parsed.message || 'Grok returned an error');
+  }
+  return {
+    provider: 'grok',
+    model,
+    output: (parsed.text || '').trim(),
+    stdout: result.stdout,
+    stderr: result.stderr,
+  };
+}
+
 async function invokeEcho(
   input: WorkflowInvokeInput,
 ): Promise<WorkflowInvokeResult> {
@@ -383,6 +435,13 @@ export function listWorkflowProviders(): WorkflowProviderInfo[] {
       description: 'Runs `agy --print` with no HappyClaw tools injected.',
     },
     {
+      id: 'grok',
+      label: 'Grok CLI',
+      available: commandExists('grok'),
+      defaultModel: process.env.HAPPYCLAW_GROK_MODEL || 'grok-4.6',
+      description: 'Runs `grok -p` with no HappyClaw tools injected.',
+    },
+    {
       id: 'echo',
       label: 'Echo test provider',
       available: true,
@@ -414,6 +473,10 @@ export async function invokeWorkflowNode(
   if (provider === 'agy') {
     if (!commandExists('agy')) throw new Error('agy CLI is not available');
     return invokeAgy(input);
+  }
+  if (provider === 'grok') {
+    if (!commandExists('grok')) throw new Error('grok CLI is not available');
+    return invokeGrok(input);
   }
   if (provider === 'echo') return invokeEcho(input);
   throw new Error(`Unknown workflow provider "${provider}"`);
