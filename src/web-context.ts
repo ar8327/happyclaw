@@ -71,6 +71,7 @@ export interface WebDeps {
   clearImFailCounts?: (jid: string) => void;
   triggerSessionWrapup?: (folder: string) => Promise<void>;
   deleteProgressSession?: (folder: string) => Promise<void>;
+  discardTurnState?: (folder: string) => void;
   getActiveTurnRuntime?: (folder: string) => ActiveTurn | null;
   getPendingTurnCounts?: (folder: string) => Map<string, number>;
   getTurnObservability?: (folder: string) => TurnObservabilitySnapshot | null;

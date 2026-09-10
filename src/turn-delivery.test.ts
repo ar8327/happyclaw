@@ -50,6 +50,33 @@ try {
   ]);
   assert.equal(db.getRecoverableTurns()[0]?.id, 'turn-1');
 
+  db.insertTurn({
+    id: 'turn-reset',
+    chat_jid: 'web:reset',
+    channel: 'web:reset',
+    message_ids: JSON.stringify(['message-reset']),
+    started_at: new Date().toISOString(),
+    status: 'recoverable',
+    group_folder: 'reset-folder',
+  });
+  db.ensureTurnDelivery({
+    deliveryId: 'delivery-reset',
+    turnId: 'turn-reset',
+    chatJid: 'web:reset',
+    groupFolder: 'reset-folder',
+    maxRowid: 9,
+    messageIds: ['message-reset'],
+    status: 'accepted',
+  });
+
+  assert.equal(db.interruptNonTerminalTurnsForFolder('reset-folder'), 1);
+  assert.equal(db.getTurnById('turn-reset')?.status, 'interrupted');
+  assert.ok(db.getTurnById('turn-reset')?.completed_at);
+  // The accepted delivery is retained for audit, but its terminal turn cannot
+  // be restored into a fresh Session.
+  assert.equal(db.getTurnDelivery('delivery-reset')?.status, 'accepted');
+  assert.ok(!db.getRecoverableTurns().some((turn) => turn.id === 'turn-reset'));
+
   db.closeDatabase();
   console.log('turn delivery tests passed');
 } finally {

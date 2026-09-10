@@ -247,6 +247,16 @@ export class TurnManager {
   }
 
   /**
+   * Forget all in-memory routing ownership for a Session after its context is
+   * explicitly reset. The caller must first terminalize the durable turn rows.
+   */
+  discardFolder(folder: string): void {
+    this.activeTurns.delete(folder);
+    this.pendingQueue.delete(folder);
+    this.handoffInFlight.delete(folder);
+  }
+
+  /**
    * Get the next queued entry for a folder (FIFO).
    * Returns null if nothing is queued.
    */

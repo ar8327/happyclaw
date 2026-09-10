@@ -7,6 +7,7 @@ import {
   deleteSession,
   deleteContextSummary,
   getJidsByFolder,
+  interruptNonTerminalTurnsForFolder,
   listSessionRecords,
   storeMessageDirect,
   ensureChatExists,
@@ -25,10 +26,12 @@ import { clearSessionRuntimeFiles } from './runner-runtime-files.js';
 export interface CommandDeps {
   queue: {
     stopSession(jid: string, opts?: { force?: boolean }): Promise<void>;
+    discardSessionState(jid: string): void;
   };
   sessions: Record<string, string>;
   broadcast: (jid: string, msg: NewMessage & { is_from_me: boolean }) => void;
   setLastAgentTimestamp: (jid: string, cursor: MessageCursor) => void;
+  discardTurnState?: (folder: string) => void;
 }
 
 function getWorkerRuntimeJidsForFolder(folder: string): string[] {
@@ -58,19 +61,33 @@ export async function executeSessionReset(
   const contextJids = agentId
     ? [buildWorkerConversationJid(chatJid, agentId)]
     : Array.from(new Set([...getJidsByFolder(folder), chatJid]));
+  let runtimeJids: string[];
   if (agentId) {
-    await deps.queue.stopSession(buildWorkerSessionId(agentId), {
-      force: true,
-    });
+    runtimeJids = [buildWorkerSessionId(agentId)];
   } else {
     // Main session reset: stop all processes for this folder
     const siblingJids = getJidsByFolder(folder);
     const workerRuntimeJids = getWorkerRuntimeJidsForFolder(folder);
-    await Promise.all(
-      [...siblingJids, ...workerRuntimeJids].map((j) =>
-        deps.queue.stopSession(j, { force: true }),
-      ),
-    );
+    runtimeJids = Array.from(new Set([...siblingJids, ...workerRuntimeJids]));
+  }
+  await Promise.all(
+    runtimeJids.map((jid) => deps.queue.stopSession(jid, { force: true })),
+  );
+  for (const runtimeJid of runtimeJids) {
+    // A failure path can schedule a retry while its process is exiting. Drop
+    // that idle scheduler state so it cannot restart the just-reset Session.
+    deps.queue.discardSessionState(runtimeJid);
+  }
+
+  if (!agentId) {
+    const interruptedTurns = interruptNonTerminalTurnsForFolder(folder);
+    deps.discardTurnState?.(folder);
+    if (interruptedTurns > 0) {
+      logger.info(
+        { chatJid, folder, interruptedTurns },
+        'Session reset stopped unfinished turns from recovery',
+      );
+    }
   }
 
   // 2. Clear runner runtime files while preserving local config/auth files.

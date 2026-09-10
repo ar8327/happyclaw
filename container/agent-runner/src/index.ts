@@ -74,6 +74,34 @@ const IM_CHANNELS_FILE = path.join(WORKSPACE_IPC, '.recent-im-channels.json');
 
 const state = new SessionState();
 
+// Keep the provider runner reachable from process-level shutdown handlers. A
+// host-side SIGTERM can otherwise terminate this wrapper while the provider
+// app-server still owns its thread-store writer lock.
+let activeRunner: AgentRunner | undefined;
+let shutdownPromise: Promise<void> | undefined;
+
+async function shutdownGracefully(signal: NodeJS.Signals): Promise<void> {
+  if (shutdownPromise) {
+    return shutdownPromise;
+  }
+
+  shutdownPromise = (async () => {
+    log(`Received ${signal}, closing runner before exit`);
+    try {
+      await activeRunner?.cleanup?.();
+    } catch (err) {
+      log(
+        `Runner cleanup after ${signal} failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    process.exit(0);
+  })();
+
+  return shutdownPromise;
+}
+
 // ---------------------------------------------------------------------------
 // Protocol helpers
 // ---------------------------------------------------------------------------
@@ -460,6 +488,7 @@ async function main(): Promise<void> {
     disableSyntheticArchive: DISABLE_SYNTHETIC_ARCHIVE,
     toolScope: TOOL_SCOPE,
   });
+  activeRunner = runner;
   validateDeclaredIpcCapabilities(runnerId, containerInput, runner);
   validateDeclaredPromptContract(runnerId, runnerManifest.descriptor, runner);
   await runner.initialize();
@@ -525,13 +554,11 @@ async function main(): Promise<void> {
 );
 
 process.on('SIGTERM', () => {
-  log('Received SIGTERM, exiting gracefully');
-  process.exit(0);
+  void shutdownGracefully('SIGTERM');
 });
 
 process.on('SIGINT', () => {
-  log('Received SIGINT, exiting gracefully');
-  process.exit(0);
+  void shutdownGracefully('SIGINT');
 });
 
 process.on('uncaughtException', (err: unknown) => {

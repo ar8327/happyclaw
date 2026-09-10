@@ -675,6 +675,7 @@ function setupWebSocket(server: any): WebSocketServer {
                 sessions: deps.getSessions(),
                 broadcast: broadcastNewMessage,
                 setLastAgentTimestamp: deps.setLastAgentTimestamp,
+                discardTurnState: deps.discardTurnState,
               });
             } catch (err) {
               logger.error(
