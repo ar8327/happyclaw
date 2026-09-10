@@ -1005,6 +1005,22 @@ export async function runHostAgent(
     '.agent-browser-profile',
   );
 
+  const proxyUrl = stringConfigValue(runnerProfileConfig, 'proxy');
+  if (proxyUrl) {
+    hostEnv['HTTP_PROXY'] = proxyUrl;
+    hostEnv['HTTPS_PROXY'] = proxyUrl;
+    hostEnv['http_proxy'] = proxyUrl;
+    hostEnv['https_proxy'] = proxyUrl;
+  }
+  const noProxy = stringConfigValue(runnerProfileConfig, 'no_proxy');
+  if (noProxy) {
+    hostEnv['NO_PROXY'] = noProxy;
+    hostEnv['no_proxy'] = noProxy;
+  } else if (proxyUrl && !hostEnv['NO_PROXY'] && !hostEnv['no_proxy']) {
+    hostEnv['NO_PROXY'] = 'localhost,127.0.0.1,::1';
+    hostEnv['no_proxy'] = 'localhost,127.0.0.1,::1';
+  }
+
   // 让 SDK 捕获 CLI 的 stderr 输出，便于排查启动失败
   hostEnv['DEBUG_CLAUDE_AGENT_SDK'] = '1';
   // CLI 禁止 root 用户使用 --dangerously-skip-permissions，

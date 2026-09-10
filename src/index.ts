@@ -3162,17 +3162,15 @@ function truncatePromptText(text: string, maxLen: number): string {
 function formatRecentConversationContext(
   messages: Array<NewMessage & { is_from_me: boolean }>,
 ): string {
-  if (messages.length === 0) return '';
+  // Host status/error notifications are UI records, not conversation context.
+  // Fresh threads must not replay them as model-facing system instructions.
+  const conversationMessages = messages.filter((m) => m.sender !== '__system__');
+  if (conversationMessages.length === 0) return '';
 
-  const lines = messages.map((m) => {
+  const lines = conversationMessages.map((m) => {
     const sourceJid = m.source_jid || m.chat_jid;
     const channelType = getChannelType(sourceJid);
-    const role =
-      m.sender === '__system__'
-        ? 'system'
-        : m.is_from_me
-          ? 'assistant'
-          : 'user';
+    const role = m.is_from_me ? 'assistant' : 'user';
     const sourceAttr = channelType
       ? ` source="${escapeXml(channelType)}:${escapeXml(extractChatId(sourceJid))}"`
       : '';
@@ -4135,6 +4133,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           queue.markRuntimeIdle(chatJid);
         }
 
+        // A successful tool-driven turn (for example, one that calls
+        // send_message directly) has no stdout result. It still leaves the
+        // long-lived runner waiting for IPC, so start its idle shutdown timer
+        // on the terminal status instead of relying on result.result below.
+        // Otherwise that runner can retain the provider thread writer and
+        // make a later resume fail with a thread-store conflict.
+        if (result.status === 'success') {
+          resetIdleTimer();
+        }
+
         // Streaming output callback — called for each agent result
         if (result.result) {
           const raw =
@@ -4185,7 +4193,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             // until process exit would cause duplicate replay after restart.
             commitCursor();
           }
-          // Only reset idle timer on actual results, not session-update markers (result: null)
+          // Reset again after a visible result so streamed output extends the
+          // idle window. Tool-only successful turns were handled above.
           resetIdleTimer();
 
           // Finalize streaming blocks for this round (kept for turn trace persistence)
@@ -4455,6 +4464,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // 上下文溢出错误：跳过重试，提交游标，通知用户
     if (errorDetail.startsWith('context_overflow:')) {
       const overflowMsg = errorDetail.replace(/^context_overflow:\s*/, '');
+      // The runner has already discarded its provider anchor and exhausted its
+      // fresh-thread retries. Terminalize the durable turn before committing
+      // the cursor so an accepted delivery cannot resurrect the overflowed
+      // provider thread after a service restart.
+      finalizeCurrentTurn('error', { errorDetail });
+      drainQueuedTurn();
       sendSystemMessage(chatJid, 'context_overflow', overflowMsg);
       if (errorImChannel) {
         sendImWithFailTracking(
@@ -7865,6 +7880,13 @@ async function main(): Promise<void> {
     },
     deleteProgressSession: (folder: string) =>
       deleteProgressSession(folder, () => imManager.getAnyLarkClient()),
+    discardTurnState: (folder: string) => {
+      turnManager.discardFolder(folder);
+      turnObservabilityManager.clear(folder);
+      triggerMessagesByFolder.delete(folder);
+      resetTurnCommentaryTimer(folder);
+      syncPendingTurnObservability(folder);
+    },
     getActiveTurnRuntime: (folder: string) => turnManager.getActiveTurn(folder),
     getPendingTurnCounts: (folder: string) =>
       turnManager.getPendingCounts(folder),

@@ -32,4 +32,9 @@ export class SessionRuntimeManager extends SessionRuntimeQueue {
   async restartSession(sessionJid: string): Promise<void> {
     await this.restartGroup(sessionJid);
   }
+
+  /** Drop idle queue/retry state after a Session has been force-stopped. */
+  discardSessionState(sessionJid: string): void {
+    this.removeGroupState(sessionJid);
+  }
 }

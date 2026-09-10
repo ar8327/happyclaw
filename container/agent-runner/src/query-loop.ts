@@ -620,7 +620,11 @@ export async function runQueryLoop(config: QueryLoopConfig): Promise<void> {
     }
 
     // Update session state
-    if (config.ephemeralSession || shouldClearProviderSession(runner)) {
+    if (
+      config.ephemeralSession ||
+      shouldClearProviderSession(runner) ||
+      result.contextOverflow
+    ) {
       sessionId = undefined;
       resumeAnchor = undefined;
     } else {

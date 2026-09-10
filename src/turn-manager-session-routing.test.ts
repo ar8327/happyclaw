@@ -40,6 +40,17 @@ try {
     'task-message',
   ]);
 
+  manager.discardFolder('shared-session');
+  assert.equal(manager.getActiveTurn('shared-session'), null);
+  const afterReset = manager.routeMessage(
+    'shared-session',
+    'web:main',
+    'web:main',
+    ['fresh-message'],
+  );
+  assert.equal(afterReset.action, 'start_new');
+  assert.notEqual(afterReset.turnId, first.turnId);
+
   const other = manager.routeMessage(
     'other-session',
     'web:other',

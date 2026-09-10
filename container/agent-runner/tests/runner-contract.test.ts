@@ -9,7 +9,10 @@ import type {
 } from '../src/runner-interface.js';
 import { listRunnerManifests } from '../src/runners/index.js';
 import { fakeJsonManifest } from '../src/runners/fake-json/manifest.js';
-import { isCodexSessionResumeFailedError } from '../src/runners/codex/runner.js';
+import {
+  isCodexContextOverflowError,
+  isCodexSessionResumeFailedError,
+} from '../src/runners/codex/runner.js';
 import { convertThreadEvent } from '../src/runners/codex/event-adapter.js';
 import {
   formatCodexAppServerError,
@@ -120,6 +123,13 @@ function assertCodexResumeFailureClassification(): void {
     true,
   );
   assert.equal(isCodexSessionResumeFailedError('rate limit exceeded'), false);
+  assert.equal(
+    isCodexContextOverflowError(
+      "TraeCode CLI ran out of room in the model's context window. Start a new thread before retrying.",
+    ),
+    true,
+  );
+  assert.equal(isCodexContextOverflowError('rate limit exceeded'), false);
 }
 
 function assertBackendRunnerManifests(): void {

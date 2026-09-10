@@ -186,6 +186,24 @@ export function isCodexSessionResumeFailedError(message: string): boolean {
   ].some((pattern) => pattern.test(message));
 }
 
+/**
+ * TraeX is backed by the Codex app-server, but it uses a provider-specific
+ * context exhaustion message instead of the usual "context window exceeded"
+ * wording.  Keep this classification close to the runner so query-loop can
+ * discard the unusable resume anchor and start a fresh thread.
+ */
+export function isCodexContextOverflowError(message: string): boolean {
+  return [
+    /prompt is too long/i,
+    /maximum context length/i,
+    /context.*too (?:large|long)/i,
+    /exceeds.*token limit/i,
+    /context window.*exceeded/i,
+    /ran out of room.*context window/i,
+    /contextwindowexceeded/i,
+  ].some((pattern) => pattern.test(message));
+}
+
 // ---------------------------------------------------------------------------
 // CodexRunner
 // ---------------------------------------------------------------------------
@@ -602,7 +620,10 @@ export class CodexRunner implements AgentRunner {
           yield {
             kind: 'error',
             message: fatalError,
-            recoverable: false,
+            recoverable: isCodexContextOverflowError(fatalError),
+            errorType: isCodexContextOverflowError(fatalError)
+              ? 'context_overflow'
+              : undefined,
           };
         }
         if (event.type === 'error') {
@@ -618,7 +639,10 @@ export class CodexRunner implements AgentRunner {
               yield {
                 kind: 'error',
                 message: fatalError,
-                recoverable: false,
+                recoverable: isCodexContextOverflowError(fatalError),
+                errorType: isCodexContextOverflowError(fatalError)
+                  ? 'context_overflow'
+                  : undefined,
               };
             }
           }
@@ -675,7 +699,11 @@ export class CodexRunner implements AgentRunner {
       closedDuringQuery: false,
       interruptedDuringQuery: false,
       drainDetectedDuringQuery: false,
-      ...(fatalError ? { genericError: fatalError } : {}),
+      ...(fatalError
+        ? isCodexContextOverflowError(fatalError)
+          ? { contextOverflow: true }
+          : { genericError: fatalError }
+        : {}),
     };
   }
 

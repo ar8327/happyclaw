@@ -164,6 +164,7 @@ const WS_CONNECT_POLL_INTERVAL_MS = 100;
 const BACKFILL_LOOKBACK_MS = 5 * 60 * 1000;
 const BACKFILL_PAGE_SIZE = 50;
 const BACKFILL_MAX_PAGES_PER_CHAT = 5;
+const BOT_OPEN_ID_RETRY_INTERVAL_MS = 60_000;
 
 function deriveStableUuid(
   seed: string | undefined,
@@ -569,6 +570,8 @@ export function createFeishuConnection(
   let eventDispatcher: lark.EventDispatcher | null = null;
   let connectOptions: ConnectOptions | null = null;
   let botOpenId: string = '';
+  let botOpenIdRetryTimer: NodeJS.Timeout | null = null;
+  let botOpenIdFetchInFlight = false;
   let reconnecting = false;
   let backfillRunning = false;
   let reconnectRequestedAt = 0;
@@ -650,6 +653,56 @@ export function createFeishuConnection(
       void checkConnectionHealth();
     }, WS_HEALTH_CHECK_INTERVAL_MS);
     healthTimer.unref?.();
+  }
+
+  function stopBotOpenIdRetry(): void {
+    if (botOpenIdRetryTimer) {
+      clearInterval(botOpenIdRetryTimer);
+      botOpenIdRetryTimer = null;
+    }
+  }
+
+  async function refreshBotOpenId(): Promise<void> {
+    if (!client || botOpenId || botOpenIdFetchInFlight) return;
+
+    botOpenIdFetchInFlight = true;
+    try {
+      const botInfoRes = await client.request({
+        method: 'GET',
+        url: '/open-apis/bot/v3/info/',
+      });
+      const info = botInfoRes as {
+        bot?: { open_id?: string };
+        data?: { bot?: { open_id?: string } };
+      };
+      const resolvedBotOpenId =
+        info?.bot?.open_id || info?.data?.bot?.open_id || '';
+      if (!resolvedBotOpenId) {
+        logger.warn(
+          'Could not fetch bot open_id; mention-gated groups remain fail-closed until retry',
+        );
+        return;
+      }
+
+      botOpenId = resolvedBotOpenId;
+      stopBotOpenIdRetry();
+      logger.info({ botOpenId }, 'Fetched bot open_id for mention detection');
+    } catch (err) {
+      logger.warn(
+        { err },
+        'Failed to fetch bot info; mention-gated groups remain fail-closed until retry',
+      );
+    } finally {
+      botOpenIdFetchInFlight = false;
+    }
+  }
+
+  function startBotOpenIdRetry(): void {
+    if (botOpenId || botOpenIdRetryTimer) return;
+    botOpenIdRetryTimer = setInterval(() => {
+      void refreshBotOpenId();
+    }, BOT_OPEN_ID_RETRY_INTERVAL_MS);
+    botOpenIdRetryTimer.unref?.();
   }
 
   function isDuplicate(msgId: string): boolean {
@@ -1632,34 +1685,10 @@ export function createFeishuConnection(
         appType: lark.AppType.SelfBuild,
       });
 
-      // Fetch bot open_id for mention detection (best-effort, non-blocking)
-      try {
-        const botInfoRes = await client.request({
-          method: 'GET',
-          url: '/open-apis/bot/v3/info/',
-        });
-        const info = botInfoRes as {
-          bot?: { open_id?: string };
-          data?: { bot?: { open_id?: string } };
-        };
-        botOpenId = info?.bot?.open_id || info?.data?.bot?.open_id || '';
-        if (botOpenId) {
-          logger.info(
-            { botOpenId },
-            'Fetched bot open_id for mention detection',
-          );
-        } else {
-          logger.warn(
-            'Could not fetch bot open_id, mention gating will fall back to any @mention',
-          );
-        }
-      } catch (err) {
-        logger.warn(
-          { err },
-          'Failed to fetch bot info, mention gating will fall back to any @mention',
-        );
-        botOpenId = '';
-      }
+      // Mention gating is fail-closed until the bot identity is known. This
+      // prevents @other-user messages from being mistaken for @bot messages.
+      await refreshBotOpenId();
+      startBotOpenIdRetry();
 
       // Create event dispatcher
       eventDispatcher = new lark.EventDispatcher({}).register({
@@ -1770,6 +1799,7 @@ export function createFeishuConnection(
 
     async stop(): Promise<void> {
       stopHealthMonitor();
+      stopBotOpenIdRetry();
       connectOptions = null;
       eventDispatcher = null;
       reconnecting = false;

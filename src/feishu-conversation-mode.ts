@@ -19,9 +19,13 @@ export function isFeishuBotMentioned(
   mentions: Array<{ id?: { open_id?: string } }> | undefined,
   botOpenId: string,
 ): boolean {
-  return botOpenId
-    ? (mentions?.some((mention) => mention.id?.open_id === botOpenId) ?? false)
-    : Boolean(mentions?.length);
+  // Mention gating must fail closed. If the application cannot resolve its own
+  // open_id, accepting any mention makes messages addressed to other people
+  // look like bot invocations.
+  if (!botOpenId) return false;
+  return (
+    mentions?.some((mention) => mention.id?.open_id === botOpenId) ?? false
+  );
 }
 
 function cleanId(value: unknown): string | undefined {

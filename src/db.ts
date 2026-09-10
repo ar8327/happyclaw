@@ -6009,6 +6009,26 @@ export function getRecoverableTurns(): TurnRow[] {
     .all() as TurnRow[];
 }
 
+/**
+ * Stop every unfinished turn for a Session folder without changing its
+ * deliveries. Delivery rows remain as audit evidence, but terminal turns are
+ * deliberately excluded from startup recovery.
+ */
+export function interruptNonTerminalTurnsForFolder(
+  groupFolder: string,
+  summary: string = '会话已重置，停止恢复旧 Turn',
+): number {
+  const result = db
+    .prepare(
+      `UPDATE turns
+          SET status = 'interrupted', completed_at = ?, summary = ?
+        WHERE group_folder = ?
+          AND status IN ('running', 'recoverable')`,
+    )
+    .run(new Date().toISOString(), summary.slice(0, 200), groupFolder);
+  return result.changes;
+}
+
 export function ensureTurnDelivery(input: {
   deliveryId: string;
   turnId: string;

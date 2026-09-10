@@ -36,7 +36,7 @@ assert.equal(normalizeFeishuConversationMode('invalid'), 'chat');
 assert.equal(isFeishuBotMentioned(undefined, ''), false);
 assert.equal(
   isFeishuBotMentioned([{ id: { open_id: 'ou_someone' } }], ''),
-  true,
+  false,
 );
 assert.equal(
   isFeishuBotMentioned([{ id: { open_id: 'ou_someone' } }], 'ou_bot'),

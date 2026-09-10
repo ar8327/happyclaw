@@ -57,6 +57,7 @@ import {
   searchMessages,
   countSearchResults,
   deleteSessionRuntimeState,
+  interruptNonTerminalTurnsForFolder,
   setRegisteredGroup,
   storeMessageDirect,
   upsertSessionRuntimeState,
@@ -2068,6 +2069,7 @@ sessionRoutes.post('/:id/reset-session', authMiddleware, async (c) => {
         sessions: deps.getSessions(),
         broadcast: () => {},
         setLastAgentTimestamp: deps.setLastAgentTimestamp,
+        discardTurnState: deps.discardTurnState,
       },
       agentId,
     );
@@ -2115,6 +2117,8 @@ sessionRoutes.post('/:id/clear-history', authMiddleware, async (c) => {
         deps.queue.stopSession(jid, { force: true }),
       ),
     );
+    interruptNonTerminalTurnsForFolder(backingGroup.folder);
+    deps.discardTurnState?.(backingGroup.folder);
     clearWorkerArtifactsForFolder(backingGroup.folder);
     resetWorkspaceForSession(backingGroup.folder);
     deleteSession(backingGroup.folder);

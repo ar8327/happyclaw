@@ -45,6 +45,12 @@ export interface IpcInjection {
 }
 
 interface GroupState {
+  /**
+   * Monotonically increasing ownership token for work launched against this
+   * queue entry. A late finally block from a superseded invocation must never
+   * clear the state of the newer runtime.
+   */
+  runGeneration: number;
   active: boolean;
   busy: boolean;
   draining: boolean;
@@ -85,6 +91,7 @@ export class SessionRuntimeQueue {
     let state = this.groups.get(groupJid);
     if (!state) {
       state = {
+        runGeneration: 0,
         active: false,
         busy: false,
         draining: false,
@@ -700,6 +707,7 @@ export class SessionRuntimeQueue {
     reason: 'messages' | 'drain',
   ): Promise<void> {
     const state = this.getGroup(groupJid);
+    const runGeneration = ++state.runGeneration;
     state.active = true;
     state.busy = true;
     state.draining = false;
@@ -728,7 +736,12 @@ export class SessionRuntimeQueue {
     try {
       if (this.processMessagesFn) {
         const success = await this.processMessagesFn(groupJid);
-        if (success) {
+        if (state.runGeneration !== runGeneration) {
+          logger.debug(
+            { groupJid, runGeneration, currentGeneration: state.runGeneration },
+            'Superseded runtime completed; leaving current runtime state intact',
+          );
+        } else if (success) {
           state.retryCount = 0;
         } else {
           this.scheduleRetry(groupJid, state);
@@ -736,8 +749,23 @@ export class SessionRuntimeQueue {
       }
     } catch (err) {
       logger.error({ groupJid, err }, 'Error processing messages for group');
-      this.scheduleRetry(groupJid, state);
+      if (state.runGeneration === runGeneration) {
+        this.scheduleRetry(groupJid, state);
+      } else {
+        logger.debug(
+          { groupJid, runGeneration, currentGeneration: state.runGeneration },
+          'Superseded runtime failed; skipping stale retry scheduling',
+        );
+      }
     } finally {
+      this.activeCount--;
+      if (state.runGeneration !== runGeneration) {
+        logger.debug(
+          { groupJid, runGeneration, currentGeneration: state.runGeneration },
+          'Superseded runtime exited; skipping stale state cleanup',
+        );
+        return;
+      }
       state.active = false;
       state.busy = false;
       state.draining = false;
@@ -746,7 +774,6 @@ export class SessionRuntimeQueue {
       state.runtimeLabel = null;
       state.groupFolder = null;
       state.agentId = null;
-      this.activeCount--;
       for (const listener of this.onContainerExitListeners) {
         try {
           listener(groupJid);
@@ -764,6 +791,7 @@ export class SessionRuntimeQueue {
 
   private async runTask(groupJid: string, task: QueuedTask): Promise<void> {
     const state = this.getGroup(groupJid);
+    const runGeneration = ++state.runGeneration;
     state.active = true;
     state.busy = true;
     state.draining = false;
@@ -784,6 +812,19 @@ export class SessionRuntimeQueue {
     } catch (err) {
       logger.error({ groupJid, taskId: task.id, err }, 'Error running task');
     } finally {
+      this.activeCount--;
+      if (state.runGeneration !== runGeneration) {
+        logger.debug(
+          {
+            groupJid,
+            taskId: task.id,
+            runGeneration,
+            currentGeneration: state.runGeneration,
+          },
+          'Superseded queued task exited; skipping stale state cleanup',
+        );
+        return;
+      }
       state.active = false;
       state.busy = false;
       state.draining = false;
@@ -792,7 +833,6 @@ export class SessionRuntimeQueue {
       state.runtimeLabel = null;
       state.groupFolder = null;
       state.agentId = null;
-      this.activeCount--;
       for (const listener of this.onContainerExitListeners) {
         try {
           listener(groupJid);
@@ -859,7 +899,7 @@ export class SessionRuntimeQueue {
 
     const state = this.getGroup(groupJid);
     const activeRunner = this.findActiveRunnerFor(groupJid);
-    if (activeRunner && activeRunner !== groupJid) {
+    if (activeRunner) {
       this.waitingGroups.add(groupJid);
       this.drainWaiting();
       return;
@@ -897,7 +937,9 @@ export class SessionRuntimeQueue {
 
     for (const jid of candidates) {
       const activeRunner = this.findActiveRunnerFor(jid);
-      if (activeRunner && activeRunner !== jid) continue;
+      // A busy Session can be waiting for its own follow-up message. Another
+      // Session exiting must not launch that follow-up alongside its writer.
+      if (activeRunner) continue;
       if (!this.hasCapacityFor(jid)) continue;
 
       this.waitingGroups.delete(jid);

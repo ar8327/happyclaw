@@ -941,13 +941,26 @@ export function buildImmediateContinuationSummary(
     'workspaceFolder' | 'chatJids' | 'transcriptFile'
   >,
 ): string {
+  // This handoff is injected into the next fresh provider thread.  It must be
+  // bounded: repeatedly prefixing a prior handoff with a fresh transcript tail
+  // used to grow it without limit and could make even a new TraeX thread exceed
+  // its context window before the task began.
+  const maxExistingSummaryChars = 8_000;
+  const maxTranscriptTailChars = 12_000;
+  const maxContinuationSummaryChars = 24_000;
+  const trimTail = (value: string, maxChars: number): string => {
+    const normalized = value.trim();
+    if (normalized.length <= maxChars) return normalized;
+    return `[Earlier handoff content omitted]\n\n${normalized.slice(-maxChars)}`;
+  };
   const existing = Array.from(
     new Set(
       transcript.chatJids
         .map(
           (jid) => getContextSummary(transcript.workspaceFolder, jid)?.summary,
         )
-        .filter((summary): summary is string => !!summary?.trim()),
+        .filter((summary): summary is string => !!summary?.trim())
+        .map((summary) => trimTail(summary, maxExistingSummaryChars)),
     ),
   );
   let tail = '';
@@ -956,21 +969,24 @@ export function buildImmediateContinuationSummary(
       path.join(DATA_DIR, 'memory', ownerKey, transcript.transcriptFile),
       'utf-8',
     );
-    tail = raw.slice(-12_000);
+    tail = raw.slice(-maxTranscriptTailChars);
   } catch {
     /* use existing summaries only */
   }
-  return [
-    ...existing,
-    existing.length > 0 ? '---' : '',
-    '## 后台归档交接',
-    `来源 transcript: ${transcript.transcriptFile}`,
-    '长期记忆整理与正式 continuation summary 正在后台执行。以下保留最近原始对话，避免新会话丢失当前任务状态。',
-    '',
-    tail,
-  ]
-    .filter(Boolean)
-    .join('\n\n');
+  return trimTail(
+    [
+      ...existing,
+      existing.length > 0 ? '---' : '',
+      '## 后台归档交接',
+      `来源 transcript: ${transcript.transcriptFile}`,
+      '长期记忆整理与正式 continuation summary 正在后台执行。以下保留最近原始对话，避免新会话丢失当前任务状态。',
+      '',
+      tail,
+    ]
+      .filter(Boolean)
+      .join('\n\n'),
+    maxContinuationSummaryChars,
+  );
 }
 
 /**
