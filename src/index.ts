@@ -97,6 +97,7 @@ import {
   getTurnDeliveries,
   getRecoverableTurns,
   getCompletedTurnDeliveryCursors,
+  completeCoveredTurnDeliveries,
   hasIncompleteTurnDeliveries,
   updateTurnDeliveryStatus,
   updateTurn,
@@ -109,6 +110,10 @@ import {
   type IMRouteContext,
   type IMSendOptions,
 } from './im-channel.js';
+import {
+  buildCanonicalFallbackRoute,
+  selectLatestCanonicalFallbackSource,
+} from './canonical-fallback-routing.js';
 import {
   applyFeishuConversationMode,
   hasFeishuThreadContext,
@@ -129,6 +134,7 @@ import {
   feedProgressSessionsForFolder,
   completeAndResetProgressSessionsForFolder,
   finalizeProgressSessionsForFolder,
+  markProgressSessionRecoveringForFolder,
   hasProgressSession,
   deleteProgressSession,
 } from './feishu-progress-card.js';
@@ -387,7 +393,13 @@ const durableOutboundTracker = new DurableOutboundTracker();
 
 function markDurableOutboundAcceptance(
   runtimeKey: string,
-  textRecord?: { messageId: string; chatJid: string; text: string },
+  textRecord?: {
+    messageId: string;
+    chatJid: string;
+    text: string;
+    turnId?: string;
+    targetChannel?: string;
+  },
 ): void {
   durableOutboundTracker.mark(runtimeKey, textRecord);
 }
@@ -665,6 +677,62 @@ function markIpcCursorReceived(deliveryIds: Iterable<string>): void {
   }
 }
 
+interface AckedFallbackRoute {
+  sourceChannel: string;
+  sourceChannelType: ReturnType<typeof getChannelType>;
+  imOptions?: IMSendOptions;
+}
+
+function resolveAckedFallbackRoute(
+  deliveryIds: Iterable<string>,
+  groupFolder: string,
+): AckedFallbackRoute | undefined {
+  const messagesById = new Map<string, DbMessage>();
+  for (const deliveryId of new Set(deliveryIds)) {
+    const delivery = getTurnDelivery(deliveryId);
+    if (!delivery || delivery.group_folder !== groupFolder) continue;
+    let messageIds: string[] = [];
+    try {
+      const parsed = JSON.parse(delivery.message_ids);
+      if (Array.isArray(parsed)) {
+        messageIds = parsed.filter(
+          (messageId): messageId is string => typeof messageId === 'string',
+        );
+      }
+    } catch (err) {
+      logger.warn(
+        { err, deliveryId },
+        'Failed to parse message IDs for acknowledged IPC delivery',
+      );
+    }
+    for (const messageId of messageIds) {
+      const message = getMessageById(messageId, delivery.chat_jid);
+      if (message) messagesById.set(message.id, message);
+    }
+  }
+
+  const source = selectLatestCanonicalFallbackSource([
+    ...messagesById.values(),
+  ]);
+  if (!source) return undefined;
+  const sourceChannelType = getChannelType(source.sourceChannel);
+  const imOptions = applyFeishuThreadModeForTarget({
+    targetChannel: source.sourceChannel,
+    sourceGroup: groupFolder,
+    trigger: {
+      id: source.messageId,
+      replyToId: source.replyToId,
+      threadId: source.threadId,
+      rootId: source.rootId,
+    },
+  });
+  return {
+    sourceChannel: source.sourceChannel,
+    sourceChannelType,
+    imOptions: Object.keys(imOptions).length > 0 ? imOptions : undefined,
+  };
+}
+
 function markIpcCursorAccepted(deliveryIds: Iterable<string>): void {
   const uniqueIds = [...new Set(deliveryIds)];
   updateTurnDeliveryStatus(uniqueIds, 'accepted');
@@ -683,6 +751,7 @@ function commitIpcCursorOnAck(deliveryIds: Iterable<string>): void {
   const uniqueIds = [...new Set(deliveryIds)];
   updateTurnDeliveryStatus(uniqueIds, 'completed');
   let changed = false;
+  const completedCursors = new Map<string, number>();
   for (const deliveryId of uniqueIds) {
     const persisted = getTurnDelivery(deliveryId);
     const entry = pendingIpcCursorCommits.get(deliveryId);
@@ -693,12 +762,19 @@ function commitIpcCursorOnAck(deliveryIds: Iterable<string>): void {
     const chatJid = entry?.chatJid || persisted?.chat_jid;
     const rowid = entry?.rowid ?? persisted?.max_rowid;
     if (!chatJid || rowid === undefined) continue;
+    completedCursors.set(
+      chatJid,
+      Math.max(completedCursors.get(chatJid) ?? 0, rowid),
+    );
     const current = lastAgentTimestamp[chatJid];
     if (!current || rowid > current.rowid) {
       lastAgentTimestamp[chatJid] = { rowid };
       changed = true;
     }
     clearWorkerRedeliveryState(chatJid);
+  }
+  for (const [chatJid, rowid] of completedCursors) {
+    completeCoveredTurnDeliveries(chatJid, rowid);
   }
   if (changed) saveState();
 }
@@ -2832,6 +2908,8 @@ async function setTyping(jid: string, isTyping: boolean): Promise<void> {
 interface SendMessageOptions {
   /** Whether to forward the reply to the IM channel (Feishu/Telegram). Defaults to true for IM JIDs. */
   sendToIM?: boolean;
+  /** IM delivery target when the canonical message is stored under a Web/session JID. */
+  imTargetJid?: string;
   /** Pre-computed local image paths to attach to IM messages. Avoids redundant filesystem scans. */
   localImagePaths?: string[];
   /** External message ID from IM platform (e.g. Feishu om_xxx). Used as DB message ID for reply matching. */
@@ -3349,6 +3427,14 @@ function broadcastInterruptedTurn(
 ): void {
   const activeTurn = turnManager.getActiveTurn(folder);
   if (!activeTurn) return;
+  // A user cancellation is terminal for the messages already accepted by
+  // this Turn. Advance their cursors so a restart cannot replay cancelled
+  // work into a new Turn.
+  commitIpcCursorOnAck(
+    getTurnDeliveries(activeTurn.id).map(
+      (delivery) => delivery.delivery_id,
+    ),
+  );
   turnObservabilityManager.markInterrupted(folder, activeTurn, detail);
   broadcastTurnEvent(chatJid, {
     eventType: 'status',
@@ -3717,8 +3803,31 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     } else if (status === 'error') {
       turnManager.failTurn(folder, options?.errorDetail);
     } else {
+      let resultMessageId = lastReplyMsgId;
+      if (resultMessageId) {
+        const resultMessage = getMessageById(resultMessageId, chatJid);
+        const resultTimestamp = resultMessage
+          ? Date.parse(resultMessage.timestamp)
+          : Number.NaN;
+        if (
+          !resultMessage ||
+          !Number.isFinite(resultTimestamp) ||
+          resultTimestamp < activeTurn.startedAt
+        ) {
+          logger.warn(
+            {
+              turnId: activeTurn.id,
+              resultMessageId,
+              turnStartedAt: new Date(activeTurn.startedAt).toISOString(),
+              resultTimestamp: resultMessage?.timestamp,
+            },
+            'Ignoring stale result message from an earlier turn',
+          );
+          resultMessageId = undefined;
+        }
+      }
       turnManager.completeTurn(folder, {
-        resultMessageId: lastReplyMsgId,
+        resultMessageId,
         summary: undefined,
         traceFile,
       });
@@ -3815,6 +3924,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     sourceChannel,
     folder: effectiveGroup.folder,
   });
+  let fallbackRoute: {
+    sourceChannel: string | null;
+    sourceChannelType: ReturnType<typeof getChannelType>;
+    imOptions?: IMSendOptions;
+  } = {
+    sourceChannel,
+    sourceChannelType,
+    imOptions: sourceFeishuOptions,
+  };
   if (
     ownerUserId &&
     sourceChannelType === 'feishu' &&
@@ -3915,6 +4033,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           ) {
             lastTurnCompletedSuccessfully = false;
             markIpcCursorReceived(se.ipcDeliveryIds || []);
+            const ackedFallbackRoute = resolveAckedFallbackRoute(
+              se.ipcDeliveryIds || [],
+              folder,
+            );
+            if (ackedFallbackRoute) {
+              fallbackRoute = ackedFallbackRoute;
+            }
+            // A long-lived runtime can serve many Turns. Establish a fresh
+            // outbound boundary before the new Turn can call send_message,
+            // and never let the previous Turn's result ID leak forward.
+            canonicalResultCursor = durableOutboundTracker.snapshot(folder);
+            lastReplyMsgId = undefined;
             // The agent just consumed a new user message — it owes a fresh
             // send_message. Re-baseline the gate so the silent-success
             // fallback also covers messages injected mid-turn.
@@ -4158,9 +4288,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             // Stop typing indicator before sending — clears the 4s refresh timer
             // so it doesn't keep firing while the agent stays alive in idle state.
             await setTyping(chatJid, false);
+            const activeTurn = turnManager.getActiveTurn(folder);
             const canonicalOutbound = durableOutboundTracker.latestTextSince(
               folder,
               canonicalResultCursor,
+              activeTurn?.id,
+              fallbackRoute.sourceChannel || undefined,
             );
             if (canonicalOutbound?.chatJid === chatJid) {
               // send_message already persisted the exact user-visible reply.
@@ -4176,14 +4309,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 'Reused explicit outbound message as canonical turn result',
               );
             } else {
-              // No explicit outbound exists, so stdout is the canonical Web
-              // fallback for this provider result.
+              // No explicit outbound exists, so stdout becomes the canonical
+              // result. Keep the Web copy and, when the triggering source is
+              // an IM channel, durably deliver the same result back to that
+              // source/thread.
               lastReplyMsgId = await sendMessage(chatJid, text, {
-                sendToIM: false,
-                sourceJid: sourceChannelType ? sourceChannel : undefined,
-                replyToId: sourceFeishuOptions?.replyToMsgId,
-                threadId: sourceFeishuOptions?.threadId,
-                rootId: sourceFeishuOptions?.threadRootMsgId,
+                ...buildCanonicalFallbackRoute({
+                  sourceChannel: fallbackRoute.sourceChannel,
+                  sourceChannelType: fallbackRoute.sourceChannelType,
+                  imOptions: fallbackRoute.imOptions,
+                }),
               });
               canonicalResultCursor = durableOutboundTracker.snapshot(folder);
             }
@@ -4253,12 +4388,26 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     lastTurnCompletedSuccessfully &&
     /timed out after \d+ms/i.test(
       [output.error, lastError].filter(Boolean).join(' '),
-    );
+  );
   const isErrorExit = processReportedError && !idleTimeoutAfterSuccessfulTurn;
 
-  // Finalize ALL Feishu progress cards for this folder (including cards
-  // created via IPC injection for sibling Feishu chats).
-  if (wasInterrupted) {
+  const activeTurnAtExit = turnManager.getActiveTurn(folder);
+  // During service shutdown an interrupted provider query is resumable, not a
+  // user cancellation. The shutdown path has already persisted the Turn as
+  // recoverable, so retain its ACK state and card for startup recovery.
+  const wasUserInterrupted = wasInterrupted && !shuttingDown;
+  const hasUnfinishedAcceptedWork =
+    !!activeTurnAtExit &&
+    hasIncompleteTurnDeliveries(activeTurnAtExit.id) &&
+    !wasUserInterrupted;
+
+  // A runtime can exit while the Turn is still recoverable. Keep that Turn's
+  // existing Feishu card registered so the replacement runtime continues to
+  // update the same message instead of completing it and creating a second
+  // card. Only terminal Turn outcomes release the card slot.
+  if (hasUnfinishedAcceptedWork) {
+    markProgressSessionRecoveringForFolder(folder);
+  } else if (wasUserInterrupted) {
     await finalizeProgressSessionsForFolder(folder, 'abort', '已中断');
   } else if (isErrorExit) {
     await finalizeProgressSessionsForFolder(folder, 'fail', runnerErrorDetail);
@@ -4272,11 +4421,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   broadcastRunnerState(chatJid, 'idle');
 
   // --- Turn lifecycle: complete/fail turn and save trace ---
-  const activeTurnAtExit = turnManager.getActiveTurn(folder);
-  const hasUnfinishedAcceptedWork =
-    !!activeTurnAtExit &&
-    hasIncompleteTurnDeliveries(activeTurnAtExit.id) &&
-    !wasInterrupted;
   if (activeTurnAtExit && hasUnfinishedAcceptedWork) {
     turnManager.markRecoverable(folder, runnerErrorDetail);
     logger.warn(
@@ -4289,7 +4433,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     );
   } else if (activeTurnAtExit) {
     const isDrained = output.status === 'drained';
-    const isInterrupted = wasInterrupted;
+    const isInterrupted = wasUserInterrupted;
     finalizeCurrentTurn(
       isInterrupted
         ? 'interrupted'
@@ -4845,7 +4989,8 @@ async function sendMessage(
   text: string,
   options: SendMessageOptions = {},
 ): Promise<string | undefined> {
-  const isIMChannel = getChannelType(jid) !== null;
+  const imTargetJid = options.imTargetJid ?? jid;
+  const isIMChannel = getChannelType(imTargetJid) !== null;
   const sendToIM = options.sendToIM ?? isIMChannel;
   try {
     const msgId = options.externalMsgId || crypto.randomUUID();
@@ -4861,7 +5006,7 @@ async function sendMessage(
       enqueueImDelivery({
         id: `reply:${msgId}`,
         sourceChatJid: jid,
-        targetJid: jid,
+        targetJid: imTargetJid,
         kind: 'text',
         payload: { text, localImagePaths, options: options.imOptions },
       });
@@ -5165,6 +5310,8 @@ function startIpcWatcher(): void {
                       messageId: canonicalMessageId,
                       chatJid: data.chatJid,
                       text: data.text,
+                      turnId: turnManager.getActiveTurn(sourceGroup)?.id,
+                      targetChannel: data.targetChannel,
                     });
                     if (deliveryRequestId) {
                       writeIpcResponseFile(ipcRoot, {
@@ -6722,6 +6869,20 @@ function recoverPendingMessages(): void {
   }
   let cursorChanged = false;
   for (const cursor of getCompletedTurnDeliveryCursors()) {
+    const reconciled = completeCoveredTurnDeliveries(
+      cursor.chat_jid,
+      cursor.max_rowid,
+    );
+    if (reconciled > 0) {
+      logger.info(
+        {
+          chatJid: cursor.chat_jid,
+          maxRowid: cursor.max_rowid,
+          reconciled,
+        },
+        'Recovery: completed stale delivery rows covered by durable cursor',
+      );
+    }
     const current = lastAgentTimestamp[cursor.chat_jid];
     if (!current || cursor.max_rowid > current.rowid) {
       lastAgentTimestamp[cursor.chat_jid] = { rowid: cursor.max_rowid };
@@ -7979,6 +8140,41 @@ async function main(): Promise<void> {
   queue.setOnMaxRetriesExceeded((groupJid: string) => {
     const group = registeredGroups[groupJid];
     const name = group?.name || groupJid;
+    const folder = resolveGroupFolder(groupJid);
+    const activeTurn = turnManager.getActiveTurn(folder);
+    if (activeTurn) {
+      // Stop treating exhausted accepted deliveries as live ownership. Leave
+      // their message cursor uncommitted so a later incoming message can retry
+      // them in a fresh Turn, but close this Turn and its progress card now.
+      discardPendingIpcCursorCommitsForFolder(folder);
+      const incompleteDeliveryIds = getTurnDeliveries(activeTurn.id)
+        .filter((delivery) => delivery.status !== 'completed')
+        .map((delivery) => delivery.delivery_id);
+      updateTurnDeliveryStatus(incompleteDeliveryIds, 'queued', {
+        allowAcceptedReplay: true,
+      });
+      const detail = `${name} 处理失败，已达最大重试次数`;
+      turnObservabilityManager.setRunnerState(
+        folder,
+        'error',
+        detail,
+        activeTurn,
+      );
+      broadcastTurnEvent(groupJid, {
+        eventType: 'turn_completed',
+        turnId: activeTurn.id,
+        turnStatus: 'error',
+        turnChannel: activeTurn.channel,
+        turnMessageCount: activeTurn.messageIds.length,
+      });
+      turnManager.failTurn(folder, detail);
+      turnObservabilityManager.clear(folder);
+      void finalizeProgressSessionsForFolder(
+        folder,
+        'fail',
+        detail,
+      );
+    }
     sendSystemMessage(
       groupJid,
       'agent_max_retries',

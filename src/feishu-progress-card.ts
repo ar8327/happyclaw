@@ -895,6 +895,17 @@ export function feedProgressSessionsForFolder(
 }
 
 /**
+ * Keep the current Turn card alive while the host replaces a runtime that
+ * exited before acknowledging all accepted IPC deliveries.
+ */
+export function markProgressSessionRecoveringForFolder(
+  folder: string,
+  detail = '运行时中断，正在恢复任务…',
+): void {
+  activeProgressSessions.get(folder)?.session.addCommentary(detail);
+}
+
+/**
  * Complete the active Turn card and release its registry slot immediately.
  * The completed message remains visible until its delayed cleanup runs, while
  * a following Turn can already claim a fresh card next to its trigger message.
