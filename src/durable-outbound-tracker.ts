@@ -3,6 +3,8 @@ export interface DurableTextOutbound {
   messageId: string;
   chatJid: string;
   text: string;
+  turnId?: string;
+  targetChannel?: string;
 }
 
 /**
@@ -37,10 +39,20 @@ export class DurableOutboundTracker {
   latestTextSince(
     runtimeKey: string,
     sequence: number,
+    turnId?: string,
+    targetChannel?: string,
   ): DurableTextOutbound | undefined {
     const records = this.textRecords.get(runtimeKey) || [];
     for (let index = records.length - 1; index >= 0; index--) {
-      if (records[index].sequence > sequence) return records[index];
+      const record = records[index];
+      const effectiveTarget = record.targetChannel || record.chatJid;
+      if (
+        record.sequence > sequence &&
+        (!turnId || record.turnId === turnId) &&
+        (!targetChannel || effectiveTarget === targetChannel)
+      ) {
+        return record;
+      }
     }
     return undefined;
   }

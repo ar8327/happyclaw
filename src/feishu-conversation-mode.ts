@@ -15,6 +15,36 @@ export interface FeishuThreadReplyOptions {
   threadFallbackReason?: string;
 }
 
+export type FeishuGroupActivationMode =
+  | 'auto'
+  | 'always'
+  | 'when_mentioned'
+  | 'disabled';
+
+/**
+ * Decide whether a group message without a bot mention may enter AgentDock.
+ * A previously established topic is an explicit conversation boundary, so it
+ * stays interactive without forcing users to mention the bot on every reply
+ * or on attachment-only messages.
+ */
+export function shouldProcessUnmentionedFeishuGroupMessage(input: {
+  activationMode: FeishuGroupActivationMode;
+  requireMention: boolean;
+  hasExistingTopic: boolean;
+}): boolean {
+  switch (input.activationMode) {
+    case 'always':
+      return true;
+    case 'disabled':
+      return false;
+    case 'when_mentioned':
+      return input.hasExistingTopic;
+    case 'auto':
+    default:
+      return input.requireMention !== true || input.hasExistingTopic;
+  }
+}
+
 export function isFeishuBotMentioned(
   mentions: Array<{ id?: { open_id?: string } }> | undefined,
   botOpenId: string,

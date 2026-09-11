@@ -80,8 +80,8 @@ export function consumeOAuthState(
   }
 
   if (
-    expectedSessionToken
-    && entry.sessionHash !== hashSessionToken(expectedSessionToken)
+    expectedSessionToken &&
+    entry.sessionHash !== hashSessionToken(expectedSessionToken)
   ) {
     return false; // mismatch — don't consume
   }
@@ -92,13 +92,13 @@ export function consumeOAuthState(
 
 // ─── OAuth URLs & Token Exchange ────────────────────────────────────
 
-const FEISHU_AUTH_BASE = 'https://accounts.feishu.cn/open-apis/authen/v1/authorize';
+const FEISHU_AUTH_BASE =
+  'https://accounts.feishu.cn/open-apis/authen/v1/authorize';
 /** Get the Feishu API base URL from system settings. */
 function getFeishuApiBase(): string {
   const domain = getSystemSettings().feishuApiDomain || 'open.feishu.cn';
   return `https://${domain}/open-apis`;
 }
-
 
 /** Generic Feishu API response shape. */
 interface FeishuApiResponse {
@@ -123,7 +123,7 @@ interface FeishuApiResponse {
 }
 
 const DEFAULT_SCOPES =
-  'wiki:wiki:readonly docx:document:readonly search:docs:read contact:user.base:readonly drive:drive.metadata:readonly space:document:retrieve offline_access';
+  'wiki:wiki:readonly docx:document:readonly sheets:spreadsheet:readonly search:docs:read contact:user.base:readonly drive:drive.metadata:readonly space:document:retrieve offline_access';
 
 /**
  * Build the Feishu OAuth authorization URL.
@@ -278,7 +278,6 @@ export async function getValidAccessToken(
 
 // ─── Document Reading API ───────────────────────────────────────────
 
-
 /**
  * Parse a Feishu URL to extract the document/wiki token.
  * Supports:
@@ -288,7 +287,8 @@ export async function getValidAccessToken(
  */
 export function parseFeishuDocUrl(url: string): {
   token: string;
-  type: 'wiki' | 'docx' | 'unknown';
+  type: 'wiki' | 'docx' | 'sheet' | 'unknown';
+  sheetId?: string;
 } | null {
   try {
     const u = new URL(url);
@@ -297,12 +297,14 @@ export function parseFeishuDocUrl(url: string): {
     if (parts.length >= 2) {
       const docType = parts[parts.length - 2];
       const token = parts[parts.length - 1].split('?')[0];
+      const sheetId = u.searchParams.get('sheet') || undefined;
 
-      if (docType === 'wiki') return { token, type: 'wiki' };
-      if (docType === 'docx') return { token, type: 'docx' };
+      if (docType === 'wiki') return { token, type: 'wiki', sheetId };
+      if (docType === 'docx') return { token, type: 'docx', sheetId };
+      if (docType === 'sheets') return { token, type: 'sheet', sheetId };
 
       // Fallback: try last segment as token
-      return { token, type: 'unknown' };
+      return { token, type: 'unknown', sheetId };
     }
     return null;
   } catch {
@@ -371,6 +373,140 @@ export async function getDocumentRawContent(
   return data.data?.content || '';
 }
 
+interface FeishuSheetInfo {
+  sheetId: string;
+  title: string;
+  index: number;
+  rowCount: number;
+  columnCount: number;
+}
+
+interface FeishuSheetMetadataResponse {
+  code?: number;
+  msg?: string;
+  data?: {
+    properties?: {
+      title?: string;
+    };
+    sheets?: Array<Partial<FeishuSheetInfo>>;
+  };
+}
+
+interface FeishuSheetValuesResponse {
+  code?: number;
+  msg?: string;
+  data?: {
+    valueRange?: {
+      range?: string;
+      values?: unknown[][];
+    };
+  };
+}
+
+const MAX_SHEET_ROWS = 5_000;
+const MAX_SHEET_CELLS = 100_000;
+const MAX_SHEET_CONTENT_CHARS = 1_000_000;
+
+function serializeSheetCell(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'object') {
+    const text = (value as { text?: unknown }).text;
+    if (typeof text === 'string') {
+      return text.replaceAll('\t', '\\t').replaceAll('\n', '\\n');
+    }
+    return JSON.stringify(value)
+      .replaceAll('\t', '\\t')
+      .replaceAll('\n', '\\n');
+  }
+  return String(value).replaceAll('\t', '\\t').replaceAll('\n', '\\n');
+}
+
+/** Read one worksheet and return a bounded, tab-separated plain-text view. */
+export async function getSpreadsheetContent(
+  accessToken: string,
+  spreadsheetToken: string,
+  requestedSheetId?: string,
+): Promise<{ title: string; content: string }> {
+  const metadataResponse = await fetch(
+    `${getFeishuApiBase()}/sheets/v2/spreadsheets/${encodeURIComponent(spreadsheetToken)}/metainfo?user_id_type=open_id`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  const metadata =
+    (await metadataResponse.json()) as FeishuSheetMetadataResponse;
+  if (metadata.code !== 0) {
+    throw new Error(
+      `Feishu Sheet metadata API error (${metadata.code}): ${metadata.msg || 'Unknown error'}`,
+    );
+  }
+
+  const sheets = (metadata.data?.sheets || [])
+    .filter((sheet): sheet is FeishuSheetInfo => Boolean(sheet.sheetId))
+    .sort((a, b) => (a.index || 0) - (b.index || 0));
+  const sheet = requestedSheetId
+    ? sheets.find((candidate) => candidate.sheetId === requestedSheetId)
+    : sheets[0];
+
+  if (!sheet) {
+    if (requestedSheetId) {
+      throw new Error(
+        `Feishu Sheet API: worksheet ${requestedSheetId} not found`,
+      );
+    }
+    throw new Error('Feishu Sheet API: spreadsheet contains no worksheets');
+  }
+
+  // A bare sheetId is a supported Feishu range and returns the populated area.
+  const range = encodeURIComponent(sheet.sheetId);
+  const valuesResponse = await fetch(
+    `${getFeishuApiBase()}/sheets/v2/spreadsheets/${encodeURIComponent(spreadsheetToken)}/values/${range}?valueRenderOption=ToString`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  const values = (await valuesResponse.json()) as FeishuSheetValuesResponse;
+  if (values.code !== 0) {
+    throw new Error(
+      `Feishu Sheet values API error (${values.code}): ${values.msg || 'Unknown error'}`,
+    );
+  }
+
+  const rows = values.data?.valueRange?.values || [];
+  const lines: string[] = [];
+  let cells = 0;
+  let contentLength = 0;
+  let truncated = false;
+
+  for (const row of rows) {
+    if (
+      lines.length >= MAX_SHEET_ROWS ||
+      cells + row.length > MAX_SHEET_CELLS
+    ) {
+      truncated = true;
+      break;
+    }
+    const line = row.map(serializeSheetCell).join('\t');
+    if (contentLength + line.length + 1 > MAX_SHEET_CONTENT_CHARS) {
+      truncated = true;
+      break;
+    }
+    lines.push(line);
+    cells += row.length;
+    contentLength += line.length + 1;
+  }
+
+  const workbookTitle = metadata.data?.properties?.title || '';
+  const title = workbookTitle
+    ? `${workbookTitle} / ${sheet.title || sheet.sheetId}`
+    : sheet.title || sheet.sheetId;
+  const suffix = truncated
+    ? '\n\n[内容已截断：最多返回 5,000 行、100,000 个单元格或 1,000,000 个字符]'
+    : '';
+
+  return {
+    title,
+    content:
+      lines.length > 0 ? `${lines.join('\n')}${suffix}` : '（工作表为空）',
+  };
+}
+
 /**
  * Read a Feishu document/wiki from URL.
  * Handles both wiki pages (resolve node → get content) and direct docx.
@@ -387,12 +523,28 @@ export async function readFeishuDocument(
   let documentId = parsed.token;
   let title = '';
 
+  if (parsed.type === 'sheet') {
+    return getSpreadsheetContent(accessToken, parsed.token, parsed.sheetId);
+  }
+
   if (parsed.type === 'wiki' || parsed.type === 'unknown') {
     // For wiki pages, resolve node to get actual document ID
     try {
       const node = await getWikiNode(accessToken, parsed.token);
       documentId = node.objToken;
       title = node.title;
+
+      if (node.objType === 'sheet') {
+        const result = await getSpreadsheetContent(
+          accessToken,
+          node.objToken,
+          parsed.sheetId,
+        );
+        return {
+          title: node.title || result.title,
+          content: result.content,
+        };
+      }
 
       if (node.objType !== 'docx' && node.objType !== 'doc') {
         return {
@@ -433,7 +585,15 @@ export interface SearchResponse {
   total: number;
 }
 
-const VALID_DOC_TYPES = ['doc', 'docx', 'sheet', 'bitable', 'mindnote', 'wiki', 'slide'] as const;
+const VALID_DOC_TYPES = [
+  'doc',
+  'docx',
+  'sheet',
+  'bitable',
+  'mindnote',
+  'wiki',
+  'slide',
+] as const;
 export type FeishuDocType = (typeof VALID_DOC_TYPES)[number];
 
 /** Check if a string is a valid Feishu doc type. */
@@ -476,16 +636,19 @@ export async function searchFeishuDocs(
     }
   }
 
-  const res = await fetch(`${getFeishuApiBase()}/suite/docs-api/search/object`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
+  const res = await fetch(
+    `${getFeishuApiBase()}/suite/docs-api/search/object`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
     },
-    body: JSON.stringify(body),
-  });
+  );
 
-  const data = await res.json() as {
+  const data = (await res.json()) as {
     code?: number;
     msg?: string;
     data?: {
@@ -560,7 +723,7 @@ export async function searchFeishuWiki(
     },
   );
 
-  const data = await res.json() as {
+  const data = (await res.json()) as {
     code?: number;
     msg?: string;
     data?: {

@@ -28,4 +28,22 @@ assert.doesNotMatch(
   'connection recovery copy should not be present',
 );
 
+const mentionGate = source.indexOf(
+  '// Apply mention gating before topic projection and attachment download.',
+);
+const topicProjection = source.indexOf(
+  'const agentRouting = resolveEffectiveChatJid?.(chatJid, routeContext);',
+);
+const fileDownload = source.indexOf("'Processing Feishu file download'");
+assert.ok(mentionGate >= 0, 'the group mention gate should exist');
+assert.ok(
+  mentionGate < topicProjection && topicProjection < fileDownload,
+  'mention gating must run before topic creation and attachment download',
+);
+assert.match(
+  source.slice(mentionGate, topicProjection),
+  /shouldProcessGroupMessage\(chatJid, routeContext\)/,
+  'the gate must receive thread context for established-topic routing',
+);
+
 console.log('Feishu backfill stays silent while processing messages');

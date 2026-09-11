@@ -23,7 +23,9 @@ argument-hint: <飞书文档链接或搜索关键词>
 
 ## 操作 1: 读取飞书文档
 
-支持 `feishu.cn` 和 `larkoffice.com` 的 wiki/docx 链接。
+支持 `feishu.cn` 和 `larkoffice.com` 的 wiki/docx/sheets 链接。Wiki 节点指向
+电子表格时，会读取 URL 中 `sheet` 参数指定的工作表；未指定时读取第一个工作表。
+表格内容以制表符分隔的纯文本返回，并设置行数、单元格数和字符数上限。
 
 ```bash
 curl -s --max-time 30 -X POST "$HAPPYCLAW_API_URL/api/internal/feishu/read-document" \
@@ -37,6 +39,7 @@ curl -s --max-time 30 -X POST "$HAPPYCLAW_API_URL/api/internal/feishu/read-docum
 
 **错误响应**：
 - `{"code": "OAUTH_REQUIRED"}` → 告知用户需要在 Web 设置页面完成「飞书文档授权」
+- `{"code": "FEISHU_SCOPE_REQUIRED"}` → 告知用户应用需要开通对应文档类型的只读权限，并重新授权
 - 其他错误 → 展示 `error` 字段内容
 
 ## 操作 2: 搜索飞书文档

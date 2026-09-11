@@ -61,10 +61,7 @@ feishuApiRoutes.post('/read-document', async (c) => {
     typeof body.userId !== 'string' ||
     typeof body.url !== 'string'
   ) {
-    return c.json(
-      { error: 'Invalid request: userId and url required' },
-      400,
-    );
+    return c.json({ error: 'Invalid request: userId and url required' }, 400);
   }
 
   const { userId, url } = body as { userId: string; url: string };
@@ -73,7 +70,10 @@ feishuApiRoutes.post('/read-document', async (c) => {
   const parsed = parseFeishuDocUrl(url);
   if (!parsed) {
     return c.json(
-      { error: '无法解析飞书文档 URL。支持的格式：https://xxx.feishu.cn/wiki/xxx 或 https://xxx.feishu.cn/docx/xxx' },
+      {
+        error:
+          '无法解析飞书文档 URL。支持的格式：https://xxx.feishu.cn/wiki/xxx 或 https://xxx.feishu.cn/docx/xxx',
+      },
       400,
     );
   }
@@ -97,11 +97,22 @@ feishuApiRoutes.post('/read-document', async (c) => {
       content: result.content,
     });
   } catch (err) {
-    const message =
-      err instanceof Error ? err.message : '读取飞书文档失败';
+    const message = err instanceof Error ? err.message : '读取飞书文档失败';
     logger.error({ err, userId, url }, 'Failed to read Feishu document');
 
-    // Check for permission errors
+    // Missing API scopes require a new OAuth grant after the app enables them.
+    if (message.includes('99991679')) {
+      return c.json(
+        {
+          error:
+            '飞书授权缺少读取此文档类型所需的权限，请更新应用权限后重新授权。',
+          code: 'FEISHU_SCOPE_REQUIRED',
+        },
+        403,
+      );
+    }
+
+    // Check for document-level permission errors.
     if (message.includes('1770032') || message.includes('403')) {
       return c.json(
         { error: '没有权限访问此文档。请确认文档已对你开放阅读权限。' },
@@ -131,10 +142,7 @@ feishuApiRoutes.post('/search', async (c) => {
     typeof body.userId !== 'string' ||
     typeof body.query !== 'string'
   ) {
-    return c.json(
-      { error: 'Invalid request: userId and query required' },
-      400,
-    );
+    return c.json({ error: 'Invalid request: userId and query required' }, 400);
   }
 
   const {
@@ -155,20 +163,30 @@ feishuApiRoutes.post('/search', async (c) => {
 
   const query = rawQuery.trim();
   if (!query) {
-    return c.json(
-      { error: '搜索关键词不能为空' },
-      400,
-    );
+    return c.json({ error: '搜索关键词不能为空' }, 400);
   }
 
   // Clamp count to [1, 50]
-  const safeCount = Math.min(Math.max(typeof count === 'number' ? count : 20, 1), 50);
+  const safeCount = Math.min(
+    Math.max(typeof count === 'number' ? count : 20, 1),
+    50,
+  );
   const safeOffset = Math.max(typeof offset === 'number' ? offset : 0, 0);
 
   // Validate docTypes whitelist
-  const VALID_DOC_TYPES = new Set(['doc', 'docx', 'sheet', 'bitable', 'mindnote', 'slide', 'wiki']);
+  const VALID_DOC_TYPES = new Set([
+    'doc',
+    'docx',
+    'sheet',
+    'bitable',
+    'mindnote',
+    'slide',
+    'wiki',
+  ]);
   const safeDocTypes = Array.isArray(docTypes)
-    ? docTypes.filter((t): t is string => typeof t === 'string' && VALID_DOC_TYPES.has(t))
+    ? docTypes.filter(
+        (t): t is string => typeof t === 'string' && VALID_DOC_TYPES.has(t),
+      )
     : undefined;
 
   // Get valid access token (auto-refreshes if needed)
@@ -192,14 +210,21 @@ feishuApiRoutes.post('/search', async (c) => {
     });
 
     // Optionally also search wiki
-    let wikiResults = { results: [] as typeof docResults.results, hasMore: false, total: 0 };
+    let wikiResults = {
+      results: [] as typeof docResults.results,
+      hasMore: false,
+      total: 0,
+    };
     if (doSearchWiki) {
       try {
         wikiResults = await searchFeishuWiki(accessToken, query, {
           pageSize: safeCount,
         });
       } catch (err) {
-        logger.warn({ err, userId }, 'Wiki search failed, returning doc results only');
+        logger.warn(
+          { err, userId },
+          'Wiki search failed, returning doc results only',
+        );
       }
     }
 
@@ -220,7 +245,10 @@ feishuApiRoutes.post('/search', async (c) => {
       try {
         ownerNames = await batchResolveUserNames(accessToken, ownerIds);
       } catch (err) {
-        logger.warn({ err, userId }, 'Failed to resolve owner names, returning open_ids');
+        logger.warn(
+          { err, userId },
+          'Failed to resolve owner names, returning open_ids',
+        );
       }
     }
 
@@ -236,13 +264,15 @@ feishuApiRoutes.post('/search', async (c) => {
       total: enriched.length,
     });
   } catch (err) {
-    const message =
-      err instanceof Error ? err.message : '搜索飞书文档失败';
+    const message = err instanceof Error ? err.message : '搜索飞书文档失败';
     logger.error({ err, userId, query }, 'Failed to search Feishu documents');
 
     if (message.includes('99991663') || message.includes('99991668')) {
       return c.json(
-        { error: '搜索权限不足。请在飞书应用中启用 search:docs:read 权限，并重新授权。' },
+        {
+          error:
+            '搜索权限不足。请在飞书应用中启用 search:docs:read 权限，并重新授权。',
+        },
         403,
       );
     }

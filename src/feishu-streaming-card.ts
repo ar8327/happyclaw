@@ -8,6 +8,7 @@
  */
 import * as lark from '@larksuiteoapi/node-sdk';
 import { randomUUID } from 'node:crypto';
+import { summarizeFeishuApiError } from './feishu-api-error.js';
 import { logger } from './logger.js';
 import { shouldReplyInFeishuThread } from './feishu-conversation-mode.js';
 import {
@@ -143,7 +144,7 @@ export class StreamingCardController {
         // incremental refresh must not make the durable outbox resend the
         // successfully-created IM message.
         logger.warn(
-          { err, chatId: this.chatId },
+          { error: summarizeFeishuApiError(err), chatId: this.chatId },
           'Streaming card content refresh failed; initial content is still visible',
         );
       }
@@ -166,7 +167,7 @@ export class StreamingCardController {
         }
       } catch (err) {
         logger.warn(
-          { err, chatId: this.chatId },
+          { error: summarizeFeishuApiError(err), chatId: this.chatId },
           'Streaming card finalization failed after visible delivery',
         );
       }
@@ -229,7 +230,7 @@ export class StreamingCardController {
         return;
       } catch (err) {
         logger.warn(
-          { err, chatId: this.chatId },
+          { error: summarizeFeishuApiError(err), chatId: this.chatId },
           'CardKit create failed, falling back to whole-card patch transport',
         );
         this.legacyPatch = true;
@@ -383,7 +384,11 @@ export class StreamingCardController {
       // with an inline static card rather than letting the durable outbox send
       // a duplicate reply or leaving the stale "回复生成中" summary behind.
       logger.warn(
-        { err, chatId: this.chatId, messageId: this.messageId },
+        {
+          error: summarizeFeishuApiError(err),
+          chatId: this.chatId,
+          messageId: this.messageId,
+        },
         'CardKit final static update failed, falling back to message patch',
       );
       if (!this.messageId) throw err;
@@ -433,7 +438,10 @@ export class StreamingCardController {
   private fail(error: unknown): void {
     this.clearRenewalTimer();
     this.state = 'error';
-    logger.warn({ error, chatId: this.chatId }, 'Streaming card failed');
+    logger.warn(
+      { error: summarizeFeishuApiError(error), chatId: this.chatId },
+      'Streaming card failed',
+    );
   }
 }
 
@@ -472,7 +480,10 @@ export async function abortAllStreamingSessions(
       try {
         await session.abort(reason);
       } catch (err) {
-        logger.debug({ err, chatJid }, 'Failed to abort streaming card');
+        logger.debug(
+          { error: summarizeFeishuApiError(err), chatJid },
+          'Failed to abort streaming card',
+        );
       }
     },
   );

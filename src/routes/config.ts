@@ -758,6 +758,17 @@ configRoutes.get('/im/feishu/oauth-status', authMiddleware, (c) => {
     });
   }
 
+  const grantedScopes = new Set(
+    (tokens.scopes || '').split(/\s+/).filter(Boolean),
+  );
+  const sheetReadAuthorized = [
+    'sheets:spreadsheet:readonly',
+    'sheets:spreadsheet:read',
+    'sheets:spreadsheet',
+    'drive:drive:readonly',
+    'drive:drive',
+  ].some((scope) => grantedScopes.has(scope));
+
   return c.json({
     authorized: true,
     hasAppCredentials: !!(config?.appId && config?.appSecret),
@@ -765,6 +776,7 @@ configRoutes.get('/im/feishu/oauth-status', authMiddleware, (c) => {
     scopes: tokens.scopes || '',
     tokenExpired: tokens.expiresAt < Date.now(),
     hasRefreshToken: !!tokens.refreshToken,
+    scopeUpgradeRequired: !sheetReadAuthorized,
   });
 });
 
